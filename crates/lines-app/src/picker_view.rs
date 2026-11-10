@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, Context, FontFeatures, FontWeight, Global, InteractiveElement, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Styled, div, prelude::*, px,
+    KeyDownEvent, MouseButton, MouseDownEvent, ParentElement, Styled, div, prelude::*,
 };
 use lines_core::{CivilDate, ProductId};
 use lines_feed::availability::Availability;
@@ -260,7 +260,7 @@ impl PickerUi {
             // A full list reserves all its lines, so a window shown one short (it won't end
             // on a heading with no row) keeps the same height.
             .when(p.hits.len() >= PICKER_ROWS, |d| {
-                d.h(px(PICKER_ROWS as f32 * LINE_H + 8.0))
+                d.h(crate::zoom::ui(PICKER_ROWS as f32 * LINE_H + 8.0))
             });
         let lines =
             picker::visible_lines(&self.entries, &p.hits, &p.query, p.selected, PICKER_ROWS);
@@ -270,12 +270,12 @@ impl PickerUi {
                     rows = rows.child(
                         div()
                             .flex_none()
-                            .h(px(LINE_H))
+                            .h(crate::zoom::ui(LINE_H))
                             .flex()
                             .items_end()
                             .px_3()
                             .pb_1()
-                            .text_size(px(11.0))
+                            .text_size(crate::zoom::ui(11.0))
                             .text_color(t.text_dim)
                             .child(label),
                     );
@@ -341,7 +341,7 @@ impl PickerUi {
                 div()
                     .id(("picker-row", i))
                     .flex_none()
-                    .h(px(LINE_H))
+                    .h(crate::zoom::ui(LINE_H))
                     .flex()
                     .flex_row()
                     .items_center()
@@ -354,11 +354,16 @@ impl PickerUi {
                         gpui::transparent_black()
                     })
                     .when(selected, |d| d.bg(t.accent.opacity(0.16)))
-                    .child(div().w(px(12.0)).text_color(t.text_dim).child(star))
+                    .child(
+                        div()
+                            .w(crate::zoom::ui(12.0))
+                            .text_color(t.text_dim)
+                            .child(star),
+                    )
                     .child(
                         div()
                             .flex_none()
-                            .w(px(SYMBOL_W))
+                            .w(crate::zoom::ui(SYMBOL_W))
                             .truncate()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(fg)
@@ -406,7 +411,7 @@ impl PickerUi {
             .py_1()
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(11.0))
+            .text_size(crate::zoom::ui(11.0))
             .text_color(t.text_dim)
             .child("↑↓ select   Tab month   Alt+M micro/mini   Ctrl+D favorite   Enter open   Esc close")
             .when_some(self.error.clone(), |d, err| {
@@ -415,7 +420,7 @@ impl PickerUi {
         Some(
             div()
                 .absolute()
-                .top(px(24.0))
+                .top(crate::zoom::ui(24.0))
                 .left_0()
                 .right_0()
                 .bottom_0()
@@ -426,7 +431,7 @@ impl PickerUi {
                     div()
                         .id("symbol-picker")
                         .occlude()
-                        .w(px(PICKER_W))
+                        .w(crate::zoom::ui(PICKER_W))
                         .max_w_full()
                         .max_h_full()
                         .flex()
@@ -435,7 +440,7 @@ impl PickerUi {
                         .border_1()
                         .border_color(t.axis_line)
                         .rounded_md()
-                        .text_size(px(13.0))
+                        .text_size(crate::zoom::ui(13.0))
                         .font_features(self.tnum.clone())
                         .child(
                             div()
@@ -449,7 +454,12 @@ impl PickerUi {
                                 .border_b_1()
                                 .border_color(t.axis_line)
                                 .child(query)
-                                .child(div().w(px(2.0)).h(px(15.0)).bg(t.accent)),
+                                .child(
+                                    div()
+                                        .w(crate::zoom::ui(2.0))
+                                        .h(crate::zoom::ui(15.0))
+                                        .bg(t.accent),
+                                ),
                         )
                         .child(rows)
                         .child(hints),

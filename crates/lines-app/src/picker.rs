@@ -156,6 +156,13 @@ pub struct Settings {
     /// (`crate::pnl`). Optional: absent (and the default, both) isn't written.
     #[serde(default, skip_serializing_if = "crate::pnl::PnlDisplay::is_default")]
     pub pnl_display: crate::pnl::PnlDisplay,
+    /// The app-wide UI zoom in percent (`crate::zoom::STEPS`). Optional: absent is 100 %.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::zoom::deserialize_saved"
+    )]
+    pub ui_zoom: Option<u16>,
     /// The order size per product symbol, shared by every DOM and chart on it. Optional: a
     /// symbol without one uses `new_panes.default_qty`, else 1.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -556,6 +563,32 @@ impl Picker {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ui_zoom_is_written_only_off_100_and_reads_back() {
+        let s = Settings::default();
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("ui_zoom"), "absent at 100 %: {json}");
+        let s = Settings {
+            ui_zoom: crate::zoom::saved(125),
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.ui_zoom, Some(125));
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.ui_zoom, None, "a file from before reads as 100 %");
+        // Hand-edited: the nearest step, never a settings file that fails to load.
+        for (json, want) in [
+            (r#"{"ui_zoom": 70000}"#, Some(150)),
+            (r#"{"ui_zoom": -5}"#, Some(80)),
+            (r#"{"ui_zoom": 112}"#, Some(110)),
+            (r#"{"ui_zoom": "big"}"#, None),
+        ] {
+            let s: Settings = serde_json::from_str(json).unwrap();
+            assert_eq!(s.ui_zoom, want, "{json}");
+        }
+    }
+
     use super::*;
     use lines_core::Month;
     use lines_feed::catalog::{BTC_USD, ES, ETH_USD, MES, MNQ, NQ, ZN};

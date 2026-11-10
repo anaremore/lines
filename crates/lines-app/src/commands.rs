@@ -139,6 +139,11 @@ pub enum Command {
     Draw(DrawCmd),
     /// Strategies (decision 0025; `crate::strategy_view`).
     Strategy(StrategyCmd),
+    /// The app-wide UI zoom (`crate::zoom`): the next step up or down, or 100 %. Never the
+    /// chart's time or price scale.
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
     /// One working order on the focused chart, from its tag's menu (`crate::pane_menu`). Not
     /// in the palette or the keymap: it needs the order under the pointer.
     Order(OrderCmd),
@@ -471,6 +476,13 @@ pub const BINDINGS: &[Binding] = &[
         "u",
     ),
     b(Command::CyclePnl, true, false, true, "p"),
+    // Ctrl+= and Ctrl++ (Shift+= on most layouts, or the keypad's +), Ctrl+−, Ctrl+0.
+    b(Command::ZoomIn, true, false, false, "="),
+    b(Command::ZoomIn, true, true, false, "="),
+    b(Command::ZoomIn, true, false, false, "+"),
+    b(Command::ZoomIn, true, true, false, "+"),
+    b(Command::ZoomOut, true, false, false, "-"),
+    b(Command::ZoomReset, true, false, false, "0"),
     // Strategies (decision 0025): Stop all, from any pane.
     b(
         Command::Strategy(StrategyCmd::StopAll),
@@ -733,6 +745,9 @@ pub fn label(c: Command) -> String {
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
         Command::Settings => "Settings…".into(),
+        Command::ZoomIn => "Zoom in".into(),
+        Command::ZoomOut => "Zoom out".into(),
+        Command::ZoomReset => "Reset zoom".into(),
         Command::Setting(c) => c.label(),
         Command::Timeframe(tf) if tf.bar_kind().is_some() => {
             format!("Timeframe: {} ({tf})", crate::pane::timeframe_name(tf))
@@ -892,6 +907,7 @@ pub fn palette() -> Vec<Command> {
     v.push(Command::CyclePnl);
     v.extend(crate::pnl::PnlDisplay::ALL.map(Command::SetPnl));
     v.push(Command::ExportDiagnostics);
+    v.extend([Command::ZoomIn, Command::ZoomOut, Command::ZoomReset]);
     v.extend(Timeframe::ALL.map(Command::Timeframe));
     v.extend(DrawCmd::ALL.map(Command::Draw));
     // Settings last: an existing command's words pick it first.
@@ -1027,6 +1043,29 @@ mod tests {
         } else {
             "ctrl"
         }
+    }
+
+    /// Ctrl+= and Ctrl++ zoom in, Ctrl+− out, Ctrl+0 resets (Cmd on macOS); bare keys stay
+    /// with the panes; all three are in the palette.
+    #[test]
+    fn zoom_keys() {
+        let c = |rest: &str| cmd(&format!("{}-{rest}", ctrl()));
+        assert_eq!(c("="), Some(Command::ZoomIn));
+        assert_eq!(c("shift-="), Some(Command::ZoomIn));
+        assert_eq!(c("+"), Some(Command::ZoomIn));
+        assert_eq!(c("shift-+"), Some(Command::ZoomIn));
+        assert_eq!(c("-"), Some(Command::ZoomOut));
+        assert_eq!(c("0"), Some(Command::ZoomReset));
+        for k in ["=", "-", "0"] {
+            assert_ne!(cmd(k), Some(Command::ZoomIn), "{k}");
+            assert_ne!(cmd(k), Some(Command::ZoomOut), "{k}");
+            assert_ne!(cmd(k), Some(Command::ZoomReset), "{k}");
+        }
+        let p = palette();
+        for z in [Command::ZoomIn, Command::ZoomOut, Command::ZoomReset] {
+            assert!(p.contains(&z), "{z:?}");
+        }
+        assert_eq!(label(Command::ZoomReset), "Reset zoom");
     }
 
     #[test]

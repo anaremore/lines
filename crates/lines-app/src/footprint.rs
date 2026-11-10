@@ -545,7 +545,8 @@ impl FootprintLayer {
             active: false,
             tick: 1,
             qty: lines_core::QtyFormat::WHOLE,
-            glyphs: Glyphs::new(TEXT_PX),
+            // Its painted rows don't zoom yet (docs/known-gaps.md): neither does its text.
+            glyphs: Glyphs::fixed(TEXT_PX),
             metrics: TextMetrics::ESTIMATE,
             scale: 1.0,
             first_bar: 0,

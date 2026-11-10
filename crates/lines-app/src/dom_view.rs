@@ -46,7 +46,7 @@ use crate::dom_trail::DomTrail;
 use crate::feeds::{Feeds, PaneFeed};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
-    self, ColumnCmd, ColumnMenu, Columns, DomCol, HEADER_ROW_H, HeaderHit, Table,
+    self, ColumnCmd, ColumnMenu, Columns, DomCol, HeaderHit, Table, header_row_h,
 };
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::text::{Glyphs, f};
@@ -57,11 +57,21 @@ use crate::wsdoc::{DomState, PaneDoc};
 
 /// Most rows a ladder shows (the row buffer is allocated once at this size).
 const MAX_ROWS: usize = 256;
-const ROW_H: f32 = 18.0;
+const ROW_H_100: f32 = 18.0;
+/// [`ROW_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn row_h() -> f32 {
+    crate::zoom::f(ROW_H_100)
+}
 /// A ladder row's height, for the trade panel's reckoning of what a short pane holds.
-pub(crate) const LADDER_ROW_H: f32 = ROW_H;
+pub(crate) const LADDER_ROW_H: f32 = ROW_H_100;
 const TEXT_PX: f32 = 12.0;
-const PAD: f32 = 6.0;
+const PAD_100: f32 = 6.0;
+/// [`PAD_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn pad() -> f32 {
+    crate::zoom::f(PAD_100)
+}
 
 #[derive(Clone, Debug)]
 pub struct DomOptions {
@@ -125,6 +135,8 @@ pub struct DomView {
     /// Whether the columns have been measured once: a ladder first painted under the pointer has
     /// to be.
     cols_measured: bool,
+    /// The UI zoom generation the columns were measured at (`crate::zoom`).
+    cols_zoom: u32,
     /// Whether the bracket editor was open as last painted: its closing moves rows.
     was_editing: bool,
     /// Whether this pane has a trade panel, whose rows decide if the ladder shows.
@@ -337,6 +349,7 @@ impl DomView {
             pane_w: 0.0,
             was_editing: false,
             cols_measured: false,
+            cols_zoom: crate::zoom::generation(),
             has_panel: false,
             trail,
         }
@@ -448,7 +461,8 @@ impl DomView {
     }
 
     fn visible_rows(&self) -> usize {
-        (((f(self.bounds.size.height) - HEADER_ROW_H) / ROW_H).floor() as usize).clamp(1, MAX_ROWS)
+        (((f(self.bounds.size.height) - header_row_h()) / row_h()).floor() as usize)
+            .clamp(1, MAX_ROWS)
     }
 
     /// A window position in table coordinates (from the header row's top-left).
@@ -505,11 +519,11 @@ impl DomView {
     /// The ladder row under a window point: its displayed price.
     fn row_at(&self, p: Point<Pixels>) -> Option<lines_core::Price> {
         let (_, y) = self.table_xy(p);
-        let y = y - HEADER_ROW_H;
+        let y = y - header_row_h();
         if y < 0.0 {
             return None;
         }
-        self.rows.get((y / ROW_H) as usize).map(|r| r.price)
+        self.rows.get((y / row_h()) as usize).map(|r| r.price)
     }
 
     /// The column under a window point.
@@ -558,8 +572,8 @@ impl DomView {
             dom_trade::row_of(r.price.0, units) == dom_trade::row_of(price.0, units)
         })?;
         let (_, y) = self.table_xy(p);
-        let top = HEADER_ROW_H + row as f32 * ROW_H;
-        if y < top - 1.0 || y >= top + ROW_H + 1.0 {
+        let top = header_row_h() + row as f32 * row_h();
+        if y < top - 1.0 || y >= top + row_h() + 1.0 {
             return None;
         }
         let (found, hit) = self.zone_pressed(price, p)?;
@@ -608,7 +622,7 @@ impl DomView {
             return;
         };
         if col == DomColumn::Orders {
-            let width = f(self.bounds.size.width);
+            let width = f(self.bounds.size.width) / crate::zoom::get();
             match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => self.orders.drag = Some(DragOrder { order, to: price }),
                 Ok(None) => return,
@@ -763,7 +777,7 @@ impl DomView {
         if self.column_at(ev.position) == Some(DomColumn::Orders)
             && let Some(price) = self.row_at(ev.position)
         {
-            let width = f(self.bounds.size.width);
+            let width = f(self.bounds.size.width) / crate::zoom::get();
             match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => {
                     if let (Some(account), Some(t)) =
@@ -804,7 +818,7 @@ impl DomView {
         }
         let dy = f(ev.delta.pixel_delta(window.line_height()).y);
         // Wheel up shows higher prices.
-        self.scroll_rows += dy / ROW_H;
+        self.scroll_rows += dy / row_h();
         let whole = self.scroll_rows.trunc();
         if whole != 0.0 {
             self.scroll_rows -= whole;
@@ -895,7 +909,7 @@ impl DomView {
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         // The header's labels depend on the pane's width, known only after layout: if this
         // frame's width calls for the other label set, render the header again.
-        let narrow = trade_bar::is_narrow(f(bounds.size.width));
+        let narrow = trade_bar::is_narrow(f(bounds.size.width) / crate::zoom::get());
         if self.header_narrow != Some(narrow) {
             self.header_narrow = Some(narrow);
             cx.notify();
@@ -960,17 +974,23 @@ impl DomView {
         // pointer leaves.
         let hovered =
             !self.frozen && window.is_window_hovered() && bounds.contains(&window.mouse_position());
+        // Every row moves on a zoom change anyway: measure again, hovered or not.
+        if self.cols_zoom != crate::zoom::generation() {
+            self.cols_zoom = crate::zoom::generation();
+            self.cols_measured = false;
+        }
         let measure = measures_columns(hovered, self.cols_measured);
         self.cols_measured |= measure;
         if measure {
-            self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
+            self.cols
+                .measure_headers(&mut self.glyphs, &t, pad(), window);
         }
         for i in 0..if measure { self.rows.len() } else { 0 } {
             let r = self.rows[i];
             s.clear();
             let _ = fmt.write(r.price, &mut s);
             let pw = self.glyphs.width(s.as_str(), t.text_main, true, window);
-            self.cols.need(DomCol::Price.index(), pw, PAD);
+            self.cols.need(DomCol::Price.index(), pw, pad());
             for (q, c) in [
                 (r.bid, DomCol::Bid),
                 (r.ask, DomCol::Ask),
@@ -980,7 +1000,7 @@ impl DomView {
                     s.clear();
                     let _ = qf.write(q, &mut s);
                     let qw = self.glyphs.width(s.as_str(), t.text_main, true, window);
-                    self.cols.need(c.index(), qw, PAD);
+                    self.cols.need(c.index(), qw, pad());
                 }
             }
         }
@@ -988,7 +1008,7 @@ impl DomView {
         if measure {
             let ow = self.glyphs.width("S88+", t.text_main, true, window);
             self.cols
-                .need(DomCol::Orders.index(), 2.0 * (ow + 6.0), PAD);
+                .need(DomCol::Orders.index(), 2.0 * (ow + 6.0), pad());
         }
         // Narrow: volume, then the trail give way, then the rest narrow to their numbers;
         // only then working orders (the panel still counts them; Cancel all reaches them):
@@ -999,7 +1019,7 @@ impl DomView {
             &[DomCol::Orders.index()],
         );
         self.cols
-            .paint_header(&mut self.glyphs, &t, bounds, PAD, &[false; 5], window, cx);
+            .paint_header(&mut self.glyphs, &t, bounds, pad(), &[false; 5], window, cx);
         let cell = |c: DomCol| self.cols.cell(c.index(), ox);
         let (orders, bid, price, ask, vol) = (
             cell(DomCol::Orders),
@@ -1008,8 +1028,8 @@ impl DomView {
             cell(DomCol::Ask),
             cell(DomCol::Volume),
         );
-        let oy = top + HEADER_ROW_H;
-        let body_h = h - HEADER_ROW_H;
+        let oy = top + header_row_h();
+        let body_h = h - header_row_h();
         if let Some((x, cw)) = price {
             crate::layout_rec::reserved(window, (x, oy, cw, body_h), "dom-price");
         }
@@ -1031,9 +1051,9 @@ impl DomView {
             crate::layout_rec::set_owner("dom-price");
             self.glyphs.paint(
                 msg,
-                table_l + PAD,
-                oy + PAD,
-                ROW_H,
+                table_l + pad(),
+                oy + pad(),
+                row_h(),
                 t.text_dim,
                 false,
                 window,
@@ -1052,25 +1072,28 @@ impl DomView {
         };
         for i in 0..self.rows.len() {
             let r = self.rows[i];
-            let y = oy + i as f32 * ROW_H;
-            if y + ROW_H > top + h + 0.5 {
+            let y = oy + i as f32 * row_h();
+            if y + row_h() > top + h + 0.5 {
                 break;
             }
             // Bid: inside tint, then a bar growing from the price side outwards.
             if let Some((x, cw)) = bid {
                 if r.best_bid {
-                    window.paint_quad(fill(rect(x, y, cw, ROW_H), t.inside_bid));
+                    window.paint_quad(fill(rect(x, y, cw, row_h()), t.inside_bid));
                 }
                 if r.bid.0 > 0 {
                     let bw = (cw * (r.bid.0 as f32 / max_size as f32)).max(hair);
-                    window.paint_quad(fill(rect(x + cw - bw, y + 1.0, bw, ROW_H - 2.0), t.bid_bar));
+                    window.paint_quad(fill(
+                        rect(x + cw - bw, y + 1.0, bw, row_h() - 2.0),
+                        t.bid_bar,
+                    ));
                     s.clear();
                     let _ = qf.write(r.bid, &mut s);
                     self.glyphs.paint_right(
                         s.as_str(),
-                        x + cw - PAD,
+                        x + cw - pad(),
                         y,
-                        ROW_H,
+                        row_h(),
                         t.text_main,
                         r.best_bid,
                         window,
@@ -1080,18 +1103,18 @@ impl DomView {
             }
             if let Some((x, cw)) = ask {
                 if r.best_ask {
-                    window.paint_quad(fill(rect(x, y, cw, ROW_H), t.inside_ask));
+                    window.paint_quad(fill(rect(x, y, cw, row_h()), t.inside_ask));
                 }
                 if r.ask.0 > 0 {
                     let aw = (cw * (r.ask.0 as f32 / max_size as f32)).max(hair);
-                    window.paint_quad(fill(rect(x, y + 1.0, aw, ROW_H - 2.0), t.ask_bar));
+                    window.paint_quad(fill(rect(x, y + 1.0, aw, row_h() - 2.0), t.ask_bar));
                     s.clear();
                     let _ = qf.write(r.ask, &mut s);
                     self.glyphs.paint_right(
                         s.as_str(),
-                        x + cw - PAD,
+                        x + cw - pad(),
                         y,
-                        ROW_H,
+                        row_h(),
                         t.text_main,
                         r.best_ask,
                         window,
@@ -1104,7 +1127,7 @@ impl DomView {
             // market is marked in the bid and ask columns.
             if let Some((x, cw)) = price {
                 let (pfg, bold) = if r.last {
-                    window.paint_quad(fill(rect(x, y, cw, ROW_H), t.last));
+                    window.paint_quad(fill(rect(x, y, cw, row_h()), t.last));
                     (t.on_last, true)
                 } else {
                     (t.text_main, false)
@@ -1112,8 +1135,16 @@ impl DomView {
                 s.clear();
                 let _ = fmt.write(r.price, &mut s);
                 crate::layout_rec::set_owner("dom-price");
-                self.glyphs
-                    .paint_right(s.as_str(), x + cw - PAD, y, ROW_H, pfg, bold, window, cx);
+                self.glyphs.paint_right(
+                    s.as_str(),
+                    x + cw - pad(),
+                    y,
+                    row_h(),
+                    pfg,
+                    bold,
+                    window,
+                    cx,
+                );
                 crate::layout_rec::set_owner("");
             }
             if flagged
@@ -1121,21 +1152,21 @@ impl DomView {
                 && let Some((l, rr)) = span
             {
                 window.paint_quad(fill(rect(l, y, rr - l, hair), t.text_main));
-                window.paint_quad(fill(rect(l, y + ROW_H - hair, rr - l, hair), t.text_main));
+                window.paint_quad(fill(rect(l, y + row_h() - hair, rr - l, hair), t.text_main));
             }
             // Traded volume.
             if let Some((x, cw)) = vol
                 && r.volume.0 > 0
             {
-                let vw = ((cw - PAD).max(1.0) * (r.volume.0 as f32 / max_vol as f32)).max(hair);
-                window.paint_quad(fill(rect(x, y + 2.0, vw, ROW_H - 4.0), t.volume_bar));
+                let vw = ((cw - pad()).max(1.0) * (r.volume.0 as f32 / max_vol as f32)).max(hair);
+                window.paint_quad(fill(rect(x, y + 2.0, vw, row_h() - 4.0), t.volume_bar));
                 s.clear();
                 let _ = qf.write(r.volume, &mut s);
                 self.glyphs.paint_right(
                     s.as_str(),
-                    x + cw - PAD,
+                    x + cw - pad(),
                     y,
-                    ROW_H,
+                    row_h(),
                     t.text_dim,
                     false,
                     window,
@@ -1143,7 +1174,7 @@ impl DomView {
                 );
             }
             window.paint_quad(fill(
-                rect(table_l, y + ROW_H - hair, ox + w - table_l, hair),
+                rect(table_l, y + row_h() - hair, ox + w - table_l, hair),
                 t.grid,
             ));
         }
@@ -1151,7 +1182,7 @@ impl DomView {
             &self.rows,
             cell(DomCol::Trail),
             oy,
-            ROW_H,
+            row_h(),
             top + h,
             &t,
             window,
@@ -1180,7 +1211,7 @@ impl DomView {
                 orders,
                 price,
                 oy,
-                ROW_H,
+                row_h(),
                 hair,
                 &self.product.price,
                 self.trade
@@ -1197,11 +1228,19 @@ impl DomView {
         if let Some(note) = self.depth_note.as_deref()
             && !self.rows.is_empty()
         {
-            let note_y = oy + self.rows.len() as f32 * ROW_H;
+            let note_y = oy + self.rows.len() as f32 * row_h();
             window.paint_quad(fill(rect(ox, note_y, w, top + h - note_y), t.bg));
             crate::layout_rec::set_owner("dom-price");
-            self.glyphs
-                .paint(note, ox + PAD, note_y, ROW_H, t.text_dim, false, window, cx);
+            self.glyphs.paint(
+                note,
+                ox + pad(),
+                note_y,
+                row_h(),
+                t.text_dim,
+                false,
+                window,
+                cx,
+            );
             crate::layout_rec::set_owner("");
         }
     }
@@ -1239,7 +1278,7 @@ impl DomView {
             .bg(t.panel)
             .border_b_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .child(
                 pane::header_content()
                     .child(
@@ -1343,10 +1382,13 @@ impl DomView {
 }
 
 impl DomView {
+    /// The trading panel's rows for this pane. The panel lays out in 100 % units
+    /// (`crate::zoom`): the pane's size goes in at the zoom's scale.
     fn panel_rows(&self) -> trade_bar::PanelRows {
+        let z = crate::zoom::get();
         trade_bar::panel_rows(
-            self.pane_w,
-            self.pane_h,
+            self.pane_w / z,
+            self.pane_h / z,
             trade_bar::panel_editing(&self.trade),
         )
     }
@@ -1355,7 +1397,7 @@ impl DomView {
         ladder_shows(
             self.has_panel,
             self.panel_rows().ladder,
-            f(self.bounds.size.height),
+            f(self.bounds.size.height) / crate::zoom::get(),
         )
     }
 
@@ -1395,25 +1437,28 @@ impl Render for DomView {
         PaneTrade::watch_focus(self, &focus, window, cx);
         // The switch is sticky: impossible trading (no contract, feed gone) shows on it as a
         // badge and denies orders; it never flips the switch.
-        let width = self.pane_w;
+        // The trading panel lays out in 100 % units (`crate::zoom`).
+        let width = self.pane_w / crate::zoom::get();
         self.header_narrow = Some(trade_bar::is_narrow(width));
         let rows = self.panel_rows();
         let trade = trade_bar::dom_bar(self, &self.product, width, rows, &t, cx);
         self.has_panel = trade.is_some();
         // What a short pane has left below the panel.
-        let left_over =
-            self.pane_h - rows.height(width) - pane::header_height(crate::layout::PaneKind::Dom);
+        let left_over = self.pane_h
+            - crate::zoom::f(
+                rows.height(width) + pane::header_height(crate::layout::PaneKind::Dom),
+            );
         let hidden_note = short_pane_message(self.trade.local_flash(), rows.status, rows.ladder)
-            .filter(|_| trade.is_some() && left_over >= ROW_H && self.feed.unavailable.is_none())
+            .filter(|_| trade.is_some() && left_over >= row_h() && self.feed.unavailable.is_none())
             .map(|message| {
                 div()
                     .absolute()
                     .left(px(8.0))
                     .right(px(8.0))
                     .top_0()
-                    .h(px(ROW_H))
+                    .h(px(row_h()))
                     .truncate()
-                    .text_size(px(12.0))
+                    .text_size(crate::zoom::ui(12.0))
                     .text_color(t.text_dim)
                     .child(message.to_owned())
             });
@@ -1562,7 +1607,7 @@ mod tests {
 
     #[test]
     fn a_ladder_needs_room_for_the_inside_market_and_its_quantity_row() {
-        let room = HEADER_ROW_H + 3.0 * ROW_H;
+        let room = crate::pane_columns::HEADER_ROW_H + 3.0 * ROW_H_100;
         assert!(!ladder_shows(true, true, 0.0));
         assert!(!ladder_shows(true, true, room - 1.0));
         assert!(ladder_shows(true, true, room));

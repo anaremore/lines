@@ -24,6 +24,12 @@ use crate::theme::Theme;
 
 /// Height of the column header row.
 pub const HEADER_ROW_H: f32 = 18.0;
+/// [`HEADER_ROW_H`] at the UI zoom (`crate::zoom`): the header row as drawn. Layout decisions
+/// made in 100 % units (`trade_bar::LADDER_MIN_H`) keep the constant.
+#[inline]
+pub fn header_row_h() -> f32 {
+    crate::zoom::f(HEADER_ROW_H)
+}
 /// How close (px) to a divider the pointer must be to grab it.
 pub const GRAB: f32 = 4.0;
 
@@ -545,7 +551,7 @@ impl Columns {
 
     /// What a press at table coordinates `x, y` (y from the header row's top) means.
     pub fn hit(&self, x: f32, y: f32, clicks: usize) -> HeaderHit {
-        if !(0.0..HEADER_ROW_H).contains(&y) {
+        if !(0.0..header_row_h()).contains(&y) {
             return HeaderHit::Outside;
         }
         match self.divider_at(x) {
@@ -640,7 +646,7 @@ impl Columns {
         let w = f32::from(bounds.size.width);
         let hair = 1.0 / window.scale_factor();
         window.paint_quad(fill(
-            Bounds::new(point(px(ox), px(oy)), size(px(w), px(HEADER_ROW_H))),
+            Bounds::new(point(px(ox), px(oy)), size(px(w), px(header_row_h()))),
             t.panel,
         ));
         for i in 0..self.set.len() {
@@ -653,7 +659,7 @@ impl Columns {
                     label,
                     x + pad,
                     oy,
-                    HEADER_ROW_H,
+                    header_row_h(),
                     t.text_dim,
                     false,
                     window,
@@ -664,7 +670,7 @@ impl Columns {
                     label,
                     x + cw - pad,
                     oy,
-                    HEADER_ROW_H,
+                    header_row_h(),
                     t.text_dim,
                     false,
                     window,
@@ -674,7 +680,7 @@ impl Columns {
         }
         window.paint_quad(fill(
             Bounds::new(
-                point(px(ox), px(oy + HEADER_ROW_H - hair)),
+                point(px(ox), px(oy + header_row_h() - hair)),
                 size(px(w), px(hair)),
             ),
             t.axis_line,
@@ -721,7 +727,7 @@ impl Columns {
             if let Some((x, cw)) = self.cell(i, ox) {
                 let b = Bounds::new(
                     point(px(x + cw - GRAB), px(oy)),
-                    size(px(2.0 * GRAB), px(HEADER_ROW_H)),
+                    size(px(2.0 * GRAB), px(header_row_h())),
                 );
                 *slot = Some(window.insert_hitbox(b, HitboxBehavior::Normal));
             }
@@ -745,7 +751,9 @@ impl Columns {
             .enumerate()
             .filter_map(|(i, c)| {
                 let d = ColumnDoc {
-                    width: self.set.width(i),
+                    // Saved in 100 % units (`crate::zoom`), so a width dragged at 150 % reads
+                    // back the same size at 100 %.
+                    width: self.set.width(i).map(|w| w / crate::zoom::get()),
                     shown: (self.set.is_shown(i) != specs[i].shown_by_default)
                         .then_some(self.set.is_shown(i)),
                 };
@@ -758,7 +766,8 @@ impl Columns {
         let specs = self.specs();
         for (i, c) in all.iter().enumerate() {
             if let Some(d) = doc.get(c) {
-                self.set.restore(specs, i, d.width, d.shown);
+                self.set
+                    .restore(specs, i, d.width.map(crate::zoom::f), d.shown);
             }
         }
         // A file can't hide every column: keep the price column in that case.

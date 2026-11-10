@@ -45,7 +45,7 @@ use lines_trading::{JournalShared, Money, Side};
 use crate::feeds::PaneFeed;
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pane_columns::{
-    self, ColumnCmd, ColumnMenu, Columns, HEADER_ROW_H, HeaderHit, JournalCol, Table,
+    self, ColumnCmd, ColumnMenu, Columns, HeaderHit, JournalCol, Table, header_row_h,
 };
 use crate::pnl::{self, PnlDisplay};
 use crate::text::{Glyphs, f};
@@ -53,9 +53,20 @@ use crate::theme::Theme;
 use crate::trading::Trading;
 use crate::wsdoc::{JournalGroup, JournalState, PaneDoc};
 
-const ROW_H: f32 = 18.0;
+const ROW_H_100: f32 = 18.0;
+
+/// [`ROW_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn row_h() -> f32 {
+    crate::zoom::f(ROW_H_100)
+}
 const TEXT_PX: f32 = 12.0;
-const PAD: f32 = 6.0;
+const PAD_100: f32 = 6.0;
+/// [`PAD_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn pad() -> f32 {
+    crate::zoom::f(PAD_100)
+}
 
 /// One trade as the table shows it (formatted once per journal change).
 #[derive(Clone, Debug, PartialEq)]
@@ -927,7 +938,7 @@ impl JournalView {
             }
             HeaderHit::Row => {}
             HeaderHit::Outside => {
-                let i = ((y - HEADER_ROW_H) / ROW_H).floor();
+                let i = ((y - header_row_h()) / row_h()).floor();
                 if i >= 0.0
                     && let Some(r) = self.rows.get(self.scroll + i as usize).cloned()
                 {
@@ -1042,7 +1053,7 @@ impl JournalView {
 
     fn on_scroll(&mut self, ev: &gpui::ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         let dy = f(ev.delta.pixel_delta(window.line_height()).y);
-        let rows = (dy / ROW_H).round() as i64;
+        let rows = (dy / row_h()).round() as i64;
         if rows != 0 {
             let (scroll, n) = if self.group.is_trades() {
                 (&mut self.scroll, self.rows.len())
@@ -1056,7 +1067,7 @@ impl JournalView {
     }
 
     fn visible_rows(&self) -> usize {
-        (((f(self.bounds.size.height) - HEADER_ROW_H) / ROW_H).floor() as usize).max(1)
+        (((f(self.bounds.size.height) - header_row_h()) / row_h()).floor() as usize).max(1)
     }
 
     fn paint(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
@@ -1072,7 +1083,8 @@ impl JournalView {
             return;
         }
         self.cols.name_zone(lines_feed::now_utc());
-        self.cols.measure_headers(&mut self.glyphs, &t, PAD, window);
+        self.cols
+            .measure_headers(&mut self.glyphs, &t, pad(), window);
         let rows = self.visible_rows();
         let end = (self.scroll + rows).min(self.rows.len());
         for i in self.scroll..end {
@@ -1083,15 +1095,15 @@ impl JournalView {
                 let tw = self
                     .glyphs
                     .width(&self.rows[i].cells[c], t.text_main, false, window);
-                self.cols.need(c, tw, PAD);
+                self.cols.need(c, tw, pad());
             }
         }
         // A narrow pane gives up the least needed columns first (never half a number).
         self.cols.layout_journal(w);
         let left: [bool; 13] = JournalCol::ALL.map(JournalCol::left_aligned);
         self.cols
-            .paint_header(&mut self.glyphs, &t, bounds, PAD, &left, window, cx);
-        let oy = top + HEADER_ROW_H;
+            .paint_header(&mut self.glyphs, &t, bounds, pad(), &left, window, cx);
+        let oy = top + header_row_h();
         if self.rows.is_empty() {
             let msg = if self.journal.is_some() {
                 "No closed trades yet. Trades appear here when a position goes back to flat."
@@ -1100,9 +1112,9 @@ impl JournalView {
             };
             self.glyphs.paint(
                 msg,
-                ox + PAD,
+                ox + pad(),
                 oy + 4.0,
-                ROW_H,
+                row_h(),
                 t.text_dim,
                 false,
                 window,
@@ -1112,8 +1124,8 @@ impl JournalView {
         }
         let selected = self.selected_index();
         for (n, i) in (self.scroll..end).enumerate() {
-            let y = oy + n as f32 * ROW_H;
-            if y + ROW_H > top + h + 0.5 {
+            let y = oy + n as f32 * row_h();
+            if y + row_h() > top + h + 0.5 {
                 break;
             }
             let r = &self.rows[i];
@@ -1130,17 +1142,17 @@ impl JournalView {
                 };
                 let text = r.cells[c].as_str();
                 let bold = *col == JournalCol::Pnl;
-                let cell = Bounds::new(point(px(x), px(y)), size(px(cw), px(ROW_H)));
+                let cell = Bounds::new(point(px(x), px(y)), size(px(cw), px(row_h())));
                 window.with_content_mask(Some(gpui::ContentMask { bounds: cell }), |window| {
                     if col.left_aligned() {
                         self.glyphs
-                            .paint(text, x + PAD, y, ROW_H, color, bold, window, cx);
+                            .paint(text, x + pad(), y, row_h(), color, bold, window, cx);
                     } else {
                         self.glyphs.paint_right(
                             text,
-                            x + cw - PAD,
+                            x + cw - pad(),
                             y,
-                            ROW_H,
+                            row_h(),
                             color,
                             bold,
                             window,
@@ -1151,23 +1163,23 @@ impl JournalView {
             }
             if Some(i) == selected {
                 // Selection: an accent outline (no fill, so text contrast is untouched).
-                for (yy, hh) in [(y, hair * 2.0), (y + ROW_H - hair * 2.0, hair * 2.0)] {
+                for (yy, hh) in [(y, hair * 2.0), (y + row_h() - hair * 2.0, hair * 2.0)] {
                     window.paint_quad(fill(
                         Bounds::new(point(px(ox), px(yy)), size(px(w), px(hh))),
                         t.accent,
                     ));
                 }
                 window.paint_quad(fill(
-                    Bounds::new(point(px(ox), px(y)), size(px(3.0), px(ROW_H))),
+                    Bounds::new(point(px(ox), px(y)), size(px(3.0), px(row_h()))),
                     t.accent,
                 ));
             }
             window.paint_quad(fill(
-                Bounds::new(point(px(ox), px(y + ROW_H - hair)), size(px(w), px(hair))),
+                Bounds::new(point(px(ox), px(y + row_h() - hair)), size(px(w), px(hair))),
                 t.grid,
             ));
         }
-        let body = Bounds::new(point(px(ox), px(oy)), size(px(w), px(h - HEADER_ROW_H)));
+        let body = Bounds::new(point(px(ox), px(oy)), size(px(w), px(h - header_row_h())));
         self.cols.paint_rules(&t, body, window);
     }
 
@@ -1194,7 +1206,7 @@ impl JournalView {
             }
         }
         for wc in &mut widths {
-            *wc += PAD * 4.0;
+            *wc += pad() * 4.0;
         }
         // The name column always shows (cut to fit if it must, at least 80 px); number
         // columns that don't fit whole are left out from the right.
@@ -1210,7 +1222,7 @@ impl JournalView {
             shown += 1;
         }
         window.paint_quad(fill(
-            Bounds::new(point(px(ox), px(top)), size(px(w), px(HEADER_ROW_H))),
+            Bounds::new(point(px(ox), px(top)), size(px(w), px(header_row_h()))),
             t.panel,
         ));
         let mut x = ox;
@@ -1218,9 +1230,9 @@ impl JournalView {
             if c == 0 {
                 self.glyphs.paint(
                     head,
-                    x + PAD,
+                    x + pad(),
                     top,
-                    HEADER_ROW_H,
+                    header_row_h(),
                     t.text_dim,
                     false,
                     window,
@@ -1229,9 +1241,9 @@ impl JournalView {
             } else {
                 self.glyphs.paint_right(
                     head,
-                    x + cw - PAD,
+                    x + cw - pad(),
                     top,
-                    HEADER_ROW_H,
+                    header_row_h(),
                     t.text_dim,
                     false,
                     window,
@@ -1240,7 +1252,7 @@ impl JournalView {
             }
             x += cw;
         }
-        let oy = top + HEADER_ROW_H;
+        let oy = top + header_row_h();
         if self.groups.is_empty() {
             let msg = if self.journal.is_some() {
                 "No closed trades in these dates."
@@ -1249,9 +1261,9 @@ impl JournalView {
             };
             self.glyphs.paint(
                 msg,
-                ox + PAD,
+                ox + pad(),
                 oy + 4.0,
-                ROW_H,
+                row_h(),
                 t.text_dim,
                 false,
                 window,
@@ -1262,11 +1274,11 @@ impl JournalView {
         let start = self.group_scroll.min(self.groups.len() - 1);
         let mut end_y = oy;
         for (n, r) in self.groups[start..].iter().enumerate() {
-            let y = oy + n as f32 * ROW_H;
-            if y + ROW_H > top + h + 0.5 {
+            let y = oy + n as f32 * row_h();
+            if y + row_h() > top + h + 0.5 {
                 break;
             }
-            end_y = y + ROW_H;
+            end_y = y + row_h();
             let mut x = ox;
             for (c, (cell, &cw)) in r.cells.iter().zip(&widths).enumerate().take(shown) {
                 let color = match c {
@@ -1276,20 +1288,28 @@ impl JournalView {
                 };
                 if c == 0 {
                     // A long name is cut at its column, never over the numbers.
-                    let cell_b = Bounds::new(point(px(x), px(y)), size(px(cw), px(ROW_H)));
+                    let cell_b = Bounds::new(point(px(x), px(y)), size(px(cw), px(row_h())));
                     window.with_content_mask(
                         Some(gpui::ContentMask { bounds: cell_b }),
                         |window| {
-                            self.glyphs
-                                .paint(cell, x + PAD, y, ROW_H, color, false, window, cx);
+                            self.glyphs.paint(
+                                cell,
+                                x + pad(),
+                                y,
+                                row_h(),
+                                color,
+                                false,
+                                window,
+                                cx,
+                            );
                         },
                     );
                 } else {
                     self.glyphs.paint_right(
                         cell,
-                        x + cw - PAD,
+                        x + cw - pad(),
                         y,
-                        ROW_H,
+                        row_h(),
                         color,
                         c == 3,
                         window,
@@ -1299,17 +1319,17 @@ impl JournalView {
                 x += cw;
             }
             window.paint_quad(fill(
-                Bounds::new(point(px(ox), px(y + ROW_H - hair)), size(px(w), px(hair))),
+                Bounds::new(point(px(ox), px(y + row_h() - hair)), size(px(w), px(hair))),
                 t.grid,
             ));
         }
         // By tag: say why the lines can add up to more than the strip.
-        if self.group == JournalGroup::Tags && end_y + ROW_H <= top + h + 0.5 {
+        if self.group == JournalGroup::Tags && end_y + row_h() <= top + h + 0.5 {
             self.glyphs.paint(
                 "A trade with several tags counts under each of them.",
-                ox + PAD,
+                ox + pad(),
                 end_y + 2.0,
-                ROW_H,
+                row_h(),
                 t.text_dim,
                 false,
                 window,
@@ -1372,7 +1392,7 @@ impl JournalView {
             .border_b_1()
             .border_t_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .child(
                 pane::header_content()
                     .child(
@@ -1452,7 +1472,7 @@ impl JournalView {
             .bg(t.panel)
             .border_b_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0))
+            .text_size(crate::zoom::ui(12.0))
             .text_color(t.text_main)
             .cursor_pointer()
             .child(line)
@@ -1500,7 +1520,7 @@ impl JournalView {
                 .bg(t.panel)
                 .border_t_1()
                 .border_color(t.axis_line)
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .child(field("Tags", &ed.tags, ed.field == Field::Tags))

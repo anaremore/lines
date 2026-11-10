@@ -62,14 +62,35 @@ use crate::wsdoc::{
     self, DisplayInfo, PaneDoc, Placement, TabDoc, TabDrop, WindowDoc, WindowState, WorkspaceDoc,
 };
 
-const TAB_BAR_H: f32 = 28.0;
-const HINT_H: f32 = 22.0;
+const TAB_BAR_H_100: f32 = 28.0;
+
+/// [`TAB_BAR_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn tab_bar_h() -> f32 {
+    crate::zoom::f(TAB_BAR_H_100)
+}
+const HINT_H_100: f32 = 22.0;
+/// [`HINT_H_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn hint_h() -> f32 {
+    crate::zoom::f(HINT_H_100)
+}
 /// The shortest window a person can drag to: room for two DOMs stacked. Narrow enough for any
 /// layout that works today.
 const MIN_WINDOW_W: f32 = crate::trade_bar::MIN_DOM_WIDTH;
-const MIN_WINDOW_H: f32 = TAB_BAR_H + HINT_H + 2.0 * crate::trade_bar::MIN_DOM_PANE_H;
-const TAB_W: f32 = 168.0;
-const TAB_X0: f32 = 4.0;
+const MIN_WINDOW_H: f32 = TAB_BAR_H_100 + HINT_H_100 + 2.0 * crate::trade_bar::MIN_DOM_PANE_H;
+const TAB_W_100: f32 = 168.0;
+/// [`TAB_W_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn tab_w() -> f32 {
+    crate::zoom::f(TAB_W_100)
+}
+const TAB_X0_100: f32 = 4.0;
+/// [`TAB_X0_100`] at the UI zoom (`crate::zoom`).
+#[inline]
+fn tab_x0() -> f32 {
+    crate::zoom::f(TAB_X0_100)
+}
 /// Width of a divider's grab handle (the visible line is one pixel).
 const GRAB: f32 = 6.0;
 /// A tab drag starts after this much movement.
@@ -443,8 +464,21 @@ impl Tab {
 
     /// The least height a split leaves this pane: a DOM keeps its header, account and exits.
     fn min_h(&self, id: &PaneId) -> f32 {
+        self.handle(*id).map_or(0.0, |h| {
+            crate::zoom::f(crate::trade_bar::min_pane_h(h.kind()))
+        })
+    }
+
+    /// The least width a split leaves this pane. Above 100 % UI zoom a DOM keeps the width its
+    /// trading panel is laid out for, at the zoom (`trade_bar::MIN_DOM_WIDTH`); at 100 % and
+    /// below, nothing (layouts are as before).
+    fn min_w(&self, id: &PaneId) -> f32 {
+        if crate::zoom::get() <= 1.0 {
+            return 0.0;
+        }
         self.handle(*id)
-            .map_or(0.0, |h| crate::trade_bar::min_pane_h(h.kind()))
+            .filter(|h| h.kind() == PaneKind::Dom)
+            .map_or(0.0, |_| crate::zoom::f(crate::trade_bar::MIN_DOM_WIDTH))
     }
 
     fn order(&self) -> Vec<PaneId> {
@@ -1091,7 +1125,7 @@ impl WindowView {
     /// workspace's status lives in the footer either way).
     fn bar_h(&self) -> f32 {
         if tabstate::shows_tab_bar(self.tabs.len()) {
-            TAB_BAR_H
+            tab_bar_h()
         } else {
             0.0
         }
@@ -1113,7 +1147,7 @@ impl WindowView {
     fn content_area(&self, window: &Window, cx: &App) -> Rect {
         let vs = window.viewport_size();
         let (w, h) = (f32::from(vs.width), f32::from(vs.height));
-        let foot = if self.footer_shown(cx) { HINT_H } else { 0.0 };
+        let foot = if self.footer_shown(cx) { hint_h() } else { 0.0 };
         Rect::new(0.0, 0.0, w, (h - self.bar_h() - foot).max(0.0))
     }
 
@@ -1463,6 +1497,7 @@ impl WindowView {
                 Ok(None) => {}
                 Err(e) => self.refuse(e, cx),
             },
+            Command::ZoomIn | Command::ZoomOut | Command::ZoomReset => zoom_command(cmd, cx),
             Command::CyclePnl | Command::SetPnl(_) => {
                 let s = cx.global_mut::<crate::picker_view::AppSettings>();
                 let m = match cmd {
@@ -1485,12 +1520,14 @@ impl WindowView {
                     .index_of(&tab.focused)
                     .and_then(|i| {
                         tab.layout
-                            .place_where(area, &|id| tab.is_shown(id), &|id| tab.min_h(id))
+                            .place_where(area, &|id| tab.is_shown(id), &|id| tab.min_h(id), &|id| {
+                                tab.min_w(id)
+                            })
                             .into_iter()
                             .find(|p| p.index == i)
                             .map(|p| p.rect)
                     })
-                    .map_or(point(px(40.0), px(bar + 30.0)), |r| {
+                    .map_or(point(crate::zoom::ui(40.0), px(bar + 30.0)), |r| {
                         point(px(r.x + 24.0), px(bar + r.y + 24.0))
                     });
                 self.open_menu(at, cx);
@@ -1658,7 +1695,9 @@ impl WindowView {
         let index = tab.layout.index_of(&id);
         let r = tab
             .layout
-            .place_where(area, &|p| tab.is_shown(p), &|p| tab.min_h(p))
+            .place_where(area, &|p| tab.is_shown(p), &|p| tab.min_h(p), &|p| {
+                tab.min_w(p)
+            })
             .into_iter()
             .find(|p| Some(p.index) == index)
             .map_or(Rect::new(0.0, 0.0, 360.0, 600.0), |p| p.rect);
@@ -1717,10 +1756,14 @@ impl WindowView {
         let Some(i) = tab.layout.index_of(&tab.focused) else {
             return;
         };
-        if let Some(j) = tab
-            .layout
-            .neighbour_where(i, dir, area, &|id| tab.is_shown(id), &|id| tab.min_h(id))
-        {
+        if let Some(j) = tab.layout.neighbour_where(
+            i,
+            dir,
+            area,
+            &|id| tab.is_shown(id),
+            &|id| tab.min_h(id),
+            &|id| tab.min_w(id),
+        ) {
             let id = *tab.layout.leaves()[j];
             self.focus_pane(id, window, cx);
         }
@@ -1994,7 +2037,7 @@ impl WindowView {
             self.screen.h.max(480.0) * 0.8,
         );
         let bounds = Bounds {
-            origin: point(px(at.0 - TAB_W * 0.5), px(at.1 - 12.0)),
+            origin: point(px(at.0 - tab_w() * 0.5), px(at.1 - 12.0)),
             size: gpui::size(px(size.0), px(size.1)),
         };
         cx.defer(move |cx| {
@@ -2048,9 +2091,9 @@ impl WindowView {
         let own = screen_rect(window);
         let vs = window.viewport_size();
         let own = Rect::new(own.x, own.y, f32::from(vs.width), f32::from(vs.height));
-        let bar = Rect::new(own.x, own.y, own.w, TAB_BAR_H);
+        let bar = Rect::new(own.x, own.y, own.w, tab_bar_h());
         let rights: Vec<f32> = (0..self.tabs.len())
-            .map(|i| own.x + TAB_X0 + (i as f32 + 1.0) * TAB_W)
+            .map(|i| own.x + tab_x0() + (i as f32 + 1.0) * tab_w())
             .collect();
         let me = window.window_handle().window_id();
         let others: Vec<(WindowHandle<WindowView>, Rect)> = cx
@@ -2424,13 +2467,15 @@ impl WindowView {
         let (x, y) = (f32::from(pos.x), f32::from(pos.y));
         let bar = self.bar_h();
         let area = self.content_area(window, cx);
-        let tab = (y < bar && x >= TAB_X0)
-            .then(|| ((x - TAB_X0) / TAB_W) as usize)
+        let tab = (y < bar && x >= tab_x0())
+            .then(|| ((x - tab_x0()) / tab_w()) as usize)
             .filter(|i| *i < self.tabs.len());
         let pane = self.tabs.get(self.active).and_then(|t| {
             let order = t.order();
             t.layout
-                .place_where(area, &|id| t.is_shown(id), &|id| t.min_h(id))
+                .place_where(area, &|id| t.is_shown(id), &|id| t.min_h(id), &|id| {
+                    t.min_w(id)
+                })
                 .into_iter()
                 .find(|p| p.rect.contains(x, y - bar))
                 .map(|p| order[p.index])
@@ -2529,16 +2574,16 @@ impl WindowView {
     fn tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let mut bar = div()
-            .h(px(TAB_BAR_H))
+            .h(px(tab_bar_h()))
             .flex_none()
             .flex()
             .flex_row()
             .items_end()
-            .pl(px(TAB_X0))
+            .pl(px(tab_x0()))
             .bg(t.panel)
             .border_b_1()
             .border_color(t.axis_line)
-            .text_size(px(12.0));
+            .text_size(crate::zoom::ui(12.0));
         let hovered = self.hover_tab;
         for (i, tab) in self.tabs.iter().enumerate() {
             let active = i == self.active;
@@ -2565,7 +2610,7 @@ impl WindowView {
             bar = bar.child(
                 div()
                     .id(("tab", i))
-                    .w(px(TAB_W))
+                    .w(px(tab_w()))
                     .h_full()
                     .flex()
                     .flex_row()
@@ -2819,7 +2864,8 @@ impl WindowView {
         let mut out = Vec::new();
         let leaves = tab.layout.leaves();
         let min_h = |id: &PaneId| tab.min_h(id);
-        let placed = tab.layout.place_where(area, &shown, &min_h);
+        let min_w = |id: &PaneId| tab.min_w(id);
+        let placed = tab.layout.place_where(area, &shown, &min_h, &min_w);
         let hovered = self.hover_pane;
         let bar = self.bar_h();
         for p in &placed {
@@ -2888,7 +2934,7 @@ impl WindowView {
         // Separators and their grab handles (on top of the panes).
         for (i, d) in tab
             .layout
-            .dividers_where(area, &shown, &min_h)
+            .dividers_where(area, &shown, &min_h, &min_w)
             .into_iter()
             .enumerate()
         {
@@ -2935,7 +2981,7 @@ impl WindowView {
                     .absolute()
                     .left_0()
                     .right_0()
-                    .bottom(px(16.0))
+                    .bottom(crate::zoom::ui(16.0))
                     .flex()
                     .justify_center()
                     .child(
@@ -2952,7 +2998,7 @@ impl WindowView {
                             .border_1()
                             .border_color(t.axis_line)
                             .rounded_md()
-                            .text_size(px(12.0))
+                            .text_size(crate::zoom::ui(12.0))
                             .text_color(t.text_dim)
                             .child(format!("Every pane: {reason}"))
                             .child(
@@ -2992,7 +3038,7 @@ impl WindowView {
         {
             let r = p.rect;
             let (color, width) = if self.window_active {
-                (t.accent, px(2.0))
+                (t.accent, crate::zoom::ui(2.0))
             } else {
                 (t.text_dim, px(1.0))
             };
@@ -3040,7 +3086,12 @@ impl WindowView {
                     } else {
                         div().text_color(t.text_main).child(text.clone())
                     })
-                    .child(div().w(px(2.0)).h(px(15.0)).bg(t.accent)),
+                    .child(
+                        div()
+                            .w(crate::zoom::ui(2.0))
+                            .h(crate::zoom::ui(15.0))
+                            .bg(t.accent),
+                    ),
                 error.clone(),
                 "Enter save   Esc cancel",
             ),
@@ -3135,7 +3186,12 @@ impl WindowView {
                     } else {
                         div().text_color(t.text_main).child(query.clone())
                     })
-                    .child(div().w(px(2.0)).h(px(15.0)).bg(t.accent));
+                    .child(
+                        div()
+                            .w(crate::zoom::ui(2.0))
+                            .h(crate::zoom::ui(15.0))
+                            .bg(t.accent),
+                    );
                 (
                     "Commands",
                     div().flex().flex_col().child(input).child(list),
@@ -3156,14 +3212,14 @@ impl WindowView {
                     div()
                         .id("prompt")
                         .occlude()
-                        .w(px(460.0))
+                        .w(crate::zoom::ui(460.0))
                         .flex()
                         .flex_col()
                         .bg(t.panel)
                         .border_1()
                         .border_color(t.axis_line)
                         .rounded_md()
-                        .text_size(px(13.0))
+                        .text_size(crate::zoom::ui(13.0))
                         .child(
                             div()
                                 .px_3()
@@ -3183,7 +3239,7 @@ impl WindowView {
                                 .py_1()
                                 .border_t_1()
                                 .border_color(t.axis_line)
-                                .text_size(px(11.0))
+                                .text_size(crate::zoom::ui(11.0))
                                 .text_color(t.text_dim)
                                 .child(hint)
                                 .when_some(error, |d, e| {
@@ -3205,10 +3261,10 @@ impl WindowView {
         Some(
             div()
                 .absolute()
-                .left(now.x - px(TAB_W * 0.5))
-                .top(now.y - px(10.0))
-                .min_w(px(TAB_W))
-                .h(px(TAB_BAR_H - 6.0))
+                .left(now.x - px(tab_w() * 0.5))
+                .top(now.y - crate::zoom::ui(10.0))
+                .min_w(px(tab_w()))
+                .h(px(tab_bar_h() - 6.0))
                 .px_3()
                 .flex()
                 .items_center()
@@ -3216,7 +3272,7 @@ impl WindowView {
                 .border_1()
                 .border_color(t.accent)
                 .rounded_md()
-                .text_size(px(12.0))
+                .text_size(crate::zoom::ui(12.0))
                 .text_color(t.text_main)
                 .child(label)
                 .into_any_element(),
@@ -3227,6 +3283,8 @@ impl WindowView {
 impl Render for WindowView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
+        // The UI zoom (`crate::zoom`): every rem-based size in the window follows it.
+        window.set_rem_size(crate::zoom::rem());
         self.screen = screen_rect(window);
         if let Some(m) = self.shot_menu.clone()
             && self.open_shot_menu(&m, cx)
@@ -3286,7 +3344,7 @@ impl Render for WindowView {
             )
             .children(footer.then(|| {
                 div()
-                    .h(px(HINT_H))
+                    .h(px(hint_h()))
                     .flex_none()
                     .flex()
                     .flex_row()
@@ -3295,7 +3353,7 @@ impl Render for WindowView {
                     .px_3()
                     .gap_4()
                     .overflow_hidden()
-                    .text_size(px(11.0))
+                    .text_size(crate::zoom::ui(11.0))
                     .text_color(t.text_dim)
                     .bg(t.panel)
                     .border_t_1()
@@ -3339,7 +3397,7 @@ pub(crate) fn header_controls<V: 'static>(
         .top_0()
         .right_0()
         // The header's own height, so the icons sit on its text's center line.
-        .h(px(crate::pane::header_height(kind) - 1.0))
+        .h(crate::zoom::ui(crate::pane::header_height(kind) - 1.0))
         .w(px(crate::pane::controls_gutter(kind)))
         .overflow_hidden()
         .justify_end()
@@ -3668,6 +3726,34 @@ pub fn set_theme(theme: Theme, cx: &mut App) {
     }
     for w in pane_windows {
         let _ = w.update(cx, |v, _, cx| v.set_theme(theme, cx));
+    }
+    cx.refresh_windows();
+}
+
+/// Zoom in, out, or back to 100 % (`crate::zoom`), from any window.
+pub(crate) fn zoom_command(cmd: Command, cx: &mut App) {
+    let dir = match cmd {
+        Command::ZoomIn => 1,
+        Command::ZoomOut => -1,
+        _ => 0,
+    };
+    set_ui_zoom(crate::zoom::step(crate::zoom::percent(), dir), cx);
+}
+
+/// Every window at this zoom now, saved; a brief notice says the new size ("110%").
+pub(crate) fn set_ui_zoom(pct: u16, cx: &mut App) {
+    if !crate::zoom::set(pct) {
+        return;
+    }
+    let pct = crate::zoom::percent();
+    crate::picker_view::update_settings(cx, |s| s.ui_zoom = crate::zoom::saved(pct));
+    applied_ui_zoom(cx);
+}
+
+/// After the zoom changed (a key, the palette, Settings): say so and redraw every window.
+pub(crate) fn applied_ui_zoom(cx: &mut App) {
+    if cx.has_global::<Workspace>() {
+        notice(format!("{}%", crate::zoom::percent()), cx);
     }
     cx.refresh_windows();
 }

@@ -969,7 +969,8 @@ impl ChainView {
             sent_at: None,
             watching: Vec::new(),
             shot,
-            glyphs: Glyphs::new(TEXT_PX),
+            // Its painted rows don't zoom yet (docs/known-gaps.md): neither does its text.
+            glyphs: Glyphs::fixed(TEXT_PX),
             bounds: Bounds::default(),
             layout: Layout::default(),
             chart: None,
@@ -4256,7 +4257,9 @@ impl ChainView {
             .px_2()
             .pr(px(pane::controls_gutter(crate::layout::PaneKind::Chain)))
             // Fixed: the exits' buttons appearing never push the rows down.
-            .h(px(pane::header_height(crate::layout::PaneKind::Chain)))
+            .h(crate::zoom::ui(pane::header_height(
+                crate::layout::PaneKind::Chain,
+            )))
             .items_center()
             .bg(t.panel)
             .border_b_1()
