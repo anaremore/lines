@@ -18,6 +18,8 @@ pub enum ConnectionEnd {
     /// Server closed the stream / replay reached its end.
     Closed,
     Shutdown,
+    /// Reconnect now, without backoff: a recording asked to start (`live_record`).
+    Restart,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +166,12 @@ async fn drive<T: Transport>(
         tokio::select! {
             biased;
             _ = shutdown.changed() => return Ok(ConnectionEnd::Shutdown),
+            // A wake-up left from a start already taken at this connect is ignored.
+            _ = store.recording.restarted() => {
+                if store.recording.has_pending() {
+                    return Ok(ConnectionEnd::Restart);
+                }
+            }
             frame = transport.recv() => {
                 let Some(frame) = frame? else { return Ok(ConnectionEnd::Closed) };
                 last_rx = Instant::now();

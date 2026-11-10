@@ -114,6 +114,10 @@ pub enum Command {
     ChainPnl,
     /// Write the journal's trades as CSV to the config folder.
     ExportJournal,
+    /// Record every live feed (and live level sources) to the data folder's `recordings/`
+    /// (`crate::recording`). No key: the only free one sits beside Ctrl+Alt+R (Reverse).
+    StartRecording,
+    StopRecording,
     /// The focused journal: edit the selected trade's tags and note.
     JournalEdit,
     /// The focused journal: stats for all dates or the current trade date.
@@ -753,6 +757,8 @@ pub fn label(c: Command) -> String {
         Command::OpenJournal => "Open journal".into(),
         Command::OpenChain => "Open option chain".into(),
         Command::OpenPositions => "Open positions".into(),
+        Command::StartRecording => "Start recording".into(),
+        Command::StopRecording => "Stop recording".into(),
         Command::ChainOneClick => "Option chain: One-click on/off".into(),
         Command::ChainChart => "Option chain: chart beside the chain on/off".into(),
         Command::ChainPnl => "Option chain: P&L to close on/off".into(),
@@ -906,6 +912,8 @@ pub fn palette() -> Vec<Command> {
         Command::ChainChart,
         Command::ChainPnl,
         Command::ExportJournal,
+        Command::StartRecording,
+        Command::StopRecording,
         Command::JournalEdit,
         Command::JournalAllDates,
         Command::JournalOpenChart,

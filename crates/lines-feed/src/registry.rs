@@ -165,6 +165,20 @@ impl FeedRegistry {
         Ok(Subscription(shared))
     }
 
+    /// The stores of the feeds running now (recording starts and stops on them).
+    pub fn stores(&self) -> Vec<Arc<crate::store::ChartStore>> {
+        // The feeds are upgraded under the lock and dropped after it: a last reference
+        // dropped here runs `Shared::drop`, which takes this same lock.
+        let held: Vec<Arc<Shared>> = self
+            .inner
+            .lock()
+            .feeds
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        held.iter().map(|s| s.store.clone()).collect()
+    }
+
     /// Feeds currently running.
     pub fn running(&self) -> usize {
         self.inner
@@ -236,6 +250,75 @@ mod tests {
         // Subscribing again starts a fresh feed.
         let d = reg.subscribe(mock(None)).unwrap();
         assert!(!Arc::ptr_eq(d.store(), &store));
+    }
+
+    /// "Start recording" on a running feed: it reconnects once with a recorder, so the file
+    /// (named for the source and contract, the source in its header: decisions 0010, 0030)
+    /// holds a whole session and replays; Stop finishes it while the feed goes on. A replay is
+    /// never recorded again.
+    #[test]
+    fn a_running_feed_starts_and_stops_recording() {
+        use crate::live_record::RecState;
+        let dir = std::env::temp_dir().join(format!("lines-live-rec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let reg = FeedRegistry::new();
+        let a = reg.subscribe(mock(None)).unwrap();
+        let store = a.store().clone();
+        wait_until(|| store.read().stats.trades_in > 0);
+        assert!(store.recording.recordable());
+        assert!(store.recording.start(dir.clone()));
+        assert!(!store.recording.start(dir.clone()), "once");
+        wait_until(|| matches!(store.recording.state(), RecState::On { .. }));
+        let RecState::On { path, .. } = store.recording.state() else {
+            unreachable!()
+        };
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let es = catalog::get(catalog::ES).unwrap();
+        let front = crate::front_month(&es, None).unwrap();
+        assert!(
+            name.starts_with(&format!("cqg-{}-", front.label(&es))) && name.ends_with("Z.lfr"),
+            "{name}"
+        );
+        let n = store.read().stats.trades_in;
+        wait_until(|| store.read().stats.trades_in > n + 20);
+        assert_eq!(
+            store.recording.stop(),
+            crate::live_record::Stopped::Saved(path.clone())
+        );
+        assert_eq!(store.recording.state(), RecState::Off);
+        let n = store.read().stats.trades_in;
+        wait_until(|| store.read().stats.trades_in > n);
+
+        // Its writer closes it on its own thread: wait until it stops growing.
+        wait_until(|| {
+            let len = std::fs::metadata(&path).map_or(0, |m| m.len());
+            std::thread::sleep(Duration::from_millis(300));
+            len > 0 && std::fs::metadata(&path).map_or(0, |m| m.len()) == len
+        });
+        // The file: the source and contract in its header, a whole session that replays.
+        let h = crate::transport::read_header(&path).unwrap();
+        assert_eq!((h.provider.as_str(), h.contract), ("cqg", Some(front)));
+        let replay = reg
+            .subscribe(FeedConfig::new(Source::Replay {
+                path: path.clone(),
+                speed: 0.0,
+                stop_at: None,
+            }))
+            .unwrap();
+        let rs = replay.store().clone();
+        wait_until(|| rs.read().status == crate::store::FeedStatus::ReplayFinished);
+        assert!(
+            rs.read().stats.trades_in > 20,
+            "{}",
+            rs.read().stats.trades_in
+        );
+        assert!(!rs.recording.recordable());
+        assert!(
+            !rs.recording.start(dir.clone()),
+            "a replay is never recorded again"
+        );
+        drop((a, replay));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

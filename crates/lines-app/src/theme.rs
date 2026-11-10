@@ -144,6 +144,9 @@ pub struct Theme {
     /// named for what they do, so the color is never the only cue. AA on `panel`, also under
     /// the selected row's tint. Not up/down, not the accent.
     pub destructive: Hsla,
+    /// The recording dot in the footer (beside "REC", which carries the meaning): at least 3:1
+    /// on the panel in every theme and palette (tested).
+    pub recording: Hsla,
 }
 
 /// A dash pattern, logical px: `on` drawn, `off` skipped.
@@ -561,6 +564,7 @@ impl Theme {
             order_target: c(0x67d0e0),
             order_stop: c(0xe3a3f5),
             destructive: c(0xff8a80),
+            recording: c(0xff4d4f),
         }
     }
 
@@ -619,6 +623,7 @@ impl Theme {
             order_target: c(0x006b7a),
             order_stop: c(0x86399f),
             destructive: c(0x9c1f19),
+            recording: c(0xd11a1a),
         }
     }
 
@@ -880,6 +885,20 @@ mod tests {
 "
             )
         );
+    }
+
+    /// The header's recording dot reads on the header (3:1, WCAG 1.4.11) in every theme and
+    /// palette.
+    #[test]
+    fn the_recording_dot_reads_on_the_header() {
+        for t in Theme::all() {
+            assert!(
+                contrast(t.recording, t.panel) >= 3.0,
+                "{}: {}",
+                t.name,
+                contrast(t.recording, t.panel)
+            );
+        }
     }
 
     #[test]

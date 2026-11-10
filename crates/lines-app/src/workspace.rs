@@ -739,6 +739,11 @@ pub struct WindowView {
     /// Screenshot: a menu to open once its pane can show it (`--context-menu`).
     shot_menu: Option<crate::pane_menu::ShotMenu>,
     hover_tab: Option<usize>,
+    /// Recording (`crate::recording`), as of this render: the footer keeps REC and its Stop
+    /// in view.
+    rec_shown: bool,
+    /// A one-second re-render is scheduled (the REC time).
+    rec_tick: bool,
     menu: Option<Menu>,
     prompt: Option<Prompt>,
     _window_subs: Vec<GpuiSubscription>,
@@ -784,6 +789,8 @@ impl WindowView {
             hover_pinned: false,
             shot_menu: None,
             hover_tab: None,
+            rec_shown: false,
+            rec_tick: false,
             menu: None,
             prompt: None,
             _window_subs: subs,
@@ -1101,6 +1108,130 @@ impl WindowView {
         cx.notify();
     }
 
+    /// "Start recording": every live feed into the data folder's `recordings/`
+    /// (`crate::recording`). Never waits on a feed: each starts at its next connect.
+    fn start_recording(&mut self, cx: &mut Context<Self>) {
+        let Some(root) = lines_feed::disk::default_root() else {
+            return self.refuse("No data folder for recordings (set LINES_DATA_DIR)", cx);
+        };
+        let stores = Feeds::registry(cx).stores();
+        if crate::recording::status(&stores).active() {
+            return self.refuse("Already recording", cx);
+        }
+        let dir = crate::recording::dir(&root);
+        match crate::recording::start(&stores, &dir, lines_feed::now_utc().0) {
+            0 => self.refuse(
+                "Nothing live to record (a replay is a recording already)",
+                cx,
+            ),
+            n => {
+                let feeds = if n == 1 { "feed" } else { "feeds" };
+                notice(format!("Recording {n} {feeds} to {}", dir.display()), cx);
+                cx.notify();
+            }
+        }
+    }
+
+    fn stop_recording(&mut self, cx: &mut Context<Self>) {
+        let stores = Feeds::registry(cx).stores();
+        let r = crate::recording::stop(&stores);
+        match r.saved.as_slice() {
+            [] if r.cancelled > 0 => {
+                notice("Recording canceled before it began".to_owned(), cx);
+                cx.notify();
+            }
+            [] => self.refuse("Not recording", cx),
+            [one] => {
+                notice(format!("Recording saved: {}", one.display()), cx);
+                cx.notify();
+            }
+            many => {
+                let dir = many[0].parent().map(|p| p.display().to_string());
+                notice(
+                    format!(
+                        "{} recordings saved in {}",
+                        many.len(),
+                        dir.unwrap_or_default()
+                    ),
+                    cx,
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    /// The footer's recording indicator: a red dot, "REC" and the elapsed time (never the dot
+    /// alone), and "Stop recording" one click away. While recording the window re-renders once
+    /// a second for the time (render, not paint: the bars and books paint as before).
+    fn recording_indicator(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let t = self.theme;
+        let (status, now) = match crate::recording::fixture() {
+            Some(f) => f,
+            None => (
+                crate::recording::status(&Feeds::registry(cx).stores()),
+                lines_feed::now_utc().0,
+            ),
+        };
+        if !status.active() {
+            return None;
+        }
+        if !self.rec_tick && crate::recording::fixture().is_none() {
+            self.rec_tick = true;
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let _ = this.update(cx, |v, cx| {
+                    v.rec_tick = false;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        let label = crate::recording::label(status.since_ms, now);
+        Some(
+            div()
+                .id("recording")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .size(crate::zoom::ui(8.0))
+                        .rounded_full()
+                        .bg(t.recording),
+                )
+                .child(
+                    div()
+                        .text_color(t.text_main)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(label.as_str().to_owned()),
+                )
+                .child(
+                    div()
+                        .id("recording-stop")
+                        // At least the 20 px hit target (docs/design.md), within the footer.
+                        .min_h(crate::zoom::ui(20.0))
+                        .flex()
+                        .items_center()
+                        .px_2()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(t.control_edge)
+                        .text_color(t.text_main)
+                        .hover(|s| s.bg(t.accent.opacity(0.16)))
+                        .child("Stop recording")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                this.run(Command::StopRecording, window, cx);
+                            }),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Report a refused action inline (docs/design.md: errors where they happened). It expires
     /// on its own; the same refusal again replaces it with a count.
     fn refuse(&mut self, why: &str, cx: &mut Context<Self>) {
@@ -1149,11 +1280,12 @@ impl WindowView {
     /// The tab bar's height: shown only with two tabs or more (one tab needs no bar; the
     /// workspace's status lives in the footer either way).
     fn bar_h(&self) -> f32 {
-        if tabstate::shows_tab_bar(self.tabs.len()) {
-            tab_bar_h()
-        } else {
-            0.0
-        }
+        if self.shows_bar() { tab_bar_h() } else { 0.0 }
+    }
+
+    /// The header bar: with two tabs or more.
+    fn shows_bar(&self) -> bool {
+        tabstate::shows_tab_bar(self.tabs.len())
     }
 
     /// The footer (key hints and workspace status) is shown unless the key hints are hidden
@@ -1166,7 +1298,12 @@ impl WindowView {
             !t.in_state(PaneState::is_hidden).is_empty()
                 || !t.in_state(|s| s == PaneState::Detached).is_empty()
         });
-        StudyVisibility::footer_shown(ws.hide_hints, ws.crosshair_sync || report || panes)
+        // Recording keeps it too (REC and its Stop live there). The footer is shown by default,
+        // so starting or stopping a recording moves no pane (docs/design.md §7).
+        StudyVisibility::footer_shown(
+            ws.hide_hints,
+            ws.crosshair_sync || report || panes || self.rec_shown,
+        )
     }
 
     fn content_area(&self, window: &Window, cx: &App) -> Rect {
@@ -1234,6 +1371,8 @@ impl WindowView {
             Command::OpenJournal => self.open_panel(PaneKind::Journal, window, cx),
             Command::OpenChain => self.open_panel(PaneKind::Chain, window, cx),
             Command::OpenPositions => self.open_panel(PaneKind::Positions, window, cx),
+            Command::StartRecording => self.start_recording(cx),
+            Command::StopRecording => self.stop_recording(cx),
             Command::ChainChart => match self.tab().focused_handle().cloned() {
                 Some(PaneHandle::Chain(c)) => c.update(cx, |v, cx| v.toggle_chart(cx)),
                 _ => self.refuse("The chart acts on the focused option chain", cx),
@@ -2260,6 +2399,11 @@ impl WindowView {
             hidden_panes: !tab.in_state(PaneState::is_hidden).is_empty(),
             detached_panes: !tab.in_state(|s| s == PaneState::Detached).is_empty(),
             closed_tabs,
+            recording: {
+                let stores = Feeds::registry(cx).stores();
+                let on = crate::recording::status(&stores).active();
+                (on || stores.iter().any(|s| s.recording.recordable())).then_some(on)
+            },
         }
     }
 
@@ -2770,7 +2914,7 @@ impl WindowView {
     /// The workspace's status for the footer (always there, with or without a tab bar):
     /// an inline report, what this tab isn't showing (click to bring it back), crosshair
     /// sync, and the workspace's name (click to open another).
-    fn status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn status(&self, rec: Option<gpui::AnyElement>, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let ws = cx.global::<Workspace>();
         let (name, sync, report) = (ws.name.clone(), ws.crosshair_sync, ws.notices.text());
@@ -2907,6 +3051,7 @@ impl WindowView {
                 ))
             })
             .when(sync, |d| d.child("crosshair sync"))
+            .children(rec)
             .child(
                 div()
                     .id("workspace-name")
@@ -3457,6 +3602,16 @@ impl Render for WindowView {
         // The UI zoom (`crate::zoom`): every rem-based size in the window follows it.
         window.set_rem_size(crate::zoom::rem());
         self.screen = screen_rect(window);
+        // Before the layout below reads `footer_shown`.
+        let (rec, failed) = match crate::recording::fixture() {
+            Some((st, _)) => (st, None),
+            None => crate::recording::upkeep(&Feeds::registry(cx).stores()),
+        };
+        self.rec_shown = rec.active();
+        if let Some(e) = failed {
+            // Shown where it was started from: a start that couldn't write is never silent.
+            notice(format!("Recording didn't start: {e}"), cx);
+        }
         if let Some(m) = self.shot_menu.clone()
             && self.open_shot_menu(&m, cx)
         {
@@ -3490,9 +3645,11 @@ impl Render for WindowView {
             self.panes(area, cx)
         };
         let menu = self.menu_overlay(window, cx);
-        let bar =
-            tabstate::shows_tab_bar(self.tabs.len()).then(|| self.tab_bar(cx).into_any_element());
-        let status = self.status(cx).into_any_element();
+        let bar = self
+            .shows_bar()
+            .then(|| self.tab_bar(cx).into_any_element());
+        let rec = self.recording_indicator(cx);
+        let status = self.status(rec, cx).into_any_element();
         // F1 / Clean chart hide the key hints; the footer stays while it has state to show.
         let (footer, hide_hints) = (self.footer_shown(cx), cx.global::<Workspace>().hide_hints);
         div()
