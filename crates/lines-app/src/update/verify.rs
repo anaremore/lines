@@ -233,7 +233,13 @@ pub(crate) mod tests {
             .to_box()
             .unwrap()
             .to_string();
-        assert!(boxed.contains(COMMITTED_KEY_ID), "{boxed}");
+        // The comment line ends with the key's ID ("… minisign public key: <ID>").
+        let comment = boxed.lines().next().unwrap_or_default();
+        assert!(
+            comment.starts_with("untrusted comment: minisign public key")
+                && comment.ends_with(&format!(" {COMMITTED_KEY_ID}")),
+            "{boxed}"
+        );
         // A file signed by another key (this test's own) for this very release: refused.
         let other = TestKey::new();
         let data = b"lines 0.3.12";
