@@ -510,6 +510,7 @@ impl TapeView {
                 &contract,
                 "Time & sales",
                 word,
+                self.store.stale_for().is_some(),
                 &right,
                 &tw,
             );
@@ -620,7 +621,15 @@ impl Render for TapeView {
                     move |bounds, window, cx| e.read(cx).cols.divider_hitboxes(bounds, window),
                     move |bounds, hitboxes, window, cx| {
                         pane_columns::set_divider_cursors(&hitboxes, window);
-                        entity.update(cx, |view, cx| view.paint(bounds, window, cx));
+                        entity.update(cx, |view, cx| {
+                            let was = view.pane_w;
+                            view.paint(bounds, window, cx);
+                            // The header's source tag fits by this width: lay it out again
+                            // after a resize, even on a quiet feed.
+                            if view.pane_w != was {
+                                cx.notify();
+                            }
+                        });
                     },
                 )
             }

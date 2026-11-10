@@ -107,6 +107,8 @@ pub struct DomView {
     seen_revision: u64,
     product: Product,
     has_depth: bool,
+    /// Whether the source gives the best bid and ask (which book note shows without depth).
+    has_bbo: bool,
     /// Why there is no depth, from the source (shown in the empty ladder).
     depth_note: Option<String>,
     /// The ladder's bottom-row note while it shows rows ([`book_note`]): the source's reason,
@@ -259,9 +261,12 @@ impl Pane for DomView {
         // change repaints even a quiet feed.
         let mut note = false;
         if let Some(d) = self.store.try_read()
-            && (d.depth_note != self.depth_note || d.capabilities.depth != self.has_depth)
+            && (d.depth_note != self.depth_note
+                || d.capabilities.depth != self.has_depth
+                || d.capabilities.bbo != self.has_bbo)
         {
             self.has_depth = d.capabilities.depth;
+            self.has_bbo = d.capabilities.bbo;
             self.depth_note.clone_from(&d.depth_note);
             self.book_note = book_note(&d.capabilities, d.depth_note.as_deref());
             note = true;
@@ -281,6 +286,7 @@ impl Pane for DomView {
             let d = self.store.read();
             self.product = d.product.clone();
             self.has_depth = d.capabilities.depth;
+            self.has_bbo = d.capabilities.bbo;
             self.depth_note.clone_from(&d.depth_note);
             self.book_note = book_note(&d.capabilities, d.depth_note.as_deref());
         }
@@ -316,11 +322,12 @@ impl DomView {
         cx: &mut Context<Self>,
     ) -> Self {
         let store = feed.store().clone();
-        let (product, has_depth, depth_note, book_note) = {
+        let (product, has_depth, has_bbo, depth_note, book_note) = {
             let d = store.read();
             (
                 d.product.clone(),
                 d.capabilities.depth,
+                d.capabilities.bbo,
                 d.depth_note.clone(),
                 book_note(&d.capabilities, d.depth_note.as_deref()),
             )
@@ -346,6 +353,7 @@ impl DomView {
             seen_revision: u64::MAX,
             product,
             has_depth,
+            has_bbo,
             depth_note,
             book_note,
             grouping: opts.grouping.max(1),
@@ -1252,17 +1260,16 @@ impl DomView {
         {
             let note_y = oy + self.rows.len() as f32 * row_h();
             window.paint_quad(fill(rect(ox, note_y, w, top + h - note_y), t.bg));
+            // Under the empty Bid column, where the eye looks for the book; from the pane's
+            // edge when it would not fit from there.
+            let nw = self.glyphs.width(note, t.text_dim, false, window);
+            let note_x = bid
+                .map(|(x, _)| x + pad())
+                .filter(|x| x + nw + pad() <= ox + w)
+                .unwrap_or(ox + pad());
             crate::layout_rec::set_owner("dom-price");
-            self.glyphs.paint(
-                note,
-                ox + pad(),
-                note_y,
-                row_h(),
-                t.text_dim,
-                false,
-                window,
-                cx,
-            );
+            self.glyphs
+                .paint(note, note_x, note_y, row_h(), t.text_dim, false, window, cx);
             crate::layout_rec::set_owner("");
         }
     }
@@ -1303,6 +1310,7 @@ impl DomView {
                 &contract,
                 "DOM",
                 word,
+                self.store.stale_for().is_some(),
                 &format!("{} {right}", state.unwrap_or("")),
                 &tw,
             );

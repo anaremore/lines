@@ -603,10 +603,16 @@ impl Picker {
     }
 
     /// Which entries an enabled source serves (index-aligned with `entries`): unserved ones
-    /// rank last. Searches again when it changed, keeping the selected symbol.
+    /// rank last. Searches again when it changed, keeping the selected symbol while a source
+    /// still serves it (else the top: the picker never opens on, or slides to, a symbol no
+    /// source serves at the list's end).
     pub fn set_served(&mut self, served: Vec<bool>, entries: &[Entry], settings: &Settings) {
         if self.searcher.set_served(served) {
-            let keep = self.selected_entry(entries).map(|e| e.product.id);
+            let keep = self
+                .hits
+                .get(self.selected)
+                .filter(|h| self.searcher.served.get(h.index).copied().unwrap_or(true))
+                .map(|h| entries[h.index].product.id);
             self.research(entries, settings, keep);
         }
     }
@@ -1189,5 +1195,27 @@ mod tests {
         );
         assert!(first_off > 0, "a served match (MES) ranks above ES");
         assert!((0..hits.len()).all(|i| heading(&e, &hits, "es", i).is_none()));
+    }
+
+    /// The picker opens before it knows what is served, on its first recent; when that symbol
+    /// turns out unserved, the selection goes to the top (a served symbol), never to the
+    /// "No source" tail. A served selection stays where it is.
+    #[test]
+    fn an_unserved_selection_goes_to_the_top() {
+        let e = all();
+        let mut s = Settings::default();
+        s.push_recent(catalog::ES);
+        let mut p = Picker::open("", &e, &s);
+        assert_eq!(p.selected_entry(&e).map(|x| x.product.symbol), Some("ES"));
+        let served: Vec<bool> = e.iter().map(|x| x.product.symbol != "ES").collect();
+        p.set_served(served, &e, &s);
+        assert_eq!(p.selected, 0);
+        assert_ne!(p.selected_entry(&e).map(|x| x.product.symbol), Some("ES"));
+        // A served selection is kept through a change.
+        p.selected = 3;
+        let kept = p.selected_entry(&e).map(|x| x.product.id);
+        let served: Vec<bool> = e.iter().map(|x| x.product.symbol != "GC").collect();
+        p.set_served(served, &e, &s);
+        assert_eq!(p.selected_entry(&e).map(|x| x.product.id), kept);
     }
 }

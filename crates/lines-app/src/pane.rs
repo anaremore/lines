@@ -596,24 +596,33 @@ pub fn chart_header_fit(
     }
 }
 
-/// The width of a DOM or T&S header's parts, all but its source tag: the row's padding, the
-/// link chip, the contract, the pane's word ("DOM"), the feed's status word, and the right
-/// group's text, each after a gap.
+/// The width of a DOM or T&S header's parts, all but its source tag: the row's left padding,
+/// the link chip, the contract, the pane's word ("DOM"), the feed's status word, the STALE
+/// badge while stale, and the right group's text, each after a gap. The right padding is the
+/// controls' gutter, which the caller's room already leaves out.
+#[allow(clippy::too_many_arguments)]
 pub fn side_header_px(
     linked: bool,
     contract: &str,
     pane_word: &str,
     status: Option<&str>,
+    stale: bool,
     right: &str,
     tw: TextPx,
 ) -> f32 {
-    header_base_px(linked, contract, tw)
+    // `header_base_px` counts the chart's px_3; these rows have px_2.
+    header_base_px(linked, contract, tw) - 4.0
         + HEADER_GAP
         + tw(pane_word)
         + status.map_or(0.0, |s| HEADER_GAP + tw(s))
+        + if stale {
+            // "STALE · no data 99 s", bold, px_1 each side.
+            HEADER_GAP + tw("STALE · no data 99 s") * BOLD + 8.0
+        } else {
+            0.0
+        }
         + HEADER_GAP
         + tw(right)
-        + 12.0 // the row's right padding (px_3)
 }
 
 /// Whether a pane header's source tag ("(Databento)") shows: it is the first thing a narrow
@@ -686,7 +695,25 @@ mod tests {
     /// fits with it; the contract is never what gives way.
     #[test]
     fn the_source_tag_is_the_first_to_go() {
-        let rest = side_header_px(true, "ESZ26", "DOM", Some("ended"), "1 tick/row", &tw7);
+        let rest = side_header_px(
+            true,
+            "ESZ26",
+            "DOM",
+            Some("ended"),
+            false,
+            "1 tick/row",
+            &tw7,
+        );
+        let stale = side_header_px(
+            true,
+            "ESZ26",
+            "DOM",
+            Some("ended"),
+            true,
+            "1 tick/row",
+            &tw7,
+        );
+        assert!(stale > rest, "the STALE badge counts");
         let tag = source_tag("Databento");
         let need = rest + HEADER_GAP + tw7(&tag);
         assert!(source_tag_fits(need, rest, &tag, &tw7));
