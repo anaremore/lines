@@ -132,7 +132,7 @@ fn run_scaled(target: &str, f: fn(&[u8]), divisor: usize) {
             let path = dir.join(format!("{target}.bin"));
             let _ = std::fs::write(&path, input);
             panic!(
-                "{target} panicked on {what} (LINES_FUZZ_SMOKE_SEED={seed:#x}, {} seeds); input                  saved to {}; {} bytes: {}",
+                "{target} panicked on {what} (LINES_FUZZ_SMOKE_SEED={seed:#x}, {} seeds); input saved to {}; {} bytes: {}",
                 seeds.len(),
                 path.display(),
                 input.len(),

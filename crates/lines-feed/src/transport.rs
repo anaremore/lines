@@ -248,6 +248,17 @@ impl ReplayTransport {
     pub fn header(&self) -> &Header {
         &self.reader.header
     }
+
+    /// At the end of a replay: how many recorded frames were skipped for a time that doesn't
+    /// fit (`recording::wall_ms`).
+    fn report_unrepresentable(&self) {
+        let n = self.reader.unrepresentable();
+        if n > 0 {
+            tracing::warn!(
+                "replay: {n} recorded frames had a time that doesn't fit and were skipped"
+            );
+        }
+    }
 }
 
 /// Read only the header of a recording or stored session (to pick the provider and
@@ -272,17 +283,13 @@ impl Transport for ReplayTransport {
             loop {
                 match self.reader.next_record()? {
                     None => {
-                        let n = self.reader.unrepresentable();
-                        if n > 0 {
-                            tracing::warn!(
-                                "replay: {n} recorded frames had a time that doesn't fit and were                                  skipped"
-                            );
-                        }
+                        self.report_unrepresentable();
                         return Ok(None);
                     }
                     Some(r) if r.direction == Direction::FromServer => {
                         let wall = r.wall_ms;
                         if self.stop_at.is_some_and(|t| wall > t.0) {
+                            self.report_unrepresentable();
                             return Ok(None);
                         }
                         self.pending = Some((r.since_start, wall, r.frame));
