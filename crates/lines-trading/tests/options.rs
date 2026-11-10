@@ -1045,3 +1045,38 @@ fn an_options_mark_keeps_its_time_through_a_one_sided_quote() {
     r.quote(Some(245), Some(247));
     assert_eq!(marked(&r), Some(Some(UtcMillis(again))));
 }
+
+/// A last sale every quote repeats isn't a new price: after a two-sided quote, a one-sided one
+/// carrying the same old last keeps the two-sided quote's time; a new last is a new price.
+#[test]
+fn a_repeated_last_sale_doesnt_freshen_an_options_mark() {
+    let mut r = Rig::new();
+    let quote = |r: &mut Rig, bid: Option<i64>, ask: Option<i64>, last: Option<i64>| {
+        let time = UtcMillis(r.t + 1);
+        r.market(
+            call(),
+            MarketInput::OptionQuote {
+                bid: bid.map(Price),
+                ask: ask.map(Price),
+                last: last.map(Price),
+                time,
+            },
+        );
+        time
+    };
+    quote(&mut r, Some(240), Some(242), Some(110));
+    r.limit(Side::Buy, 1, 242);
+    let priced = quote(&mut r, Some(240), Some(242), Some(110));
+    let marked = |r: &Rig| {
+        r.events.iter().rev().find_map(|e| match e {
+            Event::Position(p) if p.contract == call() => Some(p.marked_at),
+            _ => None,
+        })
+    };
+    r.t += 5_000;
+    quote(&mut r, None, Some(250), Some(110));
+    assert_eq!(marked(&r), Some(Some(priced)), "the old last, repeated");
+    r.t += 1_000;
+    let traded = quote(&mut r, None, Some(250), Some(120));
+    assert_eq!(marked(&r), Some(Some(traded)), "a new last");
+}

@@ -230,7 +230,10 @@ impl PositionsView {
             false
         });
         if !notes.is_empty() {
-            self.note = Some(notes.join("; "));
+            // After what Flatten all left, not over it.
+            let mut all: Vec<String> = self.note.take().into_iter().collect();
+            all.extend(notes);
+            self.note = Some(all.join("; "));
         }
         true
     }
@@ -496,7 +499,12 @@ impl PositionsView {
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        let count = self.rows.len();
+        // Flatten all's count: what it can close here (a row whose Flatten is off isn't asked).
+        let count = self
+            .rows
+            .iter()
+            .filter(|r| self.off_reason(r).is_none())
+            .count();
         let badge = model::header_badge(&self.accounts, self.filter.as_ref());
         div()
             .flex()

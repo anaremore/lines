@@ -128,6 +128,9 @@ struct Mark {
     /// When an option's price last changed source: a two-sided quote or a new last. A one-sided
     /// quote with no last keeps the mark it had, and its time.
     priced_at: Option<UtcMillis>,
+    /// An option's last sale as its quotes carry it, kept whatever else marks it: a quote that
+    /// repeats it isn't a new price.
+    last_sale: Option<Price>,
 }
 
 impl Mark {
@@ -2397,7 +2400,10 @@ impl TradingCore {
                     m.ask = a;
                     let two_sided = b.is_some() && a.is_some();
                     // A last trade repeated on every quote isn't a new price.
-                    let new_last = last.is_some() && last != m.last;
+                    let new_last = last.is_some() && last != m.last_sale;
+                    if last.is_some() {
+                        m.last_sale = last;
+                    }
                     m.last = if two_sided { None } else { last.or(held) };
                     if two_sided || new_last {
                         m.priced_at = Some(time);
