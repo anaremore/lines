@@ -341,9 +341,10 @@ impl Pick {
 
     /// The source a row's tag names, in a run with several, as [`Sources::for_pick`] picks:
     /// the pane's own when it serves the target, else the first that does, a source whose
-    /// login was refused last. When a refused source also serves it, the tag says so: the
-    /// fallthrough "Databento (Rithmic: login refused)", or only "Rithmic: login refused" when
-    /// no other does. `None`: one source, or none serves it.
+    /// login was refused last. When a refused source would have been the choice (it comes
+    /// before the one chosen), the tag says so: the fallthrough "Databento (Rithmic: login
+    /// refused)", or only "Rithmic: login refused" when no other serves it. `None`: one
+    /// source, or none serves it.
     pub fn tag(&self, target: &Target) -> Option<String> {
         let own = self.own_name.as_ref()?;
         let serving: Vec<&String> = std::iter::once((own, &self.own))
@@ -351,8 +352,10 @@ impl Pick {
             .filter(|(_, a)| a.check(target).is_ok())
             .map(|(n, _)| n)
             .collect();
-        let refused = serving.iter().find(|n| self.refused.contains(n));
-        match (serving.iter().find(|n| !self.refused.contains(n)), refused) {
+        let chosen = serving.iter().position(|n| !self.refused.contains(n));
+        // Only a refused source ahead of the chosen one would have won.
+        let passed = serving[..chosen.unwrap_or(serving.len())].first();
+        match (chosen.map(|i| serving[i]), passed) {
             (Some(n), None) => Some(source_label(n)),
             (Some(n), Some(r)) => Some(format!("{} ({})", source_label(n), refused_label(r))),
             (None, r) => r.map(|r| refused_label(r)),
@@ -729,16 +732,20 @@ mod tests {
     /// Two sources serving ES (an extension first, as Rithmic in the official build, then
     /// Databento) and Coinbase.
     fn three() -> Sources {
-        let mock = |name: &str| {
+        // Different seeds: two sources, two registry keys (`Sources::name_of`).
+        let mock = |name: &str, seed| {
             entry(
                 name,
-                lines_feed::Source::CqgMock(lines_feed::cqg::mock::MockConfig::default()),
+                lines_feed::Source::CqgMock(lines_feed::cqg::mock::MockConfig {
+                    seed,
+                    ..Default::default()
+                }),
             )
         };
         Sources::new(
             vec![
-                mock("rithmic"),
-                mock("databento"),
+                mock("rithmic", 1),
+                mock("databento", 2),
                 entry(
                     "coinbase",
                     lines_feed::Source::Coinbase {
@@ -803,7 +810,15 @@ mod tests {
         let fell = Some("Databento (Rithmic: login refused)");
         assert_eq!(pick("rithmic", &["rithmic"]).tag(&es_t).as_deref(), fell);
         assert_eq!(pick("coinbase", &["rithmic"]).tag(&es_t).as_deref(), fell);
-        assert_eq!(pick("databento", &["rithmic"]).tag(&es_t).as_deref(), fell);
+        assert_eq!(
+            pick("databento", &["rithmic"]).tag(&es_t).as_deref(),
+            Some("Databento"),
+            "already on Databento: Rithmic would never have been the choice"
+        );
+        // A feed's config names its source (what a refusal marks).
+        let base = |n: &str| s.get(n).unwrap().base.source.clone();
+        assert_eq!(s.name_of(&base("databento")), Some("databento"));
+        assert_eq!(s.name_of(&base("rithmic")), Some("rithmic"));
         assert_eq!(
             pick("rithmic", &["rithmic"])
                 .tag(&Target::Product(catalog::BTC_USD))

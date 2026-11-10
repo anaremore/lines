@@ -1009,11 +1009,12 @@ impl ChartStore {
     /// session error: credentials or permissions, which retrying won't fix). The app moves
     /// panes off such a source (decision 0030). One atomic load: cheap on every poll tick.
     pub fn logon_refused(&self) -> bool {
-        self.logon_refused.load(Ordering::Relaxed)
+        // Acquire: the failed status (the provider's reason) set before it is seen with it.
+        self.logon_refused.load(Ordering::Acquire)
     }
 
     pub(crate) fn set_logon_refused(&self) {
-        self.logon_refused.store(true, Ordering::Relaxed);
+        self.logon_refused.store(true, Ordering::Release);
     }
 }
 

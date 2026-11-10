@@ -499,10 +499,11 @@ pub async fn run_feed(
         let mut session = match plan.provider.new_session(&plan.product, contract) {
             Ok(s) => s,
             Err(e) => {
+                // The reason first: whoever sees the flag reads it.
+                store.set_status(FeedStatus::Failed(e.to_string()));
                 if !is_replay && matches!(e, provider::SessionError::LogonRejected { .. }) {
                     store.set_logon_refused();
                 }
-                store.set_status(FeedStatus::Failed(e.to_string()));
                 break;
             }
         };
@@ -635,10 +636,11 @@ pub async fn run_feed(
             }
             Err(e) if !e.is_retryable() || is_replay => {
                 tracing::error!("feed stopped: {e:#}");
+                // The reason first: whoever sees the flag reads it.
+                store.set_status(FeedStatus::Failed(e.to_string()));
                 if !is_replay && refuses_logon(&e) {
                     store.set_logon_refused();
                 }
-                store.set_status(FeedStatus::Failed(e.to_string()));
                 break;
             }
             other => {

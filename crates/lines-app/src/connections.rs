@@ -124,13 +124,11 @@ impl State {
 
 /// A source's state from its switch, whether this run has it, the first required setting
 /// with no value, and the state of each of its running feeds.
-/// A source's feed statuses with its refused login (`Sources::refusal`) as a failed feed,
-/// unless one of its feeds already says why.
+/// A source's feed statuses with its refused login (`Sources::refusal`) first, as a failed
+/// feed: the login's reason before any one symbol's.
 pub fn with_refusal(mut feeds: Vec<FeedStatus>, refusal: Option<String>) -> Vec<FeedStatus> {
-    if let Some(why) = refusal
-        && !feeds.iter().any(|s| matches!(s, FeedStatus::Failed(_)))
-    {
-        feeds.push(FeedStatus::Failed(why));
+    if let Some(why) = refusal {
+        feeds.insert(0, FeedStatus::Failed(why));
     }
     feeds
 }
@@ -464,7 +462,7 @@ mod tests {
     use super::*;
 
     /// A login refused this run reads as refused, with the provider's reason, after its panes
-    /// moved away (no feed left); a feed's own failure is never doubled.
+    /// moved away (no feed left), and before another feed's failure (one symbol's).
     #[test]
     fn a_refused_login_stays_refused_after_its_panes_moved() {
         let why = "logon rejected (code 13): permission denied";
@@ -474,10 +472,10 @@ mod tests {
             with_refusal(vec![FeedStatus::Live], None),
             vec![FeedStatus::Live]
         );
-        let own = FeedStatus::Failed("first".into());
+        let symbol = vec![FeedStatus::Failed("symbol not found".into())];
         assert_eq!(
-            with_refusal(vec![own.clone()], Some("second".into())),
-            vec![own]
+            state(true, true, None, &with_refusal(symbol, Some(why.into()))),
+            State::Refused(why.into())
         );
     }
 
