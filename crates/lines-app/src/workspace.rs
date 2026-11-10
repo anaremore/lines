@@ -2950,8 +2950,11 @@ impl WindowView {
             if !chart.read(cx).measure_shown() {
                 return false;
             }
-            let show = crate::picker_view::settings(cx).measure;
-            let o = crate::pane_menu::MenuObject::Measure { show };
+            let s = crate::picker_view::settings(cx);
+            let o = crate::pane_menu::MenuObject::Measure {
+                show: s.measure,
+                pnl: s.pnl_display,
+            };
             self.show_menu(
                 Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
                 cx,

@@ -186,6 +186,7 @@ impl ChartDrawings {
     /// Choose a tool (again: leave drawing mode).
     pub fn set_tool(&mut self, tool: Tool) {
         self.end_quick();
+        self.measure_drag = None;
         self.pending = None;
         self.note = None;
         self.measure = None;
@@ -476,6 +477,7 @@ impl ChartDrawings {
     /// Esc: cancel the tool, then the measure, then the selection.
     pub fn cancel(&mut self) -> bool {
         if self.tool.is_some() || self.pending.is_some() || self.note.is_some() {
+            self.measure_drag = None;
             self.quick = false;
             self.quick_at = None;
             self.tool = None;
@@ -502,9 +504,6 @@ impl ChartDrawings {
         self.pointer = p;
     }
 
-    /// Whether a press at plot-local (`x`, `y`) belongs to the drawings (else the chart
-    /// pans or scales as usual). `anchor`: the pointer snapped (grid or magnet). Ctrl+click
-    /// never does: it is reserved for chart trading.
     /// Screenshots (`--move-measure`): the measure moved as a drag inside it from `from` to
     /// `to` would move it (the same bar and tick steps).
     #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
@@ -551,6 +550,9 @@ impl ChartDrawings {
         true
     }
 
+    /// Whether a press at plot-local (`x`, `y`) belongs to the drawings (else the chart
+    /// pans or scales as usual). `anchor`: the pointer snapped (grid or magnet). Ctrl+click
+    /// never does: it is reserved for chart trading.
     pub fn on_down(&mut self, x: f32, y: f32, ctrl: bool, anchor: Option<Anchor>) -> bool {
         if ctrl || self.hidden {
             return false;
@@ -717,6 +719,7 @@ impl ChartDrawings {
 
     /// Keep the temporary measure as a drawing.
     pub fn pin_measure(&mut self) -> bool {
+        self.measure_drag = None;
         let Some((a, b)) = self.measure.take() else {
             return false;
         };
@@ -783,7 +786,6 @@ impl ChartDrawings {
         self.data.lock().items().len()
     }
 
-    /// The drawing under the pointer (for the cursor).
     /// The pointer's grip on the temporary measure (a drag under way, else the hovered one):
     /// the chart shows the matching cursor.
     pub fn measure_grip(&self) -> Option<Grip> {
@@ -797,6 +799,11 @@ impl ChartDrawings {
         self.measure_grip_at(x, y)
     }
 
+    /// A drag on the temporary measure is under way.
+    pub fn measure_dragging(&self) -> bool {
+        self.measure_drag.is_some()
+    }
+
     /// What a press at plot-local (`x`, `y`) would grab of the temporary measure (last frame's
     /// box): an edge or corner resizes, inside moves.
     pub fn measure_grip_at(&self, x: f32, y: f32) -> Option<Grip> {
@@ -804,6 +811,7 @@ impl ChartDrawings {
         grip(p.p0, p.p1, x, y, HIT_TOL)
     }
 
+    /// The drawing under the pointer (for the cursor).
     pub fn hover_hit(&self) -> Option<Hit> {
         if self.hidden || self.tool.is_some() {
             return None;
@@ -993,7 +1001,6 @@ impl ChartDrawings {
     }
 }
 
-/// The drawing being dragged, with the pointer at `at`.
 /// Which parts of a measure's readout the user shows (the measure's right-click menu; an
 /// optional setting, all on by default). The P&L display setting still hides ticks and money
 /// when it's off.
@@ -1073,7 +1080,9 @@ impl MeasureShow {
                     ));
                 }
             };
-            m.toggle(p);
+            if !m.get(p) {
+                m.toggle(p);
+            }
         }
         Ok(m)
     }
@@ -1218,12 +1227,20 @@ impl MeasureDrag {
                 (m.a, m.b)
             }
             Grip::Resize { time, price } => {
+                // An edge stops short of the opposite one: the box never collapses to no
+                // width or height (it couldn't be widened back by an edge).
                 let mut ends = [a, b];
                 if let Some(i) = time {
-                    ends[usize::from(i)].time = at.time;
+                    let i = usize::from(i);
+                    if at.time != ends[1 - i].time {
+                        ends[i].time = at.time;
+                    }
                 }
                 if let Some(i) = price {
-                    ends[usize::from(i)].price = at.price;
+                    let i = usize::from(i);
+                    if at.price != ends[1 - i].price {
+                        ends[i].price = at.price;
+                    }
                 }
                 (ends[0], ends[1])
             }
@@ -1231,6 +1248,7 @@ impl MeasureDrag {
     }
 }
 
+/// The drawing being dragged, with the pointer at `at`.
 fn dragged(drag: &Drag, at: Anchor, axis: &TimeAxis<'_>, tick: i64) -> Drawing {
     match drag.hit {
         Hit::Handle(i) => drag.original.with_handle(i, at),

@@ -873,6 +873,50 @@ fn a_placed_measure_resizes_by_an_edge_or_corner() {
     assert!(r.d.measure.is_none());
 }
 
+/// A tool key or Enter mid-drag ends the drag: the measure never comes back under a tool, and
+/// Enter pins it once (no temporary copy left over it).
+#[test]
+fn a_tool_or_a_pin_mid_drag_ends_the_measure_drag() {
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    r.frame(0.0, 0.0);
+    assert!(r.measure_down(300.0, 200.0));
+    r.frame(330.0, 180.0);
+    assert_eq!(r.d.key("enter", None), Key::Handled);
+    r.frame(360.0, 150.0);
+    r.up(360.0, 150.0);
+    assert_eq!(r.items().len(), 1, "pinned once");
+    assert!(r.d.measure.is_none(), "no temporary copy");
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    r.frame(0.0, 0.0);
+    assert!(r.measure_down(300.0, 200.0));
+    r.d.set_tool(Tool::Trend);
+    r.frame(360.0, 150.0);
+    assert!(!r.d.measure_dragging());
+}
+
+/// Resizing never collapses the box: an edge stops short of the opposite one.
+#[test]
+fn a_resize_never_collapses_the_box() {
+    let mut r = Rig::new();
+    r.shift_down(200.0, 300.0);
+    r.up(400.0, 100.0);
+    r.frame(0.0, 0.0);
+    let (p, _) = r.d.measure_shown().unwrap();
+    let (a, b) = r.measure();
+    // b's vertical edge dragged onto a's.
+    let ex = p.p1.0;
+    let ey = (p.p0.1 + p.p1.1) / 2.0;
+    assert!(r.measure_down(ex, ey));
+    r.frame(p.p0.0, ey);
+    r.up(p.p0.0, ey);
+    let (a2, b2) = r.measure();
+    assert_ne!(a2.time, b2.time, "still has width");
+    assert_eq!((a2, b2.price), (a, b.price));
+}
+
 /// A tool chosen or hidden drawings: a press on the box isn't the measure's.
 #[test]
 fn the_measure_takes_no_press_in_drawing_mode() {

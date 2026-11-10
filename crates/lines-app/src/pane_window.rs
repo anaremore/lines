@@ -47,7 +47,11 @@ fn command(cmd: Command) -> Option<Command> {
         // A chart's drawing style editor, and deleting the selected drawing (its menu's
         // Delete; the rest of the drawing keys: main windows).
         Command::Draw(
-            crate::commands::DrawCmd::Style | crate::commands::DrawCmd::DeleteSelected,
+            crate::commands::DrawCmd::Style
+            | crate::commands::DrawCmd::DeleteSelected
+            // The measure's menu: its parts and Remove.
+            | crate::commands::DrawCmd::MeasurePart(_)
+            | crate::commands::DrawCmd::RemoveMeasure,
         ) => Some(cmd),
         // Stop all strategies works from every window (decision 0025's kill switch).
         Command::Strategy(
@@ -442,6 +446,30 @@ mod tests {
         assert_eq!(command(marks), Some(marks));
         // Starting stays in main windows (the strategy panel).
         assert_eq!(command(Command::Strategy(StrategyCmd::Start)), None);
+    }
+
+    /// Every object menu keeps its rows in a popped-out window: an order's, a drawing's and
+    /// the measure's (nothing filtered down to a bare header).
+    #[test]
+    fn object_menus_keep_their_rows_here() {
+        use crate::pane_menu::{MenuObject, object_items};
+        for o in [
+            MenuObject::Order {
+                id: 1,
+                title: "Stop 1 @ 1.00".into(),
+                stop: true,
+            },
+            MenuObject::Drawing {
+                title: "Trend line".into(),
+            },
+            MenuObject::Measure {
+                show: crate::chart_draw::MeasureShow::default(),
+                pnl: crate::pnl::PnlDisplay::Both,
+            },
+        ] {
+            let n = object_items(&o).len();
+            assert_eq!(runnable(object_items(&o)).len(), n, "{o:?}");
+        }
     }
 
     /// Every control a pane window's header shows is a command the window runs.

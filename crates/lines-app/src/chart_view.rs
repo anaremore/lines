@@ -1472,6 +1472,7 @@ impl ChartView {
             // press; Alt and Ctrl keep theirs).
             if !ctrl
                 && !ev.modifiers.alt
+                && !ev.modifiers.shift
                 && !self.order_under(x, y)
                 && self.drawings.measure_down(x as f32, y as f32, anchor)
             {
@@ -5052,6 +5053,10 @@ impl ChartView {
             .map(|a| a.settings.measure)
             .unwrap_or_default()
             .parts(mode);
+        // Every part off: no readout at all (never an empty panel).
+        if !(parts.ticks || parts.points || parts.money || parts.bars || parts.time) {
+            return;
+        }
         if self
             .measure_lines
             .get(&key)
@@ -5168,8 +5173,11 @@ impl ChartView {
         }
         // The temporary measure, drawn over the drawings: its own menu.
         if self.drawings.measure_grip_at(x as f32, y as f32).is_some() {
-            let show = crate::picker_view::settings(cx).measure;
-            self.menu_object = Some(crate::pane_menu::MenuObject::Measure { show });
+            let s = crate::picker_view::settings(cx);
+            self.menu_object = Some(crate::pane_menu::MenuObject::Measure {
+                show: s.measure,
+                pnl: s.pnl_display,
+            });
             return;
         }
         let before = self.drawings.selected;
@@ -7140,7 +7148,14 @@ impl Render for ChartView {
                         self.drawings
                             .measure_grip()
                             .zip(self.drawings.measure_shown())
-                            .map(|(g, (p, _))| g.cursor(p.p0, p.p1)),
+                            .map(|(g, (p, _))| match g {
+                                crate::chart_draw::Grip::Move
+                                    if self.drawings.measure_dragging() =>
+                                {
+                                    gpui::CursorStyle::ClosedHand
+                                }
+                                g => g.cursor(p.p0, p.p1),
+                            }),
                         |d, c| d.cursor(c),
                     )
                     .when(

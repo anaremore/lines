@@ -88,6 +88,9 @@ pub enum MenuObject {
     /// The temporary measure: which parts its readout shows.
     Measure {
         show: crate::chart_draw::MeasureShow,
+        /// The P&L display setting: off hides ticks and P&L whatever the choice, and the
+        /// rows say so (money-relevant: never a checked box that shows nothing).
+        pnl: crate::pnl::PnlDisplay,
     },
 }
 
@@ -180,18 +183,28 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
             v.push(row("Cancel order", Command::Order(OrderCmd::Cancel(*id))).destructive());
             v
         }
-        MenuObject::Measure { show } => {
+        MenuObject::Measure { show, pnl } => {
             use crate::chart_draw::MeasurePart;
             let mut v = vec![MenuItem::title("Measure"), MenuItem::sep()];
             for p in MeasurePart::ALL {
+                let hidden = match p {
+                    MeasurePart::Ticks => !pnl.ticks(),
+                    MeasurePart::Pnl => !pnl.money(),
+                    _ => false,
+                };
+                let label = if hidden {
+                    format!("{} (hidden by P&L display)", p.label())
+                } else {
+                    p.label().to_owned()
+                };
                 v.push(toggle(
-                    p.label(),
+                    &label,
                     Command::Draw(DrawCmd::MeasurePart(p)),
                     show.get(p),
                 ));
             }
             v.push(MenuItem::sep());
-            v.push(row("Remove", Command::Draw(DrawCmd::RemoveMeasure)).destructive());
+            v.push(row("Remove measure", Command::Draw(DrawCmd::RemoveMeasure)).destructive());
             v
         }
         MenuObject::Drawing { title } => vec![
@@ -673,6 +686,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_measure_gets_its_own_menu() {
+        use crate::chart_draw::{MeasurePart, MeasureShow};
+        use crate::pnl::PnlDisplay;
+        let mut show = MeasureShow::default();
+        show.toggle(MeasurePart::Time);
+        let v = object_items(&MenuObject::Measure {
+            show,
+            pnl: PnlDisplay::Both,
+        });
+        assert!(v[0].header && v[0].label == "Measure");
+        assert_eq!(
+            labels(&v),
+            [
+                "Measure",
+                "---",
+                "Ticks",
+                "Points",
+                "P&L / contract",
+                "Bars",
+                "Time",
+                "---",
+                "Remove measure"
+            ]
+        );
+        assert!(v[2].checked && !v[6].checked, "Time off, the rest on");
+        assert!(v.last().unwrap().destructive);
+        // P&L display off: the rows it hides say so.
+        let off = object_items(&MenuObject::Measure {
+            show,
+            pnl: PnlDisplay::Off,
+        });
+        assert_eq!(labels(&off)[2], "Ticks (hidden by P&L display)");
+        assert_eq!(labels(&off)[4], "P&L / contract (hidden by P&L display)");
+        assert_eq!(labels(&off)[3], "Points");
     }
 
     #[test]
