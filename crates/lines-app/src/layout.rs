@@ -66,6 +66,18 @@ pub fn first_free_group(used: &[LinkGroup]) -> LinkGroup {
     (0..LINK_GROUPS).find(|g| !used.contains(&Some(*g)))
 }
 
+/// [`first_free_group`] over every tab's groups (`per_tab`), leaving out the tab `except` (the
+/// one being replaced: closing a window's last tab, its fresh tab doesn't count it as in use).
+pub fn free_group_for_new_tab(per_tab: &[Vec<LinkGroup>], except: Option<usize>) -> LinkGroup {
+    let used: Vec<LinkGroup> = per_tab
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| Some(*i) != except)
+        .flat_map(|(_, g)| g.iter().copied())
+        .collect();
+    first_free_group(&used)
+}
+
 /// The next link setting: unlinked → A → B → C → D → unlinked.
 pub fn next_link(link: LinkGroup) -> LinkGroup {
     match link {
@@ -1124,5 +1136,12 @@ mod tests {
             Some(0),
             "unlinked panes use no group"
         );
+        // Every tab counts but the one being replaced: closing the only tab (in A), its fresh
+        // tab takes A again.
+        use super::free_group_for_new_tab;
+        let tabs = vec![vec![Some(0), Some(0)], vec![Some(1)]];
+        assert_eq!(free_group_for_new_tab(&tabs, None), Some(2));
+        assert_eq!(free_group_for_new_tab(&tabs, Some(0)), Some(0));
+        assert_eq!(free_group_for_new_tab(&[vec![Some(0)]], Some(0)), Some(0));
     }
 }
