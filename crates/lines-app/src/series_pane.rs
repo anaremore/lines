@@ -121,9 +121,15 @@ impl ExtFrame {
             self.map = Some(map.clone());
         }
         self.now = now;
-        // The visible time window, a bar either side.
+        // The visible time window, a bar either side; with a right inset (the level labels'
+        // gutter) it ends at the last bar wholly left of it, as the bars do, so no line is
+        // drawn under the gutter or scaled by values no bar shows.
         let left = vp.x_to_index(0.0).floor() as i64 - 1;
-        let right = vp.x_to_index(vp.width).ceil() as i64 + 1;
+        let right = if vp.right_inset > 0.0 {
+            (vp.right_index - 0.5).floor() as i64
+        } else {
+            vp.x_to_index(vp.width).ceil() as i64 + 1
+        };
         let (Some(t0), Some(t1)) = (axis.slot_time(left), axis.slot_time(right)) else {
             self.status = ExtStatus::Missing("no bars");
             return;
@@ -444,6 +450,35 @@ mod tests {
         );
         let x46 = axis.x_of(&vp(), t(46)).unwrap();
         assert!(f.lines[0].pts.iter().all(|p| p.0 < x46));
+    }
+
+    /// With the level labels' gutter (a right inset), scrolled back from the newest bar, the
+    /// lines stop where the bars do: nothing is drawn under the gutter, and a value only the
+    /// gutter would cover doesn't set the pane's scale.
+    #[test]
+    fn lines_stop_at_the_gutter_like_the_bars() {
+        let b = bars();
+        let axis = TimeAxis::new(BarsView::fixed(&b, 60_000));
+        let m = map(&[(0, 1.0), (30, 2.0), (45, 99.0)], &[(0, 59)]);
+        let mut vp = vp();
+        vp.right_inset = 96.0;
+        vp.right_index = 40.0;
+        let mut f = ExtFrame::default();
+        f.reserve(1, 256);
+        f.build(
+            &DEF,
+            Some((Some(&m), LevelStatus::Current, t(59))),
+            &axis,
+            &vp,
+        );
+        let pts = &f.lines[0].pts;
+        assert!(!pts.is_empty());
+        assert!(
+            pts.iter().all(|p| f64::from(p.0) <= vp.edge()),
+            "edge {}: {pts:?}",
+            vp.edge()
+        );
+        assert_eq!(f.lo_hi, Some((0.0, 2.0)), "99 sits under the gutter");
     }
 
     /// Fresh data stopped: STALE (the source's clock past the newest report by more than the

@@ -874,7 +874,12 @@ impl LevelsLayer {
         for s in &mut self.slots {
             let Some(map) = &s.map else { continue };
             let source = s.handle.source();
-            if !self.config.source_shown(source) || !self.config.labels_shown(source) {
+            // As placing and the gutter do: a slot with no levels yet (its first map's levels
+            // refused) shows no labels.
+            if s.status == LevelStatus::Missing
+                || !self.config.source_shown(source)
+                || !self.config.labels_shown(source)
+            {
                 continue;
             }
             if s.texts == s.measured_texts {
