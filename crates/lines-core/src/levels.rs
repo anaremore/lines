@@ -166,6 +166,54 @@ pub struct NamedValue {
 /// Named values a map may carry.
 pub const MAX_VALUES: usize = 64;
 
+/// A line series a source publishes for a chart's lower pane (decision 0022: an external
+/// source may provide lower-pane line series beside its levels). Values are numbers, never
+/// prices. A value holds from its point until the next point or the end of its segment, and no
+/// further; outside every segment nothing is known: a gap, never drawn or interpolated.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Series {
+    /// Stable key (a [`NamedValue`] name's rules), unique in the map: the line a study draws.
+    pub key: String,
+    /// When each value was set, ascending.
+    pub points: Vec<(UtcMillis, f64)>,
+    /// The spans the value was reported, ascending and disjoint (`from <= to`).
+    pub segments: Vec<(UtcMillis, UtcMillis)>,
+}
+
+/// Series a map may carry, and points per series.
+pub const MAX_SERIES: usize = 16;
+pub const MAX_SERIES_POINTS: usize = 100_000;
+
+impl Series {
+    /// The value in force at `t`: inside a segment, the last point at or before `t` within
+    /// that segment; `None` in a gap or before the segment's first point. Allocation-free.
+    pub fn value_at(&self, t: UtcMillis) -> Option<f64> {
+        let s = self.segment_at(t)?;
+        let i = self.points.partition_point(|p| p.0 <= t).checked_sub(1)?;
+        let (pt, v) = self.points[i];
+        (pt >= s.0).then_some(v)
+    }
+
+    /// The segment containing `t`.
+    pub fn segment_at(&self, t: UtcMillis) -> Option<(UtcMillis, UtcMillis)> {
+        let i = self.segments.partition_point(|s| s.0 <= t).checked_sub(1)?;
+        let s = self.segments[i];
+        (t <= s.1).then_some(s)
+    }
+
+    fn check(&self) -> Result<(), LevelError> {
+        let bad = || LevelError::BadSeries(self.key.clone());
+        if !value_name_ok(&self.key) || self.points.len() > MAX_SERIES_POINTS {
+            return Err(bad());
+        }
+        let sorted = self.points.windows(2).all(|w| w[0].0 <= w[1].0)
+            && self.points.iter().all(|p| p.1.is_finite())
+            && self.segments.iter().all(|s| s.0 <= s.1)
+            && self.segments.windows(2).all(|w| w[0].1 < w[1].0);
+        if sorted { Ok(()) } else { Err(bad()) }
+    }
+}
+
 /// One source's levels for one product (and contract, if the source is contract specific).
 #[derive(Clone, Debug, PartialEq)]
 pub struct LevelMap {
@@ -181,6 +229,13 @@ pub struct LevelMap {
     pub meta: LevelMeta,
     /// Named values (not prices): see [`NamedValue`].
     pub values: Vec<NamedValue>,
+    /// Line series for lower panes: see [`Series`]. Shared, so a source rebuilding its map
+    /// each refresh keeps unchanged series without copying them.
+    pub series: Vec<std::sync::Arc<Series>>,
+    /// The source couldn't take this refresh's levels (the reason; e.g. its upstream says they
+    /// are stale): the map carries its previous levels unchanged, shown stale with this reason,
+    /// while its series are new and judged on their own freshness.
+    pub levels_refused: Option<String>,
 }
 
 impl LevelMap {
@@ -195,6 +250,8 @@ impl LevelMap {
                 levels: Vec::new(),
                 meta: LevelMeta::default(),
                 values: Vec::new(),
+                series: Vec::new(),
+                levels_refused: None,
             },
             error: None,
         }
@@ -236,6 +293,9 @@ pub enum LevelError {
     DuplicateValue(String),
     /// A named value isn't a finite number.
     ValueNotFinite(String),
+    /// A series has a bad or repeated key, too many points, a value that isn't finite, or
+    /// points or segments out of order.
+    BadSeries(String),
 }
 
 impl fmt::Display for LevelError {
@@ -246,6 +306,7 @@ impl fmt::Display for LevelError {
             }
             LevelError::TooLong(what) => write!(f, "{what} too long"),
             LevelError::TooMany(what) => write!(f, "too many {what}"),
+            LevelError::BadSeries(k) => write!(f, "series {k:?} is malformed"),
             LevelError::NotFinite => write!(f, "a level value is not a finite number"),
             LevelError::OffTick(p) => write!(f, "level {} is not on the tick grid", p.0),
             LevelError::Inverted => write!(f, "a zone's lower bound is above its upper bound"),
@@ -377,8 +438,34 @@ impl LevelMapBuilder {
         self
     }
 
+    /// Add a line series for lower panes: see [`Series`].
+    pub fn series(mut self, s: std::sync::Arc<Series>) -> Self {
+        self.map.series.push(s);
+        self
+    }
+
+    /// See [`LevelMap::levels_refused`].
+    pub fn levels_refused(mut self, reason: impl Into<String>) -> Self {
+        self.map.levels_refused = Some(reason.into());
+        self
+    }
+
     /// Validate against the instrument's `tick` (catalog units) and return the map.
     pub fn build(mut self, tick: i64) -> Result<LevelMap, LevelError> {
+        if self.map.series.len() > MAX_SERIES {
+            self.fail(LevelError::TooMany("series"));
+        }
+        let bad_series = self.map.series.iter().enumerate().find_map(|(i, s)| {
+            s.check().err().or_else(|| {
+                self.map.series[..i]
+                    .iter()
+                    .any(|o| o.key == s.key)
+                    .then(|| LevelError::BadSeries(s.key.clone()))
+            })
+        });
+        if let Some(e) = bad_series {
+            self.fail(e);
+        }
         if !slug_ok(&self.map.source) {
             self.fail(LevelError::BadSlug(self.map.source.clone()));
         }

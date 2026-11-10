@@ -60,6 +60,16 @@ pub enum IndicatorConfig {
         #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
         style: PartStyles,
     },
+    /// A level source's lower-pane line study (`ExternalSpec`).
+    External {
+        #[serde(flatten)]
+        spec: ExternalSpec,
+        #[serde(flatten, default)]
+        display: Display,
+        /// User styles of its lines, by line key. Optional.
+        #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
+        style: PartStyles,
+    },
     /// Traded volume per bar: summed from the chart's own bars (the same trades as the
     /// candles), drawn in its own lower pane or along the plot's bottom. Needs no engine node.
     Volume {
@@ -71,6 +81,17 @@ pub enum IndicatorConfig {
         #[serde(default, skip_serializing_if = "PartStyles::is_empty")]
         style: PartStyles,
     },
+}
+
+/// An external source's lower-pane line study (decision 0022: a level source may offer them,
+/// `lines_feed::levels::SeriesStudyDef`): which source and which of its studies. Drawn from the
+/// chart's level map for that source; no engine node.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExternalSpec {
+    /// The level source's id.
+    pub source: String,
+    /// The study's id within the source.
+    pub study: String,
 }
 
 /// The Volume study's options; every one off by default (plain bars in their own pane).
@@ -162,7 +183,8 @@ impl IndicatorConfig {
         match self {
             IndicatorConfig::Vwap { display, .. }
             | IndicatorConfig::CumDelta { display, .. }
-            | IndicatorConfig::Volume { display, .. } => display,
+            | IndicatorConfig::Volume { display, .. }
+            | IndicatorConfig::External { display, .. } => display,
         }
     }
 
@@ -170,7 +192,8 @@ impl IndicatorConfig {
         match self {
             IndicatorConfig::Vwap { display, .. }
             | IndicatorConfig::CumDelta { display, .. }
-            | IndicatorConfig::Volume { display, .. } => display,
+            | IndicatorConfig::Volume { display, .. }
+            | IndicatorConfig::External { display, .. } => display,
         }
     }
 
@@ -179,7 +202,8 @@ impl IndicatorConfig {
         match self {
             IndicatorConfig::Vwap { style, .. }
             | IndicatorConfig::CumDelta { style, .. }
-            | IndicatorConfig::Volume { style, .. } => style,
+            | IndicatorConfig::Volume { style, .. }
+            | IndicatorConfig::External { style, .. } => style,
         }
     }
 
@@ -187,7 +211,8 @@ impl IndicatorConfig {
         match self {
             IndicatorConfig::Vwap { style, .. }
             | IndicatorConfig::CumDelta { style, .. }
-            | IndicatorConfig::Volume { style, .. } => style,
+            | IndicatorConfig::Volume { style, .. }
+            | IndicatorConfig::External { style, .. } => style,
         }
     }
 
@@ -214,6 +239,7 @@ impl IndicatorConfig {
             IndicatorConfig::Vwap { .. } => false,
             IndicatorConfig::CumDelta { .. } => true,
             IndicatorConfig::Volume { spec, .. } => !spec.overlay,
+            IndicatorConfig::External { .. } => true,
         }
     }
 
@@ -229,7 +255,7 @@ impl IndicatorConfig {
                 period_ms,
                 delta: *spec,
             }),
-            IndicatorConfig::Volume { .. } => None,
+            IndicatorConfig::Volume { .. } | IndicatorConfig::External { .. } => None,
         }
     }
 }
@@ -312,6 +338,23 @@ mod tests {
         assert!(
             matches!(bare, IndicatorConfig::CumDelta { spec, .. } if spec.reset == DeltaReset::Eth)
         );
+    }
+
+    /// An external lower-pane study saves its source and study ids only.
+    #[test]
+    fn external_studies_round_trip() {
+        let c = IndicatorConfig::External {
+            spec: ExternalSpec {
+                source: "demo".into(),
+                study: "osc".into(),
+            },
+            display: Default::default(),
+            style: Default::default(),
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, r#"{"kind":"external","source":"demo","study":"osc"}"#);
+        assert_eq!(serde_json::from_str::<IndicatorConfig>(&json).unwrap(), c);
+        assert!(c.in_subpane() && c.spec(60_000).is_none());
     }
 
     /// Volume: every option is optional and off by default (`{"kind":"volume"}`); the

@@ -37,7 +37,7 @@ use parking_lot::RwLock;
 
 pub use lines_core::levels::{
     LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape, LevelStyle, LevelValue,
-    NamedValue,
+    NamedValue, Series,
 };
 
 /// How a source refreshes.
@@ -158,6 +158,45 @@ pub trait LevelTransport: Send {
     }
 }
 
+/// A lower-pane study a level source offers: its lines (each a [`Series`] key of the source's
+/// maps) drawn in a pane under the chart, with a shared time axis and crosshair.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SeriesStudyDef {
+    /// Stable id within the source (lowercase letters, digits, `-`): saved with the chart.
+    pub id: &'static str,
+    /// Its name in menus and its pane's title.
+    pub name: &'static str,
+    pub lines: &'static [SeriesLineDef],
+    /// Draw a dashed zero line (a value that swings around zero).
+    pub zero_line: bool,
+    /// Fresh data stopped: when the newest report is older than this (on the source's clock),
+    /// the pane says STALE (the lines already end where the reports did).
+    pub stale_after_secs: u32,
+}
+
+/// One line of a [`SeriesStudyDef`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct SeriesLineDef {
+    /// The [`Series`] key in the source's maps.
+    pub key: &'static str,
+    /// Its short name in the pane's title and the style editor.
+    pub label: &'static str,
+    /// Its default color: a theme role, so it reads in every theme and palette.
+    pub color: SeriesColor,
+    /// Its default line type: each line of a study differs by pattern, never by color alone.
+    pub line: lines_core::style::LineType,
+}
+
+/// A series line's default color, as a theme role (the app's `Theme::series`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SeriesColor {
+    /// The theme's strongest foreground: white on dark, near-black on light.
+    Foreground,
+    Orange,
+    Blue,
+    Amber,
+}
+
 /// A source of external levels (decision 0022). Implemented by adapters outside this repo
 /// (and by the synthetic [`demo`] source in tests and `demo-levels` builds).
 pub trait LevelSource: Send + Sync + 'static {
@@ -181,6 +220,11 @@ pub trait LevelSource: Send + Sync + 'static {
         false
     }
     fn settings(&self) -> &'static [SettingSpec] {
+        &[]
+    }
+    /// The lower-pane line studies this source offers (its maps carry their [`Series`] by
+    /// line key). Each is its own chart study (Studies › Add, on charts this source serves).
+    fn series_studies(&self) -> &'static [SeriesStudyDef] {
         &[]
     }
     /// Open a connection (live only; runs on the levels runtime).

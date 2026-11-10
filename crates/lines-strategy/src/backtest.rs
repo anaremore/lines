@@ -450,6 +450,8 @@ pub fn run(bt: &Backtest) -> Result<Report> {
             map: None,
             received: None,
             error: None,
+            series_received: None,
+            levels_refused: false,
             stale_after: source.stale_after(),
             replay: true,
         };
@@ -541,26 +543,18 @@ pub fn run(bt: &Backtest) -> Result<Report> {
                 while let Some((t, frames)) = l.batches.get(l.next).filter(|(t, _)| *t == now) {
                     let _ = t;
                     let prices = Prices { bars: &bars, now };
-                    match l
+                    let r = l
                         .source
-                        .decode(&ctx, &prices, l.state.map.as_deref(), frames)
-                    {
-                        Ok(Some(map)) => {
-                            l.state.map = Some(Arc::new(map));
-                            l.state.received = Some(now);
-                            l.state.error = None;
-                        }
-                        Ok(None) => {
-                            if l.state.map.is_some() {
-                                l.state.received = Some(now);
-                            }
-                            l.state.error = None;
-                        }
-                        Err(e) => {
-                            warnings.push(format!("levels {}: batch refused: {e}", l.state.source));
-                            l.state.error = Some(e);
-                        }
+                        .decode(&ctx, &prices, l.state.map.as_deref(), frames);
+                    let refused = match &r {
+                        Err(e) => Some(e.as_str()),
+                        Ok(Some(m)) => m.levels_refused.as_deref(),
+                        Ok(None) => None,
+                    };
+                    if let Some(e) = refused {
+                        warnings.push(format!("levels {}: batch refused: {e}", l.state.source));
                     }
+                    l.state.take(r, now);
                     l.next += 1;
                     l.told = None;
                 }

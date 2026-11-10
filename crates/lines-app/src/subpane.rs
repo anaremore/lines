@@ -295,6 +295,27 @@ pub struct Scale {
 }
 
 impl Scale {
+    /// [`Scale::fit`] for fractional values (external series), with `hi` kept at least `top`
+    /// px below the pane's top (its title) when the pane leaves the lines room.
+    pub fn fit_below(lo: f64, hi: f64, height: f32, top: f32) -> Scale {
+        let (lo, hi) = (lo.min(hi), hi.max(lo));
+        // A flat line still gets a range (2 % of its value, at least 0.02).
+        let span = (hi - lo).max(hi.abs().max(1.0) * 0.02);
+        let pad = span * 0.08;
+        let mut s = Scale {
+            lo: lo - pad,
+            hi: hi + pad,
+            height,
+        };
+        let room = height - top;
+        if top > 0.0 && room >= height * 0.4 {
+            // y(hi) >= top: the top value sits below the title.
+            let need = (hi - s.lo) * f64::from(height) / f64::from(room) + s.lo;
+            s.hi = s.hi.max(need);
+        }
+        s
+    }
+
     pub fn fit(lo: i64, hi: i64, height: f32) -> Scale {
         let (lo, hi) = (lo.min(hi) as f64, hi.max(lo) as f64);
         let span = (hi - lo).max(1.0);
@@ -466,6 +487,17 @@ mod tests {
         // One pane: the same as the single divider's drag.
         let one = stack_at_scale(606.0, &[0.25], 1.0).unwrap().ratios(606.0);
         assert!((drag_stack(606.0, 1, one, 0, -60.0)[0] - drag(606.0, 0.25, -60.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_fractional_scale_fits_and_clears_the_title() {
+        let s = Scale::fit_below(-0.8, 1.2, 100.0, 0.0);
+        assert!(s.lo < -0.8 && s.hi > 1.2);
+        let s = Scale::fit_below(-0.8, 1.2, 100.0, 30.0);
+        assert!(s.y(1.2) >= 30.0 - 1e-3, "{}", s.y(1.2));
+        assert!((s.value(s.y(0.5)) - 0.5).abs() < 1e-4);
+        let flat = Scale::fit_below(2.0, 2.0, 100.0, 0.0);
+        assert!(flat.hi > flat.lo && flat.contains(2.0));
     }
 
     #[test]

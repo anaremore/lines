@@ -174,6 +174,8 @@ fn status_is_missing_current_or_stale() {
         map: None,
         received: None,
         error: None,
+        series_received: None,
+        levels_refused: false,
         stale_after: std::time::Duration::from_secs(60),
         replay: false,
     };
@@ -202,6 +204,58 @@ fn status_is_missing_current_or_stale() {
     s.received = Some(t("2026-11-05T14:59:59"));
     s.error = Some("timeout".into());
     assert_eq!(s.status(now), LevelStatus::Stale { age_ms: 1_000 });
+}
+
+/// A map whose levels were refused: the levels stay stale (their time not renewed, the reason
+/// as the error), its series are current; another error makes both stale.
+#[test]
+fn refused_levels_leave_the_series_current() {
+    let mut s = runtime::LevelState {
+        source: "demo",
+        label: "Demo",
+        map: None,
+        received: None,
+        error: None,
+        series_received: None,
+        levels_refused: false,
+        stale_after: std::time::Duration::from_secs(60),
+        replay: false,
+    };
+    let bare = Fixed {
+        bars: vec![],
+        now: None,
+    };
+    let good = DemoLevels
+        .decode(&es_ctx(), &bare, None, &frames())
+        .unwrap();
+    s.take(Ok(good.clone()), t("2026-11-05T14:00:00"));
+    let mut refused = good.unwrap();
+    refused.levels_refused = Some("capture is stale".into());
+    let at = t("2026-11-05T14:30:00");
+    s.take(Ok(Some(refused)), at);
+    let now = t("2026-11-05T14:30:30");
+    assert_eq!(
+        s.status(now),
+        LevelStatus::Stale { age_ms: 1_830_000 },
+        "levels: stale since the last good map"
+    );
+    assert_eq!(s.error.as_deref(), Some("capture is stale"));
+    assert_eq!(s.series_status(now), LevelStatus::Current);
+    // Unchanged next refresh: the levels stay refused and stale, the series current.
+    s.take(Ok(None), now);
+    assert!(matches!(s.status(now), LevelStatus::Stale { .. }));
+    assert_eq!(s.error.as_deref(), Some("capture is stale"));
+    assert_eq!(s.series_status(now), LevelStatus::Current);
+    // A failed refresh with the same words is still a failure: the series go stale too.
+    s.take(Err("capture is stale".into()), now);
+    assert!(matches!(s.series_status(now), LevelStatus::Stale { .. }));
+    // An empty state: missing for both.
+    let fresh = runtime::LevelState {
+        map: None,
+        series_received: None,
+        ..s.clone()
+    };
+    assert_eq!(fresh.series_status(now), LevelStatus::Missing);
 }
 
 /// Live with recording, then replay of the recording: the same map, applied at its recorded

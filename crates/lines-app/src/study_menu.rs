@@ -59,6 +59,8 @@ pub enum StudyRef {
     Delta(usize),
     /// Volume at this index of the indicators.
     Volume(usize),
+    /// An external series study at this index of the indicators.
+    External(usize),
     Footprint,
     Profile,
     Levels(String),
@@ -77,6 +79,8 @@ pub enum StudyAction {
     AddDelta(DeltaReset),
     /// Add Volume (plain bars in its own pane); one per chart.
     AddVolume,
+    /// Add a level source's lower-pane series study (source id, study id); once per chart.
+    AddExternal(String, String),
     /// Set Volume `index`'s options.
     SetVolume(usize, VolumeSpec),
     SetDeltaReset(usize, DeltaReset),
@@ -110,7 +114,9 @@ fn next_color(set: &StudySet) -> u8 {
         .iter()
         .filter_map(|c| match c {
             IndicatorConfig::Vwap { color, .. } => Some(*color),
-            IndicatorConfig::CumDelta { .. } | IndicatorConfig::Volume { .. } => None,
+            IndicatorConfig::CumDelta { .. }
+            | IndicatorConfig::Volume { .. }
+            | IndicatorConfig::External { .. } => None,
         })
         .collect();
     (0..4u8).find(|c| !used.contains(c)).unwrap_or(0)
@@ -128,14 +134,18 @@ impl StudySet {
                 display,
                 ..
             } => Some((spec, color, display)),
-            IndicatorConfig::CumDelta { .. } | IndicatorConfig::Volume { .. } => None,
+            IndicatorConfig::CumDelta { .. }
+            | IndicatorConfig::Volume { .. }
+            | IndicatorConfig::External { .. } => None,
         }
     }
 
     fn delta(&mut self, i: usize) -> Option<&mut DeltaSpec> {
         match self.indicators.get_mut(i)? {
             IndicatorConfig::CumDelta { spec, .. } => Some(spec),
-            IndicatorConfig::Vwap { .. } | IndicatorConfig::Volume { .. } => None,
+            IndicatorConfig::Vwap { .. }
+            | IndicatorConfig::Volume { .. }
+            | IndicatorConfig::External { .. } => None,
         }
     }
 
@@ -193,6 +203,23 @@ impl StudySet {
                     });
                 }
             }
+            StudyAction::AddExternal(source, study) => {
+                let spec = lines_indicators::ExternalSpec {
+                    source: source.clone(),
+                    study: study.clone(),
+                };
+                if !self
+                    .indicators
+                    .iter()
+                    .any(|c| matches!(c, IndicatorConfig::External { spec: s, .. } if *s == spec))
+                {
+                    self.indicators.push(IndicatorConfig::External {
+                        spec,
+                        display: Default::default(),
+                        style: Default::default(),
+                    });
+                }
+            }
             StudyAction::SetVolume(i, v) => {
                 if let Some(IndicatorConfig::Volume { spec, .. }) = self.indicators.get_mut(*i) {
                     *spec = *v;
@@ -212,7 +239,10 @@ impl StudySet {
             StudyAction::SetImbalanceMin(m) => self.footprint.imbalance_min = (*m).max(1),
             StudyAction::SetFootprintGrouping(g) => self.footprint.grouping = *g,
             StudyAction::ToggleHidden(r) => match r {
-                StudyRef::Vwap(i) | StudyRef::Delta(i) | StudyRef::Volume(i) => {
+                StudyRef::Vwap(i)
+                | StudyRef::Delta(i)
+                | StudyRef::Volume(i)
+                | StudyRef::External(i) => {
                     if let Some(c) = self.indicators.get_mut(*i) {
                         let d = c.display_mut();
                         d.hidden = !d.hidden;
@@ -223,7 +253,10 @@ impl StudySet {
                 StudyRef::Levels(id) => self.levels.toggle_source(id),
             },
             StudyAction::Remove(r) => match r {
-                StudyRef::Vwap(i) | StudyRef::Delta(i) | StudyRef::Volume(i) => {
+                StudyRef::Vwap(i)
+                | StudyRef::Delta(i)
+                | StudyRef::Volume(i)
+                | StudyRef::External(i) => {
                     if *i < self.indicators.len() {
                         self.indicators.remove(*i);
                     }
@@ -303,6 +336,14 @@ impl StudySet {
                         study_style::write(c.style_mut(), &study_style::VOLUME, looks);
                     }
                 }
+                StudyRef::External(i) => {
+                    if let Some(c @ IndicatorConfig::External { .. }) = self.indicators.get_mut(*i)
+                        && let Some(def) = crate::studies::ext_def(c)
+                    {
+                        let defs = crate::series_pane::part_defs(def);
+                        study_style::write(c.style_mut(), defs, looks);
+                    }
+                }
                 StudyRef::Profile => {
                     study_style::write(&mut self.styles.profile, &study_style::PROFILE, looks)
                 }
@@ -342,6 +383,8 @@ pub struct SourceInfo {
     pub id: String,
     pub label: String,
     pub kinds: Vec<String>,
+    /// The lower-pane series studies it offers: (id, name).
+    pub series: Vec<(String, String)>,
 }
 
 /// What the menu is built from.
@@ -528,6 +571,21 @@ fn catalog(input: &MenuInput) -> Vec<(String, MenuCmd)> {
             ));
         }
     }
+    // A source's lower-pane series studies, under its name; each once per chart.
+    for s in input.sources {
+        for (id, name) in &s.series {
+            let on = input.set.indicators.iter().any(|c| {
+                matches!(c, IndicatorConfig::External { spec, .. }
+                    if spec.source == s.id && spec.study == *id)
+            });
+            if !on {
+                v.push((
+                    format!("{name} · {}", s.label),
+                    set(StudyAction::AddExternal(s.id.clone(), id.clone())),
+                ));
+            }
+        }
+    }
     for s in input.sources {
         if !input.set.levels.source_shown(&s.id) {
             v.push((
@@ -680,6 +738,19 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 display.label,
                 Swatch::None,
                 set(StudyAction::ToggleLabel(i)),
+            );
+        }
+        StudyRef::External(i) => {
+            let Some(IndicatorConfig::External { display, .. }) = input.set.indicators.get(*i)
+            else {
+                return;
+            };
+            c(
+                "Label",
+                "Show title".into(),
+                display.label,
+                Swatch::None,
+                set(StudyAction::ToggleLabel(*i)),
             );
         }
         StudyRef::Footprint => {
@@ -905,6 +976,21 @@ impl StudyMenu {
                     Swatch::None,
                     display.hidden,
                 )),
+                IndicatorConfig::External { spec, display, .. } => {
+                    // Its name and source as the source offers it; the ids if the source
+                    // isn't here (it stays, and shows when the source comes back).
+                    let src = input.sources.iter().find(|s| s.id == spec.source);
+                    let name = src
+                        .and_then(|s| s.series.iter().find(|(id, _)| *id == spec.study))
+                        .map_or(spec.study.as_str(), |(_, n)| n.as_str());
+                    let label = src.map_or(spec.source.as_str(), |s| s.label.as_str());
+                    studies.push((
+                        StudyRef::External(i),
+                        format!("{name} · {label}"),
+                        Swatch::None,
+                        display.hidden,
+                    ));
+                }
             }
         }
         let f = &input.set.footprint;

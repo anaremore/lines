@@ -59,6 +59,7 @@ mod recording;
 mod redact;
 #[cfg(feature = "screenshot")]
 mod screenshot;
+mod series_pane;
 mod settings_schema;
 mod settings_view;
 mod sources;

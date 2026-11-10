@@ -371,3 +371,81 @@ fn a_values_as_of_falls_back_to_the_maps() {
 fn b() -> LevelMapBuilder {
     LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
 }
+
+fn series(key: &str, points: &[(&str, f64)], segments: &[(&str, &str)]) -> std::sync::Arc<Series> {
+    std::sync::Arc::new(Series {
+        key: key.into(),
+        points: points.iter().map(|(a, v)| (t(a), *v)).collect(),
+        segments: segments.iter().map(|(a, b)| (t(a), t(b))).collect(),
+    })
+}
+
+/// Lower-pane series: a value holds from its point to the next or its segment's end; a gap
+/// (outside every segment) is no value, never the last one carried over.
+#[test]
+fn series_values_hold_within_their_segments_and_gaps_stay_gaps() {
+    let s = series(
+        "osc.a",
+        &[
+            ("2026-11-05T14:00:00", 1.5),
+            ("2026-11-05T14:10:00", 2.0),
+            ("2026-11-05T15:00:00", -0.5),
+        ],
+        &[
+            ("2026-11-05T14:00:00", "2026-11-05T14:30:00"),
+            ("2026-11-05T15:00:00", "2026-11-05T15:20:00"),
+        ],
+    );
+    assert_eq!(s.value_at(t("2026-11-05T13:59:00")), None, "before");
+    assert_eq!(s.value_at(t("2026-11-05T14:05:00")), Some(1.5));
+    assert_eq!(
+        s.value_at(t("2026-11-05T14:30:00")),
+        Some(2.0),
+        "to the segment's end"
+    );
+    assert_eq!(s.value_at(t("2026-11-05T14:45:00")), None, "a gap");
+    assert_eq!(s.value_at(t("2026-11-05T15:10:00")), Some(-0.5));
+    assert_eq!(
+        s.value_at(t("2026-11-05T15:30:00")),
+        None,
+        "after the last segment"
+    );
+}
+
+#[test]
+fn malformed_series_are_refused() {
+    let ok = series(
+        "osc.a",
+        &[("2026-11-05T14:00:00", 1.0)],
+        &[("2026-11-05T14:00:00", "2026-11-05T14:01:00")],
+    );
+    let map = |s: Vec<std::sync::Arc<Series>>| {
+        s.into_iter()
+            .fold(
+                LevelMap::builder("demo", ES, t("2026-11-05T14:00:00")),
+                |b, s| b.series(s),
+            )
+            .build(25)
+    };
+    assert_eq!(map(vec![ok.clone()]).unwrap().series.len(), 1);
+    assert!(map(vec![ok.clone(), ok.clone()]).is_err(), "a repeated key");
+    let bad_key = series("Res A", &[], &[]);
+    assert!(map(vec![bad_key]).is_err());
+    let unsorted = series(
+        "osc.b",
+        &[("2026-11-05T14:10:00", 1.0), ("2026-11-05T14:00:00", 2.0)],
+        &[],
+    );
+    assert!(map(vec![unsorted]).is_err());
+    let nan = series("osc.c", &[("2026-11-05T14:00:00", f64::NAN)], &[]);
+    assert!(map(vec![nan]).is_err());
+    let overlapping = series(
+        "osc.d",
+        &[],
+        &[
+            ("2026-11-05T14:00:00", "2026-11-05T14:30:00"),
+            ("2026-11-05T14:20:00", "2026-11-05T14:40:00"),
+        ],
+    );
+    assert!(map(vec![overlapping]).is_err());
+}
