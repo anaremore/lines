@@ -184,22 +184,7 @@ impl Rig {
     }
 }
 
-/// The inside has 2; a buy of 5 takes them and the rest works on, visible, then takes the next
-
-/// A top-of-book feed re-sends the same inside with every quote: that's the liquidity already
-
-/// taken, not more (decision 0005: paper errs pessimistic). Only what the level grows by, or a
-
-/// A plain market sell closing a long works on reduce-only: a stop firing on a print before the
-
-/// With no inside on its side (a snapshot cleared, its bids not in yet), a print says nothing
-
-/// Flatten on a one-level book: long 5, the bid has 2. It sells 2, works on, and the next quotes
-
-/// The Flatten's rest is reduce-only: when something else closes part of the position (here a
-
 /// A stop filled at the print (no bid to take) takes its share of the print first: a print of 3
-
 /// that fires a stop for 2 leaves 1 for a resting limit. Several orders never fill more than printed.
 #[test]
 fn a_stop_filled_at_the_print_takes_its_share_first() {
@@ -256,7 +241,6 @@ fn a_limit_order_is_unchanged() {
 }
 
 /// A fired option Stop whose bid is gone by the time its market order arrives: the order works on,
-
 /// visible, and the bid's return closes the position at the bid.
 #[test]
 fn a_fired_option_stop_with_no_bid_sells_when_the_bid_returns() {
@@ -324,9 +308,7 @@ fn a_fired_option_stop_with_no_bid_sells_when_the_bid_returns() {
 }
 
 /// The CME's daily close ends a working remainder: nothing fills at the reopen's gap, live or on
-
 /// An option's Flatten with no bid ends at the regular session's close, never filling on the
-
 /// next morning's first quote.
 #[test]
 fn an_option_flatten_ends_at_the_close() {
@@ -376,7 +358,6 @@ fn an_option_flatten_ends_at_the_close() {
 }
 
 /// No book on its side and no trade yet: nothing would ever show a price, so the market order
-
 /// ends at once rather than working on forever.
 #[test]
 fn a_market_order_with_no_price_at_all_is_cancelled() {
@@ -649,4 +630,142 @@ fn a_marketable_limit_never_slips_past_its_limit() {
     r.wait(LAT);
     assert_eq!(r.fills(id), [(px(6000.25), 1)]);
     assert_eq!(r.remaining(id), 2, "rests at its limit");
+}
+
+/// Splitting an order never slips less than sending it whole: ten 1-lot buys in a row on a 1-lot
+/// ask climb a tick each, as one 10-lot would (modelled ticks taken are remembered until the next
+/// book batch).
+#[test]
+fn ten_one_lots_in_a_row_climb_like_one_ten_lot() {
+    let mut r = Rig::new(CME_OPEN);
+    r.top((6000.00, 3), (6000.25, 1));
+    let ids: Vec<OrderId> = (0..10)
+        .map(|_| r.order(Side::Buy, 1, OrderKind::Market))
+        .collect();
+    r.wait(LAT);
+    let prices: Vec<Price> = ids
+        .iter()
+        .flat_map(|id| r.fills(*id))
+        .map(|f| f.0)
+        .collect();
+    let want: Vec<Price> = (0..10).map(|n| ticks(6000.25, n)).collect();
+    assert_eq!(prices, want);
+    assert_eq!(r.pos(es()), 10);
+}
+
+/// An option's Flatten with no bid (option market orders are otherwise refused): it works on
+/// (decision 0028), reduce-only so it can never reverse, and the person can cancel it.
+#[test]
+fn an_option_remainder_closes_reduce_only_and_can_be_cancelled() {
+    let mut r = Rig::new(RTH);
+    let quote = |r: &mut Rig, bid: Option<i64>, ask: Option<i64>| {
+        let time = UtcMillis(r.t + 1);
+        r.market(
+            call(),
+            &[MarketInput::OptionQuote {
+                bid: bid.map(Price),
+                ask: ask.map(Price),
+                last: None,
+                time,
+            }],
+        );
+    };
+    let time = UtcMillis(r.t + 1);
+    r.market(
+        spy(),
+        &[MarketInput::Trade {
+            time,
+            price: Price(68_300),
+            qty: Qty(1),
+        }],
+    );
+    quote(&mut r, Some(240), Some(242));
+    r.cmd(Command::PlaceOrder(OrderSpec {
+        account: acct(),
+        contract: call(),
+        side: Side::Buy,
+        qty: Qty(1),
+        kind: OrderKind::Limit { price: Price(242) },
+    }))
+    .unwrap();
+    r.wait(LAT + 1);
+    assert_eq!(r.pos(call()), 1);
+    quote(&mut r, None, Some(242));
+    let sell = r.flatten(call());
+    r.wait(LAT + 1);
+    assert_eq!(r.state(sell), OrderState::Working);
+    assert!(r.core.order(sell).unwrap().reduce_only, "it only closes");
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: sell,
+    })
+    .unwrap();
+    r.wait(LAT + 1);
+    assert_eq!(r.state(sell), OrderState::Cancelled);
+    quote(&mut r, Some(150), Some(152));
+    assert_eq!(r.pos(call()), 1, "nothing after the cancel");
+}
+
+/// A future's market remainder saved by an earlier version (which let it work on) fills whole on
+/// the next book batch, past a thin ask with the model; never left open.
+#[test]
+fn a_saved_future_remainder_fills_whole_on_the_next_book() {
+    use lines_trading::paper::PaperOrder;
+    use lines_trading::{Broker, BrokerEvent, Order, Role};
+    let now = UtcMillis::parse_iso(CME_OPEN).unwrap();
+    let mut b = PaperBroker::new(PaperConfig::default());
+    b.open_account(acct(), Money::whole(100_000));
+    let mut state = b.state();
+    state.orders.push(PaperOrder {
+        order: Order {
+            id: OrderId(7),
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(5),
+            kind: OrderKind::Market,
+            state: OrderState::PartiallyFilled,
+            filled: Qty(2),
+            fill_value: 2 * i128::from(px(6000.00).0),
+            role: Role::Entry,
+            parent: None,
+            oco: None,
+            triggered: false,
+            created: now,
+            updated: now,
+            reduce_only: false,
+            overfill: Qty(0),
+        },
+        queue_ahead: 0,
+        held: false,
+    });
+    let mut b = PaperBroker::from_state(PaperConfig::default(), state);
+    for i in [
+        MarketInput::BookClear,
+        MarketInput::Book {
+            side: BookSide::Bid,
+            price: px(6000.00),
+            qty: Qty(3),
+        },
+        MarketInput::Book {
+            side: BookSide::Ask,
+            price: px(6000.25),
+            qty: Qty(1),
+        },
+    ] {
+        b.market(now, es(), &i);
+    }
+    let mut out = Vec::new();
+    b.poll(now, &mut out);
+    let fills: Vec<(Price, i64)> = out
+        .iter()
+        .filter_map(|e| match e {
+            BrokerEvent::Fill { id, price, qty, .. } if *id == OrderId(7) => Some((*price, qty.0)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        fills,
+        [(px(6000.25), 1), (px(6000.50), 1), (px(6000.75), 1)]
+    );
 }

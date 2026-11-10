@@ -31,8 +31,9 @@
 //!   open). A reduce-only one still shrinks with the position; a plain one that closes the
 //!   position (no larger than what closing market orders already working leave of it) turns
 //!   reduce-only, so it never reverses it; a Reverse's opening, sent beside its close, stays an
-//!   entry. A remainder saved by an earlier version on a future works on the same way, also
-//!   taking trades at or beyond the inside on its side. Limit orders are unchanged.
+//!   entry. A future's remainder saved by an earlier version takes a print at or beyond the
+//!   inside on its side if one comes first, else fills whole with the model on the next book
+//!   batch. Limit orders are unchanged.
 //! - **Stops trigger on trades** at or through the trigger.
 //! - **Fees** per contract (per quantity unit), per side, from the account's balance.
 //! - **Options** (decision 0028) trade on their own quote, never the underlying's price:
@@ -429,9 +430,10 @@ impl PaperBroker {
                     return;
                 }
                 self.execute(now, id, None);
-                // What the book couldn't fill works on, first in line for what comes next
-                // (`walk_markets`, the trades in `on_trade`): never cancelled for want of
-                // liquidity, never resting silently.
+                // A future or equity has filled whole (past the book with modelled slippage).
+                // An option's order that couldn't fill (a missing side, a stale quote) works on,
+                // first in line for what comes next (`walk_markets`): never cancelled for want
+                // of liquidity, never resting silently.
                 if self.orders.get(&id).is_some_and(|p| p.order.is_open()) {
                     self.set_working(now, id);
                     if closing && let Some(po) = self.orders.get_mut(&id) {
@@ -532,17 +534,25 @@ impl PaperBroker {
                     Side::Buy => tick,
                     Side::Sell => -tick,
                 };
+                // Modelled ticks taken are remembered like real levels (until the next book
+                // batch forgets prices it doesn't show): orders sent one after another keep
+                // climbing, so splitting an order never slips less than sending it whole.
                 let mut p = deepest.0;
                 for n in 1..=SLIPPAGE_TICKS {
                     if left == 0 {
                         break;
                     }
                     p += step;
+                    let taken = m.taken.entry((is_bid, p)).or_insert(0);
                     let q = if n == SLIPPAGE_TICKS {
                         left
                     } else {
-                        thinnest.min(left)
+                        (thinnest - *taken).max(0).min(left)
                     };
+                    if q == 0 {
+                        continue;
+                    }
+                    *taken += q;
                     left -= q;
                     fills.push((Price(p), q));
                 }
