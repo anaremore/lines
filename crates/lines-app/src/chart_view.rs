@@ -4444,13 +4444,11 @@ impl ChartView {
         ));
         window.paint_quad(fill(rect(0.0, s.divider_mid(), pw, hair), t.axis_line));
         let sub = rect(0.0, s.sub_top, pw, s.sub_h);
-        // The title box (`draw_volume_title`, the delta's) from the pane's top.
-        let title_h =
-            if self.visibility.draws_labels() && self.studies.lower_title(k, None).is_some() {
-                4.0 + label_px() * 1.6 + 4.0
-            } else {
-                0.0
-            };
+        // One scale for everything in the pane: bars, range labels, the newest tag and the
+        // crosshair's value (all read `scale` below), clear of the title only when one is drawn.
+        let title_h = self
+            .studies
+            .lower_title_h(k, self.visibility.draws_labels(), label_px());
         let scale = self.studies.lower_scale(k, s.sub_h, title_h);
         let cross_in = self.cross_in_sub.filter(|(j, _)| *j == k).map(|(_, y)| y);
         window.with_content_mask(Some(ContentMask { bounds: sub }), |window| {
