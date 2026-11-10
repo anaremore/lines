@@ -2117,7 +2117,8 @@ pub fn editor_fits(width: f32, pane_h: f32, joins: bool) -> bool {
 fn editor_list_rows(h: f32) -> usize {
     (((h - EDITOR_HEAD_H - EDITOR_FOOT_H - 8.0) / EDITOR_ROW_H).floor() as usize).clamp(1, 4)
 }
-const EDITOR_HEAD_H: f32 = 20.0;
+/// The editor's header: as tall as the action buttons it holds in a tight panel.
+const EDITOR_HEAD_H: f32 = MIN_HIT + 2.0;
 const EDITOR_FOOT_H: f32 = 24.0;
 const EDITOR_ROW_H: f32 = 20.0;
 
@@ -3213,7 +3214,7 @@ pub fn dom_bar<V: TradePane>(
         if rows.entry && rows.buttons {
             let h = rows.editor_h(width);
             if let Some(c) = &pt.bracket_confirm {
-                panel = panel.child(bracket_confirm_view(c, v, product, narrow, h, t, cx));
+                panel = panel.child(bracket_confirm_view(c, v, product, h, t, cx));
             } else if let Some(ed) = &pt.editor {
                 panel = panel.child(editor_view(
                     ed,
@@ -3567,20 +3568,22 @@ fn position_card(d: Option<&BarData>, product: &Product, width: f32, t: &Theme) 
         items.push((market_words(m), t.text_main, false, 4));
     }
     if position.is_some() {
-        if let Some((p, q)) = d.and_then(|d| d.stop) {
-            items.push((
+        match d.and_then(|d| d.stop) {
+            Some((p, q)) => items.push((
                 card_exit("SL", q, pos_qty, fmt.format::<32>(p).as_str()),
                 t.down,
                 true,
-                4,
-            ));
+                5,
+            )),
+            // Unprotected is a state, said in words, not a blank line.
+            None => items.push(("No stop".to_owned(), t.text_dim, false, 5)),
         }
         if let Some((p, q)) = d.and_then(|d| d.target) {
             items.push((
                 card_exit("TP", q, pos_qty, fmt.format::<32>(p).as_str()),
                 t.order_target,
                 true,
-                4,
+                5,
             ));
         }
     }
@@ -4369,7 +4372,8 @@ fn editor_view<V: TradePane>(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(crate::zoom::ui(EDITOR_HEAD_H))
+        .h(crate::zoom::hit(EDITOR_HEAD_H))
+        .flex_shrink_0()
         .whitespace_nowrap()
         .overflow_hidden()
         .when(tight, |d| d.gap_1())
@@ -5346,14 +5350,12 @@ fn bracket_confirm_view<V: TradePane>(
     c: &BracketConfirm,
     v: &V,
     product: &Product,
-    narrow: bool,
     h: f32,
     t: &Theme,
     cx: &mut Context<V>,
 ) -> gpui::Div {
     let (n, mode) = (c.n, c.mode);
     let (_, units) = presets_and_units(v, product, cx);
-    let s = if n == 1 { "" } else { "s" };
     let preset = match mode {
         lines_trading::BracketMode::Position {
             stop_ticks,
@@ -5368,31 +5370,10 @@ fn bracket_confirm_view<V: TradePane>(
         ),
         lines_trading::BracketMode::PerEntry => String::new(),
     };
-    let compact = confirm_compact(h);
-    let (title, what, keep, replace_text) = if compact {
-        (
-            String::new(),
-            confirm_compact_text(n, &preset),
-            "Keep",
-            format!("Replace {n}"),
-        )
-    } else if narrow {
-        (
-            "One bracket for the position?".to_owned(),
-            format!("Cancels {n} exit{s}; one stop and target ({preset})."),
-            "Keep",
-            format!("Replace {n}"),
-        )
-    } else {
-        (
-            format!("Use one bracket for the {} position?", product.symbol),
-            format!(
-                "Cancels {n} working exit order{s} and places one stop and one target ({preset}) from the average, for the whole position."
-            ),
-            "Keep per entry",
-            format!("Replace {n} exit{s}"),
-        )
-    };
+    // One compact question everywhere (the rows it replaces are 80 to 114 px): what is cancelled
+    // and what replaces it, at most three lines ([`confirm_lines`]), over Keep and Replace.
+    let what = confirm_compact_text(n, &preset);
+    let (keep, replace_text) = ("Keep", format!("Replace {n}"));
     let cancel = tip(
         cell("bracket-confirm-cancel", t)
             .flex_shrink_0()
@@ -5447,16 +5428,8 @@ fn bracket_confirm_view<V: TradePane>(
         .gap_1()
         .h(crate::zoom::ui(h))
         .overflow_hidden()
-        .when(compact, |d| d.text_size(crate::zoom::ui(11.0)))
-        .when(!compact, |d| {
-            d.child(
-                div()
-                    .flex_shrink_0()
-                    .font_weight(FontWeight::BOLD)
-                    .text_color(t.text_main)
-                    .child(title),
-            )
-        })
+        .text_size(crate::zoom::ui(11.0))
+        .line_height(crate::zoom::ui(CONFIRM_LINE_H))
         // The text gives way (clipped) before the buttons ever do: they sit at the bottom.
         .child(
             div()
@@ -5472,21 +5445,33 @@ fn bracket_confirm_view<V: TradePane>(
                 .flex_row()
                 .flex_shrink_0()
                 .gap_2()
-                .when(compact, |d| d.mt_1())
-                .when(!compact, |d| d.mt_3())
+                .mt_1()
                 .justify_end()
                 .child(cancel)
                 .child(replace),
         )
 }
 
-/// The height the confirmation's full wording needs (its title, two to four lines, the buttons).
-pub const CONFIRM_FULL_H: f32 = 130.0;
+/// The confirmation's line height (11 px text).
+const CONFIRM_LINE_H: f32 = 14.0;
 
-/// Whether the confirmation to replace working exits uses its compact wording: where it has
-/// less than [`CONFIRM_FULL_H`] (narrow panels, and the joins hidden), one question at 11 px.
-pub fn confirm_compact(h: f32) -> bool {
-    h < CONFIRM_FULL_H
+/// How many lines the confirmation's question takes at `width`, words wrapped whole at the
+/// panel's wide glyph estimate: it must be at most three in the rows it replaces.
+#[cfg(test)]
+fn confirm_lines(text: &str, width: f32) -> usize {
+    let room = width - 2.0 * SIDE;
+    let (mut lines, mut used) = (1, 0.0f32);
+    for word in text.split(' ') {
+        let w = text_w(word, 11.0);
+        let need = if used > 0.0 { w + text_w(" ", 11.0) } else { w };
+        if used > 0.0 && used + need > room {
+            lines += 1;
+            used = w;
+        } else {
+            used += need;
+        }
+    }
+    lines
 }
 
 /// The compact confirmation's question: what is cancelled and what replaces it, in full.
@@ -6735,6 +6720,29 @@ mod tests {
         assert!(text_w("Points", 12.0) + 4.0 + 4.0 + 4.0 * MIN_HIT + 3.0 * 4.0 <= room);
     }
 
+    /// The bracket confirmation's question fits the rows it replaces at every width: at most
+    /// three lines over the buttons, with ten or more exits and a points preset.
+    #[test]
+    fn the_confirmation_is_never_cut() {
+        for width in WIDTHS {
+            let h = PanelRows {
+                joins: false,
+                ..PanelRows::ALL
+            }
+            .editor_h(width);
+            for text in [
+                confirm_compact_text(1, "8/16 t"),
+                confirm_compact_text(12, "100/200 pt"),
+            ] {
+                let lines = confirm_lines(&text, width);
+                assert!(lines <= 3, "{width}: {text} takes {lines} lines");
+                // Lines, the gap, the buttons' margin and the buttons.
+                let need = lines as f32 * CONFIRM_LINE_H + 4.0 + 4.0 + MIN_HIT + 2.0;
+                assert!(need <= h, "{width}: {need} in {h}");
+            }
+        }
+    }
+
     /// A read-only account's exits say "off" whole: both where they fit, else one "Exits off".
     #[test]
     fn read_only_exits_are_never_cut() {
@@ -6772,8 +6780,8 @@ mod tests {
         assert_eq!(card_h(240.0), card_h(420.0));
         let w = |s: &str| text_w(s, 11.0);
         // In the card's order: the stop, the target, the average (when not above), working, ticks.
-        let sl = (w("SL 6006.00") + 4.0, 4);
-        let tp = (w("TP 6014.00") + 4.0, 4);
+        let sl = (w("SL 6006.00") + 4.0, 5);
+        let tp = (w("TP 6014.00") + 4.0, 5);
         let avg = (w("@ 6010.25"), 3);
         let working = (w("2 working"), CARD_KEEP);
         let ticks = (w("+0.0 t"), 0);
