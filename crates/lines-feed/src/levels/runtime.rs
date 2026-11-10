@@ -165,6 +165,11 @@ impl LevelState {
     /// Take a decode's result, received at `time` (the runtime and a backtest alike).
     pub fn take(&mut self, result: Result<Option<LevelMap>, String>, time: UtcMillis) {
         match result {
+            // New series only: the levels' freshness and error are left as they were.
+            Ok(Some(map)) if map.series_update => {
+                self.map = Some(Arc::new(map));
+                self.series_received = Some(time);
+            }
             // Levels refused, series new: the levels stay stale (their time isn't renewed),
             // the series are current.
             Ok(Some(map)) if map.levels_refused.is_some() => {
