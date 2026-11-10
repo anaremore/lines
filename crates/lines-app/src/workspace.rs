@@ -2661,21 +2661,19 @@ impl WindowView {
                 let n = shown.len().max(1);
                 // ↑ on the first row of an empty palette (or of a recalled query) recalls an
                 // older query; otherwise ↑↓ move the selection.
-                let recalled = match key {
-                    "up" => recall.up(query, *selected, history),
-                    _ => None,
-                };
-                match (key, recalled) {
-                    (_, Some(q)) => {
-                        *query = q;
-                        *shown = palette_rank(items, query, history);
-                        *selected = 0;
-                    }
-                    ("down", None) => *selected = (*selected + 1) % n,
-                    // Past the oldest recalled query: stay (never wrap to the bottom row).
-                    ("up", None) if recall.at.is_some() && *selected == 0 => {}
-                    ("up", None) => *selected = (*selected + n - 1) % n,
-                    ("backspace", None) => {
+                use crate::palette_rank::Up;
+                match key {
+                    "up" => match recall.up(query, *selected, history) {
+                        Up::Recall(q) => {
+                            *query = q;
+                            *shown = palette_rank(items, query, history);
+                            *selected = 0;
+                        }
+                        Up::Stay => {}
+                        Up::Move => *selected = (*selected + n - 1) % n,
+                    },
+                    "down" => *selected = (*selected + 1) % n,
+                    "backspace" => {
                         query.pop();
                         recall.edited();
                         *shown = palette_rank(items, query, history);

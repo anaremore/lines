@@ -9,8 +9,9 @@
 //!   another's count) and the last [`QUERIES`] queries, newest first.
 //! - **Commands that trade, or can't be taken back, are never boosted** ([`never_boosted`]:
 //!   every `Command::Trade`, the strategies' Start, Stop and Stop all, the chain's One-click,
-//!   the update's restart and roll-back): they keep their fuzzy place, so running one often
-//!   never puts it at the top of an empty palette, where a habitual Enter would run it.
+//!   the update's restart and roll-back, Close pane): they aren't remembered at all (no count,
+//!   no query), so running one often never puts it at the top of an empty palette, and ↑ never
+//!   recalls the query that ran it, where a habitual Enter would run it again.
 //! - **Stable:** the order depends only on the query and the history snapshot taken when the
 //!   palette opened (a run is counted after it closes), with every tie broken by the palette's
 //!   own order: the same query always gives the same list, so nothing moves under the pointer.
@@ -51,6 +52,10 @@ impl PaletteHistory {
     /// `cmd` was run from the palette with `query` typed: one more use; a non-empty query
     /// becomes the newest (once).
     pub fn record(&mut self, cmd: Command, query: &str) {
+        // Neither counted nor its query kept: ↑ then Enter must never re-run one.
+        if never_boosted(cmd) {
+            return;
+        }
         let n = self.uses.entry(key(cmd)).or_insert(0);
         *n = n.saturating_add(1);
         let q = query.trim();
@@ -63,7 +68,8 @@ impl PaletteHistory {
 }
 
 /// Commands that send or cancel orders, arm trading, start or stop strategies (Stop flattens),
-/// or restart the app: never ranked up by use, however often they ran.
+/// restart the app, or close a pane (no way back): never remembered, so never ranked up by use
+/// or recalled with ↑, however often they ran.
 pub fn never_boosted(c: Command) -> bool {
     use crate::commands::StrategyCmd as S;
     matches!(
@@ -71,6 +77,7 @@ pub fn never_boosted(c: Command) -> bool {
         Command::Trade(_)
             | Command::Strategy(S::StopAll | S::StopAllKeep | S::Start | S::Stop)
             | Command::ChainOneClick
+            | Command::ClosePane
             | Command::RestartToUpdate
             | Command::RollBackUpdate
     )
@@ -116,6 +123,17 @@ pub fn rank(
     hits.into_iter().map(|(i, _, _)| items[i]).collect()
 }
 
+/// What ↑ does in the palette.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Up {
+    /// Show this older query.
+    Recall(String),
+    /// On the oldest recalled query: nothing (never wrap to the bottom row).
+    Stay,
+    /// Move the selection up, as usual.
+    Move,
+}
+
 /// Recalling recent queries with ↑ in the palette (↓ always moves the selection).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Recall {
@@ -124,22 +142,27 @@ pub struct Recall {
 }
 
 impl Recall {
-    /// ↑ with `query` typed and row `selected` chosen: the next older query to show, if this ↑
-    /// recalls: only with the first row chosen, in an empty palette or on a recalled query
-    /// unchanged. Anywhere else (the selection moved, a typed query, no older one) `None`: ↑
-    /// moves the selection as usual.
-    pub fn up(&mut self, query: &str, selected: usize, history: &PaletteHistory) -> Option<String> {
+    /// ↑ with `query` typed and row `selected` chosen. It recalls only with the first row
+    /// chosen, in an empty palette or on a recalled query unchanged: the next older query, or
+    /// [`Up::Stay`] past the oldest. Anywhere else (the selection moved, a typed or edited
+    /// query, no history) [`Up::Move`].
+    pub fn up(&mut self, query: &str, selected: usize, history: &PaletteHistory) -> Up {
         if selected != 0 {
-            return None;
+            return Up::Move;
         }
         let next = match self.at {
             None if query.is_empty() => 0,
             Some(i) if history.queries.get(i).is_some_and(|q| q == query) => i + 1,
-            _ => return None,
+            _ => return Up::Move,
         };
-        let q = history.queries.get(next)?;
-        self.at = Some(next);
-        Some(q.clone())
+        match history.queries.get(next) {
+            Some(q) => {
+                self.at = Some(next);
+                Up::Recall(q.clone())
+            }
+            None if self.at.is_some() => Up::Stay,
+            None => Up::Move,
+        }
     }
 
     /// The query was edited: no longer recalling.
@@ -196,11 +219,7 @@ mod tests {
         assert!(!ranked("zzzzqqq", &h2).contains(&C::NewTab));
         // Among matches, the used one first even when another scores higher.
         let base = ranked("tab", &PaletteHistory::default());
-        let last = *base
-            .iter()
-            .rev()
-            .find(|c| !matches!(c, C::Trade(_)))
-            .unwrap();
+        let last = *base.iter().rev().find(|c| !never_boosted(**c)).unwrap();
         let mut h3 = PaletteHistory::default();
         h3.record(last, "tab");
         assert_eq!(ranked("tab", &h3)[0], last);
@@ -249,28 +268,28 @@ mod tests {
         h.record(C::NewTab, "old");
         h.record(C::NewTab, "new");
         let mut r = Recall::default();
-        assert_eq!(r.up("", 0, &h).as_deref(), Some("new"));
-        assert_eq!(r.up("new", 0, &h).as_deref(), Some("old"));
+        assert_eq!(r.up("", 0, &h), Up::Recall("new".into()));
+        assert_eq!(r.up("new", 0, &h), Up::Recall("old".into()));
         assert_eq!(
             r.up("old", 0, &h),
-            None,
-            "no older one: the selection moves"
+            Up::Stay,
+            "past the oldest: stays, never wraps"
         );
         // The selection moved off the first row (↓, the wheel): ↑ moves it back, never
         // recalls (a reflexive Enter must run the row the trader went to).
-        assert_eq!(Recall::default().up("", 1, &h), None);
+        assert_eq!(Recall::default().up("", 1, &h), Up::Move);
         let mut r = Recall::default();
         r.up("", 0, &h);
-        assert_eq!(r.up("new", 2, &h), None);
+        assert_eq!(r.up("new", 2, &h), Up::Move);
         // A typed query: ↑ moves the selection.
-        assert_eq!(Recall::default().up("ta", 0, &h), None);
+        assert_eq!(Recall::default().up("ta", 0, &h), Up::Move);
         // Edited: done.
         r.edited();
-        assert_eq!(r.up("newx", 0, &h), None);
+        assert_eq!(r.up("newx", 0, &h), Up::Move);
         // No history: nothing to recall.
         assert_eq!(
             Recall::default().up("", 0, &PaletteHistory::default()),
-            None
+            Up::Move
         );
     }
 
@@ -301,6 +320,14 @@ mod tests {
             }
         }
         assert!(risky.iter().all(|c| never_boosted(*c)));
+        assert!(
+            h.is_empty(),
+            "never remembered: no count, no query to recall"
+        );
+        let mut h2 = PaletteHistory::default();
+        h2.record(C::Trade(TradeCmd::Flatten), "flatten");
+        assert!(h2.queries.is_empty());
+        assert!(never_boosted(C::ClosePane));
         assert_eq!(ranked("", &h), ranked("", &PaletteHistory::default()));
         assert_eq!(ranked("", &h)[0], commands::palette()[0]);
         assert!(!never_boosted(C::NewTab) && !never_boosted(C::Strategy(S::Open)));
