@@ -1081,8 +1081,10 @@ pub fn runs_while_typing(_k: &Keystroke, cmd: Command) -> bool {
     !matches!(cmd, Command::Draw(_))
 }
 
-/// Palette entries matching `query`: every word of it appears in the label (any order, any
-/// case). Order is the palette's.
+/// Palette entries whose label holds every word of `query` (any order, any case), in the
+/// palette's order. The tests use it to check labels say what traders type; the palette itself
+/// ranks with `palette_rank::rank` (fuzzy, run-before first).
+#[cfg(test)]
 pub fn filter(query: &str, commands: &[Command]) -> Vec<Command> {
     let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
     commands

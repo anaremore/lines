@@ -752,12 +752,15 @@ enum Prompt {
         text: String,
         error: Option<String>,
     },
-    /// Every command, filtered by what is typed (`commands::filter`).
+    /// Every command, ranked for what is typed (`palette_rank::rank`: run before first, then
+    /// fuzzy matches), from the history as it was when the palette opened.
     Palette {
         query: String,
         items: Vec<Command>,
         shown: Vec<Command>,
         selected: usize,
+        history: crate::palette_rank::PaletteHistory,
+        recall: crate::palette_rank::Recall,
     },
 }
 
@@ -1494,11 +1497,17 @@ impl WindowView {
             ),
             Command::Palette => {
                 let items = commands::palette();
+                // A snapshot: what runs from here counts from the next opening, so the order
+                // never moves while the palette is open.
+                let history = crate::picker_view::settings(cx).palette.clone();
+                let shown = palette_rank(&items, "", &history);
                 self.prompt = Some(Prompt::Palette {
                     query: String::new(),
-                    shown: items.clone(),
+                    shown,
                     items,
                     selected: 0,
+                    history,
+                    recall: Default::default(),
                 });
             }
             Command::NextTab => {
@@ -2530,10 +2539,16 @@ impl WindowView {
                 }
             }
             Some(Prompt::Palette {
-                shown, selected, ..
+                shown,
+                selected,
+                query,
+                ..
             }) => {
                 if let Some(cmd) = shown.get(*selected).copied() {
+                    let query = std::mem::take(query);
                     self.prompt = None;
+                    // Remembered (saved): ranks it first next time, and ↑ recalls the query.
+                    crate::picker_view::update_settings(cx, |s| s.palette.record(cmd, &query));
                     self.run(cmd, window, cx);
                 }
             }
@@ -2640,14 +2655,28 @@ impl WindowView {
                 items,
                 shown,
                 selected,
+                history,
+                recall,
             }) => {
                 let n = shown.len().max(1);
+                // ↑ on the first row of an empty palette (or of a recalled query) recalls an
+                // older query; otherwise ↑↓ move the selection.
+                use crate::palette_rank::Up;
                 match key {
+                    "up" => match recall.up(query, *selected, history) {
+                        Up::Recall(q) => {
+                            *query = q;
+                            *shown = palette_rank(items, query, history);
+                            *selected = 0;
+                        }
+                        Up::Stay => {}
+                        Up::Move => *selected = (*selected + n - 1) % n,
+                    },
                     "down" => *selected = (*selected + 1) % n,
-                    "up" => *selected = (*selected + n - 1) % n,
                     "backspace" => {
                         query.pop();
-                        *shown = commands::filter(query, items);
+                        recall.edited();
+                        *shown = palette_rank(items, query, history);
                         *selected = 0;
                     }
                     _ => {
@@ -2655,7 +2684,8 @@ impl WindowView {
                             !k.modifiers.control && !k.modifiers.alt && !k.modifiers.platform
                         }) {
                             query.push_str(c);
-                            *shown = commands::filter(query, items);
+                            recall.edited();
+                            *shown = palette_rank(items, query, history);
                             *selected = 0;
                         }
                     }
@@ -3447,10 +3477,14 @@ impl WindowView {
             items,
             shown,
             selected,
+            history,
+            recall,
+            ..
         }) = self.prompt.as_mut()
         {
+            recall.edited();
             *q = query.to_owned();
-            *shown = commands::filter(q, items);
+            *shown = palette_rank(items, q, history);
             *selected = 0;
         }
         cx.notify();
@@ -5058,4 +5092,19 @@ fn pnl_mode(cx: &App) -> crate::pnl::PnlDisplay {
 fn shot_menu_failed(why: &str) -> ! {
     eprintln!("screenshot failed: --context-menu: {why}");
     std::process::exit(1)
+}
+
+/// The palette's list for `query` (`palette_rank::rank` with a fresh scorer: the palette isn't a
+/// paint path).
+fn palette_rank(
+    items: &[Command],
+    query: &str,
+    history: &crate::palette_rank::PaletteHistory,
+) -> Vec<Command> {
+    crate::palette_rank::rank(
+        items,
+        query,
+        history,
+        &mut crate::picker::Searcher::default(),
+    )
 }
