@@ -102,14 +102,22 @@ pub fn previous_exe(exe: &Path) -> PathBuf {
     sibling(exe, "previous")
 }
 
-/// Put `new` in place of `exe`, keeping the old one as [`previous_exe`].
+/// Put the file `new` in place of `exe`, keeping the old one as [`previous_exe`] (tests; the
+/// app swaps the bytes it verified: [`swap_bytes`]).
+#[cfg(test)]
 pub fn swap(exe: &Path, new: &Path) -> std::io::Result<()> {
+    swap_bytes(exe, &std::fs::read(new)?)
+}
+
+/// Put `data` (the bytes just verified, never re-read from disk) in place of `exe`, keeping
+/// the old one as [`previous_exe`].
+pub fn swap_bytes(exe: &Path, data: &[u8]) -> std::io::Result<()> {
     let prev = previous_exe(exe);
     if prev.exists() {
         std::fs::remove_file(&prev)?;
     }
     std::fs::rename(exe, &prev)?;
-    if let Err(e) = std::fs::copy(new, exe) {
+    if let Err(e) = std::fs::write(exe, data) {
         // Put the running version back where it was.
         let _ = std::fs::remove_file(exe);
         let _ = std::fs::rename(&prev, exe);

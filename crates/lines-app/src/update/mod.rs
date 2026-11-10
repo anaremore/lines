@@ -146,10 +146,14 @@ pub fn apply_update(exe: &Path, p: &Pending) -> Result<(), String> {
     let sha = std::fs::read_to_string(staged.with_extension("sha256")).unwrap_or_default();
     let sig = std::fs::read_to_string(staged.with_extension("minisig")).unwrap_or_default();
     let expected = manifest::trusted_comment(v, manifest::target());
-    verify::verify(&data, &sha, &sig, key(), &expected)
-        .map_err(|why| format!("v{v} discarded: {why}"))?;
+    if let Err(why) = verify::verify(&data, &sha, &sig, key(), &expected) {
+        // Never offered again: the next start would find it staged.
+        let _ = std::fs::remove_file(staged);
+        return Err(format!("v{v} discarded: {why}"));
+    }
     install::backup(config, from).map_err(|e| format!("couldn't back up settings: {e}"))?;
-    install::swap(exe, staged).map_err(|e| format!("couldn't install v{to}: {e}"))?;
+    // The bytes just verified, not the file again (nothing can swap it in between).
+    install::swap_bytes(exe, &data).map_err(|e| format!("couldn't install v{to}: {e}"))?;
     let _ = install::save_state(
         config,
         &install::UpdateState {
@@ -662,7 +666,7 @@ mod tests {
             to: "0.3.12".into(),
         };
         assert!(apply_update(&exe, &up).is_err(), "re-verified at the swap");
-        std::fs::remove_file(&staged).unwrap();
+        assert!(!staged.exists(), "discarded, never offered again");
         assert!(apply_update(&exe, &up).is_err(), "gone");
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v0.3.11");
         assert!(!install::previous_exe(&exe).exists());
