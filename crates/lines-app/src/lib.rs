@@ -13,9 +13,9 @@ mod chart_draw;
 mod chart_trade;
 mod chart_view;
 mod commands;
-mod data_dir;
 mod connections;
 mod connections_view;
+mod data_dir;
 #[cfg(feature = "screenshot")]
 mod demo_broker;
 mod diagnostics;
