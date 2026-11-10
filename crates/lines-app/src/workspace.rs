@@ -1386,7 +1386,12 @@ impl WindowView {
     /// The strip's scroll as drawn: clamped to the strip (a resize or a zoom change can leave
     /// the stored value past the end), so hover, clicks and drops hit what is drawn.
     fn strip_scroll(&self, strip: &crate::tabstrip::Strip) -> f32 {
-        strip.clamp(self.tab_scroll)
+        // Right after a × closed a tab, the strip holds still until the pointer leaves the bar.
+        if self.close_guard.holding() {
+            strip.held(self.tab_scroll)
+        } else {
+            strip.clamp(self.tab_scroll)
+        }
     }
 
     /// The tab strip's geometry for a window `width` wide (`crate::tabstrip`).
@@ -2171,7 +2176,9 @@ impl WindowView {
             }
             tabstate::CloseTab::Remove { active } => {
                 self.tabs.remove(i);
-                self.activate_tab(active, window, cx);
+                // A × close keeps the strip still (the next tab slides into the slot).
+                let scroll = !self.close_guard.holding();
+                self.activate_tab_scrolling(active, scroll, window, cx);
             }
         }
     }
@@ -2416,7 +2423,7 @@ impl WindowView {
         // Over the bar, a drop lands only where the strip shows tabs (where the marker is drawn):
         // the pointer is held inside the strip, so the ▾, + or the left padding never pick a
         // tab scrolled out of view.
-        let x = f32::from(pos.x).clamp(strip.x0, strip.x0 + strip.room - 1.0);
+        let x = f32::from(pos.x).clamp(strip.x0, (strip.x0 + strip.room - 1.0).max(strip.x0));
         let x = if f32::from(pos.y) < tab_bar_h() {
             x
         } else {

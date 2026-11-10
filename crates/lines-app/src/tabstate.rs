@@ -360,6 +360,11 @@ impl CloseGuard {
         true
     }
 
+    /// A × just closed a tab and the pointer is still in the bar: the strip holds its scroll.
+    pub fn holding(&self) -> bool {
+        self.slot.is_some()
+    }
+
     /// The pointer moved: out of the tab bar (or the window), the guard ends.
     pub fn pointer(&mut self, in_bar: bool) {
         if !in_bar {

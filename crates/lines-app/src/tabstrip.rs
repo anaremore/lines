@@ -55,6 +55,13 @@ impl Strip {
         self.clamp(s)
     }
 
+    /// The scroll held after a × closed a tab: unchanged (never more than the tabs' width), even
+    /// past the new end, so no tab moves under the pointer; the usual clamp returns once the
+    /// pointer leaves the bar (`tabstate::CloseGuard`).
+    pub fn held(&self, scroll: f32) -> f32 {
+        scroll.clamp(0.0, self.n as f32 * self.tab_w)
+    }
+
     /// A wheel turn of `delta` px (positive scrolls toward the last tab).
     pub fn wheel(&self, scroll: f32, delta: f32) -> f32 {
         self.clamp(scroll + delta)
@@ -140,6 +147,20 @@ mod tests {
         assert_eq!(s.rights(150.0)[4], s.left_of(5, 150.0));
         // Past the strip's visible end (over the ▾): no tab.
         assert_eq!(s.tab_at(s.x0 + s.room + 1.0, 150.0), None);
+    }
+
+    /// Closing the last tab with × at the strip's end: the held scroll keeps every remaining
+    /// tab where it was drawn, so the pointer's slot keeps the tab that slid into it.
+    #[test]
+    fn a_close_at_the_end_moves_no_tab_while_held() {
+        let before = strip(10, 500.0);
+        let s = before.max_scroll();
+        let after = strip(9, 500.0);
+        assert!(after.clamp(s) < s, "the plain clamp would shift every tab");
+        let held = after.held(s);
+        for i in 0..9 {
+            assert_eq!(after.left_of(i, held), before.left_of(i, s));
+        }
     }
 
     #[test]
