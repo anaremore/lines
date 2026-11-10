@@ -1044,15 +1044,16 @@ fn a_series_only_push_keeps_label_state() {
 #[test]
 fn theme_change_drops_shaped_labels_only() {
     let mut layer = LevelsLayer::new(LevelsConfig::default());
-    layer.shaped.insert(
-        "Pivot 6010".into(),
-        vec![(gpui::Hsla::default(), gpui::ShapedLine::default())],
+    layer.shaped.get_or_make(
+        "Pivot 6010",
+        gpui::Hsla::default(),
+        gpui::ShapedLine::default,
     );
     layer
         .cuts
         .insert("Pivot 6010".into(), (40.0, "P… 6010".into()));
     layer.theme_changed();
-    assert!(layer.shaped.is_empty());
+    assert_eq!(layer.shaped.len(), 0);
     assert_eq!(layer.cuts.len(), 1);
 }
 
@@ -1091,8 +1092,9 @@ fn reserved(t: &crate::theme::Theme) -> Vec<(&'static str, lines_core::style::Rg
 
 /// Every demo level's default color, as the layer resolves it (`study_style::resolve_type`,
 /// then `TypeLook::line_color` for the theme; a type left at the level's own color draws the
-/// map's color, decision 0022): a line (3:1) on the chart of every theme and palette, and clear
-/// of every color with a meaning there.
+/// map's color, decision 0022): a line (3:1) on the chart of every theme and palette (a zone's
+/// edges a dim gray, seen but quieter than the candles), and clear of every color with a
+/// meaning there.
 #[test]
 fn demo_level_colors_read_and_stay_off_meanings() {
     use crate::theme::{Theme, rgb_of, source_colour};
@@ -1136,7 +1138,19 @@ fn demo_level_colors_read_and_stay_off_meanings() {
             };
             let c = rgb_of(drawn);
             let r = contrast(c, rgb_of(t.bg));
-            assert!(r >= 3.0, "{}: {kind}: {r:.2}", t.name);
+            if ty.zone {
+                // A zone's or band's edges frame it: a dim gray, quieter than the candles but
+                // still seen.
+                let candles = contrast(rgb_of(t.up), rgb_of(t.bg))
+                    .min(contrast(rgb_of(t.down), rgb_of(t.bg)));
+                assert!(
+                    (1.5..candles).contains(&r),
+                    "{}: {kind}: {r:.2} (candles {candles:.2})",
+                    t.name
+                );
+            } else {
+                assert!(r >= 3.0, "{}: {kind}: {r:.2}", t.name);
+            }
             for (what, m) in reserved(&t) {
                 let de = delta_e_2000(c, m);
                 assert!(
@@ -1339,29 +1353,92 @@ fn a_long_legend_row_is_cut_whole() {
     use super::fit_legend;
     let mono = |t: &str| t.chars().count() as f32 * 7.0;
     // Fits: whole.
-    let f = fit_legend(300.0, 70.0, Some("Map A"), &[50.0, 60.0], 12.0, mono);
+    let f = fit_legend(300.0, 70.0, 0.0, Some("Map A"), &[50.0, 60.0], 12.0, mono);
     assert_eq!(f.title.as_deref(), Some("Map A"));
     assert_eq!((f.stats, f.more), (2, false));
     // A title wider than its room: cut at a whole character, "…" last, within the room.
     let long = "A very long legend title from a source";
-    let f = fit_legend(200.0, 70.0, Some(long), &[], 12.0, mono);
+    let f = fit_legend(200.0, 70.0, 0.0, Some(long), &[], 12.0, mono);
     let t = f.title.unwrap();
     assert!(t.ends_with('…') && mono(&t) <= 130.0, "{t}");
     assert!(long.starts_with(t.trim_end_matches('…')), "{t}");
     // Stats: as many whole as fit with the "…" after them.
     let w = [80.0, 80.0, 80.0, 80.0];
-    let f = fit_legend(200.0, 70.0, None, &w, 12.0, mono);
+    let f = fit_legend(200.0, 70.0, 0.0, None, &w, 12.0, mono);
     assert_eq!((f.stats, f.more), (2, true));
     assert!(80.0 * 2.0 + 12.0 + 12.0 + mono("…") <= 200.0);
     // The last one fits without room for "…": all shown.
-    let f = fit_legend(80.0 * 2.0 + 12.0, 70.0, None, &w[..2], 12.0, mono);
+    let f = fit_legend(80.0 * 2.0 + 12.0, 70.0, 0.0, None, &w[..2], 12.0, mono);
     assert_eq!((f.stats, f.more), (2, false));
     // Not even one stat: none, and the "…".
-    let f = fit_legend(60.0, 70.0, None, &w, 12.0, mono);
+    let f = fit_legend(60.0, 70.0, 0.0, None, &w, 12.0, mono);
     assert_eq!((f.stats, f.more), (0, true));
     // A title whose room can't hold even "…": no title.
     assert_eq!(
-        fit_legend(70.0, 70.0, Some(long), &[], 12.0, mono).title,
+        fit_legend(70.0, 70.0, 0.0, Some(long), &[], 12.0, mono).title,
         None
     );
+}
+
+/// A stale row keeps its "stale" whole: a 40-character title at 12 px (about 7 px a
+/// character) is cut to leave room for the state and its gap, never the state squeezed out.
+#[test]
+fn a_stale_legend_row_keeps_stale_beside_a_long_title() {
+    let mono = |t: &str| t.chars().count() as f32 * 7.0;
+    // The legend's room inside its padding (360 px, 8 px a side, a pixel spare).
+    let room = 360.0 - 16.0 - 1.0;
+    let gap = 6.0;
+    let head = mono("RS Levels") + gap + mono("· ");
+    let status = gap + mono("stale");
+    let title = "Map BLD with a forty character long title";
+    assert!(title.chars().count() >= 40);
+    let f = fit_legend(room, head, status, Some(title), &[], 12.0, mono);
+    let t = f.title.expect("a cut title");
+    assert!(t.ends_with('…'), "{t}");
+    assert!(
+        head + mono(&t) + status <= room,
+        "{t}: stale keeps its room"
+    );
+    // Current (no state): the title gets that room too.
+    let f = fit_legend(room, head, 0.0, Some(title), &[], 12.0, mono);
+    assert!(f.title.unwrap().chars().count() > t.chars().count());
+}
+
+/// Labels of one text in four or more colors (levels of the same name in their own colors,
+/// the stale dim) are each shaped once and kept: a second frame shapes nothing, and a flip
+/// back and forth shapes nothing either. The cache stays bounded.
+#[test]
+fn same_text_labels_in_many_colors_are_shaped_once() {
+    let mut cache: ColorCache<u32> = ColorCache::new();
+    let mut made = 0;
+    let colors: Vec<gpui::Hsla> = (0..6)
+        .map(|i| gpui::hsla(i as f32 / 6.0, 0.6, 0.5, 1.0))
+        .collect();
+    for _frame in 0..3 {
+        for c in &colors {
+            cache.get_or_make("Bull Zone : 7555.00", *c, || {
+                made += 1;
+                made
+            });
+        }
+    }
+    assert_eq!(made, 6, "each color shaped once");
+    // Bounded: past MAX_SHAPED it starts over, never grows past it.
+    for k in 0..(MAX_SHAPED * 2) {
+        cache.get_or_make(&format!("t{k}"), colors[0], || 0);
+        assert!(cache.len() <= MAX_SHAPED);
+    }
+}
+
+/// Level lines and zone edges leave the last-price line's row clear (it is drawn later,
+/// translucent, and reads above them): a stroke across it is split around it, one beside it
+/// is whole, one inside it is gone.
+#[test]
+fn level_strokes_leave_the_last_price_row_clear() {
+    let parts = |y, w, last| around_last(y, w, last, 1.0).collect::<Vec<_>>();
+    assert_eq!(parts(10.0, 2.0, None), [(10.0, 2.0)]);
+    assert_eq!(parts(10.0, 2.0, Some(20.0)), [(10.0, 2.0)]);
+    assert_eq!(parts(10.0, 1.0, Some(10.0)), []);
+    assert_eq!(parts(10.0, 3.0, Some(11.0)), [(10.0, 1.0), (12.0, 1.0)]);
+    assert_eq!(parts(10.0, 2.0, Some(9.5)), [(10.5, 1.5)]);
 }

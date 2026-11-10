@@ -165,11 +165,18 @@ const OLIVE: (Color, Color) = (
     Color::Custom(Rgb::hex(0xbbdd44)),
     Color::Custom(Rgb::hex(0x777700)),
 );
-/// The pivot, support and the zones' and VWAP band's edges: a neutral gray, light on dark and deep on
-/// light (no blue in it: the colorblind palette's up is blue).
+/// The pivot and support: a neutral gray, light on dark and deep on light (no blue in it: the
+/// colorblind palette's up is blue).
 const GRAY: (Color, Color) = (
     Color::Custom(Rgb::hex(0xc8c8c8)),
     Color::Custom(Rgb::hex(0x7a7a7a)),
+);
+/// The zones' and the VWAP band's edges: a dim gray on each theme, quieter than the candles
+/// (a band's edges frame it; they aren't levels to read across the chart). Their labels fall
+/// back to the theme's text (the dim gray isn't AA on a label).
+const EDGE: (Color, Color) = (
+    Color::Custom(Rgb::hex(0x6b707c)),
+    Color::Custom(Rgb::hex(0xb4b8c1)),
 );
 
 /// The demo's level types (`LevelSource::types`): every kind its map uses. The lines in a
@@ -177,8 +184,8 @@ const GRAY: (Color, Color) = (
 /// palettes (the theme's study teal and orchid sit beside the mint up and rose down, an amber
 /// beside the colorblind orange down), so they are told apart by line type: pivot solid,
 /// support dashed, resistance dash-dot, the anchored line dotted, all 1 px (none louder than
-/// the last price). The zones: solid gray edges (drawn whole, 3:1 on both charts; a level's
-/// own look draws edges at 60 %) around a visible fill in each level's own color: a demand
+/// the last price). The zones: solid dim gray edges (quieter than the candles) around a
+/// visible fill in each level's own color: a demand
 /// zone labeled just under its low edge (`LabelAt::Low`), a supply zone (split from it, so
 /// hiding zones hides both) just above its high edge (`LabelAt::High`), each with that edge's
 /// price; the VWAP band's edges dotted. Labels are in each level's color, or theme text where that isn't AA on the
@@ -218,7 +225,7 @@ pub static TYPES: [LevelType; 7] = [
                 ..TypeStyle::OWN.fill
             },
             label_at: lines_core::levels::LabelAt::Low,
-            ..themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1)
+            ..themed(EDGE.0, Some(EDGE.1), LineType::Solid, 1)
         },
     ),
     LevelType::zone(
@@ -231,7 +238,7 @@ pub static TYPES: [LevelType; 7] = [
                 ..TypeStyle::OWN.fill
             },
             label_at: lines_core::levels::LabelAt::High,
-            ..themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1)
+            ..themed(EDGE.0, Some(EDGE.1), LineType::Solid, 1)
         },
     )
     .child_of("zone"),
@@ -239,7 +246,7 @@ pub static TYPES: [LevelType; 7] = [
         "band",
         "VWAP band",
         "Zones",
-        themed(GRAY.0, Some(GRAY.1), LineType::Dotted, 1),
+        themed(EDGE.0, Some(EDGE.1), LineType::Dotted, 1),
     ),
 ];
 

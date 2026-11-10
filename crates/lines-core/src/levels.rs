@@ -984,24 +984,28 @@ pub enum LabelSeen {
     /// Not placed yet (a new map, a level that just came on screen).
     #[default]
     New,
+    /// At its anchor.
     Shown,
+    /// Stacked a row away from its anchor, or dropped.
     Hidden,
 }
 
 /// Choose label positions: a label is anchored to its own level where its type puts it
 /// ([`Placed::label_anchor`]: on its line or a zone's high edge, just under a low edge or just
-/// above a high edge), clamped into the plot, and never moved for anything else: the last
-/// price and the tags on the axis paint over it. Labels only give way to each other: a label
-/// overlapping one already placed is dropped (the level is still drawn), never moved to
-/// another edge. Levels at
-/// fixed prices are placed first, in map order, then those moving with the VWAP, so a moving
-/// band never reshuffles the others. The layout depends only on the levels and the viewport,
-/// never the price, and keeps last frame's decision near the threshold: `seen` (by level
-/// index, updated in place) says what each label did last frame; one hidden then shows again
-/// only once it is clear of every shown label by [`LABEL_HYSTERESIS`] more (a new one needs
-/// only to be clear). `has_label(index)`: whether the level's label can be drawn at all (it
-/// has one, and it fits the plot's width): one that can't claims no room. A plot shorter
-/// than a label shows none. In place, no allocation.
+/// above a high edge), clamped into the plot, and never moved for anything but another label:
+/// the last price and the tags on the axis paint over it. Labels give way to each other: a
+/// label overlapping one already placed stacks to the nearest free row at most one label's
+/// height from its anchor ([`stack_row`]: a line's either way, a low-edge label only further
+/// down, a high-edge label only further up, so it never reaches its zone's other edge), and
+/// is dropped only when no such row is free (the level is still drawn). Levels at fixed
+/// prices are placed first, in map order, then those moving with the VWAP, so a moving band
+/// never reshuffles the others. The layout depends only on the levels and the viewport, never
+/// the price, and keeps last frame's decision near the threshold: `seen` (by level index,
+/// updated in place) says what each label did last frame; one moved or dropped then comes back
+/// to its anchor only once that is clear of every placed label by [`LABEL_HYSTERESIS`] more (a
+/// new one needs only to be clear). `has_label(index)`: whether the level's label can be drawn
+/// at all (it has one, and it fits the plot's width): one that can't claims no room. A plot
+/// shorter than a label shows none. In place, no allocation.
 pub fn place_labels(
     placed: &mut [Placed],
     label_h: f32,
@@ -1016,6 +1020,7 @@ pub fn place_labels(
     if plot_h < label_h {
         return;
     }
+    // Last frame's state per placed label is read before any is updated.
     for moving in [false, true] {
         for i in 0..placed.len() {
             let p = placed[i];
@@ -1033,20 +1038,54 @@ pub fn place_labels(
                 .iter()
                 .filter_map(|q| q.label_y)
                 .any(|q| (q - y).abs() < need);
-            placed[i].label_y = (!clash).then_some(y);
-        }
-    }
-    for p in placed.iter() {
-        if let Some(s) = seen.get_mut(p.index as usize)
-            && has_label(p.index)
-        {
-            *s = if p.label_y.is_some() {
-                LabelSeen::Shown
+            let (at, home) = if clash {
+                (stack_row(placed, y, p.anchor, label_h, plot_h), false)
             } else {
-                LabelSeen::Hidden
+                (Some(y), true)
             };
+            placed[i].label_y = at;
+            if let Some(s) = seen.get_mut(p.index as usize) {
+                *s = if home {
+                    LabelSeen::Shown
+                } else {
+                    LabelSeen::Hidden
+                };
+            }
         }
     }
+}
+
+/// The nearest free row for a label anchored at `y` that clashes with labels already placed:
+/// right against one of them (a label's height `label_h` apart), at most `label_h` from `y`,
+/// inside the plot, overlapping none; a low-edge label only further down and a high-edge
+/// label only further up (`anchor`). `None`: no row is free.
+fn stack_row(placed: &[Placed], y: f32, anchor: LabelAt, label_h: f32, plot_h: f32) -> Option<f32> {
+    let half = label_h * 0.5;
+    // A hair of slack: rows exactly a label apart touch, they don't overlap.
+    let slack = label_h * 1e-4;
+    let mut best: Option<f32> = None;
+    for q in placed.iter().filter_map(|q| q.label_y) {
+        for c in [q - label_h, q + label_h] {
+            let d = c - y;
+            let way_ok = match anchor {
+                LabelAt::Own => true,
+                LabelAt::Low => d >= 0.0,
+                LabelAt::High => d <= 0.0,
+            };
+            if !way_ok || d.abs() > label_h + slack || c < half - slack || c > plot_h - half + slack
+            {
+                continue;
+            }
+            let free = placed
+                .iter()
+                .filter_map(|o| o.label_y)
+                .all(|o| (o - c).abs() >= label_h - slack);
+            if free && best.is_none_or(|b| d.abs() < (b - y).abs()) {
+                best = Some(c);
+            }
+        }
+    }
+    best
 }
 
 // ---- the labels' gutter (paint path: no allocation) ------------------------------------

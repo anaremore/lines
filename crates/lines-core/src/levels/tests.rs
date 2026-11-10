@@ -155,7 +155,8 @@ fn labels_sit_on_their_levels_and_give_way_to_each_other() {
         &shown[..3],
         &[LabelSeen::Shown, LabelSeen::Shown, LabelSeen::New]
     );
-    // Two labels within one label height: the second is dropped (its level still drawn).
+    // Two labels within one label height: the second stacks to the next row (a label's
+    // height under the first, 11 px from its own line), never over it.
     let close = LevelMap::builder("demo", ES, UtcMillis(0))
         .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
         .line("a", LevelValue::Raw(599_975.0), Some("B"), style()) // 5 px lower
@@ -166,7 +167,7 @@ fn labels_sit_on_their_levels_and_give_way_to_each_other() {
         close.levels[i as usize].label.is_some()
     });
     assert_eq!(out.len(), 2);
-    assert_eq!((out[0].label_y, out[1].label_y), (Some(200.0), None));
+    assert_eq!((out[0].label_y, out[1].label_y), (Some(200.0), Some(216.0)));
     // Near the top edge: clamped inside the plot.
     let top = LevelMap::builder("demo", ES, UtcMillis(0))
         .line("a", LevelValue::Raw(601_000.0), Some("T"), style())
@@ -522,8 +523,9 @@ fn label_text_is_name_and_price() {
 }
 
 /// Labels are placed by height alone (they are right-aligned at the plot's edge, so any two at
-/// the same height overlap whatever their length): a longer `name : price` label two pixels
-/// from another is still dropped, never drawn over it, and the level stays drawn.
+/// the same height overlap whatever their length): a longer `name : price` label five pixels
+/// from another stacks a row away, never drawn over it; with both nearby rows taken it is
+/// dropped, and the level stays drawn.
 #[test]
 fn close_long_labels_give_way() {
     let m = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
@@ -547,8 +549,28 @@ fn close_long_labels_give_way() {
     place_labels(&mut out, 17.6, 400.0, &mut [LabelSeen::New; 2], |i| {
         m.levels[i as usize].label.is_some()
     });
-    assert!(out[0].label_y.is_some());
-    assert_eq!(out[1].label_y, None, "dropped, not drawn over the first");
+    let (a, b) = (out[0].label_y.unwrap(), out[1].label_y.unwrap());
+    assert_eq!(a, 200.0);
+    assert!(
+        (a - b).abs() >= 17.6 - 1e-3,
+        "{a} {b}: not drawn over the first"
+    );
+    assert!(
+        (b - out[1].top).abs() <= 17.6,
+        "at most a row from its line"
+    );
+    // Rows above and below taken (labels a row from the first either way): dropped.
+    let m = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+        .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
+        .line("a", LevelValue::Raw(600_090.0), Some("B"), style()) // 18 px up
+        .line("a", LevelValue::Raw(599_910.0), Some("C"), style()) // 18 px down
+        .line("a", LevelValue::Raw(600_025.0), Some("D"), style()) // 5 px up
+        .build(TICK)
+        .unwrap();
+    place(&m, &vp(), None, |_| true, &mut out);
+    place_labels(&mut out, 17.6, 400.0, &mut [LabelSeen::New; 4], |_| true);
+    assert!(out[..3].iter().all(|p| p.label_y == Some(p.top)));
+    assert_eq!(out[3].label_y, None, "no free row within one: dropped");
 }
 
 /// The source's `TypeStyle::OWN` is the look before types: own color, solid, 1 px, zones at
@@ -633,7 +655,8 @@ fn close_labels_keep_one_layout() {
         place_labels(out, h, 400.0, shown, |i| {
             m.levels[i as usize].label.is_some()
         });
-        out[1].label_y.is_some()
+        // At its own line (else stacked a row away).
+        out[1].label_y == Some(out[1].top)
     };
     // Hidden (too close), then wobbling between h - margin/2 and h + margin/2: stays hidden.
     let mut shown = [LabelSeen::New; 2];
@@ -655,7 +678,7 @@ fn close_labels_keep_one_layout() {
         let sep = h + if k % 2 == 0 { margin * 0.5 } else { 0.1 };
         assert!(run(sep, &mut out, &mut shown), "shown stays shown ({sep})");
     }
-    // Overlapping for real: gives way.
+    // Overlapping for real: gives way (stacked a row away).
     assert!(!run(h - 1.0, &mut out, &mut shown));
 
     // A VWAP-relative label near a fixed one: placed after it, so the fixed label shows
@@ -893,56 +916,48 @@ fn zone_labels_sit_at_their_types_edge() {
     assert_eq!(TypeStyle::OWN.label, LabelColor::Level);
 }
 
-/// A label that clashes gives way by being dropped, never by moving to the zone's other edge:
-/// a line placed first just under a zone's low edge takes the room, and the zone's label (low
-/// edge) shows nowhere, not at its high edge, where there is room; with hysteresis it comes
-/// back at the same edge once clear.
+/// A clashing zone-edge label stacks a row further from its zone (a low-edge label further
+/// down), never to the zone's other edge where there is room, and is dropped when that row is
+/// taken too; with hysteresis it comes back to its own edge once clear.
 #[test]
-fn a_clashing_edge_label_is_dropped_never_moved() {
-    // The line at 304 px (599_480) sits where the zone's low-edge label (308) would.
-    let m = LevelMap::builder("demo", ES, UtcMillis(0))
-        .line("a", LevelValue::Raw(599_480.0), Some("A"), style())
-        .zone(
+fn a_clashing_edge_label_stacks_away_never_to_the_other_edge() {
+    let m = |lines: &[f64]| {
+        let mut b = LevelMap::builder("demo", ES, UtcMillis(0)).zone(
             "zone",
             LevelValue::Tick(Price(599_500)),
             LevelValue::Tick(Price(599_750)),
             Some("Z"),
             style(),
-        )
-        .build(TICK)
-        .unwrap();
-    let mut out = Vec::with_capacity(8);
-    let mut seen = [LabelSeen::New; 2];
-    place(&m, &vp(), None, |_| true, &mut out);
-    out[1].anchor = LabelAt::Low;
-    place_labels(&mut out, 16.0, 400.0, &mut seen, |_| true);
-    assert_eq!(out[0].label_y, Some(304.0));
-    assert_eq!(out[1].label_y, None, "dropped, not moved to the high edge");
-    assert_eq!(seen[1], LabelSeen::Hidden);
-    // The line moves away a little: still within the hysteresis band, still hidden.
-    let away = |price: f64| {
-        LevelMap::builder("demo", ES, UtcMillis(0))
-            .line("a", LevelValue::Raw(price), Some("A"), style())
-            .zone(
-                "zone",
-                LevelValue::Tick(Price(599_500)),
-                LevelValue::Tick(Price(599_750)),
-                Some("Z"),
-                style(),
-            )
-            .build(TICK)
-            .unwrap()
+        );
+        for p in lines {
+            b = b.line("a", LevelValue::Raw(*p), Some("A"), style());
+        }
+        b.build(TICK).unwrap()
     };
-    let m = away(599_400.0); // 320 px: 12 px from 308, under 16 × 1.25
-    place(&m, &vp(), None, |_| true, &mut out);
-    out[1].anchor = LabelAt::Low;
-    place_labels(&mut out, 16.0, 400.0, &mut seen, |_| true);
-    assert_eq!(out[1].label_y, None);
-    let m = away(599_300.0); // 340 px: clear by more than 20
-    place(&m, &vp(), None, |_| true, &mut out);
-    out[1].anchor = LabelAt::Low;
-    place_labels(&mut out, 16.0, 400.0, &mut seen, |_| true);
-    assert_eq!(out[1].label_y, Some(308.0), "back at its own edge");
+    let mut out = Vec::with_capacity(8);
+    let mut seen = [LabelSeen::New; 3];
+    // Lines are placed first in map order here: the zone is level 0, so place the zone last.
+    let run = |m: &LevelMap, out: &mut Vec<Placed>, seen: &mut [LabelSeen; 3]| {
+        place(m, &vp(), None, |_| true, out);
+        out.rotate_left(1);
+        out.last_mut().unwrap().anchor = LabelAt::Low;
+        place_labels(out, 16.0, 400.0, seen, |_| true);
+        out.last().unwrap().label_y
+    };
+    // The line at 304 px (599_480) sits where the zone's low-edge label (308) would: the
+    // zone's label goes a row under the line (320), not to its high edge (242).
+    let z = run(&m(&[599_480.0]), &mut out, &mut seen);
+    assert_eq!(out[0].label_y, Some(304.0));
+    assert_eq!(z, Some(320.0), "a row further down");
+    assert_eq!(seen[0], LabelSeen::Hidden);
+    // A second line under it takes that row: dropped, never moved up to its high edge.
+    let z = run(&m(&[599_480.0, 599_400.0]), &mut out, &mut seen);
+    assert_eq!(z, None, "dropped, not moved to the high edge");
+    // The line moves away a little: within the hysteresis band, still off its edge.
+    let z = run(&m(&[599_400.0]), &mut out, &mut seen); // 320 px: 12 px from 308
+    assert_ne!(z, Some(308.0));
+    let z = run(&m(&[599_300.0]), &mut out, &mut seen); // 340 px: clear by more than 20
+    assert_eq!(z, Some(308.0), "back at its own edge");
 }
 
 /// A legend's title and stats are validated with the map: a signed tone needs its sign, and

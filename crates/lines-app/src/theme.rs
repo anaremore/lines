@@ -505,18 +505,30 @@ impl Theme {
     /// A level label's text for a level drawn in `color` (opaque): that color where it is AA
     /// (4.5:1) on the label's box (`label_bg`, translucent) over everything under that box
     /// (the gutter's chart and grid, [`Theme::label_gutter_underlays`], and each of `zones`:
-    /// the source's zone fills as drawn over the chart, opaque, alone and stacked where they
-    /// overlap at the label, [`Theme::zones_over_chart`]), else the theme's text for this
-    /// label only (AA over any level color: `level_labels_meet_aa_over_any_level_color`). A
-    /// user's color, a source's and a type's recommended one alike. No allocation.
+    /// the source's zone and band fills as drawn over the chart, opaque, alone and stacked
+    /// where they overlap under the label's box, [`Theme::zones_over_chart`]) and clear of the
+    /// last-price color (a label never reads as the last price: [`Theme::near_last`]), else
+    /// the theme's text for this label only (AA over any level color:
+    /// `level_labels_meet_aa_over_any_level_color`). A user's color, a source's and a type's
+    /// recommended one alike. No allocation.
     pub fn level_label_text(&self, color: Hsla, zones: &[Hsla]) -> Hsla {
         let mut c = color;
         c.a = 1.0;
-        if self.level_label_ratio(c, zones) >= 4.5 {
+        if !self.near_last(c) && self.level_label_ratio(c, zones) >= 4.5 {
             c
         } else {
             self.text_main
         }
+    }
+
+    /// Whether `color` is close to the last price's (and the accent's) color: within the
+    /// style editor's "close to a color with a meaning" distance (CIEDE2000 under
+    /// `NEAR_MEANING`), so text in it could be read as the last price.
+    pub fn near_last(&self, color: Hsla) -> bool {
+        use lines_core::style::{NEAR_MEANING, delta_e_2000};
+        [self.last, self.accent]
+            .into_iter()
+            .any(|m| delta_e_2000(rgb_of(color), rgb_of(m)) < NEAR_MEANING)
     }
 
     /// The lowest contrast of a level label's text in `color` (opaque) on its box over what
@@ -1191,40 +1203,59 @@ mod tests {
         }
     }
 
-    /// A mid violet (#9575CD, a level source's lightened purple) reads on the dark themes'
-    /// labels, alone and over gray zone fills, so it keeps its color there (the label's box is
-    /// in the gutter, where no candle is ever under it); on the light themes it is about 3:1,
-    /// so it falls back to the theme's text, and a deeper counterpart (#5E35B1) keeps its color.
+    /// Zone labels go through the same check as line labels, against what is actually under
+    /// their text: the chip over a gray zone's fill, a band's fill, both stacked, the chart and
+    /// its grid. On the light themes (standard and colorblind) a zone's mid-gray edge color
+    /// keeps its color only where it is AA over all of them, a light gray edge (#b4b8c1)
+    /// falls back to the theme's text, and whatever is shown is AA everywhere.
     #[test]
-    fn violet_level_label_keeps_its_color_on_dark_and_falls_back_on_light() {
-        let violet = user_color(Rgb::hex(0x9575cd), 100);
-        let deep = user_color(Rgb::hex(0x5e35b1), 100);
-        for t in Theme::all() {
-            // Gray zones (a dark and a light one, at their drawn alpha) alone and stacked.
-            let (a, b) = (
-                user_color(Rgb::hex(0x5a5e68), 18),
-                user_color(Rgb::hex(0xa9adb6), 14),
-            );
+    fn zone_labels_meet_aa_on_light_over_zone_and_band_fills() {
+        let fill = user_color(Rgb::hex(0x8a8e98), 40);
+        let band = user_color(Rgb::hex(0xb4b8c1), 14);
+        let bear = user_color(Rgb::hex(0xa9adb6), 35);
+        for t in Theme::all().into_iter().filter(|t| !t.is_dark()) {
             let zones = [
-                t.zones_over_chart([a]),
-                t.zones_over_chart([b]),
-                t.zones_over_chart([a, b]),
+                t.zones_over_chart([fill]),
+                t.zones_over_chart([band]),
+                t.zones_over_chart([bear]),
+                t.zones_over_chart([band, fill]),
+                t.zones_over_chart([band, bear]),
             ];
-            for zones in [&[][..], &zones[..]] {
-                println!(
-                    "{} (zones: {}): #9575CD {:.2}, #5E35B1 {:.2}",
-                    t.name,
-                    zones.len(),
-                    t.level_label_ratio(violet, zones),
-                    t.level_label_ratio(deep, zones)
-                );
-                if t.is_dark() {
-                    assert_eq!(t.level_label_text(violet, zones), violet, "{}", t.name);
-                } else {
-                    assert_eq!(t.level_label_text(violet, zones), t.text_main, "{}", t.name);
-                    assert_eq!(t.level_label_text(deep, zones), deep, "{}", t.name);
+            for (edge, keeps) in [(0x4b4f58, true), (0x5f636d, true), (0xb4b8c1, false)] {
+                let c = user_color(Rgb::hex(edge), 100);
+                let shown = t.level_label_text(c, &zones);
+                let r = t.level_label_ratio(shown, &zones);
+                println!("{}: zone label #{edge:06x}: {r:.2}", t.name);
+                assert!(r >= 4.5, "{}: #{edge:06x}: {r:.2}", t.name);
+                assert_eq!(shown == c, keeps, "{}: #{edge:06x}", t.name);
+                if !keeps {
+                    assert_eq!(shown, t.text_main);
                 }
             }
+        }
+    }
+
+    /// A level label never reads as the last price: a color near the last price's (and the
+    /// accent's) violet, like #9575CD or the accent itself, falls back to the theme's text in
+    /// every theme even where it is AA (a violet is 4.6:1 on the dark label); a color well
+    /// clear of it (an orange, a deep teal) keeps its color where it is AA.
+    #[test]
+    fn a_label_near_the_last_price_color_falls_back() {
+        let violet = user_color(Rgb::hex(0x9575cd), 100);
+        for t in Theme::all() {
+            for c in [violet, t.last, t.accent] {
+                assert!(t.near_last(c), "{}", t.name);
+                assert_eq!(t.level_label_text(c, &[]), t.text_main, "{}", t.name);
+            }
+            let keeps = if t.is_dark() { 0xff9800 } else { 0x00666b };
+            let keeps = user_color(Rgb::hex(keeps), 100);
+            assert!(!t.near_last(keeps), "{}", t.name);
+            assert_eq!(t.level_label_text(keeps, &[]), keeps, "{}", t.name);
+            println!(
+                "{}: #9575CD {:.2} (near the last price: text)",
+                t.name,
+                t.level_label_ratio(violet, &[])
+            );
         }
     }
 
