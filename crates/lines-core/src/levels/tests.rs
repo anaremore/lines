@@ -138,20 +138,23 @@ fn placement_filters_kinds_and_skips_off_screen_levels() {
 }
 
 #[test]
-fn labels_avoid_the_last_price_and_each_other() {
+fn labels_sit_on_their_levels_and_give_way_to_each_other() {
     let m = demo();
     let mut out = Vec::with_capacity(16);
+    let mut shown = [LabelSeen::New; 8];
     place(&m, &vp(), None, |_| true, &mut out);
-    // No last price: labels on their levels (the unlabelled raw line gets none).
-    place_labels(&mut out, &m, 16.0, 400.0, None);
+    // Labels on their levels (the unlabelled raw line gets none).
+    place_labels(&mut out, 16.0, 400.0, &mut shown, |i| {
+        m.levels[i as usize].label.is_some()
+    });
     assert_eq!(
         out.iter().map(|p| p.label_y).collect::<Vec<_>>(),
         [Some(200.0), Some(250.0), None]
     );
-    // Last price at 205 px: the pivot label (200) would cover it; it moves above, to 189.
-    place_labels(&mut out, &m, 16.0, 400.0, Some(205.0));
-    assert_eq!(out[0].label_y, Some(189.0));
-    assert_eq!(out[1].label_y, Some(250.0));
+    assert_eq!(
+        &shown[..3],
+        &[LabelSeen::Shown, LabelSeen::Shown, LabelSeen::New]
+    );
     // Two labels within one label height: the second is dropped (its level still drawn).
     let close = LevelMap::builder("demo", ES, UtcMillis(0))
         .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
@@ -159,7 +162,9 @@ fn labels_avoid_the_last_price_and_each_other() {
         .build(TICK)
         .unwrap();
     place(&close, &vp(), None, |_| true, &mut out);
-    place_labels(&mut out, &close, 16.0, 400.0, None);
+    place_labels(&mut out, 16.0, 400.0, &mut [LabelSeen::New; 2], |i| {
+        close.levels[i as usize].label.is_some()
+    });
     assert_eq!(out.len(), 2);
     assert_eq!((out[0].label_y, out[1].label_y), (Some(200.0), None));
     // Near the top edge: clamped inside the plot.
@@ -168,7 +173,9 @@ fn labels_avoid_the_last_price_and_each_other() {
         .build(TICK)
         .unwrap();
     place(&top, &vp(), None, |_| true, &mut out);
-    place_labels(&mut out, &top, 16.0, 400.0, None);
+    place_labels(&mut out, 16.0, 400.0, &mut [LabelSeen::New; 1], |i| {
+        top.levels[i as usize].label.is_some()
+    });
     assert_eq!(out[0].label_y, Some(8.0));
 }
 
@@ -448,4 +455,398 @@ fn malformed_series_are_refused() {
         ],
     );
     assert!(map(vec![overlapping]).is_err());
+}
+
+fn es_format() -> PriceFormat {
+    PriceFormat::new(
+        crate::price::PriceScale::decimal(2),
+        crate::price::DisplayStyle::Decimal { digits: 2 },
+        TICK,
+    )
+}
+
+/// A label in name-and-price mode reads `name : price` in the product's format: a line's
+/// price, a raw value at the nearest price unit (not rounded to the tick), a zone's upper edge;
+/// a VWAP-relative level keeps its name (its price moves); a level without a label has none.
+#[test]
+fn label_text_is_name_and_price() {
+    let f = es_format();
+    let m = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+        .line(
+            "demand",
+            LevelValue::Tick(Price(755_625)),
+            Some("Demand zone"),
+            style(),
+        )
+        .line("dd", LevelValue::Raw(748_207.4), Some("DD"), style())
+        .zone(
+            "zone",
+            LevelValue::Tick(Price(599_500)),
+            LevelValue::Tick(Price(599_750)),
+            Some("Z1"),
+            style(),
+        )
+        .line("vw", LevelValue::VwapOffset(750.0), Some("+1 RI"), style())
+        .line("nolabel", LevelValue::Tick(Price(600_000)), None, style())
+        .build(TICK)
+        .unwrap();
+    let texts: Vec<Option<String>> = m
+        .levels
+        .iter()
+        .map(|l| label_text(l, LabelMode::NamePrice, &f))
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            Some("Demand zone : 7556.25".into()),
+            Some("DD : 7482.07".into()),
+            Some("Z1 : 5997.50".into()),
+            Some("+1 RI".into()),
+            None,
+        ]
+    );
+    assert_eq!(
+        label_text(&m.levels[0], LabelMode::Name, &f).as_deref(),
+        Some("Demand zone")
+    );
+    for mode in [LabelMode::Name, LabelMode::NamePrice] {
+        assert_eq!(LabelMode::from_key(mode.key()), Some(mode));
+    }
+    assert_eq!(LabelMode::from_key("price-only"), None);
+    assert_eq!(LabelMode::default(), LabelMode::Name);
+}
+
+/// Labels are placed by height alone (they are right-aligned at the plot's edge, so any two at
+/// the same height overlap whatever their length): a longer `name : price` label two pixels
+/// from another is still dropped, never drawn over it, and the level stays drawn.
+#[test]
+fn close_long_labels_give_way() {
+    let m = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+        .line(
+            "open",
+            LevelValue::Tick(Price(600_000)),
+            Some("Open : 6000.00"),
+            style(),
+        )
+        .line(
+            "mid",
+            LevelValue::Tick(Price(600_025)),
+            Some("Mid line : 6000.25"),
+            style(),
+        )
+        .build(TICK)
+        .unwrap();
+    let mut out = Vec::with_capacity(8);
+    place(&m, &vp(), None, |_| true, &mut out);
+    assert_eq!(out.len(), 2);
+    place_labels(&mut out, 17.6, 400.0, &mut [LabelSeen::New; 2], |i| {
+        m.levels[i as usize].label.is_some()
+    });
+    assert!(out[0].label_y.is_some());
+    assert_eq!(out[1].label_y, None, "dropped, not drawn over the first");
+}
+
+/// The source's `TypeStyle::OWN` is the look before types: own color, solid, 1 px, zones at
+/// the 25 % that is 10 %.
+#[test]
+fn own_type_style_is_todays_look() {
+    let s = TypeStyle::OWN;
+    assert!(s.shown);
+    assert_eq!(s.line.color, Color::Own);
+    assert_eq!(
+        (s.line.line, s.line.width, s.line.opacity),
+        (LineType::Solid, 1, 100)
+    );
+    assert_eq!((s.fill.color, s.fill.opacity), (Color::Own, 25));
+    let z = LevelType::zone("demand", "Demand zone", "Zones", s);
+    assert!(z.zone && !LevelType::line("hp", "HP", "Lines", s).zone);
+}
+
+/// Labels never move for the price: placement takes no price at all, so a frame's layout is
+/// only the levels' and the viewport's. A determinism check: with the levels and the viewport
+/// fixed, 400 frames in a row (the frames a last price sweeping the plot would draw) leave
+/// every label where it was. The layer's own test drives a real moving price.
+#[test]
+fn the_label_layout_is_deterministic_frame_to_frame() {
+    let mut b = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"));
+    // Labeled levels a few ticks apart, some closer than a label's height.
+    for (i, p) in [
+        600_000, 600_025, 600_100, 600_150, 600_175, 600_400, 599_800,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        b = b.line(
+            "k",
+            LevelValue::Tick(Price(p)),
+            Some(&format!("L{i}")),
+            style(),
+        );
+    }
+    let m = b.build(TICK).unwrap();
+    let mut out = Vec::with_capacity(16);
+    let mut shown = vec![LabelSeen::New; m.levels.len()];
+    place(&m, &vp(), None, |_| true, &mut out);
+    place_labels(&mut out, 17.6, 400.0, &mut shown, |i| {
+        m.levels[i as usize].label.is_some()
+    });
+    let first: Vec<Option<f32>> = out.iter().map(|p| p.label_y).collect();
+    assert!(first.iter().filter(|y| y.is_some()).count() >= 4);
+    // Frame after frame (with its hysteresis state carried): the same layout.
+    for step in 0..400 {
+        place(&m, &vp(), None, |_| true, &mut out);
+        place_labels(&mut out, 17.6, 400.0, &mut shown, |i| {
+            m.levels[i as usize].label.is_some()
+        });
+        let now: Vec<Option<f32>> = out.iter().map(|p| p.label_y).collect();
+        assert_eq!(now, first, "frame {step}");
+    }
+}
+
+/// Hysteresis: two labeled levels whose separation wobbles around the clash distance by less
+/// than the margin keep one layout (whichever they had), and a moving band's label never
+/// changes which fixed labels show.
+#[test]
+fn close_labels_keep_one_layout() {
+    let h = 16.0;
+    let margin = h * LABEL_HYSTERESIS;
+    // A pair shown apart, then pulled to just inside and outside the clash distance, less
+    // than the margin each way: shown apart stays apart until it really overlaps.
+    let pair = |sep_px: f32| {
+        // vp(): 5 units/px; a level 200 px down is 600_000.
+        let lo = 600_000.0 - f64::from(sep_px) * 5.0;
+        LevelMap::builder("demo", ES, UtcMillis(0))
+            .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
+            .line("a", LevelValue::Raw(lo), Some("B"), style())
+            .build(TICK)
+            .unwrap()
+    };
+    let mut out = Vec::with_capacity(4);
+    let run = |sep: f32, out: &mut Vec<Placed>, shown: &mut [LabelSeen; 2]| {
+        let m = pair(sep);
+        place(&m, &vp(), None, |_| true, out);
+        place_labels(out, h, 400.0, shown, |i| {
+            m.levels[i as usize].label.is_some()
+        });
+        out[1].label_y.is_some()
+    };
+    // Hidden (too close), then wobbling between h - margin/2 and h + margin/2: stays hidden.
+    let mut shown = [LabelSeen::New; 2];
+    assert!(!run(h - 4.0, &mut out, &mut shown));
+    for k in 0..20 {
+        let sep = h + if k % 2 == 0 {
+            margin * 0.5
+        } else {
+            -margin * 0.5
+        };
+        assert!(
+            !run(sep, &mut out, &mut shown),
+            "hidden stays hidden ({sep})"
+        );
+    }
+    // Clear by more than the margin: shows; then wobbling above the clash distance: stays.
+    assert!(run(h + margin + 1.0, &mut out, &mut shown));
+    for k in 0..20 {
+        let sep = h + if k % 2 == 0 { margin * 0.5 } else { 0.1 };
+        assert!(run(sep, &mut out, &mut shown), "shown stays shown ({sep})");
+    }
+    // Overlapping for real: gives way.
+    assert!(!run(h - 1.0, &mut out, &mut shown));
+
+    // A VWAP-relative label near a fixed one: placed after it, so the fixed label shows
+    // whatever the band does.
+    let m = LevelMap::builder("demo", ES, UtcMillis(0))
+        .line("vw", LevelValue::VwapOffset(0.0), Some("+1 RI"), style())
+        .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
+        .build(TICK)
+        .unwrap();
+    let mut shown = [LabelSeen::New; 2];
+    for vwap in [599_990.0, 600_000.0, 600_010.0, 600_500.0, 600_005.0] {
+        place(&m, &vp(), Some(vwap), |_| true, &mut out);
+        place_labels(&mut out, h, 400.0, &mut shown, |i| {
+            m.levels[i as usize].label.is_some()
+        });
+        let fixed = out.iter().find(|p| p.index == 1).unwrap();
+        assert_eq!(fixed.label_y, Some(200.0), "VWAP at {vwap}");
+    }
+}
+
+/// A label that can't be drawn (too wide for the plot) claims no room, so a neighbor shows;
+/// a plot shorter than a label shows none.
+#[test]
+fn an_undrawable_label_claims_no_room() {
+    let m = LevelMap::builder("demo", ES, UtcMillis(0))
+        .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
+        .line("a", LevelValue::Raw(599_975.0), Some("B"), style())
+        .build(TICK)
+        .unwrap();
+    let mut out = Vec::with_capacity(4);
+    place(&m, &vp(), None, |_| true, &mut out);
+    let mut seen = [LabelSeen::New; 2];
+    place_labels(&mut out, 16.0, 400.0, &mut seen, |i| i != 0);
+    assert_eq!((out[0].label_y, out[1].label_y), (None, Some(205.0)));
+    assert_eq!(seen, [LabelSeen::New, LabelSeen::Shown]);
+    place_labels(&mut out, 16.0, 12.0, &mut seen, |_| true);
+    assert!(out.iter().all(|p| p.label_y.is_none()));
+}
+
+/// The gutter grows at once to whole steps, shrinks only by two steps, goes with the labels.
+#[test]
+fn the_gutter_steps_without_flicker() {
+    assert_eq!(step_gutter(0.0, 0.0), 0.0);
+    assert_eq!(step_gutter(0.0, 61.0), 64.0);
+    // Labels a little narrower or wider within a step: unchanged.
+    for t in [57.0, 60.0, 64.0, 50.0] {
+        assert_eq!(step_gutter(64.0, t), 64.0, "{t}");
+    }
+    assert_eq!(step_gutter(64.0, 65.0), 72.0, "wider: at once");
+    assert_eq!(step_gutter(64.0, 48.0), 48.0, "two steps narrower");
+    assert_eq!(step_gutter(64.0, 0.0), 0.0, "no labels: none");
+}
+
+/// The gutter takes from the bars only what the empty space right of the newest bar doesn't
+/// cover; the newest bar keeps its place when the margin is enough, and otherwise ends at the
+/// gutter's edge (never under it); scrolled into history, the whole gutter.
+#[test]
+fn the_gutter_reuses_the_right_margin() {
+    let mut v = Viewport::default();
+    v.set_size(800.0, 400.0);
+    v.bar_px = 10.0;
+    let len = 100;
+    // 6 bars of margin: the newest bar's right edge 55 px from the plot's edge.
+    v.right_index = (len - 1) as f64 + 6.0;
+    let newest = |v: &Viewport| v.index_to_x((len - 1) as f64) + 0.5 * v.bar_px;
+    let before = newest(&v);
+    assert!((v.width - before - 55.0).abs() < 1e-9);
+    // A 40 px gutter fits in it: nothing moves.
+    v.right_inset = gutter_inset(40.0, &v, len);
+    assert_eq!(v.right_inset, 0.0);
+    assert_eq!(newest(&v), before);
+    // A 96 px gutter: 41 px taken; the newest bar ends exactly at the gutter's edge.
+    v.right_inset = 0.0;
+    v.right_inset = gutter_inset(96.0, &v, len);
+    assert!((v.right_inset - 41.0).abs() < 1e-9);
+    assert!((newest(&v) - (v.width - 96.0)).abs() < 1e-9);
+    // And it goes again: the newest bar back where it was.
+    v.right_inset = gutter_inset(0.0, &v, len);
+    assert_eq!(newest(&v), before);
+    // Scrolled back into history: the whole gutter, so no bar is under it.
+    v.right_inset = 0.0;
+    v.right_index = 50.0;
+    v.right_inset = gutter_inset(96.0, &v, len);
+    assert_eq!(v.right_inset, 96.0);
+    // Every bar drawn ends left of the gutter (whole bars only), at any fraction of a bar.
+    for (ri, bar_px) in [(50.0, 10.0), (50.6, 20.0), (50.5, 20.0), (50.4, 120.0)] {
+        v.right_index = ri;
+        v.bar_px = bar_px;
+        let r = v.visible_range(len);
+        assert!(!r.is_empty());
+        let last = (r.end - 1) as f64;
+        assert!(
+            v.index_to_x(last) + 0.5 * v.bar_px <= v.edge() + 1e-9,
+            "bar {last} past the gutter at right_index {ri}, {bar_px} px"
+        );
+    }
+}
+
+/// The gutter and the price fit don't feed each other: the gutter comes from the level set
+/// (never the view), so with auto-scale the prices fit with it applied and the gutter, the
+/// view and the range hold still frame after frame.
+#[test]
+fn the_gutter_holds_still_with_auto_scale() {
+    use crate::bars::Bar;
+    let len = 120usize;
+    // A flat series at 6000, but bars at the left of the view reach 6010 (the gutter moves
+    // them off the plot's left edge).
+    let bars: Vec<Bar> = (0..len)
+        .map(|i| {
+            let hi = if (75..80).contains(&i) {
+                601_000
+            } else {
+                600_000
+            };
+            Bar {
+                time: UtcMillis(i as i64 * 60_000),
+                open: Price(600_000),
+                high: Price(hi),
+                low: Price(599_900),
+                close: Price(600_000),
+                volume: crate::qty::Qty(1),
+            }
+        })
+        .collect();
+    let mut v = Viewport::default();
+    v.set_size(400.0, 300.0);
+    v.bar_px = 8.0;
+    v.live_margin = 5.0;
+    let mut g = 0.0f32;
+    let mut seen = Vec::new();
+    for _ in 0..6 {
+        // The chart's order: the gutter from the whole level set (a constant need: it never
+        // reads the view), then the view settles and the prices fit with it applied.
+        g = settle_gutter(&mut v, len, g, 96.0, 130.0);
+        v.on_data(&bars, TICK);
+        v.right_inset = gutter_inset(f64::from(g), &v, len);
+        seen.push((g, v.right_inset, v.price_lo, v.price_hi, v.right_index));
+    }
+    assert_eq!(seen[0].0, 96.0);
+    assert!(seen.windows(2).all(|w| w[0] == w[1]), "{seen:?}");
+    // The fit is of the bars drawn (left of the gutter): those pushed out don't count.
+    assert!(v.newest_visible(len));
+    // The cap clamps before the inset: the bars end exactly at the gutter.
+    let mut c = v;
+    let g = settle_gutter(&mut c, len, 0.0, 129.0, 130.0);
+    assert_eq!(g, 130.0, "the step (136) clamped to the cap");
+    let newest_end = c.index_to_x((len - 1) as f64) + 0.5 * c.bar_px;
+    assert!(
+        (newest_end - (c.width - 130.0)).abs() < 1e-9,
+        "{newest_end}"
+    );
+}
+
+/// A name too long for the room is cut with "…" before the price; the price is never cut.
+#[test]
+fn long_names_are_cut_before_the_price() {
+    let mono = |t: &str| t.chars().count() as f32 * 6.0;
+    let cut = cut_label("Previous session close", Some("7517.25"), 120.0, mono).unwrap();
+    assert!(cut.ends_with("… : 7517.25"), "{cut}");
+    assert!(mono(&cut) <= 120.0);
+    assert!(cut.starts_with("Prev"));
+    assert_eq!(
+        cut_label("Upper band", None, 36.0, mono).as_deref(),
+        Some("Upper…")
+    );
+    // Not even a letter with the price: none (the price is never cut).
+    assert_eq!(cut_label("Mid line", Some("7517.25"), 40.0, mono), None);
+}
+
+/// The gutter's plan: 130 px on a wide plot; on a narrow one a quarter of it or the shortest
+/// cut, never over 40 %; always whole steps; no labels when the shortest cut doesn't fit or
+/// nothing would show.
+#[test]
+fn the_gutter_plan_by_width() {
+    // Wide: the 130 px cap (stepped down to 128).
+    let p = gutter_plan(150.0, 80.0, 1600.0, 130.0);
+    assert_eq!((p.cap, p.fits), (128.0, true));
+    // Narrow: the shortest cut, stepped up (a quarter would be 88).
+    let p = gutter_plan(150.0, 100.0, 360.0, 130.0);
+    assert_eq!((p.cap, p.fits), (104.0, true));
+    // Just over a step: still fits (the cap never steps down below the cut).
+    let p = gutter_plan(150.0, 89.5, 350.0, 130.0);
+    assert_eq!((p.cap, p.fits), (96.0, true));
+    let p = gutter_plan(150.0, 96.0, 360.0, 130.0);
+    assert_eq!((p.cap, p.fits), (96.0, true));
+    // A quarter when the cut is smaller.
+    let p = gutter_plan(150.0, 60.0, 400.0, 130.0);
+    assert_eq!((p.cap, p.fits), (96.0, true));
+    // Too narrow: 40 % of 200 is 80, the shortest cut needs 90.
+    let p = gutter_plan(150.0, 90.0, 200.0, 130.0);
+    assert!(!p.fits && p.cap <= 80.0);
+    // Nothing to show.
+    assert!(!gutter_plan(0.0, 0.0, 1600.0, 130.0).fits);
+    // Always whole steps, so a pixel of resize doesn't move the bars.
+    for w in 100..900 {
+        let c = gutter_plan(150.0, 70.0, w as f32, 130.0).cap;
+        assert_eq!(c % GUTTER_STEP, 0.0, "{w}: {c}");
+    }
 }

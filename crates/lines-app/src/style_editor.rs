@@ -77,6 +77,9 @@ pub enum OwnToken {
     /// The colors a level source gives its levels (decision 0022); the first one, for the
     /// swatch.
     Source(Option<Rgb>),
+    /// This color (a level type's recommended one: a theme token or a fixed color): on the
+    /// dark themes, then on the light ones.
+    Is(Color, Color),
 }
 
 /// A study part's own color: what [`Color::Own`] is called and shows.
@@ -100,6 +103,11 @@ pub struct Part {
     pub shown: Option<bool>,
     /// Studies: one line under the part's colors saying how they apply (`None`: nothing).
     pub note: Option<&'static str>,
+    /// The heading its tab is listed under (a level source's types: "Zones", "Lines"); `None`
+    /// for every part: the tabs are one plain row.
+    pub group: Option<&'static str>,
+    /// A level type with zones: the fill between its edges, and the fill's own color.
+    pub fill: Option<(FillStyle, Own)>,
 }
 
 impl Part {
@@ -112,6 +120,8 @@ impl Part {
             own: None,
             shown: None,
             note: None,
+            group: None,
+            fill: None,
         }
     }
 }
@@ -122,6 +132,8 @@ pub struct Options {
     pub extend_left: Option<bool>,
     pub extend_right: Option<bool>,
     pub axis_tag: Option<bool>,
+    /// A level source's labels carry the price (`name : price`).
+    pub label_price: Option<bool>,
 }
 
 /// One control in a row.
@@ -141,6 +153,12 @@ pub enum Control {
     AxisTag,
     /// An optional part drawn (a checkbox).
     Shown,
+    /// A level type's zone fill: its color, typing a custom one, its opacity.
+    FillColor(Color),
+    FillCustom,
+    FillOpacity(u8),
+    /// A level source's labels with the price (a checkbox).
+    LabelPrice,
     SaveDefault,
 }
 
@@ -181,6 +199,8 @@ pub struct StyleEditor {
     pub col: usize,
     /// A custom color being typed (hex digits so far).
     pub hex: Option<String>,
+    /// The hex entry is for the tab's zone fill (not its color).
+    pub hex_fill: bool,
     /// The current tab's style was just saved as the default (until the next change).
     pub saved: bool,
     /// A study's editor: theme colors are the study colors, every part offers the line
@@ -212,6 +232,7 @@ pub fn is_toggle(c: Control) -> bool {
             | Control::ExtendRight
             | Control::AxisTag
             | Control::Shown
+            | Control::LabelPrice
     )
 }
 
@@ -322,6 +343,7 @@ impl StyleEditor {
             row: 0,
             col: 0,
             hex: None,
+            hex_fill: false,
             saved: false,
             study: false,
         }
@@ -344,6 +366,14 @@ impl StyleEditor {
             .get(self.tab)
             .and_then(|p| p.own)
             .map_or("Default", |o| o.name)
+    }
+
+    /// The current tab's zone fill's own color's name.
+    pub fn fill_own_name(&self) -> &'static str {
+        self.parts
+            .get(self.tab)
+            .and_then(|p| p.fill)
+            .map_or("Default", |(_, o)| o.name)
     }
 
     // ---- drawings -----------------------------------------------------------------------
@@ -370,6 +400,7 @@ impl StyleEditor {
             extend_left: l.then_some(s.extend_left),
             extend_right: r.then_some(s.extend_right),
             axis_tag: tool.has_axis_tag().then_some(s.axis_tag),
+            label_price: None,
         };
         e.default_label = Some(format!("Save as default for {plural}"));
         e.focus_current();
@@ -427,12 +458,24 @@ impl StyleEditor {
     }
 
     fn color_row(&self, current: Color, text: bool, own: bool) -> Row {
+        self.colors(current, text, own, false)
+    }
+
+    /// A color row: the tab's color, or (`fill`) its zone fill's ("Fill").
+    fn colors(&self, current: Color, text: bool, own: bool, fill: bool) -> Row {
+        let chip = |c: Color| {
+            if fill {
+                Control::FillColor(c)
+            } else {
+                Control::Color(c)
+            }
+        };
         let mut controls = Vec::with_capacity(12);
         if own {
-            controls.push((Control::Color(Color::Own), current == Color::Own));
+            controls.push((chip(Color::Own), current == Color::Own));
         }
         if text {
-            controls.push((Control::Color(Color::Text), current == Color::Text));
+            controls.push((chip(Color::Text), current == Color::Text));
         }
         for i in 0..self.palette {
             let c = Color::Palette(i);
@@ -441,19 +484,25 @@ impl StyleEditor {
             if text && i == 0 && current != c {
                 continue;
             }
-            controls.push((Control::Color(c), current == c));
+            controls.push((chip(c), current == c));
         }
         for (hex, _) in CUSTOM_SWATCHES {
             let c = Color::Custom(Rgb::hex(hex));
-            controls.push((Control::Color(c), current == c));
+            controls.push((chip(c), current == c));
         }
         // A custom color not among the swatches shows as its own chip.
         if matches!(current, Color::Custom(_)) && !controls.iter().any(|(_, on)| *on) {
-            controls.push((Control::Color(current), true));
+            controls.push((chip(current), true));
         }
-        controls.push((Control::Custom, self.hex.is_some()));
+        let typing = self.hex.is_some() && self.hex_fill == fill;
+        let custom = if fill {
+            Control::FillCustom
+        } else {
+            Control::Custom
+        };
+        controls.push((custom, typing));
         Row {
-            label: "Color",
+            label: if fill { "Fill" } else { "Color" },
             controls,
         }
     }
@@ -529,6 +578,16 @@ impl StyleEditor {
                 });
             }
         }
+        if let Some((f, _)) = part.fill {
+            rows.push(self.colors(f.color, false, true, true));
+            rows.push(Row {
+                label: "Fill opacity",
+                controls: LINE_OPACITIES
+                    .iter()
+                    .map(|&o| (Control::FillOpacity(o), o == f.opacity))
+                    .collect(),
+            });
+        }
         if self.tab == 0 {
             let o = self.options;
             let mut extend = Vec::with_capacity(2);
@@ -548,6 +607,12 @@ impl StyleEditor {
                 rows.push(Row {
                     label: "Price tag",
                     controls: vec![(Control::AxisTag, on)],
+                });
+            }
+            if let Some(on) = o.label_price {
+                rows.push(Row {
+                    label: "Labels",
+                    controls: vec![(Control::LabelPrice, on)],
                 });
             }
         }
@@ -580,6 +645,7 @@ impl StyleEditor {
         // A click anywhere ends the hex entry (keys go back to the controls); "Custom…"
         // opens it again.
         self.hex = None;
+        self.hex_fill = false;
         self.row = row;
         self.col = col;
         let rows = self.rows();
@@ -611,7 +677,12 @@ impl StyleEditor {
                 "enter" => {
                     if let Some(rgb) = Rgb::parse(hex) {
                         self.hex = None;
-                        return self.set_color(Color::Custom(rgb));
+                        let c = Color::Custom(rgb);
+                        return if std::mem::take(&mut self.hex_fill) {
+                            self.set_fill_color(c)
+                        } else {
+                            self.set_color(c)
+                        };
                     }
                 }
                 _ => {
@@ -660,7 +731,37 @@ impl StyleEditor {
         let tab = self.tab.min(self.parts.len().saturating_sub(1));
         let changed = match c {
             Control::Color(c) => return self.set_color(c),
+            Control::FillColor(c) => return self.set_fill_color(c),
+            Control::FillCustom => {
+                self.hex_fill = true;
+                self.hex = Some(match self.parts.get(tab).and_then(|p| p.fill) {
+                    Some((
+                        FillStyle {
+                            color: Color::Custom(rgb),
+                            ..
+                        },
+                        _,
+                    )) => {
+                        let mut s = String::new();
+                        let _ = rgb.write_hex(&mut s);
+                        s.trim_start_matches('#').to_owned()
+                    }
+                    _ => String::new(),
+                });
+                return Outcome::Nothing;
+            }
+            Control::FillOpacity(o) => match self.parts.get_mut(tab) {
+                Some(Part {
+                    fill: Some((f, _)), ..
+                }) if f.opacity != o => {
+                    f.opacity = o;
+                    true
+                }
+                _ => false,
+            },
+            Control::LabelPrice => flip(&mut self.options.label_price),
             Control::Custom => {
+                self.hex_fill = false;
                 self.hex = Some(match self.parts.get(tab).map(|p| p.style.color()) {
                     Some(Color::Custom(rgb)) => {
                         let mut s = String::new();
@@ -737,6 +838,21 @@ impl StyleEditor {
         }
         self.saved = false;
         Outcome::Changed
+    }
+
+    /// Set the current tab's zone fill color.
+    fn set_fill_color(&mut self, c: Color) -> Outcome {
+        let tab = self.tab.min(self.parts.len().saturating_sub(1));
+        match self.parts.get_mut(tab) {
+            Some(Part {
+                fill: Some((f, _)), ..
+            }) if f.color != c => {
+                f.color = c;
+                self.saved = false;
+                Outcome::Changed
+            }
+            _ => Outcome::Nothing,
+        }
     }
 
     // ---- readability guard ----------------------------------------------------------------
@@ -888,8 +1004,10 @@ pub fn color_name(c: Color, names: &[&'static str]) -> String {
 /// [`color_name`]).
 pub fn control_label(c: Control, names: &[&'static str]) -> String {
     match c {
-        Control::Color(c) => color_name(c, names),
-        Control::Custom => "Custom…".to_owned(),
+        Control::Color(c) | Control::FillColor(c) => color_name(c, names),
+        Control::Custom | Control::FillCustom => "Custom…".to_owned(),
+        Control::FillOpacity(o) => format!("{o}%"),
+        Control::LabelPrice => "With the price".to_owned(),
         Control::LineType(t) => t.label().to_owned(),
         Control::Width(w) => format!("{w} px"),
         Control::Opacity(o) => format!("{o}%"),

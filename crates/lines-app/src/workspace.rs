@@ -638,7 +638,12 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
             PaneHandle::Chart(cx.new(|cx| {
                 let mut v = ChartView::new(feed, theme, frozen, fixture, cx);
                 match &doc.chart {
-                    Some(s) => v.restore(s),
+                    Some(s) => {
+                        v.restore(s);
+                        // Its own level styles from before they were app-wide: now, so a
+                        // chart in a background tab loses nothing before it is shown.
+                        v.promote_levels(cx);
+                    }
                     // A new chart: the studies saved as the default for new charts.
                     None => v.apply_new_chart_defaults(cx),
                 }

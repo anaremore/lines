@@ -448,7 +448,7 @@ fn column_layout_and_resizing_do_not_allocate() {
 #[test]
 fn level_placement_does_not_allocate() {
     use lines_core::ProductId;
-    use lines_core::levels::{LevelMap, LevelStyle, LevelValue, place, place_labels};
+    use lines_core::levels::{LabelSeen, LevelMap, LevelStyle, LevelValue, place, place_labels};
 
     let mut b = LevelMap::builder("demo", ProductId(1), UtcMillis(0));
     for k in 0..200i64 {
@@ -476,6 +476,7 @@ fn level_placement_does_not_allocate() {
     (vp.price_lo, vp.price_hi) = (596_000.0, 604_000.0);
     let mut out = Vec::with_capacity(1024);
     place(&map, &vp, Some(600_000.0), |_| true, &mut out); // warm
+    let mut shown = vec![LabelSeen::New; map.levels.len()];
     let n = allocs_during(|| {
         for i in 0..50 {
             vp.price_hi = 604_000.0 + i as f64 * 25.0;
@@ -486,10 +487,21 @@ fn level_placement_does_not_allocate() {
                 |k| k != 1 || i % 2 == 0,
                 &mut out,
             );
-            place_labels(&mut out, &map, 17.6, 700.0, Some(350.0));
+            place_labels(&mut out, 17.6, 700.0, &mut shown, |i| {
+                map.levels[i as usize].label.is_some()
+            });
         }
     });
     assert_eq!(n, 0, "level placement allocated {n} times");
+    // The labels' gutter, every frame: its step and its inset.
+    let mut g = 0.0f32;
+    let n = allocs_during(|| {
+        for i in 0..50 {
+            g = lines_core::levels::step_gutter(g, 40.0 + (i % 7) as f32 * 9.0);
+            vp.right_inset = lines_core::levels::gutter_inset(f64::from(g), &vp, 200);
+        }
+    });
+    assert_eq!(n, 0, "the labels' gutter allocated {n} times");
     assert!(!out.is_empty());
 }
 

@@ -466,6 +466,13 @@ pub fn blend(top: Rgb, a: f32, bottom: Rgb) -> Rgb {
     }
 }
 
+/// Whether bar `i`'s footprint column lies wholly on the plot, left of the time axis's end
+/// (`Viewport::edge`: the level labels' gutter is right of it).
+pub(crate) fn whole_column(vp: &Viewport, i: usize, scale: f32) -> bool {
+    let c = Column::of(vp, i, scale);
+    c.strip_x >= 0.0 && f64::from(c.cell_left + c.cell_w) <= vp.edge()
+}
+
 /// The style editor's warning on the footprint's Cells tab when the color and opacity picked
 /// are held back in the chart's `mode` (off: in any mode, each named) in some theme or palette.
 /// Holds unstyled cells already have (sell × buy, the cells' own color) aren't warned about;
@@ -783,10 +790,7 @@ impl ChartLayer for FootprintLayer {
         self.qty = data.product.qty;
         let scale = self.scale;
         // Only bars whose whole column is on the plot: one cut by an edge is a candle.
-        let whole = |i: usize| {
-            let c = Column::of(vp, i, scale);
-            c.strip_x >= 0.0 && f64::from(c.cell_left + c.cell_w) <= vp.width
-        };
+        let whole = |i: usize| whole_column(vp, i, scale);
         let (mut a, mut b) = (range.start, range.end);
         while a < b && !whole(a) {
             a += 1;
@@ -1188,6 +1192,29 @@ mod tests {
         vp.price_hi = 600_200.0;
         vp.auto_price = false;
         vp
+    }
+
+    /// A column cut by the time axis's end (the level labels' gutter right of it) isn't
+    /// whole: it is drawn as a candle, never as cells under the labels.
+    #[test]
+    fn a_column_past_the_gutter_is_not_whole() {
+        let mut vp = Viewport::default();
+        vp.set_size(800.0, 400.0);
+        vp.bar_px = 120.0;
+        vp.right_index = 20.4;
+        vp.right_inset = 96.0;
+        // Bar 20 ends past the gutter's edge but inside the plot: not whole (judged by the
+        // edge, not the plot's width).
+        let c = Column::of(&vp, 20, 1.0);
+        let right = f64::from(c.cell_left + c.cell_w);
+        assert!(right > vp.edge() && right <= vp.width, "{right}");
+        assert!(!whole_column(&vp, 20, 1.0));
+        for i in 0..=20 {
+            if whole_column(&vp, i, 1.0) {
+                let c = Column::of(&vp, i, 1.0);
+                assert!(f64::from(c.cell_left + c.cell_w) <= vp.edge());
+            }
+        }
     }
 
     #[test]

@@ -7,6 +7,8 @@ fn sources() -> Vec<SourceInfo> {
         label: "Demo levels".into(),
         kinds: vec!["pivot".into(), "zone".into()],
         series: Vec::new(),
+        parents: Vec::new(),
+        styled_off: Vec::new(),
     }]
 }
 
@@ -222,6 +224,8 @@ fn a_sources_series_studies_are_offered_added_and_removed() {
             ("osc".into(), "Demo oscillator".into()),
             ("swing".into(), "Demo swing".into()),
         ],
+        parents: Vec::new(),
+        styled_off: Vec::new(),
     }];
     let mut set = StudySet::default();
     let l = labels(&StudyMenu::default().items(&input(&set, &src, &[])));
@@ -643,4 +647,67 @@ fn every_study_editor_offers_its_styles() {
         let cmd = m.key(&items, "enter", None).unwrap();
         assert_eq!(m.local(cmd), Some(MenuCmd::Style(r.clone())));
     }
+}
+
+/// The Kinds rows show a kind its parent hid as hidden, and clicking it shows that kind alone.
+#[test]
+fn kinds_hidden_through_their_parent() {
+    let src = vec![SourceInfo {
+        id: "src".into(),
+        label: "Src".into(),
+        kinds: vec!["open".into(), "mid".into(), "pivot".into()],
+        parents: vec![Some("session"), Some("session"), None],
+        styled_off: Vec::new(),
+        series: Vec::new(),
+    }];
+    let mut set = StudySet::default();
+    set.levels.hidden_kinds = vec!["src/session".into()];
+    let m = StudyMenu {
+        editing: Some(StudyRef::Levels("src".into())),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let row = |name: &str| {
+        items
+            .iter()
+            .find_map(|it| match it {
+                Item::Control { label, on, cmd, .. } if label == name => Some((*on, cmd.clone())),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert!(!row("open").0 && !row("mid").0 && row("pivot").0);
+    let MenuCmd::Set(a) = row("mid").1 else {
+        panic!("not a change");
+    };
+    set.apply(&a);
+    assert!(set.levels.kind_shown_under("src", "mid", Some("session")));
+    assert!(!set.levels.kind_shown_under("src", "open", Some("session")));
+}
+
+/// A kind whose type is turned off in the style editor reads unchecked, and says where.
+#[test]
+fn a_type_off_in_style_reads_unchecked() {
+    let src = vec![SourceInfo {
+        id: "src".into(),
+        label: "Src".into(),
+        kinds: vec!["pivot".into(), "zone".into()],
+        parents: Vec::new(),
+        styled_off: vec![true, false],
+        series: Vec::new(),
+    }];
+    let set = StudySet::default();
+    let m = StudyMenu {
+        editing: Some(StudyRef::Levels("src".into())),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let on = |name: &str| {
+        items.iter().find_map(|it| match it {
+            Item::Control { label, on, .. } if label == name => Some(*on),
+            _ => None,
+        })
+    };
+    assert_eq!(on("pivot (off in Style…)"), Some(false));
+    assert_eq!(on("zone"), Some(true));
 }

@@ -42,6 +42,13 @@ pub struct AppSettings {
 impl Global for AppSettings {}
 
 impl AppSettings {
+    /// Whether these settings are saved (a settings file we may write).
+    pub fn writable(&self) -> bool {
+        self.path.is_some()
+    }
+}
+
+impl AppSettings {
     /// Load from `path` (reporting problems through `report`), saving through `writer`.
     pub fn load(path: Option<PathBuf>, writer: Option<Writer>) -> (AppSettings, Option<String>) {
         let Some(p) = path else {
