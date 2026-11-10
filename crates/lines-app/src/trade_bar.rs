@@ -170,7 +170,7 @@ impl PaneTrade {
             resize_armed: false,
             seen_size: SIZE_EPOCH.load(Ordering::Relaxed),
             account_menu: trading.is_some_and(|t| t.start_account_menu),
-            panel_menu: None,
+            panel_menu: trading.and_then(|t| t.start_panel_menu),
             local_flash: None,
             local_flash_label: "NOT SENT",
             keys_shown: std::cell::Cell::new(true),
@@ -4230,13 +4230,11 @@ fn controls<V: TradePane>(
             cx.listener(|v: &mut V, _: &gpui::MouseDownEvent, _, cx| close_account_menu(v, cx)),
         )
     };
-    // Under Flatten and Cancel all, which these lists can reach (`dropdown::PANEL_PRIORITY`).
+    // Each list opens under its field, as every dropdown does (`dropdown::fit`).
     let qty = crate::dropdown::dropdown(div().flex().flex_shrink_0().child(qty), qty_menu)
-        .in_panel()
         .on_dismiss(dismiss(cx));
     let bracket =
         crate::dropdown::dropdown(div().flex().flex_1().min_w_0().child(bracket), bracket_menu)
-            .in_panel()
             .on_dismiss(dismiss(cx));
     div()
         .flex()

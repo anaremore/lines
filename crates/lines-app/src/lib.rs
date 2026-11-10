@@ -685,6 +685,9 @@ struct Cli {
     /// Screenshot: charts and DOMs with their account list open (the header's account chip).
     #[arg(long, requires = "screenshot")]
     account_menu: bool,
+    /// Screenshot: DOMs start with this trade panel list open: `qty` or `bracket`.
+    #[arg(long, requires = "screenshot", value_parser = ["qty", "bracket"])]
+    panel_menu: Option<String>,
     /// Screenshot: chain panes with a ticket open (`buy|sell STRIKE call|put [at PRICE] [close]`)
     /// on the soonest expiry, and/or the One-click switch on (`one-click`).
     #[arg(long, requires = "screenshot")]
@@ -1605,6 +1608,10 @@ where
                 demo_broker: cli.demo_broker,
                 strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,
+                panel_menu: cli.panel_menu.as_deref().map(|m| match m {
+                    "bracket" => trade_bar::PanelMenu::Bracket,
+                    _ => trade_bar::PanelMenu::Qty,
+                }),
                 chain_ticket: cli
                     .chain_ticket
                     .as_deref()

@@ -251,6 +251,26 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         s(name, quick, end, a)
     };
     v.push(paper("orders-armed", true, ORDERS, "--arm"));
+    // The trading panel's Qty and Bracket lists: anchored under their field, as wide as their
+    // content (never the window's width).
+    v.push(s(
+        "panel-qty-list",
+        true,
+        end,
+        args("--layout trading --size 1600x900 --theme dark --panel-menu qty"),
+    ));
+    v.push(s(
+        "panel-bracket-list-light-150",
+        false,
+        end,
+        args("--layout trading --size 1600x900 --theme light --panel-menu bracket --ui-zoom 150"),
+    ));
+    v.push(s(
+        "panel-qty-list-narrow",
+        false,
+        end,
+        args("--layout trading --size 700x700 --theme dark --panel-menu qty"),
+    ));
     // In-app updates (decision 0031) on the status line: ready (Restart to update), held by a
     // position, a discarded download, and the rollback offer after two failed starts.
     v.push(s(
