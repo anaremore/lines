@@ -97,12 +97,7 @@ impl Scope {
 /// The Connections section's list of sources (`connections_view` draws it).
 pub const CONNECTIONS_LIST: &str = "connections.list";
 /// The public sources' switches: rows for search and the palette, drawn on their cards.
-pub const SOURCE_SWITCHES: [&str; 4] = [
-    "data.coinbase",
-    "data.kraken",
-    "data.databento",
-    "data.databento_key",
-];
+pub const SOURCE_SWITCHES: [&str; 3] = ["data.coinbase", "data.kraken", "data.databento"];
 
 /// Trading-affecting settings are marked in the window and loosening them asks first
 /// (decision 0021).

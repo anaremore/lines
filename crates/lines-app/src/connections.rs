@@ -226,11 +226,24 @@ fn account(source: &str, key: &str) -> String {
     }
 }
 
+/// Where a secret lives in the OS keychain: (target, service, user). A connector's own entry
+/// is the one it reads with the platform's tools: on Windows a generic credential whose
+/// target is the entry's name; on macOS and Linux an item in the default keychain or
+/// collection whose service is that name (keyring takes a target there as a keychain or
+/// collection name, so none is given). Lines' own: service `lines`, account `<source>.<key>`.
+fn entry_spec(own: Option<&'static str>, account: String) -> (Option<String>, String, String) {
+    match own {
+        Some(entry) if cfg!(windows) => (Some(entry.to_owned()), entry.to_owned(), SERVICE.into()),
+        Some(entry) => (None, entry.to_owned(), SERVICE.into()),
+        None => (None, SERVICE.into(), account),
+    }
+}
+
 fn os_entry(source: &str, key: &str) -> Result<keyring::Entry, String> {
-    match own_entry(source, key) {
-        // The connector's own entry: its target (Windows) and service (macOS, Linux).
-        Some(entry) => keyring::Entry::new_with_target(entry, entry, SERVICE),
-        None => keyring::Entry::new(SERVICE, &account(source, key)),
+    let (target, service, user) = entry_spec(own_entry(source, key), account(source, key));
+    match target {
+        Some(t) => keyring::Entry::new_with_target(&t, &service, &user),
+        None => keyring::Entry::new(&service, &user),
     }
     .map_err(|e| e.to_string())
 }
@@ -496,6 +509,27 @@ mod tests {
         assert_eq!(s.tone(), Tone::Bad);
         assert_eq!(State::Idle.tone(), Tone::Quiet);
         assert_eq!(State::Connected { feeds: 1 }.text(), "Connected: 1 symbol");
+    }
+
+    /// A connector's own keychain entry is where its own reader looks: the target on
+    /// Windows, the service (default keychain or collection, no target) elsewhere.
+    #[test]
+    fn a_connectors_own_entry_is_where_its_reader_looks() {
+        let (target, service, user) = entry_spec(Some("lines-databento"), "x".into());
+        assert_eq!(service, "lines-databento");
+        assert_eq!(user, "lines");
+        if cfg!(windows) {
+            assert_eq!(target.as_deref(), Some("lines-databento"));
+        } else {
+            assert_eq!(
+                target, None,
+                "a target names a keychain or collection there"
+            );
+        }
+        assert_eq!(
+            entry_spec(None, "acme.api-key".into()),
+            (None, "lines".to_owned(), "acme.api-key".to_owned())
+        );
     }
 
     #[test]
