@@ -2247,12 +2247,19 @@ impl ChartView {
                 .overflow_hidden()
                 .cursor_pointer()
                 .child(label);
-            // Filled in the side's color, text in the background color (as the DOM's).
+            // Filled in the side's color, text in the background color (as the DOM's). Dimmed
+            // (no link group: nothing can send): a dashed edge in the side's color and dim text,
+            // unfilled, never faded (design.md §6). The edge stays 1 px here: the buttons are a
+            // fixed 96 px and a 5-digit size's label needs the room. An armed pick on a dimmed
+            // strip (unlinking doesn't drop it, and Esc must have something to cancel) is unfilled
+            // too, its label in the side's color: armed, but never solid like a live one.
+            let el = if dim { el.border_dashed() } else { el };
             let el = match fill {
-                Some(c) => el.bg(c).text_color(t.bg),
+                Some(c) if !dim => el.bg(c).text_color(t.bg),
+                Some(_) => el.text_color(line),
+                None if dim => el.text_color(t.text_dim),
                 None => el.text_color(t.text_main),
             };
-            let el = if dim { el.opacity(0.4) } else { el };
             strip = strip.child(el.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |v, ev: &MouseDownEvent, window, cx| {
@@ -6394,7 +6401,7 @@ impl ChartView {
                 point(px(ox + left), px(oy + top)),
                 size(px(box_w), px(box_h)),
             ),
-            t.panel.opacity(0.85),
+            t.label_bg,
         ));
         let origin = point(
             px(ox + left + 6.0),
@@ -6442,7 +6449,7 @@ impl ChartView {
                 point(px(ox + left), px(oy + top)),
                 size(px(box_w), px(box_h)),
             ),
-            t.panel.opacity(0.9),
+            t.label_bg,
         ));
         self.paint_label(
             LabelKind::TickFrom,
@@ -6927,7 +6934,7 @@ impl ChartView {
         if !self.tf_menu {
             return None;
         }
-        let accent = t.accent;
+        let (accent, lit) = (t.accent, t.ghost_selected);
         let mut list = div()
             .id("timeframe-list")
             .block_mouse_except_scroll()
@@ -6976,7 +6983,7 @@ impl ChartView {
                     .py(px(2.0))
                     .cursor_pointer()
                     .text_color(t.text_main)
-                    .hover(move |s| s.bg(accent.opacity(0.18)))
+                    .hover(move |s| s.bg(lit))
                     .font_weight(if on {
                         FontWeight::BOLD
                     } else {

@@ -444,9 +444,12 @@ impl PositionsView {
                     .id(SharedString::from(id))
                     .px_2()
                     .py_0p5()
+                    .border_l_2()
+                    .border_color(gpui::transparent_black())
                     .cursor_pointer()
                     .when(on, |d| d.font_weight(FontWeight::SEMIBOLD))
-                    .hover(|s| s.bg(t.panel))
+                    // As the trade panel's lists: the row under the pointer is the highlight.
+                    .hover(|s| s.bg(t.ghost_selected).border_color(t.accent))
                     .child(name)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -682,6 +685,8 @@ impl PositionsView {
             .border_b_1()
             .border_color(t.grid)
             .cursor_pointer()
+            // Raised to the panel, not a state token: the row's P&L is in up/down, AA on
+            // `panel` but not on the light themes' tinted states.
             .hover(|s| s.bg(t.panel));
         for &c in cols {
             // The Flatten column sits at the pane's right edge, under Flatten all.

@@ -233,7 +233,7 @@ pub fn button(
     on: bool,
     t: &Theme,
 ) -> Stateful<Div> {
-    let (dim, main, accent, hover_bg) = (t.text_dim, t.text_main, t.accent, t.axis_line);
+    let (dim, main, accent, hover_bg) = (t.text_dim, t.text_main, t.accent, t.ghost_hover);
     let el = div()
         .id(id)
         .flex_none()

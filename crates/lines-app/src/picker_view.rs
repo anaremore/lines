@@ -385,8 +385,8 @@ impl PickerUi {
                     } else {
                         gpui::transparent_black()
                     })
-                    .when(selected, |d| d.bg(t.accent.opacity(0.16)))
-                    .when(!selected, |d| d.hover(|s| s.bg(t.accent.opacity(0.08))))
+                    .when(selected, |d| d.bg(t.ghost_selected))
+                    .when(!selected, |d| d.hover(|s| s.bg(t.ghost_hover)))
                     .cursor_pointer()
                     .child(
                         div()

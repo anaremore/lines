@@ -3571,7 +3571,7 @@ impl WindowView {
                             .border_1()
                             .border_color(t.control_edge)
                             .text_color(t.text_main)
-                            .hover(|s| s.bg(t.accent.opacity(0.16)))
+                            .hover(|s| s.bg(t.element_hover))
                             .child(if fit.short_safety {
                                 footer::REC_STOP.1
                             } else {
@@ -4051,7 +4051,7 @@ impl WindowView {
                                     .border_1()
                                     .border_color(t.accent)
                                     .text_color(t.text_main)
-                                    .hover(|d| d.bg(t.accent.opacity(0.16)))
+                                    .hover(|d| d.bg(t.element_hover))
                                     .child(format!("Switch all panes to {label}"))
                                     .on_mouse_down(
                                         MouseButton::Left,
@@ -4127,8 +4127,8 @@ impl WindowView {
                 } else {
                     gpui::transparent_black()
                 })
-                .when(sel, |d| d.bg(t.accent.opacity(0.16)))
-                .when(!sel, |d| d.hover(|s| s.bg(t.accent.opacity(0.08))))
+                .when(sel, |d| d.bg(t.ghost_selected))
+                .when(!sel, |d| d.hover(|s| s.bg(t.ghost_hover)))
                 .cursor_pointer()
                 .on_mouse_down(
                     MouseButton::Left,
@@ -4365,7 +4365,7 @@ impl WindowView {
                 .px_3()
                 .flex()
                 .items_center()
-                .bg(t.panel.opacity(0.9))
+                .bg(t.label_bg)
                 .border_1()
                 .border_color(t.accent)
                 .rounded_md()

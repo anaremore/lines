@@ -319,7 +319,7 @@ pub fn unavailable_body<V: Pane>(
             .border_color(theme.accent)
             .text_size(crate::zoom::ui(12.0))
             .text_color(theme.text_main)
-            .hover(|d| d.bg(theme.accent.opacity(0.16)))
+            .hover(|d| d.bg(theme.element_hover))
             .child(format!("Show {} here  (Enter)", s.label))
             .on_mouse_down(
                 MouseButton::Left,

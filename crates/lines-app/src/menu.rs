@@ -590,7 +590,7 @@ fn rows<V: 'static>(
                 } else {
                     gpui::transparent_black()
                 })
-                .when(lit, |d| d.bg(t.accent.opacity(0.16)))
+                .when(lit, |d| d.bg(t.ghost_selected))
                 .child(div().w(crate::zoom::ui(12.0)).flex_none().child(mark))
                 .child(
                     div()
