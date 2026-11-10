@@ -160,6 +160,18 @@ impl Extensions {
         &self.sources
     }
 
+    /// The built-in sources that use the extension interface (decision 0033): Databento,
+    /// unless the caller registered its own of that name. Added last, so `--help` lists them
+    /// after the caller's.
+    fn with_builtin_sources(mut self) -> Self {
+        if !self.sources.iter().any(|s| s.name() == DATABENTO) {
+            self.sources.push(Arc::new(
+                lines_databento::live::DatabentoExtension::from_env(),
+            ));
+        }
+        self
+    }
+
     /// Add an external level source (decision 0022): its levels show on the charts of the
     /// products it serves.
     pub fn with_level_source(mut self, source: Arc<dyn LevelSource>) -> Self {
@@ -1092,7 +1104,7 @@ fn run_sources(
     let prefs = persist::config_dir()
         .map(|d| source_prefs(&d.join("settings.json")))
         .unwrap_or_default();
-    let choices = enabled_sources(ext, &prefs);
+    let choices = enabled_sources(ext, &prefs, |name| name != DATABENTO || databento_set_up());
     if choices.is_empty() {
         // Every source off: the app still opens (on the mock, offline, as `--source mock`
         // would), so Settings › Data can turn one back on.
@@ -1107,24 +1119,46 @@ fn run_sources(
     Ok((out, false))
 }
 
+/// The built-in Databento source's name (decision 0033).
+pub const DATABENTO: &str = "databento";
+
+/// Whether this run has a Databento key (`DATABENTO_API_KEY`, the OS keychain, or a key file):
+/// looked up once per run, never shown. Without one, Databento is "not set up" and makes no
+/// requests (decision 0033).
+pub fn databento_set_up() -> bool {
+    static SET_UP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SET_UP.get_or_init(|| lines_databento::key::ApiKey::load().is_ok())
+}
+
 /// The sources a run without `--source` has, in preference order (decision 0030): each
-/// registered extension, then Coinbase, then Kraken, less those switched off.
+/// registered extension, then Coinbase, then Kraken, then the built-in extensions (Databento,
+/// only when set up), less those switched off.
 fn enabled_sources(
     ext: &Extensions,
     prefs: &std::collections::BTreeMap<String, sources::SourcePrefs>,
+    set_up: impl Fn(&str) -> bool,
 ) -> Vec<SourceChoice> {
     let on = |name: &str| prefs.get(name).is_none_or(sources::SourcePrefs::on);
+    let builtin = |name: &str| name == DATABENTO;
+    let ext_choice =
+        |e: &Arc<dyn SourceExtension>| SourceChoice::Extension(ExtensionSource(e.clone()));
     let mut choices: Vec<SourceChoice> = ext
         .sources
         .iter()
-        .filter(|e| on(e.name()))
-        .map(|e| SourceChoice::Extension(ExtensionSource(e.clone())))
+        .filter(|e| !builtin(e.name()) && on(e.name()))
+        .map(ext_choice)
         .collect();
     choices.extend(
         [SourceKind::Coinbase, SourceKind::Kraken]
             .into_iter()
             .map(SourceChoice::Builtin)
             .filter(|c| on(&c.name())),
+    );
+    choices.extend(
+        ext.sources
+            .iter()
+            .filter(|e| builtin(e.name()) && on(e.name()) && set_up(e.name()))
+            .map(ext_choice),
     );
     choices
 }
@@ -1527,6 +1561,7 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let ext = ext.with_builtin_sources();
     // --help/--version print and exit 0; usage errors print and exit 2, as before.
     let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
     if let Some(path) = &cli.econ_calendar {
@@ -2318,17 +2353,37 @@ mod tests {
         assert!(parse(&["lines", "--also-replay", "x.lfr"]).is_err());
         // A plain run's sources: extensions, Coinbase, Kraken, less those switched off;
         // every one off leaves none (the run then opens on the mock, limited).
-        let names = |prefs: &[(&str, bool)]| -> Vec<String> {
+        let names_with = |prefs: &[(&str, bool)], key: bool| -> Vec<String> {
             let prefs = prefs
                 .iter()
                 .map(|(n, on)| ((*n).to_owned(), sources::SourcePrefs { enabled: Some(*on) }))
                 .collect();
-            enabled_sources(&Extensions::new(), &prefs)
+            enabled_sources(&Extensions::new().with_builtin_sources(), &prefs, |_| key)
                 .iter()
                 .map(SourceChoice::name)
                 .collect()
         };
+        let names = |prefs: &[(&str, bool)]| names_with(prefs, false);
+        // Databento (decision 0033): not set up without a key (out of the run, no requests);
+        // with one, after Kraken; its switch turns it off.
         assert_eq!(names(&[]), ["coinbase", "kraken"]);
+        assert_eq!(names_with(&[], true), ["coinbase", "kraken", "databento"]);
+        assert_eq!(
+            names_with(&[("databento", false)], true),
+            ["coinbase", "kraken"]
+        );
+        // `--source databento` names it whatever the key (the pane then says it isn't set up).
+        assert!(matches!(
+            SourceChoice::parse("databento", &Extensions::new().with_builtin_sources()),
+            Some(SourceChoice::Extension(_))
+        ));
+        // A caller's own Databento (an official build) is used, never a second one.
+        let own = Extensions::new()
+            .with_source(Arc::new(
+                lines_databento::live::DatabentoExtension::from_env(),
+            ))
+            .with_builtin_sources();
+        assert_eq!(own.sources().len(), 1);
         assert_eq!(names(&[("kraken", false)]), ["coinbase"]);
         assert_eq!(
             names(&[("coinbase", true), ("kraken", true)]),

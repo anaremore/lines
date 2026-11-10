@@ -13,7 +13,7 @@
 <sub>All screenshots use synthetic data, rendered with Lines' screenshot mode.</sub>
 
 > [!IMPORTANT]
-> **Pre-alpha. Paper trading only.** Lines has no live order routing: every order goes to a simulated paper account. Public builds read the mock futures feed, Coinbase and Kraken public data, and replays. Official builds add vendor connectors.
+> **Pre-alpha. Paper trading only.** Lines has no live order routing: every order goes to a simulated paper account. Public builds read the mock futures feed, Coinbase and Kraken public data, Databento (CME futures, with your own Databento account), and replays. Official builds add vendor connectors.
 
 ## What works today
 
@@ -45,6 +45,7 @@
 
 **Data**
 - Coinbase and Kraken public feeds (spot and perpetuals), a simulated ES futures feed, and deterministic replay.
+- Databento CME futures (live top of book and trades, history import) with your own Databento account and API key: see `crates/lines-databento/README.md`. Without a key it stays off and makes no requests.
 - **Record / Stop recording** from the app: live feeds and levels go to the data folder, with REC in the footer.
 - A local market-data store for live feeds, so charts and order flow open at once on restart.
 

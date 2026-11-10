@@ -88,12 +88,7 @@ impl Sources {
             return Ok(self.primary());
         }
         if let Some(name) = saved {
-            return self.get(name).ok_or_else(|| {
-                NoSource(format!(
-                    "{} is off or not in this build",
-                    source_label(name)
-                ))
-            });
+            return self.get(name).ok_or_else(|| NoSource(missing_reason(name)));
         }
         let Some(t) = target.map(TargetDoc::to_target) else {
             return Ok(self.primary());
@@ -269,6 +264,15 @@ impl Pick {
             .find(|(_, a)| a.check(target).is_ok())
             .map(|(n, _)| source_label(n))
     }
+}
+
+/// Why a saved source isn't in this run. Databento without a key is "not set up" (decision
+/// 0033): it makes no requests until the key exists.
+fn missing_reason(name: &str) -> String {
+    if name == crate::DATABENTO && !crate::databento_set_up() {
+        return "Databento is not set up: no API key (see Settings › Data)".to_owned();
+    }
+    format!("{} is off or not in this build", source_label(name))
 }
 
 /// How a source is named on screen: "Coinbase", "Kraken", an extension's name capitalised.

@@ -1629,6 +1629,37 @@ fn table() -> Vec<Setting> {
             ),
             Value::Bool(true),
         ),
+        with_default(
+            s(
+                "data.databento",
+                Sec::Data,
+                "Databento",
+                "CME futures through your own Databento account, billed by Databento. Off until your API key is set up (DATABENTO_API_KEY, or the OS keychain entry lines-databento); without it Lines makes no Databento requests. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, crate::DATABENTO)),
+                Some(|p, _, v| set_source(p, crate::DATABENTO, want_bool(v)?)),
+            ),
+            Value::Bool(true),
+        ),
+        s(
+            "data.databento_key",
+            Sec::Data,
+            "Databento key",
+            "Whether this run found your Databento API key. The key itself is never shown. Settings › Connections will take it.",
+            Scope::ReadOnly,
+            Normal,
+            Info,
+            |_, _, _| {
+                Value::Text(if crate::databento_set_up() {
+                    "Set up".to_owned()
+                } else {
+                    "Not set up".to_owned()
+                })
+            },
+            None,
+        ),
         s(
             DATA_FOLDER_KEY,
             Sec::Data,
