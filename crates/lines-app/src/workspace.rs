@@ -2672,6 +2672,8 @@ impl WindowView {
                         *selected = 0;
                     }
                     ("down", None) => *selected = (*selected + 1) % n,
+                    // Past the oldest recalled query: stay (never wrap to the bottom row).
+                    ("up", None) if recall.at.is_some() && *selected == 0 => {}
                     ("up", None) => *selected = (*selected + n - 1) % n,
                     ("backspace", None) => {
                         query.pop();
@@ -3478,9 +3480,11 @@ impl WindowView {
             shown,
             selected,
             history,
+            recall,
             ..
         }) = self.prompt.as_mut()
         {
+            recall.edited();
             *q = query.to_owned();
             *shown = palette_rank(items, q, history);
             *selected = 0;

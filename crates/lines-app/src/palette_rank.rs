@@ -7,9 +7,10 @@
 //!   use count per command (keyed by [`key`]: the command's name, a setting's by its stable
 //!   settings key and value, so a renamed or reordered command starts again at 0, never takes
 //!   another's count) and the last [`QUERIES`] queries, newest first.
-//! - **Trading commands are never boosted** (`Command::Trade`: Flatten, Buy/Sell market,
-//!   Reverse, arming, …): they keep their fuzzy place, so running one often never puts an order
-//!   at the top of an empty palette, where Enter would send it.
+//! - **Commands that trade, or can't be taken back, are never boosted** ([`never_boosted`]:
+//!   every `Command::Trade`, the strategies' Start, Stop and Stop all, the chain's One-click,
+//!   the update's restart and roll-back): they keep their fuzzy place, so running one often
+//!   never puts it at the top of an empty palette, where a habitual Enter would run it.
 //! - **Stable:** the order depends only on the query and the history snapshot taken when the
 //!   palette opened (a run is counted after it closes), with every tie broken by the palette's
 //!   own order: the same query always gives the same list, so nothing moves under the pointer.
@@ -39,9 +40,9 @@ impl PaletteHistory {
         self.uses.is_empty() && self.queries.is_empty()
     }
 
-    /// Its use count for ranking: 0 for a trading command (never boosted).
+    /// Its use count for ranking: 0 for a command that is [`never_boosted`].
     fn uses_of(&self, c: Command) -> u32 {
-        if matches!(c, Command::Trade(_)) {
+        if never_boosted(c) {
             return 0;
         }
         self.uses.get(&key(c)).copied().unwrap_or(0)
@@ -59,6 +60,20 @@ impl PaletteHistory {
             self.queries.truncate(QUERIES);
         }
     }
+}
+
+/// Commands that send or cancel orders, arm trading, start or stop strategies (Stop flattens),
+/// or restart the app: never ranked up by use, however often they ran.
+pub fn never_boosted(c: Command) -> bool {
+    use crate::commands::StrategyCmd as S;
+    matches!(
+        c,
+        Command::Trade(_)
+            | Command::Strategy(S::StopAll | S::StopAllKeep | S::Start | S::Stop)
+            | Command::ChainOneClick
+            | Command::RestartToUpdate
+            | Command::RollBackUpdate
+    )
 }
 
 /// A command's saved name: its `{:?}` (variant names and the values they carry, all stable),
@@ -259,16 +274,36 @@ mod tests {
         );
     }
 
-    /// A trading command run often never moves to the top: an empty palette's Enter never
-    /// sends an order because of the history.
+    /// A command that trades (or restarts the app) run often never moves to the top: an
+    /// empty palette's Enter never sends an order, stops a strategy or restarts because of the
+    /// history. Every such command in the palette, run 50 times each.
     #[test]
     fn trading_commands_are_never_boosted() {
+        use crate::commands::StrategyCmd as S;
+        let risky = [
+            C::Trade(TradeCmd::Flatten),
+            C::Strategy(S::StopAll),
+            C::Strategy(S::StopAllKeep),
+            C::Strategy(S::Start),
+            C::Strategy(S::Stop),
+            C::ChainOneClick,
+            C::RestartToUpdate,
+            C::RollBackUpdate,
+        ];
         let mut h = PaletteHistory::default();
-        for _ in 0..50 {
-            h.record(C::Trade(TradeCmd::Flatten), "");
+        for c in commands::palette()
+            .into_iter()
+            .filter(|c| never_boosted(*c))
+            .chain(risky)
+        {
+            for _ in 0..50 {
+                h.record(c, "");
+            }
         }
+        assert!(risky.iter().all(|c| never_boosted(*c)));
         assert_eq!(ranked("", &h), ranked("", &PaletteHistory::default()));
         assert_eq!(ranked("", &h)[0], commands::palette()[0]);
+        assert!(!never_boosted(C::NewTab) && !never_boosted(C::Strategy(S::Open)));
     }
 
     /// The shipped order keeps the rule the substring filter's tests pinned: "flatten" lists
@@ -279,17 +314,22 @@ mod tests {
         assert_eq!(q[0], C::Trade(TradeCmd::Flatten), "{:?}", labels(&q));
     }
 
-    /// A setting command's saved name is its settings key and value, not its table position.
+    /// A setting command's saved name is its settings key and value text, never its table
+    /// position: exactly `Setting:<key>=<value>`, distinct per value.
     #[test]
     fn setting_keys_name_the_setting() {
-        let s = crate::settings_schema::palette()
-            .into_iter()
-            .find(|s| s.value().is_some())
-            .unwrap();
-        let k = key(C::Setting(s));
+        let cmds = crate::settings_schema::palette();
+        let s = cmds.iter().copied().find(|s| s.value().is_some()).unwrap();
         let st = s.setting().unwrap();
-        assert!(k.starts_with(&format!("Setting:{}=", st.key)), "{k}");
-        assert!(!k.contains("index"), "{k}");
+        let v = s.value().unwrap();
+        assert_eq!(
+            key(C::Setting(s)),
+            format!("Setting:{}={}", st.key, st.value_text(&v))
+        );
+        // Every palette setting command's key is its own.
+        let keys: std::collections::BTreeSet<String> =
+            cmds.iter().map(|s| key(C::Setting(*s))).collect();
+        assert_eq!(keys.len(), cmds.len());
     }
 
     /// Characters the fuzzy pattern would treat specially are literal: as a negation, "!tab"
