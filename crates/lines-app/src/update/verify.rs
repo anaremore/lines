@@ -1,6 +1,7 @@
 //! Verifying a downloaded update before it can run (decision 0031 §3): its SHA-256 must
 //! match the manifest's and its minisign (Ed25519) signature must verify against the public
-//! key compiled into this build. Either failing discards the file.
+//! key compiled into this build, with a trusted (signed) comment naming this very release
+//! (`super::manifest::trusted_comment`). Anything failing is discarded.
 //!
 //! The real public key is the owner's ([`PUBLIC_KEY`], `docs/release.md`). Until it is set
 //! this build has no key and never updates itself: no request, no download. Tests sign with a
@@ -50,12 +51,14 @@ pub fn sha256_hex(data: &[u8]) -> String {
     s
 }
 
-/// `data` is the file the manifest describes (`sha256`, `signature`), signed by `key`.
+/// `data` is the file the manifest describes (`sha256`, `signature`), signed by `key` for this
+/// release (`expected`: [`super::manifest::trusted_comment`]).
 pub fn verify(
     data: &[u8],
     sha256: &str,
     signature: &str,
     key: Option<&str>,
+    expected: &str,
 ) -> Result<(), Rejected> {
     let key = key.ok_or(Rejected::NoKey)?;
     if !sha256_hex(data).eq_ignore_ascii_case(sha256.trim()) {
@@ -67,7 +70,16 @@ pub fn verify(
     let sig = minisign_verify::Signature::decode(signature)
         .map_err(|e| Rejected::Signature(e.to_string()))?;
     pk.verify(data, &sig, false)
-        .map_err(|e| Rejected::Signature(e.to_string()))
+        .map_err(|e| Rejected::Signature(e.to_string()))?;
+    // The signed comment names the release: a file signed for another version, edition,
+    // channel or system isn't this update.
+    let said = sig.trusted_comment().trim();
+    if said != expected {
+        return Err(Rejected::Signature(format!(
+            "it was signed for \"{said}\", not \"{expected}\""
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -87,19 +99,37 @@ pub(crate) mod test_key {
             }
         }
 
-        /// The `.minisig` text for `data`.
+        /// The `.minisig` text for `data`, its trusted comment `comment`.
+        pub fn sign_as(&self, data: &[u8], comment: &str) -> String {
+            minisign::sign(
+                None,
+                &self.secret,
+                std::io::Cursor::new(data),
+                Some(comment),
+                None,
+            )
+            .expect("sign")
+            .to_string()
+        }
+
+        /// Signed for [`super::tests::RELEASE`].
         pub fn sign(&self, data: &[u8]) -> String {
-            minisign::sign(None, &self.secret, std::io::Cursor::new(data), None, None)
-                .expect("sign")
-                .to_string()
+            self.sign_as(data, super::tests::RELEASE)
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::test_key::TestKey;
     use super::*;
+
+    /// The release the tests' files are signed for.
+    pub(crate) const RELEASE: &str = "lines 0.3.12 public pre-release x86_64-pc-windows-msvc";
+
+    fn check(data: &[u8], sha: &str, sig: &str, key: Option<&str>) -> Result<(), Rejected> {
+        verify(data, sha, sig, key, RELEASE)
+    }
 
     #[test]
     fn a_signed_file_with_its_checksum_verifies() {
@@ -107,7 +137,7 @@ mod tests {
         let data = b"lines 0.3.12";
         let sig = k.sign(data);
         assert_eq!(
-            verify(data, &sha256_hex(data), &sig, Some(&k.public)),
+            check(data, &sha256_hex(data), &sig, Some(&k.public)),
             Ok(())
         );
     }
@@ -121,11 +151,11 @@ mod tests {
         let sig = k.sign(data);
         let bad = b"lines 0.3.12 + something";
         assert_eq!(
-            verify(bad, &sha256_hex(data), &sig, Some(&k.public)),
+            check(bad, &sha256_hex(data), &sig, Some(&k.public)),
             Err(Rejected::Checksum)
         );
         assert!(matches!(
-            verify(bad, &sha256_hex(bad), &sig, Some(&k.public)),
+            check(bad, &sha256_hex(bad), &sig, Some(&k.public)),
             Err(Rejected::Signature(_))
         ));
     }
@@ -137,11 +167,11 @@ mod tests {
         let data = b"lines 0.3.12";
         let sig = theirs.sign(data);
         assert!(matches!(
-            verify(data, &sha256_hex(data), &sig, Some(&ours.public)),
+            check(data, &sha256_hex(data), &sig, Some(&ours.public)),
             Err(Rejected::Signature(_))
         ));
         assert!(matches!(
-            verify(
+            check(
                 data,
                 &sha256_hex(data),
                 "not a signature",
@@ -151,12 +181,33 @@ mod tests {
         ));
     }
 
+    /// A file the project signed for another release (an older version, another edition or
+    /// system) is refused: the manifest isn't signed, the trusted comment is.
+    #[test]
+    fn a_signed_file_from_another_release_is_rejected() {
+        let k = TestKey::new();
+        let old = b"lines 0.3.5";
+        let sig = k.sign_as(old, "lines 0.3.5 public pre-release x86_64-pc-windows-msvc");
+        assert!(matches!(
+            check(old, &sha256_hex(old), &sig, Some(&k.public)),
+            Err(Rejected::Signature(_))
+        ));
+        let official = k.sign_as(
+            old,
+            "lines 0.3.12 official pre-release x86_64-pc-windows-msvc",
+        );
+        assert!(matches!(
+            check(old, &sha256_hex(old), &official, Some(&k.public)),
+            Err(Rejected::Signature(_))
+        ));
+    }
+
     /// Without a public key nothing verifies, so nothing updates.
     #[test]
     fn no_key_no_update() {
         let data = b"x";
         assert_eq!(
-            verify(data, &sha256_hex(data), "", None),
+            check(data, &sha256_hex(data), "", None),
             Err(Rejected::NoKey)
         );
         assert!(

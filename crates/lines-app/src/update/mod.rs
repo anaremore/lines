@@ -94,15 +94,81 @@ impl Updater {
     }
 }
 
-/// Where a restart started from `lib.rs` after the app quit and saved.
-static RELAUNCH: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// What to do once the app has quit and flushed its saves (`lib.rs`), before starting the
+/// executable then in place: an update's backup and swap, or a rollback's swap and restore.
+/// Done after the quit, so the quit-time saves (workspace, settings, the paper file) can't
+/// write over the files a rollback restores, and the backup holds the very last saves.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pending {
+    Update {
+        config: PathBuf,
+        staged: PathBuf,
+        from: String,
+        to: String,
+    },
+    Rollback {
+        config: PathBuf,
+        target: String,
+    },
+}
 
-/// After the app has quit and flushed its saves: start the executable a restart or rollback
-/// put in place, with this run's arguments.
+static RELAUNCH: Mutex<Option<Pending>> = Mutex::new(None);
+
+/// An update, applied: the saved files backed up, the executable swapped, the start count
+/// begun. Errors leave the running version in place.
+pub fn apply_update(exe: &Path, p: &Pending) -> Result<(), String> {
+    let Pending::Update {
+        config,
+        staged,
+        from,
+        to,
+    } = p
+    else {
+        return Err("not an update".into());
+    };
+    install::backup(config, from).map_err(|e| format!("couldn't back up settings: {e}"))?;
+    install::swap(exe, staged).map_err(|e| format!("couldn't install v{to}: {e}"))?;
+    let _ = install::save_state(
+        config,
+        &install::UpdateState {
+            from: from.clone(),
+            to: to.clone(),
+            starts: 0,
+            confirmed: false,
+        },
+    );
+    Ok(())
+}
+
+/// A rollback, applied: the previous executable back, and the saved files it had.
+pub fn apply_rollback(exe: &Path, p: &Pending) -> Result<(), String> {
+    let Pending::Rollback { config, target } = p else {
+        return Err("not a rollback".into());
+    };
+    install::roll_back_exe(exe).map_err(|e| format!("couldn't roll back: {e}"))?;
+    install::restore(config, target)
+        .map_err(|e| format!("rolled back to v{target}, but its saved files: {e}"))?;
+    let _ = std::fs::remove_file(install::state_path(config));
+    Ok(())
+}
+
+/// After the app has quit and flushed its saves: apply what a restart or rollback asked for,
+/// then start the executable now in place (the old one if applying failed), with this run's
+/// arguments.
 pub fn relaunch_if_requested() {
-    let Some(exe) = RELAUNCH.lock().ok().and_then(|mut r| r.take()) else {
+    let Some(p) = RELAUNCH.lock().ok().and_then(|mut r| r.take()) else {
         return;
     };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let applied = match &p {
+        Pending::Update { .. } => apply_update(&exe, &p),
+        Pending::Rollback { .. } => apply_rollback(&exe, &p),
+    };
+    if let Err(e) = applied {
+        tracing::error!("updates: {e}");
+    }
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     if let Err(e) = std::process::Command::new(&exe).args(args).spawn() {
         tracing::error!("couldn't start {}: {e}", exe.display());
@@ -111,6 +177,9 @@ pub fn relaunch_if_requested() {
 
 /// The version a rollback returns to, if the last update kept one.
 pub fn rollback_target(config: &Path) -> Option<String> {
+    if !manifest::supported() {
+        return None;
+    }
     let s = install::load_state(config)?;
     let exe = std::env::current_exe().ok()?;
     (s.to == Version::current().to_string() && install::previous_exe(&exe).exists())
@@ -160,6 +229,12 @@ pub fn start(config: PathBuf, mode: UpdateMode, cx: &mut App) {
         tracing::info!("updates: this build has no update key; it never checks");
         return;
     }
+    if !manifest::supported() {
+        tracing::info!("updates: this system doesn't update itself yet");
+        return;
+    }
+    // Downloads this version has passed are of no more use.
+    install::clean_staged(&config.join("updates"), &current);
     std::thread::Builder::new()
         .name("updates".into())
         .spawn(move || {
@@ -285,7 +360,8 @@ pub fn stage(
     signature: &str,
     key: Option<&str>,
 ) -> Status {
-    if let Err(why) = verify::verify(data, sha256, signature, key) {
+    let expected = manifest::trusted_comment(v, manifest::target());
+    if let Err(why) = verify::verify(data, sha256, signature, key, &expected) {
         tracing::error!("updates: v{v} discarded: {why}");
         return Status::Rejected(v, why.to_string());
     }
@@ -308,22 +384,17 @@ pub fn stage(
     }
 }
 
-/// Why a restart (to update or roll back) can't happen now, if it can't.
-pub fn held(cx: &App) -> Option<String> {
-    hold::hold_reason(cx.try_global::<Updater>()?.activity)
-}
-
-/// Refresh what a restart would interrupt (with the workspace's status line, once a second).
-pub fn refresh_activity(cx: &mut App) {
-    if cx.try_global::<Updater>().is_none() {
-        return;
-    }
+/// What a restart would interrupt, read now from the trading cache and the strategy source
+/// (every listed account: positions, working orders, armed triggers; running strategies).
+/// `Err` when the trading cache is busy this instant.
+fn activity_now(cx: &App) -> Result<hold::Activity, String> {
     let mut a = hold::Activity::default();
     if let Some(t) = crate::trading::Trading::try_global(cx) {
         let accounts = t.accounts();
-        let Some(st) = t.cache.try_read() else {
-            return; // busy this instant: last time's stands
-        };
+        let st = t
+            .cache
+            .try_read()
+            .ok_or("trading is busy this instant: try again")?;
         for acct in &accounts {
             a.positions += st.positions_of(&acct.id).count();
             a.orders += st.open_orders_of(&acct.id).count();
@@ -342,18 +413,40 @@ pub fn refresh_activity(cx: &mut App) {
                 })
                 .count();
     }
-    if cx.has_global::<Updater>() {
+    Ok(a)
+}
+
+/// Whether a restart (to update or roll back) may happen now: checked at the press, from the
+/// trading state as it is then, whether or not the updater runs (`--no-update-check` still
+/// holds a rollback).
+fn hold_now(cx: &App) -> Result<(), String> {
+    match hold::hold_reason(activity_now(cx)?) {
+        Some(why) => Err(why),
+        None => Ok(()),
+    }
+}
+
+/// Why a restart can't happen now, as last refreshed (the status line).
+pub fn held(cx: &App) -> Option<String> {
+    hold::hold_reason(cx.try_global::<Updater>()?.activity)
+}
+
+/// Refresh what a restart would interrupt (with the workspace's status line, once a second).
+pub fn refresh_activity(cx: &mut App) {
+    if cx.try_global::<Updater>().is_none() {
+        return;
+    }
+    // Busy this instant: last time's stands.
+    if let Ok(a) = activity_now(cx) {
         cx.global_mut::<Updater>().activity = a;
     }
 }
 
-/// Restart to update: refused while anything is trading (the reason is returned); otherwise
-/// re-verify the staged file, back up the saved files, swap the executable, and quit (the new
-/// version starts once this one has saved: [`relaunch_if_requested`]).
+/// Restart to update: refused while anything is trading (the reason is returned). The staged
+/// file is verified again now; the backup, the swap and the new version's start come after
+/// this one has quit and saved ([`relaunch_if_requested`]).
 pub fn restart_to_update(cx: &mut App) -> Result<(), String> {
-    if let Some(why) = held(cx) {
-        return Err(why);
-    }
+    hold_now(cx)?;
     let u = cx
         .try_global::<Updater>()
         .ok_or("updates are off in this run")?;
@@ -364,46 +457,34 @@ pub fn restart_to_update(cx: &mut App) -> Result<(), String> {
     let data = std::fs::read(&staged).map_err(|e| format!("the update is gone: {e}"))?;
     let sha = std::fs::read_to_string(staged.with_extension("sha256")).unwrap_or_default();
     let sig = std::fs::read_to_string(staged.with_extension("minisig")).unwrap_or_default();
-    if let Err(why) = verify::verify(&data, &sha, &sig, verify::PUBLIC_KEY) {
+    let expected = manifest::trusted_comment(v, manifest::target());
+    if let Err(why) = verify::verify(&data, &sha, &sig, verify::PUBLIC_KEY, &expected) {
         let _ = std::fs::remove_file(&staged);
+        if let Ok(mut st) = u.status.lock() {
+            *st = Status::Rejected(v, why.to_string());
+        }
         return Err(format!("v{v} discarded: {why}"));
     }
-    let current = Version::current().to_string();
-    install::backup(&config, &current).map_err(|e| format!("couldn't back up settings: {e}"))?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    install::swap(&exe, &staged).map_err(|e| format!("couldn't install v{v}: {e}"))?;
-    let _ = install::save_state(
-        &config,
-        &install::UpdateState {
-            from: current,
-            to: v.to_string(),
-            starts: 0,
-            confirmed: false,
-        },
-    );
     if let Ok(mut r) = RELAUNCH.lock() {
-        *r = Some(exe);
+        *r = Some(Pending::Update {
+            config,
+            staged,
+            from: Version::current().to_string(),
+            to: v.to_string(),
+        });
     }
     cx.quit();
     Ok(())
 }
 
-/// Roll back to the version the last update replaced: its executable and its saved files.
-/// Held as a restart to update is.
+/// Roll back to the version the last update replaced, with the saved files it had: held as a
+/// restart to update is, applied after this one has quit and saved.
 pub fn roll_back(cx: &mut App) -> Result<(), String> {
-    if let Some(why) = held(cx) {
-        return Err(why);
-    }
+    hold_now(cx)?;
     let config = crate::persist::config_dir().ok_or("no settings folder")?;
     let target = rollback_target(&config).ok_or("no earlier version is kept")?;
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    install::roll_back_exe(&exe).map_err(|e| format!("couldn't roll back: {e}"))?;
-    if let Err(e) = install::restore(&config, &target) {
-        tracing::error!("updates: rolled back to v{target} but its saved files: {e}");
-    }
-    let _ = std::fs::remove_file(install::state_path(&config));
     if let Ok(mut r) = RELAUNCH.lock() {
-        *r = Some(exe);
+        *r = Some(Pending::Rollback { config, target });
     }
     cx.quit();
     Ok(())
@@ -424,7 +505,14 @@ pub fn status_label(cx: &App) -> Option<(String, bool, Option<crate::commands::C
         Status::Idle => None,
         Status::Available(v) => Some((format!("Update available: v{v}"), false, None)),
         Status::Ready(v, _) => Some(match held(cx) {
-            Some(why) => (format!("Update ready: v{v} · {why}"), false, None),
+            Some(why) => (
+                format!(
+                    "Update ready: v{v} · {}",
+                    why.trim_start_matches("Update ").replacen('w', "W", 1)
+                ),
+                false,
+                None,
+            ),
             None => (
                 format!("Update ready: v{v} · Restart to update"),
                 false,
@@ -456,6 +544,10 @@ mod tests {
         let v = Version(0, 3, 12);
         let exe = b"MZ new lines";
         let sig = k.sign(exe);
+        assert_eq!(
+            manifest::trusted_comment(v, "x86_64-pc-windows-msvc"),
+            verify::tests::RELEASE
+        );
         let sha = verify::sha256_hex(exe);
         match stage(&c, v, exe, &sha, &sig, Some(&k.public)) {
             Status::Ready(sv, p) => {
@@ -481,6 +573,40 @@ mod tests {
             Status::Rejected(_, _)
         ));
         assert!(!staged_path(&c, v).exists(), "nothing staged");
+        let _ = std::fs::remove_dir_all(&c);
+    }
+
+    /// A rollback applied after the quit: the previous executable back and the saved files the
+    /// old version had, whatever the new one wrote last.
+    #[test]
+    fn a_rollback_restores_the_executable_and_settings() {
+        let c = dir("rollback");
+        let exe = c.join("lines.exe");
+        std::fs::write(&exe, "v0.3.11").unwrap();
+        std::fs::write(c.join("settings.json"), "old settings").unwrap();
+        std::fs::write(c.join("download.exe"), "v0.3.12").unwrap();
+        let up = Pending::Update {
+            config: c.clone(),
+            staged: c.join("download.exe"),
+            from: "0.3.11".into(),
+            to: "0.3.12".into(),
+        };
+        apply_update(&exe, &up).unwrap();
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v0.3.12");
+        assert_eq!(install::load_state(&c).unwrap().to, "0.3.12");
+        // The new version saves its own format, then rolls back.
+        std::fs::write(c.join("settings.json"), "new settings").unwrap();
+        let back = Pending::Rollback {
+            config: c.clone(),
+            target: "0.3.11".into(),
+        };
+        apply_rollback(&exe, &back).unwrap();
+        assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v0.3.11");
+        assert_eq!(
+            std::fs::read_to_string(c.join("settings.json")).unwrap(),
+            "old settings"
+        );
+        assert!(install::load_state(&c).is_none());
         let _ = std::fs::remove_dir_all(&c);
     }
 

@@ -177,6 +177,22 @@ pub fn save_state(config: &Path, s: &UpdateState) -> std::io::Result<()> {
     versioned::save(&state_path(config), &bytes)
 }
 
+/// Remove staged downloads (`updates/<version>/`) of versions no newer than `current`.
+pub fn clean_staged(updates: &Path, current: &str) {
+    let Some(cur) = super::manifest::Version::parse(current) else {
+        return;
+    };
+    let Ok(rd) = std::fs::read_dir(updates) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if super::manifest::Version::parse(&name).is_some_and(|v| v <= cur) {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// Failed starts after which the next launch offers the rollback (decision 0031 §4: two).
 pub const FAILED_STARTS: u32 = 2;
 
@@ -299,6 +315,18 @@ mod tests {
             "the old version (rolled back) isn't counted"
         );
         assert_eq!(on_start(None, "0.3.12"), (None, false));
+    }
+
+    #[test]
+    fn staged_downloads_this_version_passed_are_removed() {
+        let d = dir("clean");
+        for v in ["0.3.10", "0.3.11", "0.3.12"] {
+            write(&d.join(v).join("lines.exe"), v);
+        }
+        clean_staged(&d, "0.3.11");
+        assert!(!d.join("0.3.10").exists() && !d.join("0.3.11").exists());
+        assert!(d.join("0.3.12").exists(), "a newer one waits");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -15,17 +15,28 @@ pub const CHANNEL: &str = "pre-release";
 /// The manifest's asset name on a release.
 pub const MANIFEST_ASSET: &str = "update.json";
 
-/// This build's target, as the manifest names it.
+/// This build's target, as the manifest names it. Windows only for now: a macOS update must
+/// replace the whole app bundle (decision 0031 §4), which isn't built yet, so other systems
+/// never update themselves.
 pub fn target() -> &'static str {
     if cfg!(all(windows, target_arch = "x86_64")) {
         "x86_64-pc-windows-msvc"
-    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        "aarch64-apple-darwin"
-    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
-        "x86_64-apple-darwin"
     } else {
         "unsupported"
     }
+}
+
+/// Whether this system updates itself at all.
+pub fn supported() -> bool {
+    target() != "unsupported"
+}
+
+/// What a release's minisign signature must say in its trusted (signed) comment: the file is
+/// this version, edition, channel and target. The manifest itself isn't signed, so this is
+/// what ties a signed file to the release offering it (no older or other-edition build can be
+/// passed off as a newer one).
+pub fn trusted_comment(v: Version, target: &str) -> String {
+    format!("lines {v} {EDITION} {CHANNEL} {target}")
 }
 
 /// A version as `MAJOR.MINOR.PATCH` (a leading `v` allowed; pre-release suffixes refused, as
