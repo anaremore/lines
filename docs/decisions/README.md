@@ -38,3 +38,4 @@ Format: Status · Context · Decision · Consequences.
 | 0030 | Several data sources at once, set up in Settings › Connections (Accepted) |
 | 0031 | In-app updates, signed, never during a trade (Accepted) |
 | 0033 | Databento is a public data source (Accepted) |
+| 0034 | Bundled fonts: IBM Plex Sans for the UI, IBM Plex Mono for numbers (Accepted) |
