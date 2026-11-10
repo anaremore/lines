@@ -219,6 +219,26 @@ impl Slot {
         self.kind_looks.get(usize::from(l.kind)).copied().flatten()
     }
 
+    /// Whether map kind `k`'s type is drawn by its style (the style editor's Show), and its
+    /// parent's (`LevelType::parent`) where the map has that kind: a child is hidden with its
+    /// parent. `true` for a kind without a declared type.
+    fn type_drawn(&self, map: &LevelMap, k: usize) -> bool {
+        let shown = |j: usize| {
+            self.kind_looks
+                .get(j)
+                .copied()
+                .flatten()
+                .is_none_or(|t| t.shown)
+        };
+        let parent = map
+            .kinds
+            .get(k)
+            .and_then(|id| self.types.iter().find(|t| t.id == id))
+            .and_then(|t| t.parent)
+            .and_then(|p| map.kinds.iter().position(|q| q == p));
+        shown(k) && parent.is_none_or(shown)
+    }
+
     /// A zone's fill at `dim`, before the under-candles scale: its type's fill (per-type
     /// override, else the source's Zones, else the type's own, with its light-theme
     /// counterpart), else the source's Zones look over the level's own color.
@@ -277,7 +297,9 @@ impl Slot {
     }
 
     /// The scale (0..=1) on this source's zone fills so the candles over each keep 3:1
-    /// (`Theme::under_candles`; one scale for all its zones: the most held back).
+    /// (`Theme::under_candles`), and over each stack where they overlap
+    /// (`Theme::stack_under_candles`); one scale for all its zones: the most held back.
+    /// Computed when the theme, map or looks change (allocating then), not every frame.
     fn zone_scale(&self, map: &Arc<LevelMap>, theme: &Theme) -> f32 {
         let key = Arc::as_ptr(map) as usize;
         if let Some((name, k, rev, out)) = self.zone_scale.get()
@@ -287,59 +309,110 @@ impl Slot {
         {
             return out;
         }
-        let out = held_back(
-            theme,
-            map.levels
-                .iter()
-                .filter(|l| matches!(l.shape, LevelShape::Zone { .. }))
-                .map(|l| self.zone_fill(theme, l, 1.0)),
-        );
+        // Each zone's fill and, at fixed prices, its span (a VWAP-relative one can sit
+        // anywhere: over any of them).
+        let zones: Vec<(Option<(f64, f64)>, Paint)> = map
+            .levels
+            .iter()
+            .filter(|l| matches!(l.shape, LevelShape::Zone { .. }))
+            .map(|l| {
+                let span = (!l.is_vwap_relative()).then(|| l.span_at(None)).flatten();
+                (span, self.zone_fill(theme, l, 1.0))
+            })
+            .collect();
+        let mut out = held_back(theme, zones.iter().map(|(_, f)| *f));
+        // And every stack where zones overlap: those containing each fixed zone's low edge
+        // (any overlap contains one), alone and under each VWAP-relative zone.
+        let mut stack: Vec<Paint> = Vec::with_capacity(zones.len() + 1);
+        for (lo, _) in zones.iter().filter_map(|(s, _)| *s) {
+            stack.clear();
+            stack.extend(
+                zones
+                    .iter()
+                    .filter(|(s, _)| s.is_some_and(|(a, b)| a <= lo && lo <= b))
+                    .map(|(_, f)| *f),
+            );
+            if stack.len() > 1 {
+                out = out.min(theme.stack_under_candles(&stack));
+            }
+            for (_, v) in zones.iter().filter(|(s, _)| s.is_none()) {
+                stack.push(*v);
+                out = out.min(theme.stack_under_candles(&stack));
+                stack.pop();
+            }
+        }
         self.zone_scale.set(Some((theme.name, key, self.rev, out)));
         out
     }
 
     /// Each level's label text color in `theme` (by level index), resolved once per (theme,
     /// map, looks): the level's line color, opaque, where it is AA on the label's box over
-    /// everything under it (`Theme::level_label_text`: the chart's underlays and this source's
-    /// zone fills as drawn), else the theme's text; the theme's text for a type that asks for
-    /// it. Allocates only when one of them changes.
+    /// what is under that box in the gutter (`Theme::level_label_text`: the chart, its grid,
+    /// each of this source's zone fills at fixed prices as drawn, and the stack of those
+    /// containing the label's price), else the theme's text; the theme's text for a type that
+    /// asks for it. VWAP-relative zones are drawn along the bars only, never in the gutter.
+    /// Allocates only when one of them changes.
     fn label_colors(&mut self, map: &Arc<LevelMap>, theme: &Theme, hair: f32) {
         let key = (theme.name, Arc::as_ptr(map) as usize, self.rev);
         if self.label_colors_key == Some(key) {
             return;
         }
         let scale = self.zone_scale(map, theme);
-        let fills: Vec<Hsla> = map
+        // Each zone at fixed prices: its span and its fill as drawn.
+        let zones: Vec<((f64, f64), Paint)> = map
             .levels
             .iter()
-            .filter(|l| matches!(l.shape, LevelShape::Zone { .. }))
-            .map(|l| {
+            .filter(|l| matches!(l.shape, LevelShape::Zone { .. }) && !l.is_vwap_relative())
+            .filter_map(|l| {
                 let mut z = self.zone_fill(theme, l, 1.0);
                 z.a *= scale;
-                z
+                Some((l.span_at(None)?, z))
             })
             .collect();
-        let colors = map
-            .levels
+        let alone: Vec<Paint> = zones
             .iter()
-            .map(|l| self.label_color(theme, l, hair, &fills))
+            .map(|(_, f)| theme.zones_over_chart([*f]))
             .collect();
+        let mut unders: Vec<Paint> = Vec::with_capacity(alone.len() + 1);
+        let mut colors = Vec::with_capacity(map.levels.len());
+        for l in &map.levels {
+            unders.clear();
+            unders.extend_from_slice(&alone);
+            if let Some(p) = self.label_price(l) {
+                unders.push(
+                    theme.zones_over_chart(
+                        zones
+                            .iter()
+                            .filter(|((lo, hi), _)| *lo <= p && p <= *hi)
+                            .map(|(_, f)| *f),
+                    ),
+                );
+            }
+            colors.push(self.label_color(theme, l, hair, &unders));
+        }
         self.label_colors = colors;
         self.label_colors_key = Some(key);
     }
 
-    /// Level `l`'s label text color (see [`Slot::label_colors`]); `fills`: the zone fills
-    /// under the labels, as drawn.
-    fn label_color(&self, theme: &Theme, l: &Level, hair: f32, fills: &[Paint]) -> Paint {
+    /// The price level `l`'s label sits at (its line's; a zone's edge its type puts it at),
+    /// `None` for one moving with the VWAP.
+    fn label_price(&self, l: &Level) -> Option<f64> {
+        let (lo, hi) = l.span_at(None)?;
+        let at = self.type_look(l).map_or(LabelAt::Own, |t| t.label.at);
+        Some(if at == LabelAt::Low { lo } else { hi })
+    }
+
+    /// Level `l`'s label text color (see [`Slot::label_colors`]); `zones`: what is under its
+    /// label, opaque.
+    fn label_color(&self, theme: &Theme, l: &Level, hair: f32, zones: &[Paint]) -> Paint {
         let wants = self
             .type_look(l)
             .map_or(LabelColor::Level, |t| t.label.color);
         match wants {
             LabelColor::Text => theme.text_main,
             LabelColor::Level => {
-                let mut c = self.stroke(theme, l, 1.0, false, hair).color;
-                c.a = 1.0;
-                theme.level_label_text(c, fills)
+                let c = self.stroke(theme, l, 1.0, false, hair).color;
+                theme.level_label_text(c, zones)
             }
         }
     }
@@ -647,7 +720,9 @@ impl LevelsLayer {
         let Some(k) = s.map.as_ref().and_then(|m| m.kind_index(kind)) else {
             return true;
         };
-        s.kind_looks[usize::from(k)].is_none_or(|t| t.shown)
+        s.map
+            .as_ref()
+            .is_none_or(|m| s.type_drawn(m, usize::from(k)))
     }
 
     /// The kind `kind` of source `id` was split from (`LevelType::parent`).
@@ -829,10 +904,9 @@ impl LevelsLayer {
             let mut mask = 0u64;
             for (i, k) in map.kinds.iter().enumerate().take(64) {
                 // Shown on this pane (its parent kind too), and its type (if declared) drawn.
+                // A child kind is also hidden while its parent's type is (`Slot::type_drawn`).
                 let parent = s.types.iter().find(|t| t.id == k).and_then(|t| t.parent);
-                if self.config.kind_shown_under(source, k, parent)
-                    && s.kind_looks[i].is_none_or(|t| t.shown)
-                {
+                if self.config.kind_shown_under(source, k, parent) && s.type_drawn(map, i) {
                     mask |= 1 << i;
                 }
             }
@@ -911,11 +985,7 @@ impl LevelsLayer {
                     .and_then(|k| s.types.iter().find(|t| t.id == k))
                     .and_then(|t| t.parent);
                 let shown = kind.is_some_and(|k| self.config.kind_shown_under(source, k, parent))
-                    && s.kind_looks
-                        .get(usize::from(l.kind))
-                        .copied()
-                        .flatten()
-                        .is_none_or(|t| t.shown);
+                    && s.type_drawn(map, usize::from(l.kind));
                 if !shown {
                     continue;
                 }
@@ -1440,6 +1510,11 @@ fn estimate(t: &str) -> f32 {
 
 /// `text`'s width as a label, shaped and not kept (a cut's candidates).
 pub(crate) fn measure(text: &str, theme: &Theme, window: &mut Window) -> f32 {
+    measure_at(text, LABEL_PX, theme, window)
+}
+
+/// `text`'s width at `size` px in the window's font, shaped and not kept.
+pub(crate) fn measure_at(text: &str, size: f32, theme: &Theme, window: &mut Window) -> f32 {
     let run = TextRun {
         len: text.len(),
         font: crate::fonts::ui(),
@@ -1451,21 +1526,74 @@ pub(crate) fn measure(text: &str, theme: &Theme, window: &mut Window) -> f32 {
     f32::from(
         window
             .text_system()
-            .shape_line(
-                SharedString::from(text.to_owned()),
-                px(LABEL_PX),
-                &[run],
-                None,
-            )
+            .shape_line(SharedString::from(text.to_owned()), px(size), &[run], None)
             .width,
     )
+}
+
+/// What of a source's legend row fits a legend `room` px wide (inside its padding), measured
+/// with `measure`: its title after the source's name (`head`: the name's width and the gap
+/// and "· " before the title) cut with "…" at a whole character, and how many of its stats
+/// (`stat_w`: each stat's width, name and value with their gap; `gap` between stats) fit
+/// whole, in order, with room for a closing "…" when some don't. A number is never cut.
+pub struct LegendFit {
+    /// The title as shown (`None`: none, or not even "…" fits).
+    pub title: Option<String>,
+    /// How many stats show, from the first.
+    pub stats: usize,
+    /// Some stats don't fit: the line ends with "…".
+    pub more: bool,
+}
+
+pub fn fit_legend(
+    room: f32,
+    head: f32,
+    title: Option<&str>,
+    stat_w: &[f32],
+    gap: f32,
+    mut measure: impl FnMut(&str) -> f32,
+) -> LegendFit {
+    let title = title.and_then(|t| {
+        let left = room - head;
+        if measure(t) <= left {
+            return Some(t.to_owned());
+        }
+        // The longest prefix (whole characters, trailing spaces dropped) with "…" that fits.
+        let ends: Vec<usize> = t.char_indices().map(|(i, _)| i).skip(1).collect();
+        ends.iter().rev().find_map(|&e| {
+            let cut = format!("{}…", t[..e].trim_end());
+            (measure(&cut) <= left).then_some(cut)
+        })
+    });
+    // The first `k` stats' width.
+    let width = |k: usize| stat_w[..k].iter().sum::<f32>() + gap * k.saturating_sub(1) as f32;
+    let n = if width(stat_w.len()) <= room {
+        stat_w.len()
+    } else {
+        let more_w = measure("…");
+        (0..stat_w.len())
+            .rev()
+            .find(|&k| width(k) + if k > 0 { gap } else { 0.0 } + more_w <= room)
+            .unwrap_or(0)
+    };
+    LegendFit {
+        title,
+        stats: n,
+        more: n < stat_w.len(),
+    }
 }
 
 /// Labels shaped and kept, by text: one per color the text is drawn in.
 type Shaped = HashMap<String, Vec<(Hsla, ShapedLine)>>;
 
-/// `text` shaped as a label in `color` (shaped once per distinct text and color and kept; a
-/// cache miss allocates, as the map's labels are new).
+/// Most colors a label text is kept shaped in (see [`shaped_in`]).
+const SHAPED_COLORS: usize = 3;
+
+/// `text` shaped as a label in `color` (shaped once per distinct text and color and kept, at
+/// most [`SHAPED_COLORS`] colors per text; a cache miss allocates, as the map's labels are
+/// new). A stale/current flip shapes each label once in its other color and then keeps both,
+/// so flips back and forth shape nothing (GPUI's line layout cache serves the glyphs of a
+/// text shaped the frame before, whatever its color).
 fn shaped_in<'a>(
     shaped: &'a mut Shaped,
     text: &str,
@@ -1496,6 +1624,11 @@ fn shaped_in<'a>(
                 None,
             );
             let v = shaped.entry(text.to_owned()).or_default();
+            // Bounded per text: its level color, the stale dim and one more (a restyle); the
+            // oldest goes first.
+            if v.len() >= SHAPED_COLORS {
+                v.remove(0);
+            }
             v.push((color, line));
             v.len() - 1
         }

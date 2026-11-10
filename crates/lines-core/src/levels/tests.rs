@@ -486,7 +486,12 @@ fn label_text_is_name_and_price() {
             Some("Z1"),
             style(),
         )
-        .line("vw", LevelValue::VwapOffset(750.0), Some("+1 RI"), style())
+        .line(
+            "vw",
+            LevelValue::VwapOffset(750.0),
+            Some("+1 Band"),
+            style(),
+        )
         .line("nolabel", LevelValue::Tick(Price(600_000)), None, style())
         .build(TICK)
         .unwrap();
@@ -501,7 +506,7 @@ fn label_text_is_name_and_price() {
             Some("Demand zone : 7556.25".into()),
             Some("DD : 7482.07".into()),
             Some("Z1 : 5997.50".into()),
-            Some("+1 RI".into()),
+            Some("+1 Band".into()),
             None,
         ]
     );
@@ -656,7 +661,7 @@ fn close_labels_keep_one_layout() {
     // A VWAP-relative label near a fixed one: placed after it, so the fixed label shows
     // whatever the band does.
     let m = LevelMap::builder("demo", ES, UtcMillis(0))
-        .line("vw", LevelValue::VwapOffset(0.0), Some("+1 RI"), style())
+        .line("vw", LevelValue::VwapOffset(0.0), Some("+1 Band"), style())
         .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
         .build(TICK)
         .unwrap();
@@ -941,7 +946,8 @@ fn a_clashing_edge_label_is_dropped_never_moved() {
 }
 
 /// A legend's title and stats are validated with the map: a signed tone needs its sign, and
-/// lengths and counts are bounded; a bad legend refuses the map like a bad level.
+/// lengths and counts are bounded. A bad legend is dropped (`legend_dropped`), never the map:
+/// its levels are kept.
 #[test]
 fn legend_is_validated_with_the_map() {
     let stat = |name: &str, text: &str, tone| LegendStat {
@@ -951,43 +957,51 @@ fn legend_is_validated_with_the_map() {
     };
     let b = |l: LevelLegend| {
         LevelMap::builder("demo", ES, UtcMillis(0))
+            .line(
+                "pivot",
+                LevelValue::Tick(Price(600_000)),
+                Some("P"),
+                LevelStyle::default(),
+            )
             .legend(l)
             .build(TICK)
     };
     let good = LevelLegend {
         title: Some("Map A".into()),
         stats: vec![
-            stat("RI", "72.25", StatTone::Plain),
-            stat("Res", "\u{2212}7.9", StatTone::Down),
-            stat("MRes", "-1", StatTone::Down),
-            stat("WRes", "+11.0", StatTone::Up),
+            stat("Range", "72.25", StatTone::Plain),
+            stat("Bias", "\u{2212}7.9", StatTone::Down),
+            stat("Skew", "-1", StatTone::Down),
+            stat("Drift", "+11.0", StatTone::Up),
         ],
     };
-    assert_eq!(b(good.clone()).unwrap().legend, Some(good));
-    for bad in [
-        vec![stat("Res", "7.9", StatTone::Down)],
-        vec![stat("Res", "-7.9", StatTone::Up)],
+    assert_eq!(good.check(), Ok(()));
+    let m = b(good.clone()).unwrap();
+    assert_eq!(m.legend, Some(good));
+    assert!(!m.legend_dropped);
+    let mut bads: Vec<LevelLegend> = [
+        vec![stat("Bias", "7.9", StatTone::Down)],
+        vec![stat("Bias", "-7.9", StatTone::Up)],
         vec![stat("", "1", StatTone::Plain)],
         vec![stat("R", "", StatTone::Plain)],
         vec![stat("R", "1234567890123", StatTone::Plain)],
         vec![stat("R", "1", StatTone::Plain); MAX_LEGEND_STATS + 1],
-    ] {
-        assert_eq!(
-            b(LevelLegend {
-                title: None,
-                stats: bad.clone()
-            }),
-            Err(LevelError::BadLegend),
-            "{bad:?}"
-        );
+    ]
+    .into_iter()
+    .map(|stats| LevelLegend { title: None, stats })
+    .collect();
+    bads.push(LevelLegend {
+        title: Some("x".repeat(MAX_LEGEND_TEXT + 1)),
+        stats: Vec::new(),
+    });
+    for bad in bads {
+        assert_eq!(bad.check(), Err(LevelError::BadLegend), "{bad:?}");
+        let m = b(bad.clone()).expect("the map is kept");
+        assert_eq!(m.legend, None, "{bad:?}");
+        assert!(m.legend_dropped, "{bad:?}");
+        assert_eq!(m.levels.len(), 1, "its levels kept");
     }
-    assert_eq!(
-        b(LevelLegend {
-            title: Some("x".repeat(MAX_LEGEND_TEXT + 1)),
-            stats: Vec::new()
-        }),
-        Err(LevelError::BadLegend)
-    );
     // No legend: none.
     assert_eq!(demo().legend, None);
+    assert!(!demo().legend_dropped);
 }

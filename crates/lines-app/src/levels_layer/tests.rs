@@ -156,7 +156,9 @@ fn layer_places_filters_and_reports_freshness() {
     let (_, _, kinds) = &layer.sources()[i];
     assert_eq!(
         kinds,
-        &["pivot", "resist", "support", "zone", "band", "anchor"]
+        &[
+            "pivot", "resist", "support", "supply", "zone", "band", "anchor"
+        ]
     );
     // Current: the source's title and stats, never the map's time.
     let rows = layer.legend();
@@ -515,8 +517,8 @@ fn types_resolve_hide_and_label_with_the_price() {
         .collect();
     assert!(texts.contains(&"Pivot 6010 : 6010.00"), "{texts:?}");
     assert!(
-        texts.contains(&"Supply : 6017.50"),
-        "a zone: the edge its label sits at (the demo's: the low edge)"
+        texts.contains(&"Supply : 6022.50") && texts.contains(&"Demand : 5990.00"),
+        "a zone: the edge its label sits at (supply's high, demand's low)"
     );
     assert!(
         texts.contains(&"VWAP ±7.50"),
@@ -1150,12 +1152,13 @@ fn demo_level_colors_read_and_stay_off_meanings() {
 /// Labels are in each level's color where that is AA on the label (4.5:1 on its box over
 /// every underlay and the source's zone fills), else theme text for that label only: in every
 /// theme and palette, for the type's recommended color, a user's color and a type asking for
-/// text. The demo's zones sit at their low edge, with that edge's price.
+/// text. The demo's demand zone sits under its low edge and its supply zone above its high
+/// edge, each with that edge's price.
 #[test]
 fn labels_take_the_level_color_where_it_reads_and_their_types_edge() {
     use crate::theme::rgb_of;
     use lines_core::levels::{LabelAt, LabelColor, LabelMode};
-    use lines_core::style::{Color, Rgb, contrast, over};
+    use lines_core::style::Color;
     let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
     lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
     let store = es_store();
@@ -1179,13 +1182,9 @@ fn labels_take_the_level_color_where_it_reads_and_their_types_edge() {
         );
     };
     frame(&mut layer);
-    // Every label color reads (AA) on its box over everything under it, or is the text.
-    let reads = |t: &Theme, c: Hsla| {
-        let pct = |a: f32| (a.clamp(0.0, 1.0) * 100.0).round() as u8;
-        let label = rgb_of(t.label_bg);
-        let k = |u: Rgb| contrast(rgb_of(c), over(label, pct(t.label_bg.a), u));
-        t.chart_underlays().iter().all(|(_, u)| k(*u) >= 4.5)
-    };
+    // Every label color reads (AA) on its box over the gutter's chart and grid, or is the
+    // text.
+    let reads = |t: &Theme, c: Hsla| t.level_label_ratio(c, &[]) >= 4.5;
     let mut colored = 0;
     let mut fell_back = 0;
     for t in Theme::all() {
@@ -1261,28 +1260,73 @@ fn labels_take_the_level_color_where_it_reads_and_their_types_edge() {
             .is_none()
     );
 
-    // The demo's zones: labeled under their low edge, with the low edge's price.
-    let zone = map
-        .levels
-        .iter()
-        .position(|l| map.kinds[usize::from(l.kind)] == "zone")
-        .unwrap();
-    let placed = *layer
-        .placed(i)
-        .iter()
-        .find(|p| p.index as usize == zone)
-        .unwrap();
-    assert_eq!(placed.anchor, LabelAt::Low);
-    if let Some(y) = placed.label_y {
-        assert!(
-            y > placed.bottom,
-            "under its low edge: {y} vs {}",
-            placed.bottom
-        );
+    // The demo's demand zone: labeled under its low edge, with that edge's price; its supply
+    // zone above its high edge, with that edge's price.
+    for (kind, at, text) in [
+        ("zone", LabelAt::Low, "Demand : 5990.00"),
+        ("supply", LabelAt::High, "Supply : 6022.50"),
+    ] {
+        let zone = map
+            .levels
+            .iter()
+            .position(|l| map.kinds[usize::from(l.kind)] == kind)
+            .unwrap();
+        let placed = *layer
+            .placed(i)
+            .iter()
+            .find(|p| p.index as usize == zone)
+            .unwrap();
+        assert_eq!(placed.anchor, at, "{kind}");
+        if let Some(y) = placed.label_y {
+            match at {
+                LabelAt::Low => assert!(y > placed.bottom, "under its low edge: {y}"),
+                _ => assert!(y < placed.top, "above its high edge: {y}"),
+            }
+        }
+        assert_eq!(layer.label_texts(i)[zone].as_deref(), Some(text), "{kind}");
     }
-    assert_eq!(
-        layer.label_texts(i)[zone].as_deref(),
-        Some("Supply : 6017.50"),
-        "the low edge's price"
-    );
+}
+
+/// A child kind (`LevelType::parent`) hides with its parent's type too: hiding the parent in
+/// its style (the style editor's Show; a saved `types.<parent>.shown: false`) hides the child
+/// as well (the demo's supply zone is a kind of its zones).
+#[test]
+fn a_parent_type_hidden_in_its_style_hides_its_children() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut layer, store, i) = demo_layer();
+    let frame = |layer: &mut LevelsLayer| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+        );
+    };
+    frame(&mut layer);
+    let map = layer.map(i).unwrap().clone();
+    let of = |kind: &str| {
+        map.levels
+            .iter()
+            .position(|l| map.kinds[usize::from(l.kind)] == kind)
+            .unwrap()
+    };
+    let (zone, supply) = (of("zone"), of("supply"));
+    let placed =
+        |layer: &LevelsLayer, at: usize| layer.placed(i).iter().any(|p| p.index as usize == at);
+    assert!(placed(&layer, zone) && placed(&layer, supply));
+    assert!(layer.kind_styled_shown("demo", "supply"));
+    let hidden: BTreeMap<String, PartStyles> =
+        serde_json::from_str(r#"{"demo": {"types": {"zone": {"shown": false}}}}"#).unwrap();
+    layer.set_styles(&hidden);
+    frame(&mut layer);
+    assert!(!placed(&layer, zone), "the parent hidden");
+    assert!(!placed(&layer, supply), "and its child with it");
+    assert!(!layer.kind_styled_shown("demo", "supply"));
+    // Hiding only the child leaves the parent.
+    let child: BTreeMap<String, PartStyles> =
+        serde_json::from_str(r#"{"demo": {"types": {"supply": {"shown": false}}}}"#).unwrap();
+    layer.set_styles(&child);
+    frame(&mut layer);
+    assert!(placed(&layer, zone) && !placed(&layer, supply));
 }

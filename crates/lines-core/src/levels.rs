@@ -243,6 +243,9 @@ pub struct LevelMap {
     /// What the source puts in its legend row beside its name (`None`: nothing): see
     /// [`LevelLegend`].
     pub legend: Option<LevelLegend>,
+    /// The source sent a legend that isn't valid ([`LevelError::BadLegend`]): it was dropped
+    /// and the levels kept (a legend is never worth the levels). The runtime logs it.
+    pub legend_dropped: bool,
 }
 
 /// A source's legend content (generic: the source decides the words): a short title after
@@ -258,7 +261,7 @@ pub struct LevelLegend {
     pub stats: Vec<LegendStat>,
 }
 
-/// One legend stat: `name text` ("Res -7.9").
+/// One legend stat: `name text` ("Bias -7.9").
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LegendStat {
     /// 1-12 characters.
@@ -299,6 +302,15 @@ impl LegendStat {
 }
 
 impl LevelLegend {
+    /// Whether it is valid (`Err(BadLegend)` when not).
+    pub fn check(&self) -> Result<(), LevelError> {
+        if self.ok() {
+            Ok(())
+        } else {
+            Err(LevelError::BadLegend)
+        }
+    }
+
     fn ok(&self) -> bool {
         self.title
             .as_ref()
@@ -324,6 +336,7 @@ impl LevelMap {
                 levels_refused: None,
                 series_update: false,
                 legend: None,
+                legend_dropped: false,
             },
             error: None,
         }
@@ -369,7 +382,8 @@ pub enum LevelError {
     /// points or segments out of order.
     BadSeries(String),
     /// The legend's title is too long, it has too many stats, or a stat is empty, too long, or
-    /// up or down without its sign.
+    /// up or down without its sign ([`LevelLegend::check`]; the builder drops such a legend
+    /// and keeps the map: [`LevelMap::legend_dropped`]).
     BadLegend,
 }
 
@@ -557,8 +571,10 @@ impl LevelMapBuilder {
         if !slug_ok(&self.map.source) {
             self.fail(LevelError::BadSlug(self.map.source.clone()));
         }
+        // A bad legend is dropped, never the map.
         if self.map.legend.as_ref().is_some_and(|l| !l.ok()) {
-            self.fail(LevelError::BadLegend);
+            self.map.legend = None;
+            self.map.legend_dropped = true;
         }
         if self.map.levels.len() > MAX_LEVELS {
             self.fail(LevelError::TooMany("levels"));

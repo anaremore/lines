@@ -156,7 +156,9 @@ fn demo_decode_translates_the_anchor_only_where_the_chart_has_a_price() {
     assert_eq!(m.as_of, t("2026-11-05T13:00:00"));
     assert_eq!(
         m.kinds,
-        ["pivot", "resist", "support", "zone", "band", "anchor"]
+        [
+            "pivot", "resist", "support", "supply", "zone", "band", "anchor"
+        ]
     );
     let band = m.levels.iter().find(|l| l.is_vwap_relative()).unwrap();
     assert_eq!(band.vwap_offsets(), Some((-750.0, 750.0)));

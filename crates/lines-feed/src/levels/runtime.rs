@@ -27,8 +27,8 @@ use lines_core::{ContractKey, ProductId, UtcMillis};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use super::{
-    ChartPrices, LevelContext, LevelFrame, LevelMap, LevelSource, RefreshMode, SettingValues,
-    decode_batch, encode_batch,
+    ChartPrices, LevelContext, LevelError, LevelFrame, LevelMap, LevelSource, RefreshMode,
+    SettingValues, decode_batch, encode_batch,
 };
 use crate::provider::Frame;
 use crate::recording::{Direction, FORMAT_VERSION, Header, Reader, Writer};
@@ -555,6 +555,15 @@ fn apply(
     let prev = cell.read().map.clone();
     let result = source.decode(ctx, prices, prev.as_deref(), frames);
     let series_only = matches!(&result, Ok(Some(m)) if m.series_update);
+    if let Ok(Some(m)) = &result
+        && m.legend_dropped
+    {
+        tracing::warn!(
+            "levels {}: {}; its legend dropped, its levels kept",
+            source.id(),
+            LevelError::BadLegend
+        );
+    }
     cell.update(|s| match result {
         Ok(Some(map)) if map.product != ctx.product.id || map.source != source.id() => {
             s.error = Some(format!(

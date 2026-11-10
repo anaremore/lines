@@ -2565,7 +2565,7 @@ impl ChartView {
 
     /// Study legends (VWAP …) and level-source rows, top left under the readout, unless the
     /// chart hides its study labels (render time).
-    fn legend(&self, t: &Theme) -> Option<gpui::AnyElement> {
+    fn legend(&self, t: &Theme, window: &mut Window) -> Option<gpui::AnyElement> {
         if !self.visibility.draws_labels() {
             // The readout still shows over the plot's top-left.
             self.legend_band.set((8.0 + LEGEND_MAX_W, readout_bottom()));
@@ -2622,10 +2622,38 @@ impl ChartView {
         }
         // Level rows: the source's name, its legend title, then its state (none while current);
         // a long reason ends in an ellipsis at the legend's width, never running over the
-        // chart. A source's stats on a line under it: each name dim, its value in the up or
-        // down color where that is AA on the legend (`Theme::legend_text`, else text), the sign
-        // always written; a stale row all dim.
+        // chart; a long title is cut with "…" at a whole character. A source's stats on a line
+        // under it, whole: those that don't fit are dropped and the line ends with "…" (a
+        // number is never cut, `levels_layer::fit_legend`). Each stat's name dim, its value in
+        // the up or down color where that is AA on the legend box (`Theme::legend_stat_text`,
+        // else text), the sign always written; a stale row all dim. The box is opaque, so no
+        // zone, band or line shows through it.
+        let size = crate::zoom::f(12.0);
+        let rem = f32::from(window.rem_size());
+        // Inside the box's padding, a pixel spare for rounding.
+        let room = LEGEND_MAX_W - 2.0 * crate::zoom::f(8.0) - 1.0;
         let levels = (!rows.is_empty()).then(|| {
+            let mut m = |s: &str| crate::levels_layer::measure_at(s, size, t, window);
+            let rows: Vec<_> = rows
+                .into_iter()
+                .map(|r| {
+                    let head = m(r.label) + 0.5 * rem + m("· ");
+                    let stat_w: Vec<f32> = r
+                        .stats
+                        .iter()
+                        .map(|s| m(&s.name) + 0.25 * rem + m(&s.text))
+                        .collect();
+                    let fit = crate::levels_layer::fit_legend(
+                        room,
+                        head,
+                        r.title.as_deref(),
+                        &stat_w,
+                        0.75 * rem,
+                        &mut m,
+                    );
+                    (r, fit)
+                })
+                .collect();
             div()
                 .flex()
                 .flex_col()
@@ -2633,21 +2661,22 @@ impl ChartView {
                 .max_w(px(LEGEND_MAX_W))
                 .px(crate::zoom::ui(8.0))
                 .py(crate::zoom::ui(4.0))
-                .bg(t.label_bg)
+                .bg(t.legend_box())
                 .text_size(crate::zoom::ui(12.0))
-                .children(rows.into_iter().map(|r| {
+                .children(rows.into_iter().map(|(r, fit)| {
                     let head = div()
                         .flex()
                         .flex_row()
                         .gap_2()
                         .min_w_0()
+                        .whitespace_nowrap()
                         .child(
                             div()
                                 .flex_shrink_0()
                                 .text_color(if r.dim { t.text_dim } else { t.text_main })
                                 .child(r.label),
                         )
-                        .when_some(r.title, |d, title| {
+                        .when_some(fit.title, |d, title| {
                             d.child(
                                 div()
                                     .flex_shrink_0()
@@ -2673,12 +2702,12 @@ impl ChartView {
                             .min_w_0()
                             .overflow_hidden()
                             .whitespace_nowrap()
-                            .children(r.stats.into_iter().map(|s| {
+                            .children(r.stats.into_iter().take(fit.stats).map(|s| {
                                 let value = match (dim, s.tone) {
                                     (true, _) => t.text_dim,
                                     (false, StatTone::Plain) => t.text_main,
-                                    (false, StatTone::Up) => t.legend_text(t.up),
-                                    (false, StatTone::Down) => t.legend_text(t.down),
+                                    (false, StatTone::Up) => t.legend_stat_text(t.up),
+                                    (false, StatTone::Down) => t.legend_stat_text(t.down),
                                 };
                                 div()
                                     .flex()
@@ -2688,6 +2717,9 @@ impl ChartView {
                                     .child(div().text_color(t.text_dim).child(s.name))
                                     .child(div().text_color(value).child(s.text))
                             }))
+                            .when(fit.more, |d| {
+                                d.child(div().flex_shrink_0().text_color(t.text_dim).child("…"))
+                            })
                     });
                     div()
                         .flex()
@@ -9278,7 +9310,7 @@ impl Render for ChartView {
                         )
                         .size_full(),
                     )
-                    .when_some(self.legend(&t), |d, l| d.child(l))
+                    .when_some(self.legend(&t, window), |d, l| d.child(l))
                     .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
                     .when_some(
                         crate::order_group_view::layer(self, window, &t, cx),
