@@ -110,6 +110,8 @@ pub struct JournalWriter {
 
 enum Job {
     Write(Record),
+    /// Keep the file as a dated `.bak`, then replace it with these records.
+    Rewrite(Vec<Record>),
     /// Sync, then reply.
     Flush(Sender<()>),
 }
@@ -173,6 +175,13 @@ impl JournalWriter {
         let _ = self.tx.send(Job::Write(r));
     }
 
+    /// Keep the file as it is now (`<name>-YYYYMMDD-HHMMSS.jsonl.bak`, UTC), then replace it
+    /// with its header and `records` (written whole beside it, then renamed). After the writes
+    /// queued before it; later appends go to the new file.
+    pub fn rewrite(&self, records: Vec<Record>) {
+        let _ = self.tx.send(Job::Rewrite(records));
+    }
+
     /// Wait (up to `timeout`) until everything queued so far is written and synced.
     pub fn flush(&self, timeout: Duration) -> bool {
         let (tx, rx) = mpsc::channel();
@@ -223,6 +232,53 @@ fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::rename(&tmp, path).with_context(|| format!("replace {}", path.display()))
 }
 
+/// [`JournalWriter::rewrite`] on the writer's thread: returns the new file, open for appending.
+fn rewrite(path: &Path, records: &[Record]) -> Result<File> {
+    let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let nl = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .context("journal header")?;
+    let stem = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64);
+    let (y, mo, d, h, mi, s) = lines_core::UtcMillis(now).to_civil();
+    let base = format!("{stem}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}");
+    let mut n = 1;
+    let aside = loop {
+        let name = if n == 1 {
+            format!("{base}.jsonl.bak")
+        } else {
+            format!("{base}-{n}.jsonl.bak")
+        };
+        let p = path.with_file_name(name);
+        if !p.exists() {
+            break p;
+        }
+        n += 1;
+    };
+    write_whole(&aside, &bytes)?;
+    let mut out = bytes[..=nl].to_vec();
+    for r in records {
+        out.extend(serde_json::to_vec(r)?);
+        out.push(b'\n');
+    }
+    write_whole(path, &out)?;
+    tracing::info!(
+        "journal {}: rewritten (kept {})",
+        path.display(),
+        aside.display()
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))
+}
+
 fn write_loop(mut file: File, path: PathBuf, rx: Receiver<Job>) {
     let mut last_sync = Instant::now();
     let mut unsynced = false;
@@ -232,6 +288,14 @@ fn write_loop(mut file: File, path: PathBuf, rx: Receiver<Job>) {
                 let _ = file.sync_data();
                 unsynced = false;
                 let _ = tx.send(());
+            }
+            Ok(Job::Rewrite(records)) => {
+                let _ = file.sync_data();
+                match rewrite(&path, &records) {
+                    Ok(f) => file = f,
+                    Err(e) => tracing::error!("journal {}: can't rewrite: {e:#}", path.display()),
+                }
+                unsynced = false;
             }
             Ok(Job::Write(r)) => match serde_json::to_vec(&r) {
                 Ok(mut line) => {

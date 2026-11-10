@@ -593,6 +593,57 @@ fn a_v1_journal_migrates_to_v2_when_written() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A paper reset that clears its journal: that account's trades go, from memory and from the
+/// file (kept first as a dated `.bak`); another account's stay, and appends continue after.
+#[test]
+fn clearing_an_account_rewrites_the_file_and_keeps_a_copy() {
+    let dir = std::env::temp_dir().join(format!("lines-journal-clear-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("mock.jsonl");
+    let mine = closed(10.0, 5, &["a"]);
+    let mut theirs = closed(-5.0, 20, &[]);
+    theirs.account = AccountId::new("other");
+    theirs.id = "other-1".into();
+    let mut j = Journal::from_records([
+        Record::Trade(Box::new(mine.clone())),
+        Record::Trade(Box::new(theirs.clone())),
+    ]);
+    assert_eq!(j.clear_account(&acct()), 1);
+    assert_eq!(j.trades(), std::slice::from_ref(&theirs));
+    assert!(j.trade(&mine.id).is_none());
+    assert!(
+        j.trade("other-1").is_some(),
+        "ids still find the trades left"
+    );
+
+    let w = JournalWriter::open(path.clone(), "mock", None).unwrap();
+    w.append(Record::Trade(Box::new(mine)));
+    w.append(Record::Trade(Box::new(theirs.clone())));
+    assert!(w.flush(std::time::Duration::from_secs(5)));
+    let before = std::fs::read_to_string(&path).unwrap();
+    w.rewrite(vec![Record::Trade(Box::new(theirs.clone()))]);
+    w.append(Record::Trade(Box::new(closed(3.0, 30, &[]))));
+    assert!(w.flush(std::time::Duration::from_secs(5)));
+    let l = store::read(&path).unwrap().unwrap();
+    assert_eq!(
+        l.records.len(),
+        2,
+        "the other account's trade, then the new one"
+    );
+    assert_eq!(l.records[0], Record::Trade(Box::new(theirs)));
+    let baks: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("mock-") && n.ends_with(".jsonl.bak"))
+        .collect();
+    assert_eq!(baks.len(), 1, "{baks:?}");
+    assert_eq!(std::fs::read_to_string(dir.join(&baks[0])).unwrap(), before);
+    drop(w);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
     let dir = std::env::temp_dir().join(format!("lines-journal-{}", std::process::id()));
@@ -783,6 +834,36 @@ fn screenshot_names_round_trip_and_older_lines_load() {
         !csv.contains(".svg") && !csv.contains("screenshots"),
         "{csv}"
     );
+}
+
+/// A reset that clears its journal clears it on its event, in order: the trades before it go,
+/// a trade made right after it (in the same batch, or before the UI could act) stays.
+#[test]
+fn a_reset_clears_the_journal_in_order_with_the_events() {
+    let shared = JournalShared::start(Journal::new(), None);
+    let mut obs = shared.observer();
+    let reset = |clear_journal| Event::AccountReset {
+        account: acct(),
+        balance: Money::whole(50_000),
+        at: at(5),
+        clear_journal,
+    };
+    obs.events(&[fill("a1", 1, Side::Buy, 6000.0, 1, 0.0, 0)]);
+    obs.events(&[fill("a2", 2, Side::Sell, 6001.0, 1, 0.0, 2)]);
+    // A reset that keeps the journal: nothing goes.
+    obs.events(&[reset(false)]);
+    shared.sync();
+    assert_eq!(shared.snapshot().unwrap().trades.len(), 1);
+    // One that clears it, then a round trip in the same batch.
+    obs.events(&[
+        reset(true),
+        fill("b1", 3, Side::Buy, 6000.0, 1, 0.0, 6),
+        fill("b2", 4, Side::Sell, 6002.0, 1, 0.0, 8),
+    ]);
+    shared.sync();
+    let trades = shared.snapshot().unwrap().trades.clone();
+    assert_eq!(trades.len(), 1, "only the trade after the reset");
+    assert_eq!(trades[0].entry_time, at(6));
 }
 
 /// The journal thread asks only when the journal is saved; a flush reaches the drawing thread.

@@ -256,6 +256,11 @@ pub struct GuardrailTracker {
     pub open: Vec<OpenTrade>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock: Option<Lockout>,
+    /// The day's P&L before a paper reset this trade date (`Command::ResetPaper`): the daily
+    /// loss guardrail still counts it, so a reset is no way around it. Gone with the next trade
+    /// date. Optional: older files have none.
+    #[serde(default, skip_serializing_if = "crate::types::Money::is_zero")]
+    pub carried: crate::types::Money,
 }
 
 impl GuardrailTracker {
@@ -296,6 +301,7 @@ impl GuardrailTracker {
             }
             self.trades = 0;
             self.streak = 0;
+            self.carried = crate::types::Money::ZERO;
         }
         self.day = Some(date);
         if self

@@ -125,7 +125,11 @@ pub fn concerns(cfg: &lines_trading::StrategyConfig, e: &Event) -> bool {
         Event::Fill(f) => &f.account == a && f.contract == k,
         Event::Position(p) => &p.account == a && p.contract == k,
         Event::Account(v) => &v.account == a,
-        Event::Breach { account, .. } | Event::Guardrail { account, .. } => account == a,
+        Event::Breach { account, .. }
+        | Event::Guardrail { account, .. }
+        | Event::ResetWaiting { account }
+        | Event::ResetDropped { account, .. }
+        | Event::AccountReset { account, .. } => account == a,
         Event::Overfill { account, .. } => account == a,
         Event::CancelFailed {
             account, contract, ..

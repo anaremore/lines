@@ -82,7 +82,8 @@ pub struct PaneTrade {
     pub account_menu: bool,
     /// A refusal made in the UI (not by the core), with when.
     local_flash: Option<(String, Instant)>,
-    /// The local message's word: NOT SENT for an order action, NOTICE otherwise.
+    /// The local message's word: NOT SENT for an order action, CONFIRM for a press waiting for
+    /// its second (a paper reset), NOTICE otherwise.
     local_flash_label: &'static str,
     /// Whether the Keys chip is in view as last drawn. Order keys send only while it is.
     keys_shown: std::cell::Cell<bool>,
@@ -241,6 +242,15 @@ impl PaneTrade {
     pub fn flash(&mut self, msg: impl Into<String>) {
         self.local_flash = Some((msg.into(), Instant::now()));
         self.local_flash_label = "NOT SENT";
+    }
+
+    /// A paper reset's first press (`crate::paper_reset`): its words, for as long as the second
+    /// press is waited for.
+    fn confirm(&mut self, msg: impl Into<String>) {
+        // Shown from now until the wait ends (a flash shows for `LOCAL_FLASH` from its time).
+        let wait = crate::paper_reset::CONFIRM.saturating_sub(LOCAL_FLASH);
+        self.local_flash = Some((msg.into(), Instant::now() + wait));
+        self.local_flash_label = "CONFIRM";
     }
 
     /// The press a notice asked for has come: it no longer applies.
@@ -681,6 +691,10 @@ fn run_with<V: TradePane>(
         }
         TradeCmd::BracketMode => {
             bracket_switch(v, cx);
+        }
+        TradeCmd::ResetPaper | TradeCmd::ResetPaperJournal => {
+            let journal = cmd == TradeCmd::ResetPaperJournal;
+            reset_press(v, journal, source, cx);
         }
         TradeCmd::EditBrackets => {
             if v.trade_ref().editor.is_some() {
@@ -3731,6 +3745,30 @@ fn badge(word: &'static str, t: &Theme) -> gpui::Div {
     }
 }
 
+/// A press of Reset paper account on this pane's account: the first shows what it will do
+/// (CONFIRM), the second sends it; a broker account is refused (NOT SENT).
+fn reset_press<V: TradePane>(v: &mut V, journal: bool, source: Source, cx: &mut Context<V>) {
+    let Some(account) = v.trade_ref().account.clone() else {
+        v.trade().flash("no account");
+        return;
+    };
+    let Some(t) = Trading::try_global(cx) else {
+        return;
+    };
+    match t.press_reset(&account, journal, source) {
+        Ok(Some(text)) => v.trade().confirm(format!("{text}. Press again to reset")),
+        Ok(None) => {
+            let name = t.account(&account).map(|a| a.name).unwrap_or_default();
+            v.trade().notice(format!(
+                "Resetting {}: anything open is flattened first",
+                crate::paper_reset::account_words(&name, &t.source)
+            ));
+        }
+        Err(why) => v.trade().flash(why),
+    }
+    cx.notify();
+}
+
 /// Open or close the account list (the account chip).
 pub fn toggle_account_menu<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
     if v.trade_ref().account_menu {
@@ -3842,6 +3880,110 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                     }),
                 ),
         );
+    }
+    // The current account, when paper: reset it (a second press confirms; `paper_reset`).
+    if let Some(info) = current.as_ref().and_then(|a| trading.account(a))
+        && info.paper
+    {
+        let who = crate::paper_reset::account_words(&info.name, &trading.source);
+        let waiting = trading.cache.read().resetting(&info.id);
+        list = list.child(div().my_1().h(crate::zoom::ui(1.0)).bg(t.axis_line));
+        if waiting {
+            // In place of the reset rows: one is on its way, and a second can't be started.
+            list = list.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .items_center()
+                    .text_color(t.text_main)
+                    .child(
+                        // Pending is outlined (design.md §3), never color alone.
+                        div()
+                            .flex_shrink_0()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(t.text_main)
+                            .font_weight(FontWeight::BOLD)
+                            .child("PENDING"),
+                    )
+                    // Wraps inside the list's width (never past its edge).
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(format!("Resetting {who}: waiting for the flatten to fill")),
+                    ),
+            );
+        } else {
+            let mut armed_text = None;
+            for (k, journal) in [(0u64, false), (1, true)] {
+                let armed = trading.reset_armed(&info.id, journal);
+                // One line whatever the state: nothing below it moves under the pointer.
+                let label = if armed {
+                    armed_text = Some(crate::paper_reset::confirm_text(
+                        &info.name,
+                        &trading.source,
+                        info.start_balance,
+                        journal,
+                    ));
+                    crate::paper_reset::armed_label(&info.name, &trading.source, journal)
+                } else if journal {
+                    format!("Reset {who} and clear its journal…")
+                } else {
+                    format!("Reset {who}…")
+                };
+                let mut item = div()
+                    .id(("acct-reset", k))
+                    .px_2()
+                    .py_1()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(accent.opacity(0.18)))
+                    // Destructive rows go last, in their token (design.md §6); the words say it.
+                    .text_color(t.destructive)
+                    .whitespace_nowrap()
+                    .truncate()
+                    .child(label);
+                if armed {
+                    // Waiting for the second press: its words and a border, not color alone.
+                    item = item
+                        .border_1()
+                        .border_color(t.warn)
+                        .font_weight(FontWeight::BOLD);
+                }
+                list = list.child(item.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v: &mut V, _, _, cx| {
+                        cx.stop_propagation();
+                        reset_press(v, journal, Source::Dom, cx);
+                        // Sent: the list closes (the pane says what happens next).
+                        let sent = Trading::try_global(cx).is_some_and(|t| {
+                            v.trade_ref()
+                                .account
+                                .as_ref()
+                                .is_some_and(|a| !t.reset_armed(a, journal))
+                        });
+                        if sent {
+                            close_account_menu(v, cx);
+                        }
+                    }),
+                ));
+            }
+            // What the second press does, under the rows (last: nothing above it moves).
+            if let Some(text) = armed_text {
+                list = list.child(
+                    div()
+                        .px_2()
+                        .pb_1()
+                        .text_size(crate::zoom::ui(11.0))
+                        .text_color(t.text_main)
+                        .child(text),
+                );
+            }
+        }
     }
     Some(list.into_any_element())
 }

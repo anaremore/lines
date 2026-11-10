@@ -204,6 +204,8 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
     }
     // A deterministic paper core: in memory, its clock moved only by the data and the script.
     let mut setup = TradingSetup::manual();
+    // Named as a replay's paper state is ("Reset Paper (replay)").
+    setup.source = "replay".to_owned();
     setup.journal = journal_dir.map(|d| (d.join("screenshot.jsonl"), "screenshot".to_owned()));
     crate::journal_shots::set_theme(ws.env.theme.get());
     if let Some(m) = pnl {

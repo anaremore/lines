@@ -321,6 +321,21 @@ impl Journal {
         std::mem::take(&mut self.shot_requests)
     }
 
+    /// Drop every trade of `account`, closed and open: a paper account reset with its journal
+    /// cleared. Other accounts' trades, and their edits, stay. Returns how many closed trades went.
+    pub fn clear_account(&mut self, account: &AccountId) -> usize {
+        let before = self.closed.len();
+        self.closed.retain(|t| &t.account != account);
+        self.by_id = self
+            .closed
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.id.clone(), i))
+            .collect();
+        self.open.retain(|(a, _), _| a != account);
+        before - self.closed.len()
+    }
+
     /// Closed trades, in the order they closed.
     pub fn trades(&self) -> &[Trade] {
         &self.closed
@@ -894,6 +909,25 @@ fn run(
                         if let Some(w) = &writer {
                             w.append(Record::Trade(Box::new(t)));
                         }
+                    }
+                    // A reset that clears its journal: here, in order, so trades after it stay.
+                    if let Event::AccountReset {
+                        account,
+                        clear_journal: true,
+                        ..
+                    } = e
+                    {
+                        let n = j.clear_account(account);
+                        tracing::info!("journal: cleared {n} trades of a reset paper account");
+                        if let Some(w) = &writer {
+                            w.rewrite(
+                                j.trades()
+                                    .iter()
+                                    .map(|t| Record::Trade(Box::new(t.clone())))
+                                    .collect(),
+                            );
+                        }
+                        closed = true;
                     }
                 }
                 if closed || j.open_trades().count() != open {

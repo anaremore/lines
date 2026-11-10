@@ -1246,6 +1246,7 @@ impl SettingsWindow {
             (Kind::Number { .. }, Value::Number(n)) => {
                 self.edit = Some(n.map(|n| n.to_string()).unwrap_or_default());
             }
+            (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_press(i, false, cx),
             (Kind::Editor, _) => self.open_editor_for(i, cx),
             _ => {}
         }
@@ -1411,6 +1412,9 @@ impl SettingsWindow {
                 )
                 .into_any_element()
             }
+            (Kind::Editor, _) if schema::all()[i].key == schema::RESET_KEY => {
+                self.reset_buttons(i, cx)
+            }
             (Kind::Editor, _) => div()
                 .id(("editor", i))
                 .flex_none()
@@ -1435,6 +1439,123 @@ impl SettingsWindow {
                 .into_any_element(),
             _ => div().into_any_element(),
         }
+    }
+
+    /// Reset paper account's buttons: keep the journal, or clear it too. An armed one says
+    /// "Press again" (`crate::paper_reset`); a broker account has none.
+    fn reset_buttons(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme;
+        let account = self
+            .target
+            .account
+            .as_deref()
+            .map(lines_trading::AccountId::new);
+        let trading = crate::trading::Trading::try_global(cx);
+        let paper = account
+            .as_ref()
+            .and_then(|a| trading.and_then(|t| t.account(a)))
+            .is_some_and(|a| a.paper);
+        if !paper {
+            return div().into_any_element();
+        }
+        let mut row = div().flex().flex_row().flex_wrap().gap_1().flex_none();
+        let armed_any = [false, true].map(|j| {
+            account
+                .as_ref()
+                .zip(trading)
+                .is_some_and(|(a, t)| t.reset_armed(a, j))
+        });
+        for (k, journal) in [(0usize, false), (1, true)] {
+            let armed = armed_any[k];
+            // While one is armed it is the only target: the other goes.
+            if !armed && armed_any.contains(&true) {
+                continue;
+            }
+            let label = match (armed, journal) {
+                (true, false) => "Press again: reset",
+                (true, true) => "Press again: reset and clear journal",
+                (false, false) => "Reset…",
+                (false, true) => "Reset and clear journal…",
+            };
+            row = row.child(
+                div()
+                    .id(("reset", i * 2 + k))
+                    .flex_none()
+                    .whitespace_nowrap()
+                    .px_2()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(if armed { t.warn } else { t.axis_line })
+                    .when(armed, |d| d.font_weight(FontWeight::BOLD))
+                    .cursor_pointer()
+                    .child(label)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |v, _, _, cx| {
+                            v.select(i);
+                            v.reset_press(i, journal, cx);
+                        }),
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    /// The armed reset's words for the chosen account, if one is waiting for its second press.
+    fn reset_confirm(&self, cx: &App) -> Option<String> {
+        let account = self
+            .target
+            .account
+            .as_deref()
+            .map(lines_trading::AccountId::new)?;
+        let t = crate::trading::Trading::try_global(cx)?;
+        let info = t.account(&account)?;
+        [false, true]
+            .into_iter()
+            .find(|&j| t.reset_armed(&account, j))
+            .map(|j| crate::paper_reset::confirm_text(&info.name, &t.source, info.start_balance, j))
+    }
+
+    /// A press of a reset button (or Enter on the row: the one keeping the journal).
+    fn reset_press(&mut self, i: usize, journal: bool, cx: &mut Context<Self>) {
+        let Some(account) = self
+            .target
+            .account
+            .as_deref()
+            .map(lines_trading::AccountId::new)
+        else {
+            self.note = Some((i, "Choose an account".to_owned(), Tone::Problem));
+            cx.notify();
+            return;
+        };
+        let Some(t) = crate::trading::Trading::try_global(cx) else {
+            self.note = Some((i, "Trading is not running".to_owned(), Tone::Problem));
+            cx.notify();
+            return;
+        };
+        // A person's command from a window (the core has no Settings source; Palette is the
+        // person's, so its inner Flatten pauses strategies on the account as a click would).
+        self.note = match t.press_reset(&account, journal, lines_trading::Source::Palette) {
+            // The row says what the second press does while it waits (`reset_confirm`), and
+            // drops it when the wait is over.
+            Ok(Some(_)) => {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor()
+                        .timer(crate::paper_reset::CONFIRM)
+                        .await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                })
+                .detach();
+                None
+            }
+            Ok(None) => Some((
+                i,
+                "Resetting: anything open is flattened first".to_owned(),
+                Tone::Done,
+            )),
+            Err(why) => Some((i, why, Tone::Problem)),
+        };
+        cx.notify();
     }
 
     fn select(&mut self, i: usize) {
@@ -1513,6 +1634,19 @@ impl SettingsWindow {
                     .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_main)
                     .child(s.clone()),
+            );
+        }
+        // A reset waiting for its second press says what that press will do.
+        if st.key == schema::RESET_KEY
+            && let Some(text) = self.reset_confirm(cx)
+        {
+            left = left.child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(t.warn)
+                    // Armed shows by weight too, not only by color.
+                    .font_weight(FontWeight::BOLD)
+                    .child(text),
             );
         }
         if let Some((n, text, tone)) = self.note.as_ref().filter(|n| n.0 == i) {
@@ -1904,7 +2038,9 @@ impl Render for SettingsWindow {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .px_3()
-            .py_2()
+            .pt_2()
+            // Room under the last row: its controls never sit on the footer's rule.
+            .pb_4()
             .child(div().font_weight(FontWeight::BOLD).pb_1().child(title));
         // Per-account settings: which account (and product) they mean.
         let per_account = rows.iter().any(|&i| {

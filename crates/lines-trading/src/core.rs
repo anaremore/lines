@@ -45,6 +45,7 @@ pub const EXTERNAL_ORDER: OrderId = OrderId(0);
 mod cancels;
 mod flatten;
 mod position_bracket;
+mod reset;
 mod reverse;
 mod strategy_gate;
 mod trigger;
@@ -236,6 +237,9 @@ pub struct TradingCore {
     /// External fills for accounts not added yet (a broker can report executions before its
     /// accounts join): applied when they do. Oldest dropped past `KEEP_HELD`.
     held: VecDeque<BrokerEvent>,
+    /// Paper accounts whose reset waits for their flatten (`core/reset.rs`), and whether it
+    /// clears their journal.
+    resets: BTreeMap<AccountId, bool>,
     /// Strategy instances (decision 0025), and which instance placed each order.
     strategies: BTreeMap<StrategyId, Instance>,
     strategy_orders: HashMap<OrderId, StrategyId>,
@@ -315,6 +319,7 @@ impl TradingCore {
             fill_order: VecDeque::new(),
             adopted: HashSet::new(),
             held: VecDeque::new(),
+            resets: BTreeMap::new(),
             strategies: BTreeMap::new(),
             strategy_orders: HashMap::new(),
             position_brackets: BTreeMap::new(),
@@ -732,6 +737,19 @@ impl TradingCore {
             self.trigger_person_acted(&env);
             self.flatten_take_back(&env);
             self.reverse_take_back(&env, now);
+            // An order accepted on an account waiting for its reset drops the reset.
+            if matches!(
+                env.command,
+                Command::PlaceOrder(_)
+                    | Command::PlaceExit(_)
+                    | Command::PlaceBracket(_)
+                    | Command::ArmTrigger(_)
+                    | Command::Reverse { .. }
+            ) && let Some(a) = env.command.account()
+            {
+                let a = a.clone();
+                self.reset_on_new_order(&a);
+            }
         }
         if let Source::Strategy(s) = env.source {
             self.strategy_counted(s, now, result.is_ok());
@@ -749,6 +767,7 @@ impl TradingCore {
         self.poll(now);
         self.flatten_pending(now);
         self.reverse_pending(now);
+        self.reset_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -1084,7 +1103,9 @@ impl TradingCore {
                 // A tighter daily loss applies to the next order: today's loss is checked
                 // now (a guardrail lock never liquidates, nor blocks exits).
                 if let Some((_, end)) = day {
-                    let day_pnl = a.balance + unrealised - a.tracker.day_open_balance;
+                    // With what a paper reset this trade date carried over.
+                    let day_pnl =
+                        a.balance + unrealised - a.tracker.day_open_balance + a.guard.carried;
                     a.guard.on_day_pnl(day_pnl, end);
                 }
                 self.guard_report(&account);
@@ -1179,6 +1200,15 @@ impl TradingCore {
                 stop_loss,
                 ..
             } => self.reverse(env, now, &account, contract, take_profit, stop_loss),
+            Command::ResetPaper { clear_journal, .. } => {
+                if matches!(env.source, Source::Strategy(_)) {
+                    return Err(Reject::new(
+                        RejectCode::Strategy,
+                        "a strategy can't reset an account",
+                    ));
+                }
+                self.reset_start(now, env, &account, clear_journal)
+            }
             Command::Flatten { contract, .. } => {
                 let simulated = self.broker.simulated();
                 let positions: Vec<(ContractKey, i64)> = self.accounts[&account]
@@ -1890,8 +1920,10 @@ impl TradingCore {
             open_buy,
             open_sell,
             reference: self.marks.get(&spec.contract).and_then(Mark::price),
+            // The risk daily loss counts the day from before a paper reset too.
             day_pnl: self.equity(&spec.account)
-                - self.accounts[&spec.account].tracker.day_open_balance,
+                - self.accounts[&spec.account].tracker.day_open_balance
+                + self.accounts[&spec.account].guard.carried,
             recent_submits,
         };
         risk::check(
@@ -2065,6 +2097,7 @@ impl TradingCore {
         self.news_flatten(now);
         self.flatten_pending(now);
         self.reverse_pending(now);
+        self.reset_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -2447,6 +2480,7 @@ impl TradingCore {
         }
         self.flatten_pending(now);
         self.reverse_pending(now);
+        self.reset_pending(now);
         self.strategy_watch(now);
         self.position_brackets_sync(now);
         self.triggers_step(now);
@@ -2612,8 +2646,10 @@ impl TradingCore {
         liquidate: bool,
         equity: Money,
     ) {
-        // Guardrails: the day's loss (realised + unrealised, fees included).
-        let day_pnl = equity - self.accounts[account].tracker.day_open_balance;
+        // Guardrails: the day's loss (realised + unrealised, fees included), with what a paper
+        // reset this trade date carried over (a reset is no way around the daily loss).
+        let a = &self.accounts[account];
+        let day_pnl = equity - a.tracker.day_open_balance + a.guard.carried;
         if now > Self::BEFORE_DATA
             && let Some((_, end)) = self.trade_day(account, now)
             && let Some(a) = self.accounts.get_mut(account)

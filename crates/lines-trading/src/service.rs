@@ -440,6 +440,26 @@ fn run(
         if let Some(g) = &mut guard_saves {
             g.after(&core, &events);
         }
+        // A paper reset asked for: the file as it is now, before the flatten, is kept dated
+        // (on disk before the reset is ever saved over it); the reset itself is saved at once.
+        if events
+            .iter()
+            .any(|e| matches!(e, Event::ResetWaiting { .. }))
+            && let Some((path, _)) = &file
+        {
+            match crate::persist::backup(path, lines_core::UtcMillis(wall_ms())) {
+                Ok(Some(b)) => tracing::info!("paper account reset asked: kept {}", b.display()),
+                Ok(None) => {}
+                Err(e) => tracing::error!("can't keep a copy of {}: {e:#}", path.display()),
+            }
+        }
+        if events
+            .iter()
+            .any(|e| matches!(e, Event::AccountReset { .. }))
+        {
+            save(&core, &file);
+            last_save = Instant::now();
+        }
         if !events.is_empty() {
             dirty = true;
             subscribers.retain(|s| events.iter().all(|e| s.send(e.clone()).is_ok()));
@@ -493,6 +513,13 @@ impl GuardSaves {
             Err(e) => tracing::error!("can't save {}: {e:#}", self.path.display()),
         }
     }
+}
+
+/// The wall clock in ms (a backup's name; never trading time).
+fn wall_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
 }
 
 fn save(core: &TradingCore, file: &Option<(PathBuf, PaperConfig)>) {

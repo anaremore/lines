@@ -337,6 +337,87 @@ fn max_trades_counts_round_trips_through_partial_fills() {
     r.denied(Side::Buy, 1);
 }
 
+/// A paper reset clears the P&L shown, but the daily-loss guardrail still counts the day's loss
+/// from before it: losing up to the limit, resetting, and losing it again isn't possible.
+#[test]
+fn a_reset_carries_the_days_loss_into_the_daily_loss_guardrail() {
+    let mut r = Rig::new(Guardrails {
+        max_daily_loss: Some(200),
+        ..Default::default()
+    });
+    // Down about $125 (1 contract, 2.25 points + fees), flat, not locked.
+    r.market_fill(Side::Buy, 1);
+    r.book_at(5997.50, 5997.75);
+    r.market_fill(Side::Sell, 1);
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Active);
+    r.cmd(Command::ResetPaper {
+        account: acct(),
+        clear_journal: false,
+    })
+    .unwrap();
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e, Event::AccountReset { .. }))
+    );
+    // Another $125 down the same trade date: over $200 with what came before the reset.
+    r.book();
+    r.market_fill(Side::Buy, 1);
+    r.book_at(5997.50, 5997.75);
+    let ev = r.guard_events();
+    assert_eq!(ev.last().map(|e| e.0), Some(GuardState::Locked), "{ev:?}");
+}
+
+/// Tightening the daily loss after a reset counts the loss from before it too.
+#[test]
+fn a_tighter_daily_loss_after_a_reset_counts_the_day_before_it() {
+    let mut r = Rig::new(Guardrails::default());
+    r.market_fill(Side::Buy, 1);
+    r.book_at(5997.50, 5997.75);
+    r.market_fill(Side::Sell, 1);
+    r.cmd(Command::ResetPaper {
+        account: acct(),
+        clear_journal: false,
+    })
+    .unwrap();
+    r.cmd(Command::SetGuardrails {
+        account: acct(),
+        guardrails: Guardrails {
+            max_daily_loss: Some(100),
+            ..Default::default()
+        },
+    })
+    .unwrap();
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Locked);
+}
+
+/// A paper reset starts the account over but is no way out of a lock the trader set.
+#[test]
+fn a_reset_keeps_a_lockout() {
+    let mut r = Rig::new(Guardrails {
+        max_trades_per_day: Some(1),
+        ..Default::default()
+    });
+    r.losing_trade();
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Locked);
+    r.cmd(Command::ResetPaper {
+        account: acct(),
+        clear_journal: false,
+    })
+    .unwrap();
+    assert!(
+        r.events
+            .iter()
+            .any(|e| matches!(e, Event::AccountReset { .. })),
+        "the flat account reset"
+    );
+    assert_eq!(r.core.guard_state(&acct()), GuardState::Locked);
+    assert!(
+        r.denied(Side::Buy, 1)
+            .starts_with("Locked: max 1 trade reached")
+    );
+}
+
 #[test]
 fn a_lockout_survives_a_restart_and_settings_cannot_clear_it() {
     let dir = std::env::temp_dir().join(format!("lines-guardrails-{}", std::process::id()));

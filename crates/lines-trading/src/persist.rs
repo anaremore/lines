@@ -201,6 +201,36 @@ pub fn save(path: &Path, file: &TradingFile) -> Result<()> {
     Ok(())
 }
 
+/// Keep `path` as it is now beside it, dated in UTC: `paper/mock.json` becomes
+/// `paper/mock-20261109-221500.json.bak` (a second one that second gets `-2`, and so on). Before
+/// a paper account's reset (`Command::ResetPaper`) is saved over it. `None`: no file yet.
+pub fn backup(path: &Path, now: lines_core::UtcMillis) -> Result<Option<std::path::PathBuf>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let stem = path
+        .file_stem()
+        .map_or_else(|| "trading".into(), |s| s.to_string_lossy().into_owned());
+    let (y, mo, d, h, mi, s) = now.to_civil();
+    let base = format!("{stem}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}");
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut n = 1;
+    let to = loop {
+        let name = if n == 1 {
+            format!("{base}.json.bak")
+        } else {
+            format!("{base}-{n}.json.bak")
+        };
+        let to = dir.join(name);
+        if !to.exists() {
+            break to;
+        }
+        n += 1;
+    };
+    std::fs::copy(path, &to)?;
+    Ok(Some(to))
+}
+
 /// The guardrails file's version (its own, apart from the trading file's).
 pub const GUARDS_VERSION: u64 = 1;
 
@@ -268,6 +298,28 @@ pub fn save_guards(path: &Path, file: &GuardFile) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_backup_keeps_the_file_dated_and_never_overwrites_one() {
+        let dir = std::env::temp_dir().join(format!("lines-backup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mock.json");
+        let now = lines_core::UtcMillis::parse_iso("2026-11-09T22:15:00Z").unwrap();
+        assert_eq!(backup(&path, now).unwrap(), None, "no file yet");
+        std::fs::write(&path, b"before").unwrap();
+        let a = backup(&path, now).unwrap().unwrap();
+        assert_eq!(a, dir.join("mock-20261109-221500.json.bak"));
+        assert_eq!(std::fs::read(&a).unwrap(), b"before");
+        let b = backup(&path, now).unwrap().unwrap();
+        assert_eq!(b, dir.join("mock-20261109-221500-2.json.bak"));
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"before",
+            "the file itself is left"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     use crate::guardrails::GuardState;
 
     /// Pinned: exactly what a v1 build with guardrails (roadmap 8b, before the bump) wrote, a
