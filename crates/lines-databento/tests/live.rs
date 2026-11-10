@@ -958,7 +958,8 @@ fn an_aged_out_replay_moves_the_next_start_forward() {
         &[GREETING, SUCCESS],
     );
     assert_eq!(out[2], trades_line(ms(earliest_ns).0));
-    // A floor after now never puts the start in the future.
+    // A floor after now never puts the start in the future, nor asks again for a start
+    // before the floor (refused again): live only.
     floors
         .lock()
         .unwrap()
@@ -967,7 +968,10 @@ fn an_aged_out_replay_moves_the_next_start_forward() {
         &mut session(&floors, ReplayLimit::default()),
         &[GREETING, SUCCESS],
     );
-    assert_eq!(out[2], trades_line(now().floor_to(MIN).0));
+    assert_eq!(
+        out[2],
+        "schema=trades|stype_in=raw_symbol|symbols=ESZ6|snapshot=0|is_last=1\n"
+    );
 }
 
 /// The owner's live failure (2026-11-10): a pane whose stored bars ended more than a day ago

@@ -99,8 +99,10 @@ restart), and a remembered position shared by feeds lost or dropped trades. As b
 replay is **history**, the public stitch rule every provider follows:
 
 - Every connection replays `trades` from the feed's `history_from` (the newest stored bar's
-  start, a bar boundary), at most 24 hours back (`LINES_DATABENTO_REPLAY_HOURS` caps it),
-  aligned up to a bar boundary when the window cuts it.
+  start, a bar boundary), at most 23 h 40 min back (`REPLAY_WINDOW_MS`;
+  `LINES_DATABENTO_REPLAY_HOURS` caps it lower), aligned up to a bar boundary when the window
+  cuts it. The gateway's window starts at the next 10-minute mark after 24 hours ago (at 17:01
+  it took 17:10 the day before at the earliest), so asking for the full 24 hours is refused.
 - The replayed trades become bars and go out as one `History` snapshot whose closed `as_of` is
   the newest replayed millisecond; `lines_core::stitch` replaces the stored bars with it and
   drops re-delivered live trades. Nothing is remembered across connections, so feeds, restarts
@@ -108,8 +110,11 @@ replay is **history**, the public stitch rule every provider follows:
 - If the switch from replay to live splits a millisecond, a live trade at or before `as_of` is
   added to the snapshot's last bar, re-sent as a corrected `History` (it replaces the bar).
 - History older than the replay reaches is a `HistoryGap`. A replay that aged out
-  (`REPLAY_DATA_AGED_OUT`) is a gap up to the start the gateway names; the next connection
-  starts no earlier (a per-contract floor the provider keeps, only ever a lower bound).
+  (`REPLAY_DATA_AGED_OUT`), or a start refused as a subscription ("Invalid start time. Must be
+  <time> or later, or 0"), is a gap up to the start the gateway names (now, if it names none);
+  the next connection starts no earlier (a per-contract floor the provider keeps, only ever a
+  lower bound, rounded up to the millisecond). A floor at or after now subscribes live only, no
+  replay. A refused start never stops the feed.
 - Replayed trades fill bars, not the tape or volume at price (as other providers' history).
 - The book clears at each connection and rebuilds at the first `mbp-10` event end.
 - Each connection starts with the transport's marker frame (recorded), so a recording that
