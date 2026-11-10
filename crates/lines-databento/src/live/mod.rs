@@ -245,6 +245,11 @@ impl SourceExtension for DatabentoExtension {
             Ok(Box::new(t) as Box<dyn DynTransport>)
         })
     }
+    /// "Download days…" (decision 0030 §8): whole past trade dates from the historical API
+    /// into this source's local store (`crate::days`).
+    fn past_days(&self) -> Option<Arc<dyn lines_feed::download::PastDays>> {
+        Some(Arc::new(crate::days::DatabentoDays))
+    }
     fn timing(&self) -> Timing {
         Timing {
             // The gateway sends heartbeats (every 10 s, requested at logon); we send none.

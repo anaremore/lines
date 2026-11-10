@@ -34,7 +34,7 @@ pub struct Query {
     pub end: String,
 }
 
-pub const SCHEMAS: &[&str] = &["definition", "trades", "mbp-10"];
+pub const SCHEMAS: &[&str] = &["definition", "trades", "mbp-1", "mbp-10"];
 
 impl Query {
     pub fn validate(&self) -> Result<()> {
@@ -125,14 +125,27 @@ fn agent(timeout: Duration) -> ureq::Agent {
         .into()
 }
 
+/// For a streamed download: no limit on the whole transfer (a day of `mbp-10` is gigabytes),
+/// but the answer must start within 10 minutes and no read may stall for 2 minutes.
+fn streaming_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(600)))
+        .timeout_per_read(Some(Duration::from_secs(120)))
+        .user_agent(concat!("lines-databento/", env!("CARGO_PKG_VERSION")))
+        .http_status_as_error(false)
+        .build()
+        .into()
+}
+
 /// POST a method; `Ok(body)` on 2xx, else an error with Databento's message (never the key).
 fn post(
     key: &ApiKey,
     method: &str,
     form: &[(&'static str, String)],
-    timeout: Duration,
+    agent: ureq::Agent,
 ) -> Result<ureq::http::Response<ureq::Body>> {
-    let resp = agent(timeout)
+    let resp = agent
         .post(format!("{BASE}{method}"))
         .header("Authorization", basic_auth(key))
         .send_form(form.iter().map(|(k, v)| (*k, v.as_str())))
@@ -143,8 +156,29 @@ fn post(
     }
     let mut resp = resp;
     let body = resp.body_mut().read_to_string().unwrap_or_default();
-    bail!("{method}: HTTP {status}: {}", error_message(&body))
+    Err(ApiError {
+        method: method.to_owned(),
+        status: status.as_u16(),
+        message: error_message(&body),
+    }
+    .into())
 }
+
+/// Databento answered with an error: its own message (never the key).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ApiError {
+    pub method: String,
+    pub status: u16,
+    pub message: String,
+}
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: HTTP {}: {}", self.method, self.status, self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 /// Databento's error body is JSON with a `detail` (string or object with `message`).
 pub fn error_message(body: &str) -> String {
@@ -190,12 +224,12 @@ pub fn estimate(key: &ApiKey, q: &Query) -> Result<Estimate> {
     let form = q.form();
     let t = Duration::from_secs(60);
     let usd = parse_cost(
-        &post(key, "metadata.get_cost", &form, t)?
+        &post(key, "metadata.get_cost", &form, agent(t))?
             .body_mut()
             .read_to_string()?,
     )?;
     let bytes = parse_size(
-        &post(key, "metadata.get_billable_size", &form, t)?
+        &post(key, "metadata.get_billable_size", &form, agent(t))?
             .body_mut()
             .read_to_string()?,
     )?;
@@ -222,7 +256,7 @@ pub fn download(key: &ApiKey, q: &Query, max_usd: f64, out: &Path) -> Result<(Es
         key,
         "timeseries.get_range",
         &form,
-        Duration::from_secs(3600),
+        agent(Duration::from_secs(3600)),
     )?;
     let part = out.with_extension("part");
     if let Some(dir) = out.parent()
@@ -239,6 +273,45 @@ pub fn download(key: &ApiKey, q: &Query, max_usd: f64, out: &Path) -> Result<(Es
     drop(file);
     std::fs::rename(&part, out)?;
     Ok((est, n))
+}
+
+/// Stream `q` (DBN + zstd) to `out` with no cost check (the caller checked), calling
+/// `progress(bytes so far)` as it arrives; `progress` returning false stops it (an error,
+/// and `out` is removed). Returns the bytes written.
+pub fn fetch(
+    key: &ApiKey,
+    q: &Query,
+    out: &Path,
+    mut progress: impl FnMut(u64) -> bool,
+) -> Result<u64> {
+    q.validate()?;
+    let mut form = q.form();
+    form.push(("encoding", "dbn".into()));
+    form.push(("compression", "zstd".into()));
+    let resp = post(key, "timeseries.get_range", &form, streaming_agent())?;
+    let mut file = std::io::BufWriter::new(
+        std::fs::File::create(out).with_context(|| format!("creating {}", out.display()))?,
+    );
+    let mut body = resp.into_body().into_reader();
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut n = 0u64;
+    loop {
+        let k = match std::io::Read::read(&mut body, &mut buf) {
+            Ok(0) => break,
+            Ok(k) => k,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(anyhow::Error::new(e).context("downloading")),
+        };
+        file.write_all(&buf[..k])?;
+        n += k as u64;
+        if !progress(n) {
+            drop(file);
+            let _ = std::fs::remove_file(out);
+            bail!("stopped");
+        }
+    }
+    file.flush()?;
+    Ok(n)
 }
 
 pub fn human_bytes(b: u64) -> String {
@@ -306,6 +379,9 @@ mod tests {
                 ("end", "2026-11-05".into()),
             ]
         );
+        let mut ok = q();
+        ok.schema = "mbp-1".into();
+        assert!(ok.validate().is_ok());
         let mut bad = q();
         bad.schema = "mbo".into();
         assert!(bad.validate().is_err());

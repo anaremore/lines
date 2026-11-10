@@ -27,8 +27,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use dbn::decode::{DbnMetadata, DecodeRecordRef, DynDecoder};
-use dbn::{Mbp10Msg, Schema, TradeMsg, VersionUpgradePolicy, rtype};
-use lines_core::{ContractKey, Product, Qty};
+use dbn::{Mbp1Msg, Mbp10Msg, Schema, TradeMsg, VersionUpgradePolicy, rtype};
+use lines_core::{ContractKey, Price, Product, Qty};
 use lines_feed::catalog;
 use lines_feed::native::{self, Aggressor, NativeEvent};
 use lines_feed::provider::Frame;
@@ -52,6 +52,11 @@ pub struct ImportReport {
     pub definitions: u64,
     pub trade_records: u64,
     pub mbp10_records: u64,
+    pub mbp1_records: u64,
+    /// Best bid/ask changes written (from mbp-1).
+    pub quotes_written: u64,
+    /// mbp-1 top-of-book prices refused (not exact or off the tick grid).
+    pub quotes_rejected: u64,
     /// Market records whose instrument had no definition that day.
     pub unmapped: u64,
     /// Records of other contracts, spreads, options, products not in the catalog.
@@ -74,9 +79,20 @@ impl fmt::Display for ImportReport {
         writeln!(f, "files {}  definitions {}", self.files, self.definitions)?;
         writeln!(
             f,
-            "records: trades {}  mbp-10 {}  unmapped {}  other instruments {}",
-            self.trade_records, self.mbp10_records, self.unmapped, self.other_instruments
+            "records: trades {}  mbp-10 {}  mbp-1 {}  unmapped {}  other instruments {}",
+            self.trade_records,
+            self.mbp10_records,
+            self.mbp1_records,
+            self.unmapped,
+            self.other_instruments
         )?;
+        if self.mbp1_records > 0 {
+            writeln!(
+                f,
+                "top of book: changes written {}  rejected {}",
+                self.quotes_written, self.quotes_rejected
+            )?;
+        }
         writeln!(
             f,
             "trades written {} (from {})  rejected {}",
@@ -162,6 +178,7 @@ fn open(path: &Path) -> Result<Dec> {
 enum Item {
     Trade(TradeMsg),
     Mbp(Box<Mbp10Msg>),
+    Top(Mbp1Msg),
 }
 
 impl Item {
@@ -169,19 +186,21 @@ impl Item {
         match self {
             Item::Trade(t) => t.ts_recv,
             Item::Mbp(m) => m.ts_recv,
+            Item::Top(m) => m.ts_recv,
         }
     }
     fn sequence(&self) -> u32 {
         match self {
             Item::Trade(t) => t.sequence,
             Item::Mbp(m) => m.sequence,
+            Item::Top(m) => m.sequence,
         }
     }
     /// Trades before book updates at an equal (ts_recv, sequence).
     fn rank(&self) -> u8 {
         match self {
             Item::Trade(_) => 0,
-            Item::Mbp(_) => 1,
+            Item::Mbp(_) | Item::Top(_) => 1,
         }
     }
 }
@@ -236,6 +255,13 @@ impl Source {
                     }
                     None => continue,
                 },
+                rtype::MBP_1 => match rec.get::<Mbp1Msg>() {
+                    Some(m) => {
+                        report.mbp1_records += 1;
+                        Item::Top(m.clone())
+                    }
+                    None => continue,
+                },
                 _ => continue,
             };
             self.read += 1;
@@ -279,8 +305,64 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
     let product: Product =
         catalog::get(opts.contract.product).context("contract's product is not in the catalog")?;
     let raw = raw_symbol(opts.contract).context("not a monthly futures contract")?;
+    let tmp = opts.out.with_extension("lfr.part");
+    let mut writer: Option<Writer<std::io::BufWriter<File>>> = None;
+    let mut first_us = 0i64;
+    let mut buf: Vec<u8> = Vec::with_capacity(4096);
+    let report = convert(&opts.inputs, opts.contract, |recv_us, events| {
+        if writer.is_none() {
+            first_us = recv_us;
+            let header = Header {
+                start_wall_ms: recv_us.div_euclid(1000),
+                provider: native::PROVIDER.into(),
+                protocol: native::PROTOCOL.into(),
+                product: product.symbol.into(),
+                contract: Some(opts.contract),
+                version: lines_feed::recording::FORMAT_VERSION,
+            };
+            writer = Some(
+                Writer::create(&tmp, &header)
+                    .with_context(|| format!("creating {}", tmp.display()))?,
+            );
+        }
+        buf.clear();
+        for e in events {
+            native::encode(e, &mut buf);
+        }
+        let span = u64::try_from(recv_us - first_us).unwrap_or(0);
+        writer.as_mut().expect("created").write(
+            Direction::FromServer,
+            Duration::from_micros(span),
+            &Frame::binary(buf.clone()),
+        )?;
+        Ok(())
+    })?;
+    let Some(w) = writer else {
+        bail!("no {raw} records in the inputs (wrong symbol, or only definitions?)");
+    };
+    w.finish()?;
+    std::fs::rename(&tmp, &opts.out)
+        .with_context(|| format!("moving {} to {}", tmp.display(), opts.out.display()))?;
+    Ok(report)
+}
+
+/// Convert DBN files (`definition`, `trades`, `mbp-1`, `mbp-10`) for one contract into Lines
+/// events, calling `emit(recv_us, batch)` once per frame in order (`recv_us` never goes back).
+/// An error from `emit` stops the conversion and is returned. Definitions that disagree with
+/// the catalog, or no definition for the contract, stop it before anything is emitted.
+///
+/// Top of book (`mbp-1`): at each event end, the best bid and ask that changed price, as one
+/// `Bbo` event (an empty side keeps the last price: Lines' top of book has no "no bid").
+pub fn convert(
+    inputs: &[PathBuf],
+    contract: ContractKey,
+    mut emit: impl FnMut(i64, &[NativeEvent]) -> Result<()>,
+) -> Result<ImportReport> {
+    let product: Product =
+        catalog::get(contract.product).context("contract's product is not in the catalog")?;
+    let raw = raw_symbol(contract).context("not a monthly futures contract")?;
     let conv = PriceConv::new(&product);
-    let mut inputs = opts.inputs.clone();
+    let mut inputs = inputs.to_vec();
     inputs.sort();
     inputs.dedup();
     let mut report = ImportReport {
@@ -312,9 +394,9 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
                 has_trades_files = true;
                 market_files.push(path.clone());
             }
-            Some(Schema::Mbp10) => market_files.push(path.clone()),
+            Some(Schema::Mbp10 | Schema::Mbp1) => market_files.push(path.clone()),
             Some(other) => bail!(
-                "{}: schema {other} is not imported (definition, trades, mbp-10)",
+                "{}: schema {other} is not imported (definition, trades, mbp-1, mbp-10)",
                 path.display()
             ),
         }
@@ -327,7 +409,7 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
             bad.join("; ")
         );
     }
-    if !map.contracts().contains_key(&opts.contract) {
+    if !map.contracts().contains_key(&contract) {
         bail!(
             "no definition for {raw} in the inputs: add the `definition` files for the same days"
         );
@@ -349,51 +431,20 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         sources.push(s);
     }
 
-    let tmp = opts.out.with_extension("lfr.part");
-    let mut writer: Option<Writer<std::io::BufWriter<File>>> = None;
-    let mut first_us = 0i64;
-    let mut last_frame_us = 0i64;
+    let mut last_frame_us = i64::MIN;
     let mut book = BookDiff::new();
+    let mut top: (Option<Price>, Option<Price>) = (None, None);
     let mut events: Vec<NativeEvent> = Vec::with_capacity(32);
-    let mut buf: Vec<u8> = Vec::with_capacity(4096);
 
-    let mut emit = |recv_us: i64,
-                    events: &[NativeEvent],
-                    writer: &mut Option<Writer<std::io::BufWriter<File>>>,
-                    report: &mut ImportReport|
-     -> Result<()> {
-        if writer.is_none() {
-            first_us = recv_us;
-            last_frame_us = recv_us;
-            let header = Header {
-                start_wall_ms: recv_us.div_euclid(1000),
-                provider: native::PROVIDER.into(),
-                protocol: native::PROTOCOL.into(),
-                product: product.symbol.into(),
-                contract: Some(opts.contract),
-                version: lines_feed::recording::FORMAT_VERSION,
-            };
-            *writer = Some(
-                Writer::create(&tmp, &header)
-                    .with_context(|| format!("creating {}", tmp.display()))?,
-            );
-        }
-        buf.clear();
+    let mut out = |recv_us: i64, events: &[NativeEvent], report: &mut ImportReport| {
         for e in events {
-            native::encode(e, &mut buf);
             let t = e.time_us();
             report.first_event_us = Some(report.first_event_us.map_or(t, |f| f.min(t)));
             report.last_event_us = Some(report.last_event_us.map_or(t, |l| l.max(t)));
         }
         last_frame_us = last_frame_us.max(recv_us);
-        let span = u64::try_from(last_frame_us - first_us).unwrap_or(0);
-        writer.as_mut().expect("created").write(
-            Direction::FromServer,
-            Duration::from_micros(span),
-            &Frame::binary(buf.clone()),
-        )?;
         report.frames_written += 1;
-        Ok(())
+        emit(last_frame_us, events)
     };
 
     while let Some(Reverse(head)) = heap.pop() {
@@ -404,13 +455,14 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         let (ts_recv, instrument_id) = match &head.item {
             Item::Trade(t) => (t.ts_recv, t.hd.instrument_id),
             Item::Mbp(m) => (m.ts_recv, m.hd.instrument_id),
+            Item::Top(m) => (m.ts_recv, m.hd.instrument_id),
         };
         match map.lookup(ts_recv, instrument_id) {
             None => {
                 report.unmapped += 1;
                 continue;
             }
-            Some(DefOutcome::Contract(k)) if *k == opts.contract => {}
+            Some(DefOutcome::Contract(k)) if *k == contract => {}
             Some(_) => {
                 report.other_instruments += 1;
                 continue;
@@ -438,7 +490,7 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
         match head.item {
             Item::Trade(t) => {
                 if let Some(e) = trade(t.price, t.size, t.side, t.hd.ts_event, &mut report) {
-                    emit(recv_us, &[e], &mut writer, &mut report)?;
+                    out(recv_us, &[e], &mut report)?;
                 }
             }
             Item::Mbp(m) => {
@@ -450,7 +502,7 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
                     b'T' if !has_trades_files => {
                         if let Some(e) = trade(m.price, m.size, m.side, m.hd.ts_event, &mut report)
                         {
-                            emit(recv_us, &[e], &mut writer, &mut report)?;
+                            out(recv_us, &[e], &mut report)?;
                         }
                     }
                     _ => {}
@@ -465,18 +517,54 @@ pub fn import(opts: &ImportOptions) -> Result<ImportReport> {
                         &mut events,
                     );
                     if !events.is_empty() {
-                        emit(recv_us, &events, &mut writer, &mut report)?;
+                        out(recv_us, &events, &mut report)?;
+                    }
+                }
+            }
+            Item::Top(m) => {
+                if m.flags.raw() & dbn::flags::MAYBE_BAD_BOOK != 0 {
+                    report.maybe_bad_book += 1;
+                }
+                if m.action as u8 == b'T'
+                    && !has_trades_files
+                    && let Some(e) = trade(m.price, m.size, m.side, m.hd.ts_event, &mut report)
+                {
+                    out(recv_us, &[e], &mut report)?;
+                }
+                if m.flags.is_last() {
+                    let l = &m.levels[0];
+                    let side = |px: i64, sz: u32, report: &mut ImportReport| {
+                        if px == dbn::UNDEF_PRICE || sz == 0 {
+                            return None;
+                        }
+                        match conv.price(px) {
+                            Ok(p) => Some(p),
+                            Err(_) => {
+                                report.quotes_rejected += 1;
+                                None
+                            }
+                        }
+                    };
+                    let bid = side(l.bid_px, l.bid_sz, &mut report);
+                    let ask = side(l.ask_px, l.ask_sz, &mut report);
+                    let bid = bid.filter(|b| top.0 != Some(*b));
+                    let ask = ask.filter(|a| top.1 != Some(*a));
+                    if bid.is_some() || ask.is_some() {
+                        top = (bid.or(top.0), ask.or(top.1));
+                        report.quotes_written += 1;
+                        out(
+                            recv_us,
+                            &[NativeEvent::Bbo {
+                                time_us: (m.hd.ts_event / 1000) as i64,
+                                bid,
+                                ask,
+                            }],
+                            &mut report,
+                        )?;
                     }
                 }
             }
         }
     }
-
-    let Some(w) = writer else {
-        bail!("no {raw} records in the inputs (wrong symbol, or only definitions?)");
-    };
-    w.finish()?;
-    std::fs::rename(&tmp, &opts.out)
-        .with_context(|| format!("moving {} to {}", tmp.display(), opts.out.display()))?;
     Ok(report)
 }

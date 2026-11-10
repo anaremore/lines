@@ -38,5 +38,5 @@ live = ["dep:tokio", "dep:ring"]
 tokio.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# The key from Windows Credential Manager (`key.rs`).
+# The key from the Windows Credential Manager (`key.rs`; macOS and Linux use their own tools).
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials"] }

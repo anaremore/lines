@@ -6,15 +6,18 @@ account and API key**: Lines has no Databento identity of its own and carries no
 - **Live market data:** built into the `lines` app as the `databento` source (`src/live/`,
   feature `live`): trades with aggressor, the inside bid and ask, and an intraday replay of trades
   as back-fill. Billed by Databento.
-- **History:** the `lines-databento` command line (`cost`, `download`, `contracts`, `import`)
-  turns Databento's DBN files into Lines replays (`.lfr`), exact and deterministic.
+- **History:** "Download days…" in the app (decision 0030 §8) fetches whole past trade dates
+  into the local store. The `lines-databento` command line (`cost`, `download`, `contracts`,
+  `import`, `days`) does the same from a terminal and turns Databento's DBN files into Lines
+  replays (`.lfr`), exact and deterministic.
 
 | Command | What it does |
 |---|---|
 | `cost` | Prices a request with Databento's free cost check. It downloads and bills nothing. |
 | `download` | Runs the cost check first and downloads only if the total is within `--max-usd`. Files are DBN + zstd. |
 | `contracts` | Lists the contracts and days covered by the `definition` records in some files. |
-| `import` | Converts DBN files (`definition`, `trades`, `mbp-10`) into one `.lfr` replay for one contract. The output is exact and deterministic. |
+| `import` | Converts DBN files (`definition`, `trades`, `mbp-1`, `mbp-10`) into one `.lfr` replay for one contract. The output is exact and deterministic. |
+| `days` | Whole past trade dates into the local store, as the app's "Download days…" does: the free estimate per day, and with `--download` the days, only if their total estimate is within `--max-usd` (default 0: nothing that costs money). |
 
 Data from Databento is licensed (decision 0010): downloads, imported recordings and
 screenshots made from them stay on your machine and never enter this repository.
@@ -156,6 +159,45 @@ The header says "history incomplete" when the app asks for more history than the
 holds. Errors from the gateway (a rejected key, a symbol it can't resolve, a DBN version this
 build doesn't decode) stop the feed with the gateway's words. The design: [LIVE-DESIGN.md](LIVE-DESIGN.md).
 
+## Download days (the app's "Download days…")
+
+With a key, the `lines` app offers "Download days…" for Databento in the palette (decision
+0030 §8). It fetches whole past trade dates for one contract into the local store, under
+`store-v1/databento/<contract>/`, where each day replays and warm-starts like a day stored live.
+The same engine runs from the command line:
+
+```sh
+# The estimate only (free): one line per day, "Included in your plan" or "Estimated $X.XX".
+lines-databento days --contract ESZ6 --from 2026-11-02 --to 2026-11-06
+# Download them if the total is $0 (--max-usd defaults to 0; the total is printed first).
+lines-databento days --contract ESZ6 --from 2026-11-02 --to 2026-11-06 --download
+```
+
+- **Contents.** "Trades + top of book" fetches `trades` and `mbp-1` (included in the Standard
+  plan for the last 12 months). "Full depth (top 10)" fetches `mbp-10` (included for the last
+  month; its trades come from its own records). Every day also pulls the contract's
+  `definition` records (free) for the definition check. `mbo` is later work.
+- **The day.** A trade date is its CME session: 17:00 CT the evening before to 16:00 CT.
+  Definitions are fetched for the whole UTC days around it, because instrument ids are mapped
+  per UTC day.
+- **Cost.** The estimate is `metadata.get_cost` and `metadata.get_billable_size` per schema,
+  which are free. $0 shows as "Included in your plan". A day is fetched only at or below the
+  price you accepted: the price is checked again just before the day is fetched.
+- **Refusals.** An entitlement or symbol error shows Databento's own message.
+- **Definition first.** The contract's definition (free) is fetched and checked before any
+  paid schema is requested; a disagreeing definition stops the day there.
+- **Contract life.** A date after the contract's expiry, or more than 5 years (quarterly
+  products; 9 for other one-digit-year roots, 12 for two-digit) before it, is refused before
+  any cost check: a one-digit raw symbol a decade off names another contract.
+- **Conversion.** The importer's (`import::convert`): exact prices, the definition check
+  (tick, point value, currency, exchange, symbol; a disagreeing definition stops the day), and
+  the best bid and ask written only when a price changes.
+- **Data hygiene.** The DBN files are written to a scratch folder inside the store and deleted
+  with the day. Nothing is written outside the data directory, and the data must never be
+  committed or attached anywhere (decisions 0010, 0030).
+- **Never twice.** A day already in the store is never estimated or fetched again. A contract
+  a live feed is storing is refused until its panes close.
+
 ## How the import works
 
 - **Contracts.** Instrument ids map to contracts through that UTC day's `definition` records.
@@ -176,6 +218,8 @@ build doesn't decode) stop the feed with the gateway's words. The design: [LIVE-
   so the replayed book always equals Databento's top 10. Book clears (action `R`) restart from
   an empty book.
 - **Trades.** The aggressor comes from the record's side: `B` buy, `A` sell, `N` unknown.
+- **Top of book.** From `mbp-1`, at each event end: the best bid and ask whose price changed,
+  as one event. An empty side keeps its last price. Off-grid prices are counted, never rounded.
 - **Order.** Records are merged by `(ts_recv, sequence)`, trades first at equal keys. Event
   times are `ts_event`, truncated to µs, since recordings hold µs.
 - **Deterministic.** The same files give a byte-identical `.lfr`, whatever the argument order
@@ -207,4 +251,7 @@ None uses real data or Databento's network, and none needs a key:
 cargo test -p lines-databento --features live
 ```
 
-The `cost` and `download` commands are not run in tests: they need a key.
+The `cost`, `download` and `days` commands are not run in tests: they need a key.
+`tests/import.rs` covers the `mbp-1` conversion and the definition check `days` relies on;
+`lines-feed/tests/download.rs` covers the store side (all or nothing, stored days never asked
+again, cancel, the live-writer rule) with a synthetic source.

@@ -7,8 +7,8 @@ use std::path::{Path, PathBuf};
 use dbn::encode::{DbnEncoder, EncodeRecord};
 use dbn::record::str_to_c_chars;
 use dbn::{
-    BidAskPair, FlagSet, InstrumentDefMsg, Mbp10Msg, Metadata, RecordHeader, SType, Schema,
-    TradeMsg, UNDEF_PRICE, rtype,
+    BidAskPair, FlagSet, InstrumentDefMsg, Mbp1Msg, Mbp10Msg, Metadata, RecordHeader, SType,
+    Schema, TradeMsg, UNDEF_PRICE, rtype,
 };
 use lines_core::{ContractKey, Month, Price, Qty, Side};
 use lines_databento::import::{ImportOptions, ImportReport, import};
@@ -548,4 +548,139 @@ fn a_book_clear_restarts_with_a_full_snapshot() {
             .iter()
             .all(|e| matches!(e, NativeEvent::BookLevel { qty, .. } if qty.0 > 0))
     );
+}
+
+fn top(id: u32, ts: u64, seq: u32, bid: (i64, u32), ask: (i64, u32), last: bool) -> Mbp1Msg {
+    let mut flags = FlagSet::empty();
+    if last {
+        flags.set_last();
+    }
+    Mbp1Msg {
+        hd: RecordHeader::new::<Mbp1Msg>(rtype::MBP_1, 1, id, ts - 1_000),
+        price: bid.0,
+        size: 1,
+        action: b'A' as c_char,
+        side: b'B' as c_char,
+        flags,
+        depth: 0,
+        ts_recv: ts,
+        ts_in_delta: 0,
+        sequence: seq,
+        levels: [BidAskPair {
+            bid_px: bid.0,
+            ask_px: ask.0,
+            bid_sz: bid.1,
+            ask_sz: ask.1,
+            bid_ct: 1,
+            ask_ct: 1,
+        }],
+    }
+}
+
+/// "Download days" contents "Trades + top of book": trades plus mbp-1 become trades and
+/// best bid/ask changes, exact, only when a price changes, merged in receive order.
+#[test]
+fn trades_and_top_of_book_convert_exactly() {
+    use lines_databento::import::convert;
+    let d = dir("tob");
+    let t0 = DAY1 + H14;
+    write(
+        &d.join("defs.dbn"),
+        Schema::Definition,
+        &[es_def(42, DAY1 + 1)],
+    );
+    write(
+        &d.join("trades.dbn"),
+        Schema::Trades,
+        &[trade(42, t0 + 20, 3, PX, 2, b'B')],
+    );
+    write(
+        &d.join("mbp1.dbn.zst"),
+        Schema::Mbp1,
+        &[
+            top(42, t0 + 10, 1, (PX - TICK, 5), (PX, 3), true),
+            top(42, t0 + 15, 2, (PX - TICK, 9), (PX, 3), true), // sizes only: nothing
+            top(42, t0 + 30, 4, (PX, 1), (PX + TICK, 4), false), // mid-event: nothing
+            top(42, t0 + 31, 5, (PX, 1), (PX + TICK, 4), true),
+            top(42, t0 + 40, 6, (PX + 100_000_000, 1), (PX + TICK, 4), true), // off tick
+            top(42, t0 + 50, 7, (UNDEF_PRICE, 0), (PX + 2 * TICK, 1), true),  // bid empty
+            top(43, t0 + 60, 8, (PX, 1), (PX + TICK, 1), true),               // no definition
+        ],
+    );
+    let mut frames: Vec<(i64, Vec<NativeEvent>)> = Vec::new();
+    let r = convert(
+        &[
+            d.join("mbp1.dbn.zst"),
+            d.join("trades.dbn"),
+            d.join("defs.dbn"),
+        ],
+        es_z6(),
+        |t, ev| {
+            frames.push((t, ev.to_vec()));
+            Ok(())
+        },
+    )
+    .unwrap();
+    let us = |ns: u64| (ns / 1_000) as i64;
+    let ev = |ns: u64| ((ns - 1_000) / 1_000) as i64;
+    assert_eq!(
+        frames,
+        vec![
+            (
+                us(t0 + 10),
+                vec![NativeEvent::Bbo {
+                    time_us: ev(t0 + 10),
+                    bid: Some(Price(599975)),
+                    ask: Some(Price(600000)),
+                }]
+            ),
+            (
+                us(t0 + 20),
+                vec![NativeEvent::Trade {
+                    time_us: ev(t0 + 20),
+                    price: Price(600000),
+                    qty: Qty(2),
+                    aggressor: Aggressor::Buy,
+                }]
+            ),
+            (
+                us(t0 + 31),
+                vec![NativeEvent::Bbo {
+                    time_us: ev(t0 + 31),
+                    bid: Some(Price(600000)),
+                    ask: Some(Price(600025)),
+                }]
+            ),
+            (
+                us(t0 + 50),
+                vec![NativeEvent::Bbo {
+                    time_us: ev(t0 + 50),
+                    bid: None,
+                    ask: Some(Price(600050)),
+                }]
+            ),
+        ]
+    );
+    assert_eq!(
+        (r.mbp1_records, r.quotes_written, r.quotes_rejected),
+        (7, 3, 1)
+    );
+    assert_eq!(r.unmapped, 1);
+
+    // A disagreeing definition stops it before anything is emitted.
+    let mut bad = es_def(42, DAY1 + 1);
+    bad.currency = str_to_c_chars("EUR").unwrap();
+    write(&d.join("defs.dbn"), Schema::Definition, &[bad]);
+    let mut n = 0;
+    let e = convert(
+        &[d.join("mbp1.dbn.zst"), d.join("defs.dbn")],
+        es_z6(),
+        |_, _| {
+            n += 1;
+            Ok(())
+        },
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("BadMetadata"), "{e}");
+    assert_eq!(n, 0);
 }
