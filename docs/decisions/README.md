@@ -35,7 +35,8 @@ Format: Status · Context · Decision · Consequences.
 | 0027 | Strategy host heartbeat on the wall clock; the daily loss closes the trade, amends 0025 (Accepted) |
 | 0028 | Equities and listed options (SPY/QQQ first) through a broker extension, amends 0013 (Accepted) |
 | 0029 | Trading options from the underlying's chart, with triggers on the underlying's price (Accepted) |
-| 0030 | Several data sources at once, set up in Settings › Connections (Accepted) |
+| 0030 | Several data sources at once, set up in Settings › Connections (Accepted; §4 Show superseded by 0035) |
 | 0031 | In-app updates, signed, never during a trade (Accepted) |
 | 0033 | Databento is a public data source (Accepted) |
 | 0034 | Bundled fonts: IBM Plex Sans for the UI, IBM Plex Mono for numbers (Accepted) |
+| 0035 | A saved key is never shown again (Accepted; supersedes the Show clause of 0030 §4) |

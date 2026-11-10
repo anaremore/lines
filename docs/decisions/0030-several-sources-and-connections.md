@@ -1,6 +1,6 @@
 # 0030: Several data sources at once, set up in Settings › Connections
 
-**Status:** Accepted (owner accepted 2026-11-09; Connections mock approved the same day)
+**Status:** Accepted (owner accepted 2026-11-09; Connections mock approved the same day). §4's "Show" is superseded by 0035 (owner, 2026-11-10).
 
 **Context:** Lines runs one data source per process, chosen with `--source`. The owner wants public crypto data (Coinbase, Kraken) without a flag, the Databento key entered in the UI, and charts from different sources side by side. Several more sources are planned: Databento (now), Schwab (0028), Rithmic and CQG (0014, 0020). They share the same needs: a key or a login, entitlements that vary by plan, and status. Connectors stay private (0014, 0020), so the public app can't name them.
 
