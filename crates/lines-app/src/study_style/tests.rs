@@ -58,6 +58,7 @@ fn defaults_are_todays_look_and_write_nothing() {
             .map(|d| Look {
                 style: d.style,
                 shown: !d.optional,
+                fill: None,
             })
             .collect();
         let mut map = PartStyles::new();
@@ -419,7 +420,11 @@ fn readability_warnings_per_part() {
                 if let PartStyle::Line(l) = &mut style {
                     l.opacity = 100;
                 }
-                Look { style, shown: true }
+                Look {
+                    style,
+                    shown: true,
+                    fill: None,
+                }
             })
             .collect();
         let mut e = editor("x".into(), defs, &looks, None);
@@ -803,4 +808,438 @@ fn a_shared_imbalance_color_is_warned_about() {
     let w = crate::footprint::imbalance_warning(&looks).expect("one color for both sides");
     assert!(w.text.contains("every theme and palette"), "{}", w.text);
     assert!(w.text.contains("place"), "{}", w.text);
+}
+
+// ---- level types --------------------------------------------------------------------------
+
+use lines_core::levels::{LabelMode, LevelType, TypeStyle};
+
+/// A source's declared types, like a real source's: a zone type with a recommended theme
+/// color and fill, a line type with a recommended text color, one keeping the levels' own.
+static TYPES: [LevelType; 3] = [
+    LevelType::zone(
+        "demand",
+        "Demand zone",
+        "Zones",
+        TypeStyle {
+            shown: true,
+            line: LineStyle {
+                color: Color::Palette(2),
+                line: LineType::Solid,
+                width: 1,
+                opacity: 100,
+            },
+            fill: FillStyle {
+                color: Color::Palette(2),
+                opacity: 50,
+            },
+            light: None,
+        },
+    ),
+    LevelType::line(
+        "mid",
+        "Mid line",
+        "Session",
+        TypeStyle {
+            line: LineStyle {
+                color: Color::Text,
+                line: LineType::Dashed,
+                width: 1,
+                opacity: 100,
+            },
+            ..TypeStyle::OWN
+        },
+    ),
+    LevelType::line("other", "Other", "Lines", TypeStyle::OWN),
+];
+
+/// A type never styled (also one a source adds later) gets its recommended look; nothing is
+/// saved for it.
+#[test]
+fn an_untouched_type_gets_its_recommended_look() {
+    let empty = PartStyles::new();
+    let src = Look::defaults(&LEVELS);
+    for t in &TYPES {
+        let ty = read_type(&empty, t);
+        let r = resolve_type(t, &src, &ty);
+        assert_eq!(r.shown, t.style.shown);
+        assert_eq!(r.line, t.style.line, "{}", t.id);
+        assert_eq!(r.fill, t.style.fill, "{}", t.id);
+        let mut m = PartStyles::new();
+        write_type(&mut m, t, &ty);
+        assert!(m.is_empty(), "{}: {m:?}", t.id);
+    }
+    // A file saved before a type existed: the new type is at its default.
+    let saved: PartStyles = serde_json::from_str(r#"{"types": {"cat": {"color": "p1"}}}"#).unwrap();
+    let r = resolve_type(&TYPES[1], &src, &read_type(&saved, &TYPES[1]));
+    assert_eq!(r.line, TYPES[1].style.line);
+}
+
+/// Precedence, field by field: the type's override, else the source's (Lines, Zones), else
+/// the type's recommended look (which may be each level's own color).
+#[test]
+fn type_styles_resolve_by_precedence() {
+    let t = &TYPES[0];
+    let mut src = Look::defaults(&LEVELS);
+    set_line(&mut src[LEVEL_LINES], |l| {
+        l.color = Color::Custom(MAGENTA);
+        l.opacity = 50;
+    });
+    set_fill(&mut src[LEVEL_ZONES], |f| f.color = Color::Palette(3));
+    // The source's override over the type's recommended look.
+    let mut ty = read_type(&PartStyles::new(), t);
+    let r = resolve_type(t, &src, &ty);
+    assert_eq!(r.line.color, Color::Custom(MAGENTA));
+    assert_eq!(r.line.opacity, 50);
+    assert_eq!(r.fill.color, Color::Palette(3));
+    assert_eq!(
+        r.fill.opacity, 50,
+        "the source's Zones opacity is its default"
+    );
+    // The type's override over the source's.
+    set_line(&mut ty, |l| {
+        l.color = Color::Palette(1);
+        l.opacity = 75;
+        l.width = 3;
+    });
+    ty.fill = Some(FillStyle {
+        color: Color::Custom(MAGENTA),
+        opacity: 25,
+    });
+    let r = resolve_type(t, &src, &ty);
+    assert_eq!(
+        (r.line.color, r.line.opacity, r.line.width),
+        (Color::Palette(1), 75, 3)
+    );
+    assert_eq!(
+        r.fill,
+        FillStyle {
+            color: Color::Custom(MAGENTA),
+            opacity: 25
+        }
+    );
+    // No overrides on a type keeping the levels' own colors: `Own` (today's look).
+    let own = resolve_type(
+        &TYPES[2],
+        &Look::defaults(&LEVELS),
+        &read_type(&PartStyles::new(), &TYPES[2]),
+    );
+    assert_eq!(own.line.color, Color::Own);
+}
+
+/// A chart saved before types (a per-source override only) loads and applies unchanged, and
+/// restyling a type keeps it: the per-source fields stay as saved, types go beside them.
+#[test]
+fn a_saved_per_source_style_migrates() {
+    let mut set: StudySet = serde_json::from_str(
+        r##"{"styles": {"levels": {"demo": {"lines": {"color": "#f719cb", "opacity": 75},
+                                            "zones": {"opacity": 50}}}}}"##,
+    )
+    .unwrap();
+    let saved = set.styles.levels["demo"].clone();
+    let src = read(&saved, &LEVELS);
+    assert_eq!(src[LEVEL_LINES].color(), Color::Custom(MAGENTA));
+    // A type left alone takes the source's override.
+    let r = resolve_type(&TYPES[1], &src, &read_type(&saved, &TYPES[1]));
+    assert_eq!((r.line.color, r.line.opacity), (Color::Custom(MAGENTA), 75));
+    // Restyle one type through the editor's action.
+    let mut looks = src.to_vec();
+    for t in &TYPES {
+        looks.push(read_type(&saved, t));
+    }
+    looks[2 + 1].shown = false;
+    set.apply(&StudyAction::SetLevelStyle(
+        "demo".into(),
+        Box::new(LevelEdit {
+            looks,
+            types: &TYPES,
+            label: LabelMode::NamePrice,
+            label_default: LabelMode::Name,
+        }),
+    ));
+    let m = &set.styles.levels["demo"];
+    assert_eq!(m["lines"], saved["lines"]);
+    assert_eq!(m["zones"], saved["zones"]);
+    assert_eq!(m["types"], serde_json::json!({"mid": {"shown": false}}));
+    assert_eq!(m["label"], "name-price");
+    // Round trip through JSON.
+    let back: StudySet = serde_json::from_str(&serde_json::to_string(&set).unwrap()).unwrap();
+    assert_eq!(back, set);
+    assert_eq!(
+        read_label(&back.styles.levels["demo"], LabelMode::Name),
+        LabelMode::NamePrice
+    );
+    // The source's own label mode isn't saved.
+    let mut m2 = m.clone();
+    write_label(&mut m2, LabelMode::Name, LabelMode::Name);
+    assert!(!m2.contains_key(LABEL_KEY));
+}
+
+/// Fields and types a newer build saved are kept when a type is restyled; values this build
+/// can't read fall back to the type's default.
+#[test]
+fn unknown_type_fields_are_kept() {
+    let mut m: PartStyles = serde_json::from_str(
+        r##"{"types": {"demand": {"glow": 2, "fill": {"color": "#f719cb", "hatch": 1},
+                                     "line": "wavy"},
+                       "future-kind": {"x": 1}},
+             "label": "price-only", "halo": {"r": 1}}"##,
+    )
+    .unwrap();
+    let t = &TYPES[0];
+    let mut look = read_type(&m, t);
+    assert_eq!(look.line().line, LineType::Solid);
+    assert_eq!(look.fill.unwrap().color, Color::Custom(MAGENTA));
+    assert_eq!(read_label(&m, LabelMode::NamePrice), LabelMode::NamePrice);
+    set_line(&mut look, |l| l.width = 2);
+    write_type(&mut m, t, &look);
+    let z = &m["types"]["demand"];
+    assert_eq!(z["glow"], 2);
+    assert_eq!(z["line"], "wavy", "not changed: left as saved");
+    assert_eq!(z["width"], 2);
+    assert_eq!(z["fill"]["hatch"], 1);
+    assert_eq!(m["types"]["future-kind"]["x"], 1);
+    assert_eq!(m["halo"]["r"], 1);
+    assert_eq!(m["label"], "price-only");
+    assert_eq!(read_type(&m, t), look);
+}
+
+/// The editor shows what is saved and saves what it shows: grouped tabs after the source's
+/// own, each type's look (a zone's fill too) and the label option, round-tripped.
+#[test]
+fn the_level_editor_round_trips() {
+    let mut styles: PartStyles = serde_json::from_str(
+        r##"{"types": {"mid": {"width": 2}, "demand": {"fill": {"opacity": 75}}}}"##,
+    )
+    .unwrap();
+    let mut e = level_editor(
+        "Levels · Demo style".into(),
+        &styles,
+        &TYPES,
+        LabelMode::NamePrice,
+        None,
+        |_| None,
+    );
+    let titles: Vec<_> = e.parts.iter().map(|p| (p.group, p.title)).collect();
+    assert_eq!(
+        titles,
+        vec![
+            (Some(SOURCE_GROUP), "Lines"),
+            (Some(SOURCE_GROUP), "Zones"),
+            (Some("Zones"), "Demand zone"),
+            (Some("Session"), "Mid line"),
+            (Some("Lines"), "Other"),
+        ]
+    );
+    assert_eq!(e.options.label_price, Some(true));
+    let edit = LevelEdit::of(&e, &TYPES, LabelMode::NamePrice);
+    assert_eq!(edit.looks[3], read_type(&styles, &TYPES[1]));
+    assert_eq!(edit.looks[2].fill.unwrap().opacity, 75);
+    // The zone type's tab: show, color, line, width, opacity, then its fill.
+    e.select_tab(2);
+    let labels: Vec<_> = e.rows().iter().map(|r| r.label).collect();
+    assert_eq!(
+        labels,
+        [
+            "Show",
+            "Color",
+            "Line",
+            "Width",
+            "Opacity",
+            "Fill",
+            "Fill opacity"
+        ]
+    );
+    // Pick the fill's second study color and hide the type; then turn the price off (tab 0).
+    let rows = e.rows();
+    let fill = rows.iter().position(|r| r.label == "Fill").unwrap();
+    let k = rows[fill]
+        .controls
+        .iter()
+        .position(|(c, _)| *c == Control::FillColor(Color::Palette(1)))
+        .unwrap();
+    assert_eq!(e.click(fill, k), Outcome::Changed);
+    assert_eq!(e.click(0, 0), Outcome::Changed);
+    e.select_tab(0);
+    let r = e.rows().iter().position(|r| r.label == "Labels").unwrap();
+    assert_eq!(e.click(r, 0), Outcome::Changed);
+    let edit = LevelEdit::of(&e, &TYPES, LabelMode::NamePrice);
+    let mut ss = StudyStyles::default();
+    ss.levels.insert("demo".into(), styles.clone());
+    ss.set_level_style("demo", &edit);
+    styles = ss.levels["demo"].clone();
+    assert_eq!(
+        styles["types"]["demand"],
+        serde_json::json!({"shown": false, "fill": {"color": "p1", "opacity": 75}})
+    );
+    assert_eq!(styles["types"]["mid"], serde_json::json!({"width": 2}));
+    assert_eq!(styles["label"], "name");
+    // Opened again: the same looks.
+    let again = level_editor(
+        "t".into(),
+        &styles,
+        &TYPES,
+        LabelMode::NamePrice,
+        None,
+        |_| None,
+    );
+    assert_eq!(looks_of(&again), edit.looks);
+    assert_eq!(again.options.label_price, Some(false));
+    // A custom fill typed as hex goes to the fill, not the line.
+    let mut e = again;
+    e.select_tab(2);
+    let line_before = e.parts[2].style;
+    let rows = e.rows();
+    let fill = rows.iter().position(|r| r.label == "Fill").unwrap();
+    let custom = rows[fill].controls.len() - 1;
+    e.click(fill, custom);
+    assert!(e.hex.is_some() && e.hex_fill);
+    for ch in ["f", "7", "1", "9", "c", "b"] {
+        e.key(ch, false, Some(ch));
+    }
+    assert_eq!(e.key("enter", false, None), Outcome::Changed);
+    assert_eq!(e.parts[2].fill.unwrap().0.color, Color::Custom(MAGENTA));
+    assert_eq!(e.parts[2].style, line_before, "the line is untouched");
+}
+
+/// A source declaring no types keeps the editor it had (Lines and Zones on one plain tab row),
+/// plus its label option.
+#[test]
+fn a_source_without_types_keeps_its_two_tabs() {
+    let e = level_editor(
+        "t".into(),
+        &PartStyles::new(),
+        &[],
+        LabelMode::Name,
+        None,
+        |_| None,
+    );
+    assert_eq!(e.parts.len(), 2);
+    assert!(e.parts.iter().all(|p| p.group.is_none()));
+    assert_eq!(e.options.label_price, Some(false));
+}
+
+/// A source's Zones tab still warns when held back under the candles when the source has
+/// types (its editor has more parts than Lines and Zones).
+#[test]
+fn zones_warn_through_a_typed_sources_editor() {
+    let themes = Theme::all();
+    let mut e = level_editor(
+        "t".into(),
+        &PartStyles::new(),
+        &lines_feed::levels::demo::TYPES,
+        LabelMode::Name,
+        Some(Rgb::hex(0x3d7bf5)),
+        |_| None,
+    );
+    e.select_tab(LEVEL_ZONES);
+    let r = StudyRef::Levels("demo".into());
+    let chart = ChartCtx::default();
+    let quiet = warnings(&r, &e, &themes, &chart);
+    assert!(quiet.iter().all(|w| !w.text.contains("over the zones")));
+    // A heavy Zones color: held back, and said so.
+    let rows = e.rows();
+    let color = rows.iter().position(|r| r.label == "Color").unwrap();
+    let k = rows[color]
+        .controls
+        .iter()
+        .position(|(c, _)| *c == Control::Color(Color::Palette(0)))
+        .unwrap();
+    e.click(color, k);
+    let op = e.rows().iter().position(|r| r.label == "Opacity").unwrap();
+    e.click(op, 0); // 100 %
+    let w = warnings(&r, &e, &themes, &chart);
+    assert!(w.iter().any(|w| w.text.contains("over the zones")), "{w:?}");
+}
+
+/// A user-picked zone fill on a type's tab is checked like any picked color: a color with a
+/// meaning is named as the fill's, and a fill held back under the candles says so. Its
+/// recommended (own) color isn't checked.
+#[test]
+fn a_types_zone_fill_is_guarded() {
+    let themes = Theme::all();
+    let r = StudyRef::Levels("demo".into());
+    let chart = ChartCtx::default();
+    let mut e = level_editor(
+        "t".into(),
+        &PartStyles::new(),
+        &TYPES,
+        LabelMode::Name,
+        None,
+        |_| None,
+    );
+    e.select_tab(2); // the demand zone type
+    assert!(
+        warnings(&r, &e, &themes, &chart)
+            .iter()
+            .all(|w| !w.text.starts_with("Fill") && !w.text.contains("zone fill")),
+        "the recommended fill isn't checked"
+    );
+    let up = Theme::dark(crate::theme::Palette::Standard).meanings()[0].1;
+    let set_fill = |e: &mut crate::style_editor::StyleEditor, c: Color, opacity: u8| {
+        if let Some((f, _)) = e.parts[2].fill.as_mut() {
+            f.color = c;
+            f.opacity = opacity;
+        }
+    };
+    // The dark theme's up color, faint: looks like up.
+    set_fill(&mut e, Color::Custom(up), 25);
+    let w = warnings(&r, &e, &themes, &chart);
+    assert!(
+        w.iter()
+            .any(|w| w.text.starts_with("Fill: Looks like the up color")),
+        "{w:?}"
+    );
+    // Heavy white: held back under the candles, said of the fill.
+    set_fill(&mut e, Color::Custom(Rgb::hex(0xffffff)), 100);
+    let w = warnings(&r, &e, &themes, &chart);
+    assert!(
+        w.iter().any(|w| w.text.contains("over the zone fill")),
+        "{w:?}"
+    );
+}
+
+/// A type left at `TypeStyle::OWN` keeps the look before types (each level's own weight,
+/// dashes and edges); restyling its line ends that. A recommended color with a light-theme
+/// counterpart uses it on light themes only, and only while it is the type's own.
+#[test]
+fn own_types_keep_the_old_look_and_light_counterparts_apply() {
+    let src = Look::defaults(&LEVELS);
+    let own = &TYPES[2];
+    let mut ty = read_type(&PartStyles::new(), own);
+    assert!(resolve_type(own, &src, &ty).own_line);
+    set_line(&mut ty, |l| l.width = 2);
+    assert!(!resolve_type(own, &src, &ty).own_line);
+
+    let lit = LevelType::line(
+        "band",
+        "Upper band",
+        "Lines",
+        TypeStyle {
+            line: LineStyle {
+                color: Color::Custom(Rgb::hex(0x7ed957)),
+                ..TypeStyle::OWN.line
+            },
+            light: Some(Color::Custom(Rgb::hex(0x2e7d32))),
+            ..TypeStyle::OWN
+        },
+    );
+    let ty = read_type(&PartStyles::new(), &lit);
+    let r = resolve_type(&lit, &src, &ty);
+    assert!(!r.own_line);
+    assert_eq!(r.line_color(true), Color::Custom(Rgb::hex(0x7ed957)));
+    assert_eq!(r.line_color(false), Color::Custom(Rgb::hex(0x2e7d32)));
+    // Picked for the type, or for the whole source: the same in every theme.
+    let mut picked = ty;
+    set_line(&mut picked, |l| l.color = Color::Palette(1));
+    assert_eq!(
+        resolve_type(&lit, &src, &picked).line_color(false),
+        Color::Palette(1)
+    );
+    let mut s2 = src;
+    set_line(&mut s2[LEVEL_LINES], |l| l.color = Color::Custom(MAGENTA));
+    assert_eq!(
+        resolve_type(&lit, &s2, &ty).line_color(false),
+        Color::Custom(MAGENTA)
+    );
 }

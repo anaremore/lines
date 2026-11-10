@@ -843,6 +843,10 @@ impl ChartView {
             .sources()
             .into_iter()
             .map(|(id, label, kinds)| SourceInfo {
+                parents: kinds
+                    .iter()
+                    .map(|k| self.levels.kind_parent(&id, k))
+                    .collect(),
                 id,
                 label: label.to_owned(),
                 kinds,
@@ -1018,16 +1022,16 @@ impl ChartView {
             ),
             StudyRef::Levels(id) => {
                 let (_, label, _) = self.levels.sources().into_iter().find(|s| s.0 == *id)?;
-                let looks = set.styles.levels.get(id).map_or_else(
-                    || ss::Look::defaults(&ss::LEVELS),
-                    |m| ss::read(m, &ss::LEVELS),
-                );
-                (
-                    format!("Levels · {label}"),
-                    &ss::LEVELS,
-                    looks.to_vec(),
+                let (types, label_default) = self.levels.source_types(id)?;
+                let empty = lines_indicators::PartStyles::new();
+                return Some(ss::level_editor(
+                    format!("Levels · {label} style"),
+                    set.styles.levels.get(id).unwrap_or(&empty),
+                    types,
+                    label_default,
                     self.levels.source_color(id),
-                )
+                    |kind| self.levels.kind_color(id, kind),
+                ));
             }
         };
         Some(ss::editor(format!("{title} style"), defs, &looks, source))
@@ -3936,7 +3940,8 @@ impl ChartView {
                 window.paint_quad(fill(rect(l.x, 0.0, hair, ph), t.grid));
             }
             // Paint order inside the plot: grid, volume profile, the levels' zones and VWAP
-            // band fills (behind the candles: a heavy fill never covers a bar), candles,
+            // band fills (behind the candles: a heavy fill never covers a bar), the levels'
+            // labels (behind the bars too), candles,
             // `layers`, indicator studies (VWAP lines and band edges), opaque footprint cells
             // over them, the levels' front lines, the profile's label, drawings, then the
             // last-price line (above every study fill and line), crosshair.
@@ -3948,6 +3953,12 @@ impl ChartView {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
                 self.levels.paint_back(plot, &t, window);
                 self.studies.paint_back((ox, oy), &t, window);
+                // Level labels sit behind the bars (and every study line, footprint cell and
+                // drawing): a label chip never hides price action where a bar crosses it.
+                // The levels' own lines break around their chips.
+                if labels {
+                    self.levels.paint_labels(plot, &t, window, cx);
+                }
             }
             // Tick charts: a faint dashed line where each session's bars begin, behind the
             // bars (dashed: never mistaken for the crosshair's solid line).
@@ -4055,7 +4066,6 @@ impl ChartView {
             // Strategy markers: above studies and drawings, under the crosshair.
             self.marks.paint(plot, &t, window, cx);
             if labels {
-                self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
             }
             if let Some((from, x)) = self.tick_from {
@@ -4916,9 +4926,20 @@ impl ChartView {
                     self.toggle_studies_menu(cx);
                 }
                 crate::style_editor::Outcome::Changed => {
-                    let looks = crate::study_style::looks_of(&e);
+                    let action = match &r {
+                        StudyRef::Levels(id) => match self.levels.source_types(id) {
+                            Some((types, label)) => StudyAction::SetLevelStyle(
+                                id.clone(),
+                                Box::new(crate::study_style::LevelEdit::of(&e, types, label)),
+                            ),
+                            None => {
+                                StudyAction::SetStyle(r.clone(), crate::study_style::looks_of(&e))
+                            }
+                        },
+                        _ => StudyAction::SetStyle(r.clone(), crate::study_style::looks_of(&e)),
+                    };
                     let mut s = self.study_set();
-                    s.apply(&StudyAction::SetStyle(r.clone(), looks));
+                    s.apply(&action);
                     self.set_study_set(s);
                     self.study_style = Some((r, e));
                 }
@@ -6486,8 +6507,7 @@ fn prepare_studies(
         l.prepare(d, bars, vp);
     }
     studies.prepare(bars, vp, max_columns);
-    let last_y = d.last_trade.map(|p| vp.price_to_y(p.0 as f64) as f32);
-    levels.prepare(d, bars, vp, last_y);
+    levels.prepare(d, bars, vp);
 }
 
 /// Where a measure's readout goes (plot-local top-left): on the far side of the measured

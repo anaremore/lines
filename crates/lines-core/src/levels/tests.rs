@@ -138,20 +138,23 @@ fn placement_filters_kinds_and_skips_off_screen_levels() {
 }
 
 #[test]
-fn labels_avoid_the_last_price_and_each_other() {
+fn labels_sit_on_their_levels_and_give_way_to_each_other() {
     let m = demo();
     let mut out = Vec::with_capacity(16);
+    let mut shown = [LabelSeen::New; 8];
     place(&m, &vp(), None, |_| true, &mut out);
-    // No last price: labels on their levels (the unlabelled raw line gets none).
-    place_labels(&mut out, &m, 16.0, 400.0, None);
+    // Labels on their levels (the unlabelled raw line gets none).
+    place_labels(&mut out, 16.0, 400.0, &mut shown, |i| {
+        m.levels[i as usize].label.is_some()
+    });
     assert_eq!(
         out.iter().map(|p| p.label_y).collect::<Vec<_>>(),
         [Some(200.0), Some(250.0), None]
     );
-    // Last price at 205 px: the pivot label (200) would cover it; it moves above, to 189.
-    place_labels(&mut out, &m, 16.0, 400.0, Some(205.0));
-    assert_eq!(out[0].label_y, Some(189.0));
-    assert_eq!(out[1].label_y, Some(250.0));
+    assert_eq!(
+        &shown[..3],
+        &[LabelSeen::Shown, LabelSeen::Shown, LabelSeen::New]
+    );
     // Two labels within one label height: the second is dropped (its level still drawn).
     let close = LevelMap::builder("demo", ES, UtcMillis(0))
         .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
@@ -159,7 +162,9 @@ fn labels_avoid_the_last_price_and_each_other() {
         .build(TICK)
         .unwrap();
     place(&close, &vp(), None, |_| true, &mut out);
-    place_labels(&mut out, &close, 16.0, 400.0, None);
+    place_labels(&mut out, 16.0, 400.0, &mut [LabelSeen::New; 2], |i| {
+        close.levels[i as usize].label.is_some()
+    });
     assert_eq!(out.len(), 2);
     assert_eq!((out[0].label_y, out[1].label_y), (Some(200.0), None));
     // Near the top edge: clamped inside the plot.
@@ -168,7 +173,9 @@ fn labels_avoid_the_last_price_and_each_other() {
         .build(TICK)
         .unwrap();
     place(&top, &vp(), None, |_| true, &mut out);
-    place_labels(&mut out, &top, 16.0, 400.0, None);
+    place_labels(&mut out, 16.0, 400.0, &mut [LabelSeen::New; 1], |i| {
+        top.levels[i as usize].label.is_some()
+    });
     assert_eq!(out[0].label_y, Some(8.0));
 }
 
@@ -370,4 +377,238 @@ fn a_values_as_of_falls_back_to_the_maps() {
 
 fn b() -> LevelMapBuilder {
     LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+}
+
+fn es_format() -> PriceFormat {
+    PriceFormat::new(
+        crate::price::PriceScale::decimal(2),
+        crate::price::DisplayStyle::Decimal { digits: 2 },
+        TICK,
+    )
+}
+
+/// A label in name-and-price mode reads `name : price` in the product's format: a line's
+/// price, a raw value at the nearest price unit (not rounded to the tick), a zone's upper edge;
+/// a VWAP-relative level keeps its name (its price moves); a level without a label has none.
+#[test]
+fn label_text_is_name_and_price() {
+    let f = es_format();
+    let m = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+        .line(
+            "demand",
+            LevelValue::Tick(Price(755_625)),
+            Some("Demand zone"),
+            style(),
+        )
+        .line("dd", LevelValue::Raw(748_207.4), Some("DD"), style())
+        .zone(
+            "zone",
+            LevelValue::Tick(Price(599_500)),
+            LevelValue::Tick(Price(599_750)),
+            Some("Z1"),
+            style(),
+        )
+        .line("vw", LevelValue::VwapOffset(750.0), Some("+1 RI"), style())
+        .line("nolabel", LevelValue::Tick(Price(600_000)), None, style())
+        .build(TICK)
+        .unwrap();
+    let texts: Vec<Option<String>> = m
+        .levels
+        .iter()
+        .map(|l| label_text(l, LabelMode::NamePrice, &f))
+        .collect();
+    assert_eq!(
+        texts,
+        vec![
+            Some("Demand zone : 7556.25".into()),
+            Some("DD : 7482.07".into()),
+            Some("Z1 : 5997.50".into()),
+            Some("+1 RI".into()),
+            None,
+        ]
+    );
+    assert_eq!(
+        label_text(&m.levels[0], LabelMode::Name, &f).as_deref(),
+        Some("Demand zone")
+    );
+    for mode in [LabelMode::Name, LabelMode::NamePrice] {
+        assert_eq!(LabelMode::from_key(mode.key()), Some(mode));
+    }
+    assert_eq!(LabelMode::from_key("price-only"), None);
+    assert_eq!(LabelMode::default(), LabelMode::Name);
+}
+
+/// Labels are placed by height alone (they are right-aligned at the plot's edge, so any two at
+/// the same height overlap whatever their length): a longer `name : price` label two pixels
+/// from another is still dropped, never drawn over it, and the level stays drawn.
+#[test]
+fn close_long_labels_give_way() {
+    let m = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"))
+        .line(
+            "open",
+            LevelValue::Tick(Price(600_000)),
+            Some("Open : 6000.00"),
+            style(),
+        )
+        .line(
+            "mid",
+            LevelValue::Tick(Price(600_025)),
+            Some("Mid line : 6000.25"),
+            style(),
+        )
+        .build(TICK)
+        .unwrap();
+    let mut out = Vec::with_capacity(8);
+    place(&m, &vp(), None, |_| true, &mut out);
+    assert_eq!(out.len(), 2);
+    place_labels(&mut out, 17.6, 400.0, &mut [LabelSeen::New; 2], |i| {
+        m.levels[i as usize].label.is_some()
+    });
+    assert!(out[0].label_y.is_some());
+    assert_eq!(out[1].label_y, None, "dropped, not drawn over the first");
+}
+
+/// The source's `TypeStyle::OWN` is the look before types: own color, solid, 1 px, zones at
+/// the 25 % that is 10 %.
+#[test]
+fn own_type_style_is_todays_look() {
+    let s = TypeStyle::OWN;
+    assert!(s.shown);
+    assert_eq!(s.line.color, Color::Own);
+    assert_eq!(
+        (s.line.line, s.line.width, s.line.opacity),
+        (LineType::Solid, 1, 100)
+    );
+    assert_eq!((s.fill.color, s.fill.opacity), (Color::Own, 25));
+    let z = LevelType::zone("demand", "Demand zone", "Zones", s);
+    assert!(z.zone && !LevelType::line("hp", "HP", "Lines", s).zone);
+}
+
+/// Labels never move for the price: with the levels and the viewport fixed, a last price
+/// sweeping across every labeled level (the old `avoid` row) leaves every label where it was,
+/// frame after frame. (Placement takes no price at all; this pins that a frame's layout is
+/// only the levels' and the viewport's.)
+#[test]
+fn a_moving_price_never_moves_a_label() {
+    let mut b = LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"));
+    // Labeled levels a few ticks apart, some closer than a label's height.
+    for (i, p) in [
+        600_000, 600_025, 600_100, 600_150, 600_175, 600_400, 599_800,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        b = b.line(
+            "k",
+            LevelValue::Tick(Price(p)),
+            Some(&format!("L{i}")),
+            style(),
+        );
+    }
+    let m = b.build(TICK).unwrap();
+    let mut out = Vec::with_capacity(16);
+    let mut shown = vec![LabelSeen::New; m.levels.len()];
+    place(&m, &vp(), None, |_| true, &mut out);
+    place_labels(&mut out, 17.6, 400.0, &mut shown, |i| {
+        m.levels[i as usize].label.is_some()
+    });
+    let first: Vec<Option<f32>> = out.iter().map(|p| p.label_y).collect();
+    assert!(first.iter().filter(|y| y.is_some()).count() >= 4);
+    // The last price walks the whole plot, one tick a frame; nothing it can reach moves.
+    for step in 0..400 {
+        let _last_price = 599_000 + step * TICK / 5;
+        place(&m, &vp(), None, |_| true, &mut out);
+        place_labels(&mut out, 17.6, 400.0, &mut shown, |i| {
+            m.levels[i as usize].label.is_some()
+        });
+        let now: Vec<Option<f32>> = out.iter().map(|p| p.label_y).collect();
+        assert_eq!(now, first, "frame {step}");
+    }
+}
+
+/// Hysteresis: two labeled levels whose separation wobbles around the clash distance by less
+/// than the margin keep one layout (whichever they had), and a moving band's label never
+/// changes which fixed labels show.
+#[test]
+fn close_labels_keep_one_layout() {
+    let h = 16.0;
+    let margin = h * LABEL_HYSTERESIS;
+    // A pair shown apart, then pulled to just inside and outside the clash distance, less
+    // than the margin each way: shown apart stays apart until it really overlaps.
+    let pair = |sep_px: f32| {
+        // vp(): 5 units/px; a level 200 px down is 600_000.
+        let lo = 600_000.0 - f64::from(sep_px) * 5.0;
+        LevelMap::builder("demo", ES, UtcMillis(0))
+            .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
+            .line("a", LevelValue::Raw(lo), Some("B"), style())
+            .build(TICK)
+            .unwrap()
+    };
+    let mut out = Vec::with_capacity(4);
+    let run = |sep: f32, out: &mut Vec<Placed>, shown: &mut [LabelSeen; 2]| {
+        let m = pair(sep);
+        place(&m, &vp(), None, |_| true, out);
+        place_labels(out, h, 400.0, shown, |i| {
+            m.levels[i as usize].label.is_some()
+        });
+        out[1].label_y.is_some()
+    };
+    // Hidden (too close), then wobbling between h - margin/2 and h + margin/2: stays hidden.
+    let mut shown = [LabelSeen::New; 2];
+    assert!(!run(h - 4.0, &mut out, &mut shown));
+    for k in 0..20 {
+        let sep = h + if k % 2 == 0 {
+            margin * 0.5
+        } else {
+            -margin * 0.5
+        };
+        assert!(
+            !run(sep, &mut out, &mut shown),
+            "hidden stays hidden ({sep})"
+        );
+    }
+    // Clear by more than the margin: shows; then wobbling above the clash distance: stays.
+    assert!(run(h + margin + 1.0, &mut out, &mut shown));
+    for k in 0..20 {
+        let sep = h + if k % 2 == 0 { margin * 0.5 } else { 0.1 };
+        assert!(run(sep, &mut out, &mut shown), "shown stays shown ({sep})");
+    }
+    // Overlapping for real: gives way.
+    assert!(!run(h - 1.0, &mut out, &mut shown));
+
+    // A VWAP-relative label near a fixed one: placed after it, so the fixed label shows
+    // whatever the band does.
+    let m = LevelMap::builder("demo", ES, UtcMillis(0))
+        .line("vw", LevelValue::VwapOffset(0.0), Some("+1 RI"), style())
+        .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
+        .build(TICK)
+        .unwrap();
+    let mut shown = [LabelSeen::New; 2];
+    for vwap in [599_990.0, 600_000.0, 600_010.0, 600_500.0, 600_005.0] {
+        place(&m, &vp(), Some(vwap), |_| true, &mut out);
+        place_labels(&mut out, h, 400.0, &mut shown, |i| {
+            m.levels[i as usize].label.is_some()
+        });
+        let fixed = out.iter().find(|p| p.index == 1).unwrap();
+        assert_eq!(fixed.label_y, Some(200.0), "VWAP at {vwap}");
+    }
+}
+
+/// A label that can't be drawn (too wide for the plot) claims no room, so a neighbor shows;
+/// a plot shorter than a label shows none.
+#[test]
+fn an_undrawable_label_claims_no_room() {
+    let m = LevelMap::builder("demo", ES, UtcMillis(0))
+        .line("a", LevelValue::Raw(600_000.0), Some("A"), style())
+        .line("a", LevelValue::Raw(599_975.0), Some("B"), style())
+        .build(TICK)
+        .unwrap();
+    let mut out = Vec::with_capacity(4);
+    place(&m, &vp(), None, |_| true, &mut out);
+    let mut seen = [LabelSeen::New; 2];
+    place_labels(&mut out, 16.0, 400.0, &mut seen, |i| i != 0);
+    assert_eq!((out[0].label_y, out[1].label_y), (None, Some(205.0)));
+    assert_eq!(seen, [LabelSeen::New, LabelSeen::Shown]);
+    place_labels(&mut out, 16.0, 12.0, &mut seen, |_| true);
+    assert!(out.iter().all(|p| p.label_y.is_none()));
 }

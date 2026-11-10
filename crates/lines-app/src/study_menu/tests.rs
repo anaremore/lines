@@ -6,6 +6,7 @@ fn sources() -> Vec<SourceInfo> {
         id: "demo".into(),
         label: "Demo levels".into(),
         kinds: vec!["pivot".into(), "zone".into()],
+        parents: Vec::new(),
     }]
 }
 
@@ -485,4 +486,38 @@ fn every_study_editor_offers_its_styles() {
         let cmd = m.key(&items, "enter", None).unwrap();
         assert_eq!(m.local(cmd), Some(MenuCmd::Style(r.clone())));
     }
+}
+
+/// The Kinds rows show a kind its parent hid as hidden, and clicking it shows that kind alone.
+#[test]
+fn kinds_hidden_through_their_parent() {
+    let src = vec![SourceInfo {
+        id: "src".into(),
+        label: "Src".into(),
+        kinds: vec!["open".into(), "mid".into(), "pivot".into()],
+        parents: vec![Some("session"), Some("session"), None],
+    }];
+    let mut set = StudySet::default();
+    set.levels.hidden_kinds = vec!["src/session".into()];
+    let m = StudyMenu {
+        editing: Some(StudyRef::Levels("src".into())),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let row = |name: &str| {
+        items
+            .iter()
+            .find_map(|it| match it {
+                Item::Control { label, on, cmd, .. } if label == name => Some((*on, cmd.clone())),
+                _ => None,
+            })
+            .unwrap()
+    };
+    assert!(!row("open").0 && !row("mid").0 && row("pivot").0);
+    let MenuCmd::Set(a) = row("mid").1 else {
+        panic!("not a change");
+    };
+    set.apply(&a);
+    assert!(set.levels.kind_shown_under("src", "mid", Some("session")));
+    assert!(!set.levels.kind_shown_under("src", "open", Some("session")));
 }

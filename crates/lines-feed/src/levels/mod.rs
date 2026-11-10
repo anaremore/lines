@@ -36,8 +36,8 @@ use lines_core::{ContractKey, Price, Product, UtcMillis};
 use parking_lot::RwLock;
 
 pub use lines_core::levels::{
-    LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape, LevelStyle, LevelValue,
-    NamedValue,
+    LabelMode, LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape, LevelStyle, LevelType,
+    LevelValue, NamedValue, TypeStyle,
 };
 
 /// How a source refreshes.
@@ -182,6 +182,18 @@ pub trait LevelSource: Send + Sync + 'static {
     }
     fn settings(&self) -> &'static [SettingSpec] {
         &[]
+    }
+    /// The kinds of level this source emits, each with a label, a group and its recommended
+    /// look (decision 0026: the chart's per-type style starts from it). A type's `id` is the
+    /// kind slug its levels carry. Kinds not declared (and every kind of a source declaring
+    /// none, the default) are drawn as their levels' own style says.
+    fn types(&self) -> &'static [LevelType] {
+        &[]
+    }
+    /// What its labels say unless the chart changes it: the name (the default) or the name and
+    /// price.
+    fn label_mode(&self) -> LabelMode {
+        LabelMode::Name
     }
     /// Open a connection (live only; runs on the levels runtime).
     fn connect(&self, ctx: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>>;

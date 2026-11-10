@@ -298,6 +298,15 @@ impl Theme {
         }
     }
 
+    /// A style editor's zone-fill chip (a level type's): its own color is the fill's own.
+    pub fn fill_swatch_color(&self, e: &crate::style_editor::StyleEditor, c: Color) -> Hsla {
+        match (c, e.parts.get(e.tab).and_then(|p| p.fill)) {
+            (Color::Own, Some((_, own))) => self.own_color(own.token, self.text_main),
+            (Color::Own, None) => self.text_dim,
+            (c, _) => self.swatch_color(e, c),
+        }
+    }
+
     /// A study part's own color as the style editor shows it (its swatch). `line`: the study's
     /// line color (parts that follow it).
     pub fn own_color(&self, token: crate::style_editor::OwnToken, line: Hsla) -> Hsla {
@@ -314,6 +323,10 @@ impl Theme {
             T::Line => line,
             T::Source(Some(rgb)) => user_color(rgb, 100),
             T::Source(None) => self.text_dim,
+            T::Is(dark, light) => {
+                let c = if self.is_dark() { dark } else { light };
+                self.part_color(c, self.text_dim, 100)
+            }
         };
         c.a = 1.0;
         c
