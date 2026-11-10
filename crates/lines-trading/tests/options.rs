@@ -1073,9 +1073,17 @@ fn a_repeated_last_sale_doesnt_freshen_an_options_mark() {
             _ => None,
         })
     };
+    let pnl = |r: &Rig| {
+        r.events.iter().rev().find_map(|e| match e {
+            Event::Position(p) if p.contract == call() => Some(p.unrealised),
+            _ => None,
+        })
+    };
+    let at_mid = pnl(&r);
     r.t += 5_000;
     quote(&mut r, None, Some(250), Some(110));
     assert_eq!(marked(&r), Some(Some(priced)), "the old last, repeated");
+    assert_eq!(pnl(&r), at_mid, "still marked at the mid, not the old sale");
     r.t += 1_000;
     let traded = quote(&mut r, None, Some(250), Some(120));
     assert_eq!(marked(&r), Some(Some(traded)), "a new last");

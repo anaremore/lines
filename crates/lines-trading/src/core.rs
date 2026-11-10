@@ -2404,7 +2404,15 @@ impl TradingCore {
                     if last.is_some() {
                         m.last_sale = last;
                     }
-                    m.last = if two_sided { None } else { last.or(held) };
+                    // One-sided: a new sale marks it; a repeated one doesn't replace the newer
+                    // mark it had (its mid), which keeps its time too.
+                    m.last = if two_sided {
+                        None
+                    } else if new_last {
+                        last
+                    } else {
+                        held.or(last)
+                    };
                     if two_sided || new_last {
                         m.priced_at = Some(time);
                     }

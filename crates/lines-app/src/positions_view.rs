@@ -548,7 +548,7 @@ impl PositionsView {
                                 div().min_w_0().truncate().text_color(t.text_main).child(n)
                             })),
                     )
-                    // Present while anything is listed, so it never appears under a pointer
+                    // Present while anything it can close is listed, so it never appears under a pointer
                     // mid-run of presses that had nothing to act on.
                     .when(count > 0 || self.confirm, |d| {
                         d.child(self.flatten_all(count, cx))
@@ -817,7 +817,8 @@ impl Render for PositionsView {
         // The pane's clock (a replay's market time, a live source's wall time); with none,
         // nothing is called stale rather than judged on another clock.
         let now = Trading::try_global(cx).and_then(|tr| tr.now(&self.store));
-        if self.rows.is_empty() {
+        // Nothing left that Flatten all could close: its question goes.
+        if !self.rows.iter().any(|r| self.off_reason(r).is_none()) {
             self.confirm = false;
         }
         // Not measured yet (the first frame): every column, until the width is known.
