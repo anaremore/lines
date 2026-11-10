@@ -18,7 +18,7 @@ use super::{
 };
 use lines_core::style::LineType;
 
-/// Two synthetic lower-pane studies (decision 0010: synthetic): three lines around 20 and one
+/// Two synthetic lower-pane studies (decision 0010: synthetic): three lines around 50 to 65 and one
 /// line swinging around zero, a value a minute over the synthetic sessions, with a gap.
 pub const SERIES_STUDIES: &[SeriesStudyDef] = &[
     SeriesStudyDef {
@@ -48,11 +48,11 @@ pub const SERIES_STUDIES: &[SeriesStudyDef] = &[
         stale_after_secs: 300,
     },
     SeriesStudyDef {
-        id: "speed",
-        name: "Demo speed",
+        id: "swing",
+        name: "Demo swing",
         lines: &[SeriesLineDef {
-            key: "speed",
-            label: "Speed",
+            key: "swing",
+            label: "Swing",
             color: SeriesColor::Amber,
             line: LineType::Solid,
         }],
@@ -258,11 +258,11 @@ impl LevelSource for DemoLevels {
         );
         let sin = |x: f64, p: f64| (x / p).sin();
         let series = [
-            demo_series("osc.a", from, to, |x| 22.0 + 3.0 * sin(x, 47.0)),
-            demo_series("osc.b", from, to, |x| 21.0 + 4.0 * sin(x + 30.0, 61.0)),
-            demo_series("osc.c", from, to, |x| 29.0 + 2.5 * sin(x, 83.0)),
-            demo_series("speed", from, to, |x| {
-                0.9 * sin(x, 37.0) + 0.3 * sin(x, 11.0)
+            demo_series("osc.a", from, to, |x| 55.0 + 6.0 * sin(x, 47.0)),
+            demo_series("osc.b", from, to, |x| 48.0 + 8.0 * sin(x + 30.0, 61.0)),
+            demo_series("osc.c", from, to, |x| 66.0 + 5.0 * sin(x, 83.0)),
+            demo_series("swing", from, to, |x| {
+                4.0 * sin(x, 37.0) + 1.5 * sin(x, 11.0)
             }),
         ];
         for s in series {

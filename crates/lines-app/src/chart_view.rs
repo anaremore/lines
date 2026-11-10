@@ -393,6 +393,8 @@ pub struct ChartView {
     levels: LevelsLayer,
     /// `levels.revision()` last drawn.
     seen_levels: u64,
+    /// The 5 s step of the wall clock last seen while a series pane was live.
+    series_tick: i64,
     /// The footprint chart mode (roadmap 10e), saved with the pane. Kept typed (it replaces
     /// candles bar by bar).
     footprint: crate::footprint::FootprintLayer,
@@ -403,6 +405,8 @@ pub struct ChartView {
     split: Option<crate::subpane::Stack>,
     /// Each lower pane's × as last drawn (plot-local top-left; `CLOSE_BOX` square).
     lower_close: [Option<(f32, f32)>; crate::subpane::MAX_PANES],
+    /// The lower pane whose × was pressed (removed on a release still on it).
+    pane_closing: Option<usize>,
     /// Height above the time axis this frame (the plot plus any sub-pane).
     above_axis: f32,
     /// The pointer is in lower pane `k`, this far below its top: the crosshair's vertical
@@ -710,10 +714,12 @@ impl ChartView {
             seen_studies: u64::MAX,
             levels,
             seen_levels: u64::MAX,
+            series_tick: 0,
             footprint: crate::footprint::FootprintLayer::new(Default::default()),
             subpane_ratios: std::array::from_fn(crate::subpane::default_ratio),
             split: None,
             lower_close: [None; crate::subpane::MAX_PANES],
+            pane_closing: None,
             above_axis: 0.0,
             cross_in_sub: None,
             fp_seen: Default::default(),
@@ -1469,12 +1475,12 @@ impl ChartView {
         }
         self.end_drag();
         let (x, y) = self.local(ev.position);
-        // A lower pane's ×: its study goes (as Remove in the studies menu).
+        // A lower pane's ×: its study goes (as Remove in the studies menu) on a release still
+        // on the same × (a pan that starts there removes nothing).
         if region == Region::Sub
             && let Some(k) = self.close_hit(x as f32, y as f32)
         {
-            self.remove_lower(k);
-            cx.notify();
+            self.pane_closing = Some(k);
             return;
         }
         if self
@@ -2545,6 +2551,14 @@ impl ChartView {
                 // Market data busy at the press: say so, keep the pick (click again).
                 (Some(_), Err(why)) => self.trade.flash(why),
                 (None, _) => {}
+            }
+            cx.notify();
+            return;
+        }
+        if let Some(k) = self.pane_closing.take() {
+            let (x, y) = self.local(ev.position);
+            if self.close_hit(x as f32, y as f32) == Some(k) {
+                self.remove_lower(k);
             }
             cx.notify();
             return;
@@ -4549,7 +4563,6 @@ impl ChartView {
         );
     }
 
-    /// Price tag on the price axis and time tag on the time axis, drawn over the axis labels.
     /// Lower pane `k`'s × under plot-local (`x`, `y`), as last drawn.
     fn close_hit(&self, x: f32, y: f32) -> Option<usize> {
         self.lower_close.iter().position(|b| {
@@ -4650,7 +4663,7 @@ impl ChartView {
             styles,
         }) = title
         {
-            self.draw_series_title(k, s, def, &values, status, &styles, (ox, oy), window, cx);
+            self.draw_series_title(s, def, &values, status, &styles, (ox, oy), window, cx);
         }
         if let Some(crate::studies::LowerTitle::Volume {
             bar,
@@ -4771,12 +4784,22 @@ impl ChartView {
             );
             (last, y)
         });
-        let tag = newest.map(|(_, y)| Span::around(y, tag_h() * 0.5));
-        for v in marks.into_iter().flatten() {
+        // The tag, then each label drawn: a later mark (the zero line's 0) that would cover one
+        // is left out.
+        let mut taken = [
+            newest.map(|(_, y)| Span::around(y, tag_h() * 0.5)),
+            None,
+            None,
+            None,
+        ];
+        for (i, v) in marks.into_iter().enumerate() {
+            let Some(v) = v else { continue };
             let y = s.sub_top + sc.y(v);
-            if !label_clear_of_tags(Span::around(y, label_px() * 0.65), &[tag]) {
+            let span = Span::around(y, label_px() * 0.65);
+            if !label_clear_of_tags(span, &taken) {
                 continue;
             }
+            taken[i + 1] = Some(span);
             let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubValue,
@@ -4844,7 +4867,6 @@ impl ChartView {
     #[allow(clippy::too_many_arguments)]
     fn draw_series_title(
         &mut self,
-        k: usize,
         s: crate::subpane::Split,
         def: &'static lines_feed::levels::SeriesStudyDef,
         values: &[Option<f64>; crate::series_pane::MAX_LINES],
@@ -4857,9 +4879,19 @@ impl ChartView {
         use crate::series_pane::ExtStatus;
         use lines_core::style::LineType;
         let t = self.theme;
-        // Label keys: the pane, then the line, then the value in hundredths, in separate bits
-        // (a study's text never meets another's in the cache).
-        let pane = (k as i64 & 0xff) << 52;
+        // A value's label key mixes the study, the line, its text color and the value in
+        // hundredths (`None`: the name alone, a stale pane's key), so a study moved to another
+        // pane or a restyled line never draws another's cached text.
+        let value_key = |i: usize, c: Hsla, v: Option<f64>| -> i64 {
+            let mut h = std::hash::DefaultHasher::new();
+            std::hash::Hash::hash(&(def as *const _ as usize), &mut h);
+            std::hash::Hash::hash(&i, &mut h);
+            for f in [c.h, c.s, c.l, c.a] {
+                std::hash::Hash::hash(&f.to_bits(), &mut h);
+            }
+            std::hash::Hash::hash(&v.map(|v| (v * 100.0).round() as i64), &mut h);
+            std::hash::Hasher::finish(&h) as i64
+        };
         let study = def as *const _ as usize as i64;
         let pw = f32::from(self.plot.size.width);
         let (bx, by, bh) = (8.0, s.sub_top + 4.0, label_px() * 1.6);
@@ -4884,17 +4916,25 @@ impl ChartView {
         );
         parts[n] = (LabelKind::SeriesName, study, t.text_main, w);
         n += 1;
-        let line_text = move |i: usize, v: f64| {
+        let line_text = move |i: usize, v: Option<f64>| {
             move |b: &mut FixedStr<32>| {
-                let _ = write!(b, "{} ", def.lines[i].label);
-                crate::series_pane::write_value(v, b);
+                let _ = b.write_str(def.lines[i].label);
+                if let Some(v) = v {
+                    let _ = b.write_char(' ');
+                    crate::series_pane::write_value(v, b);
+                }
             }
         };
         let lines = def.lines.len().min(crate::series_pane::MAX_LINES);
         for (i, v) in values.iter().enumerate().take(lines) {
-            let Some(v) = *v else { continue };
+            // Stale with no value to show: the line's sample and name stay (the key to the
+            // faded lines), without a number.
+            if v.is_none() && status != ExtStatus::Stale {
+                continue;
+            }
+            let v = *v;
             let text = t.legend_text(color_of(i));
-            let key = pane | ((i as i64) << 44) | (((v * 100.0).round() as i64) & 0xfff_ffff_ffff);
+            let key = value_key(i, text, v);
             let w = f32::from(
                 self.label(
                     LabelKind::SeriesValue(i as u8),
@@ -4983,10 +5023,9 @@ impl ChartView {
                             }
                         }
                     }
-                    if let Some(v) = values[li] {
-                        let at = point(px(ox + x + SAMPLE + 4.0), px(ty));
-                        self.paint_label(kind, key, at, line_h, c, window, cx, line_text(li, v));
-                    }
+                    let at = point(px(ox + x + SAMPLE + 4.0), px(ty));
+                    let text = line_text(li, values[li]);
+                    self.paint_label(kind, key, at, line_h, c, window, cx, text);
                 }
                 _ => {
                     if state.is_some_and(|s| s.1) {
@@ -6890,7 +6929,15 @@ impl Pane for ChartView {
         }
         let r = self.studies.revision();
         let l = self.levels.revision();
-        let changed = r != self.seen_studies || l != self.seen_levels;
+        // A live series pane turns STALE on the wall clock alone (no new data comes to say
+        // so): look again every 5 s while one is shown.
+        let series_tick = (self.studies.series_live() && lines_feed::levels::runtime::is_live())
+            .then(|| lines_feed::now_utc().0 / 5_000);
+        let tick = series_tick.is_some_and(|t| t != self.series_tick);
+        if let Some(t) = series_tick {
+            self.series_tick = t;
+        }
+        let changed = r != self.seen_studies || l != self.seen_levels || tick;
         self.seen_studies = r;
         self.seen_levels = l;
         changed || rates

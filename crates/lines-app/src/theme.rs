@@ -1064,8 +1064,6 @@ mod tests {
         }
     }
 
-    /// The Volume study's neutral bars read as data on the chart (3:1, WCAG 1.4.11) and are
-    /// never mistaken for a direction or the accent.
     /// Series lines read as data (3:1 on the chart) in every theme and palette, and a
     /// three-line study's colors stay clearly apart.
     #[test]
@@ -1083,9 +1081,17 @@ mod tests {
                 let de = delta_e_2000(t.series[i], t.series[j]);
                 assert!(de > 20.0, "{}: series {i} and {j}: {de}", t.name);
             }
+            // Faded (a stale pane), still read as data.
+            for (i, c) in t.series.iter().enumerate() {
+                let faded = over(c.opacity(crate::series_pane::STALE_FADE), t.bg);
+                let r = contrast(faded, t.bg);
+                assert!(r >= 3.0, "{}: stale series {i}: {r}", t.name);
+            }
         }
     }
 
+    /// The Volume study's neutral bars read as data on the chart (3:1, WCAG 1.4.11) and are
+    /// never mistaken for a direction or the accent.
     #[test]
     fn volume_bars_contrast_and_stay_neutral() {
         for t in Theme::all() {

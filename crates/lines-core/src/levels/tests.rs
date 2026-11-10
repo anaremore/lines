@@ -385,7 +385,7 @@ fn series(key: &str, points: &[(&str, f64)], segments: &[(&str, &str)]) -> std::
 #[test]
 fn series_values_hold_within_their_segments_and_gaps_stay_gaps() {
     let s = series(
-        "res.a",
+        "osc.a",
         &[
             ("2026-11-05T14:00:00", 1.5),
             ("2026-11-05T14:10:00", 2.0),
@@ -415,7 +415,7 @@ fn series_values_hold_within_their_segments_and_gaps_stay_gaps() {
 #[test]
 fn malformed_series_are_refused() {
     let ok = series(
-        "res.a",
+        "osc.a",
         &[("2026-11-05T14:00:00", 1.0)],
         &[("2026-11-05T14:00:00", "2026-11-05T14:01:00")],
     );
@@ -432,15 +432,15 @@ fn malformed_series_are_refused() {
     let bad_key = series("Res A", &[], &[]);
     assert!(map(vec![bad_key]).is_err());
     let unsorted = series(
-        "res.b",
+        "osc.b",
         &[("2026-11-05T14:10:00", 1.0), ("2026-11-05T14:00:00", 2.0)],
         &[],
     );
     assert!(map(vec![unsorted]).is_err());
-    let nan = series("res.c", &[("2026-11-05T14:00:00", f64::NAN)], &[]);
+    let nan = series("osc.c", &[("2026-11-05T14:00:00", f64::NAN)], &[]);
     assert!(map(vec![nan]).is_err());
     let overlapping = series(
-        "res.d",
+        "osc.d",
         &[],
         &[
             ("2026-11-05T14:00:00", "2026-11-05T14:30:00"),

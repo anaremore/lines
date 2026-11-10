@@ -220,7 +220,7 @@ fn a_sources_series_studies_are_offered_added_and_removed() {
         kinds: vec![],
         series: vec![
             ("osc".into(), "Demo oscillator".into()),
-            ("speed".into(), "Demo speed".into()),
+            ("swing".into(), "Demo swing".into()),
         ],
     }];
     let mut set = StudySet::default();
@@ -230,12 +230,12 @@ fn a_sources_series_studies_are_offered_added_and_removed() {
         "{l:?}"
     );
     assert!(
-        l.contains(&"+ Demo speed · Demo levels".to_owned()),
+        l.contains(&"+ Demo swing · Demo levels".to_owned()),
         "{l:?}"
     );
     set.apply(&StudyAction::AddExternal("demo".into(), "osc".into()));
     set.apply(&StudyAction::AddExternal("demo".into(), "osc".into()));
-    set.apply(&StudyAction::AddExternal("demo".into(), "speed".into()));
+    set.apply(&StudyAction::AddExternal("demo".into(), "swing".into()));
     assert_eq!(set.indicators.len(), 2, "each once");
     assert!(
         set.indicators.iter().all(IndicatorConfig::in_subpane),
@@ -258,7 +258,7 @@ fn a_sources_series_studies_are_offered_added_and_removed() {
     set.apply(&StudyAction::Remove(StudyRef::External(0)));
     assert!(matches!(
         set.indicators.as_slice(),
-        [IndicatorConfig::External { spec, .. }] if spec.study == "speed"
+        [IndicatorConfig::External { spec, .. }] if spec.study == "swing"
     ));
 }
 

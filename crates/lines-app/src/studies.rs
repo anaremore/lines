@@ -273,6 +273,16 @@ impl Studies {
         }
     }
 
+    /// A shown external series study is live: its STALE turns on the clock alone, so the
+    /// chart repaints on a timer while this holds (`ChartView::changed`).
+    pub fn series_live(&self) -> bool {
+        self.list.iter().any(|s| {
+            s.ext_def.is_some()
+                && !s.config.display().hidden
+                && s.ext.status == crate::series_pane::ExtStatus::Live
+        })
+    }
+
     /// Sum of the studies' output revisions: changes when any study has new values.
     pub fn revision(&self) -> u64 {
         self.list
@@ -1319,8 +1329,8 @@ mod tests {
                 stale_after_secs: 300,
             },
             SeriesStudyDef {
-                id: "speed",
-                name: "Speed",
+                id: "swing",
+                name: "Swing",
                 lines: &[LINE],
                 zero_line: true,
                 stale_after_secs: 300,
@@ -1370,7 +1380,7 @@ mod tests {
             display: Default::default(),
             style: Default::default(),
         };
-        let mut st = Studies::new(vec![volume(false), ext("osc"), ext("speed")]);
+        let mut st = Studies::new(vec![volume(false), ext("osc"), ext("swing")]);
         assert_eq!(st.lower_count(), 3);
         assert_eq!(st.list[1].looks.len(), 3, "a part per line");
         let b = bars();

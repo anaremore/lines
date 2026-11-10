@@ -27,6 +27,10 @@ use crate::theme::Theme;
 /// Lines a study may have.
 pub const MAX_LINES: usize = 8;
 
+/// A stale pane's lines, at this share of their opacity: visibly faded, still 3:1 on the
+/// chart (the theme tests check every role).
+pub const STALE_FADE: f32 = 0.75;
+
 /// What the pane's title says about its data.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ExtStatus {
@@ -196,8 +200,9 @@ impl ExtFrame {
         };
     }
 
-    /// Each line's value at `t` (the crosshair's time), else its value now (on the source's
-    /// clock) while live.
+    /// Each line's value at `t` (the crosshair's time; nothing after the source's clock), else
+    /// its value now while live: the latest value in force, also when its run ended (the next
+    /// report not due yet) within the study's stale time.
     pub fn values(&self, def: &SeriesStudyDef, t: Option<UtcMillis>) -> [Option<f64>; MAX_LINES] {
         let mut out = [None; MAX_LINES];
         let Some(map) = &self.map else {
@@ -208,8 +213,16 @@ impl ExtFrame {
                 continue;
             };
             out[i] = match t {
-                Some(t) => s.value_at(t),
-                None if self.status == ExtStatus::Live => s.value_at(self.now),
+                Some(t) if t <= self.now => s.value_at(t),
+                Some(_) => None,
+                None if self.status == ExtStatus::Live => {
+                    let stale_ms = i64::from(def.stale_after_secs) * 1000;
+                    let seg = s.segments.partition_point(|g| g.0 <= self.now);
+                    seg.checked_sub(1)
+                        .map(|g| s.segments[g].1.min(self.now))
+                        .filter(|end| self.now.0.saturating_sub(end.0) <= stale_ms)
+                        .and_then(|end| s.value_at(end))
+                }
                 None => None,
             };
         }
@@ -217,7 +230,7 @@ impl ExtFrame {
     }
 }
 
-/// A value as the pane prints it: one decimal from 10 up, two below (a speed of 0.75 keeps its
+/// A value as the pane prints it: one decimal from 10 up, two below (a swing of 0.75 keeps its
 /// digits), a minus sign where negative.
 pub fn write_value(v: f64, out: &mut impl std::fmt::Write) {
     let _ = if v.abs() >= 10.0 {
@@ -284,7 +297,7 @@ pub fn paint(
         let color = theme.part_color(st.color, base, st.opacity);
         // Stale is a state: the lines fade, so their end never reads as live.
         let color = if frame.status == ExtStatus::Stale {
-            color.opacity(color.a * 0.5)
+            color.opacity(color.a * STALE_FADE)
         } else {
             color
         };
@@ -519,6 +532,32 @@ mod tests {
         );
         assert_eq!(f.values(&DEF, None)[0], Some((100 % 7) as f64));
         assert_eq!(f.status, ExtStatus::Live);
+        // The crosshair reads up to the clock, never past it (a replay's map can hold more).
+        assert_eq!(f.values(&DEF, Some(t(50)))[0], Some((50 % 7) as f64));
+        assert_eq!(f.values(&DEF, Some(t(200)))[0], None);
+    }
+
+    /// Live with the newest run ended (the next report not due yet): the title keeps showing
+    /// the latest value until the study's stale time.
+    #[test]
+    fn a_live_title_holds_the_last_report() {
+        let axis_bars = bars();
+        let view = BarsView::fixed(&axis_bars, 60_000);
+        let axis = TimeAxis::new(view);
+        let m = map(&[(0, 1.5), (10, 2.5)], &[(0, 10)]);
+        let mut f = ExtFrame::default();
+        f.reserve(1, 256);
+        let at = |f: &mut ExtFrame, now: i64| {
+            f.build(
+                &DEF,
+                Some((Some(&m), LevelStatus::Current, t(now))),
+                &axis,
+                &vp(),
+            );
+            (f.status, f.values(&DEF, None)[0])
+        };
+        assert_eq!(at(&mut f, 12), (ExtStatus::Live, Some(2.5)));
+        assert_eq!(at(&mut f, 16), (ExtStatus::Stale, None));
     }
 
     #[test]
