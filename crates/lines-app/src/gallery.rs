@@ -353,7 +353,8 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             "--stage-order".into(),
             STAGED.into(),
             "--chart-flash".into(),
-            "The stop is above the entry: drag it below".into(),
+            // A refusal that can't contradict the scene's staged order.
+            crate::chart_trade::MARKET_MOVED.into(),
         ]);
         v.push(s(name, quick, end, a));
     }
