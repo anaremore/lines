@@ -1262,9 +1262,11 @@ impl DomView {
         let t = self.theme;
         let mut left = String::with_capacity(64);
         let mut right = String::with_capacity(64);
+        let mut word = None;
         if let Some(title) = pane::unavailable_title(&self.feed) {
             let _ = write!(left, "{title}  DOM");
         } else if let Some(d) = self.store.try_read() {
+            word = pane::status_word(&d.status);
             left.push_str(&pane::contract_text(&d));
             crate::sources::write_header_tag(&mut left, &self.feed, cx);
             left.push_str("  DOM");
@@ -1310,6 +1312,16 @@ impl DomView {
                                     .children(crate::layout_rec::text_marker(&left))
                                     .child(left),
                             )
+                            // Every state but live is a word beside the contract that never
+                            // gives way, as on the chart: an ended or failed feed must not
+                            // read as live (docs/design.md §7).
+                            .children(word.map(|w| {
+                                div()
+                                    .text_color(t.text_main)
+                                    .relative()
+                                    .children(crate::layout_rec::text_marker(w))
+                                    .child(w)
+                            }))
                             .children(pane::stale_badge(&self.store, &t)),
                     )
                     .child(

@@ -27,6 +27,7 @@ pub mod registry;
 pub mod store;
 pub mod synth;
 pub mod synth_chain;
+pub mod synth_crypto;
 pub mod ticks;
 pub mod transport;
 

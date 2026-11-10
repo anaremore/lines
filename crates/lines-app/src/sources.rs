@@ -104,15 +104,59 @@ impl Sources {
             .iter()
             .find(|e| e.availability.check(&t).is_ok());
         found.ok_or_else(|| {
+            // What's missing; the pane under it and the tab's banner give the way out
+            // (Ctrl+K, a one-click switch to a symbol a source has).
             NoSource(format!(
-                "no enabled source serves {}",
+                "no source has {}",
                 lines_feed::catalog::get(match &t {
                     Target::Product(p) => *p,
                     Target::Contract(k) => k.product,
                 })
-                .map_or("it", |p| p.symbol)
+                .map_or_else(
+                    || "it".to_owned(),
+                    |p| match &t {
+                        Target::Contract(k) => k.label(&p).as_str().to_owned(),
+                        Target::Product(_) => p.symbol.to_owned(),
+                    }
+                )
             ))
         })
+    }
+
+    /// What a first run opens on (decision 0030): `None` for `pair` (NQ | ES) when a source
+    /// in the run serves ES; else a product one serves (BTC, then ETH; Coinbase's before
+    /// Kraken's), else the primary source's own symbol, else BTC/USD (a source serving none
+    /// of these and offering no symbol: its panes then say so).
+    pub fn first_run_product(&self) -> Option<lines_core::ProductId> {
+        use lines_feed::catalog;
+        let serves = |p| {
+            self.entries
+                .iter()
+                .any(|e| e.availability.check(&Target::Product(p)).is_ok())
+        };
+        if serves(catalog::ES) {
+            return None;
+        }
+        [
+            catalog::BTC_USD,
+            catalog::BTC_USD_KR,
+            catalog::BTC_PERP_KR,
+            catalog::ETH_USD,
+            catalog::ETH_USD_KR,
+        ]
+        .into_iter()
+        .find(|&p| serves(p))
+        .or_else(|| {
+            self.primary()
+                .fallback
+                .suggest
+                .as_ref()
+                .map(|s| match &s.target {
+                    Target::Product(p) => *p,
+                    Target::Contract(k) => k.product,
+                })
+        })
+        .or(Some(catalog::BTC_USD))
     }
 
     /// The source a pick goes to: the pane's own if it serves the target, else the first that
@@ -344,6 +388,36 @@ mod tests {
         }
     }
 
+    /// Decision 0030: a first run opens on a symbol the run's sources serve: `pair` with a
+    /// futures source, else BTC/USD on Coinbase, Kraken's BTC/USD with Kraken alone.
+    #[test]
+    fn a_first_run_opens_on_a_symbol_the_runs_sources_serve() {
+        assert_eq!(two(false).first_run_product(), None, "the mock serves ES");
+        let coinbase = || {
+            entry(
+                "coinbase",
+                lines_feed::Source::Coinbase {
+                    url: lines_feed::coinbase::WS_URL.into(),
+                },
+            )
+        };
+        let kraken = || {
+            entry(
+                "kraken",
+                lines_feed::Source::Kraken {
+                    spot_url: lines_feed::kraken::SPOT_WS_URL.into(),
+                    futures_url: lines_feed::kraken::FUTURES_WS_URL.into(),
+                },
+            )
+        };
+        let plain = Sources::new(vec![coinbase(), kraken()], false);
+        assert_eq!(plain.first_run_product(), Some(catalog::BTC_USD));
+        let kraken_only = Sources::new(vec![kraken()], false);
+        assert_eq!(kraken_only.first_run_product(), Some(catalog::BTC_USD_KR));
+        let limited = Sources::new(vec![kraken()], true);
+        assert_eq!(limited.first_run_product(), Some(catalog::BTC_USD_KR));
+    }
+
     /// The mock (ES only) and Coinbase (spot crypto): what each pane opens on.
     fn two(limited: bool) -> Sources {
         Sources::new(
@@ -442,10 +516,16 @@ mod tests {
         assert_eq!(s.for_pane(Some("kraken"), None).unwrap().name, "mock");
         // Nothing serves NQ here (the mock is ES only).
         let err = s.for_pane(None, Some(&doc(catalog::NQ))).unwrap_err();
-        assert!(
-            err.0.starts_with("no enabled source serves NQ"),
-            "{}",
-            err.0
+        assert_eq!(err.0, "no source has NQ");
+        // A contract is named as a contract.
+        let nqz = TargetDoc::from_target(&Target::Contract(lines_core::ContractKey::monthly(
+            catalog::NQ,
+            2026,
+            lines_core::Month::new(12).unwrap(),
+        )));
+        assert_eq!(
+            s.for_pane(None, Some(&nqz)).unwrap_err().0,
+            "no source has NQZ26"
         );
     }
 

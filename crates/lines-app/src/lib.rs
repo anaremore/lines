@@ -428,9 +428,10 @@ struct Cli {
     #[arg(long, value_enum)]
     layout: Option<LayoutKind>,
     /// Open a workspace: a saved one by name, or a built-in (`pair` = NQ and ES side by side,
-    /// `trading`, `chart`, `1x2`, `2x2`, `1+2`, `6c2d`). Screenshots take a built-in or a
-    /// workspace `.json` file (they never read user settings). Default: the autosaved
-    /// workspace (first run: `pair`).
+    /// `trading`, `chart`, `1x2`, `2x2`, `1+2`, `6c2d`). Screenshots take a built-in, a
+    /// workspace `.json` file (they never read user settings) or `first-run` (what a first run
+    /// opens with this run's sources). Default: the autosaved workspace (first run: `pair`
+    /// when a source serves futures, else BTC/USD chart, DOM and time & sales).
     #[arg(long)]
     workspace: Option<String>,
     /// Benchmark: open the workspace (default `6c2d`: 6 charts + 2 DOMs on two contracts)
@@ -1704,12 +1705,15 @@ where
         })),
         default_size: cli.size,
     };
+    // What a first run opens on: `pair` with a futures source, else a symbol a source in
+    // this run serves (a public build's plain run: BTC/USD), decision 0030.
+    let first_run = env.sources.first_run_product();
     let registry = FeedRegistry::new();
 
     if frozen || bench {
         // Built-ins or explicit files only: these modes never read user settings.
         let mut doc = match (&cli.workspace, cli.layout) {
-            (Some(w), _) => fixed_workspace(w)?,
+            (Some(w), _) => fixed_workspace(w, first_run)?,
             (None, Some(l)) => preset_doc(l),
             (None, None) if bench => WorkspaceDoc::bench(),
             (None, None) => preset_doc(LayoutKind::Trading),
@@ -1849,14 +1853,15 @@ where
                 if !l.writable {
                     autosave = false;
                 }
-                l.value.unwrap_or_else(WorkspaceDoc::pair)
+                l.value
+                    .unwrap_or_else(|| WorkspaceDoc::first_run(first_run))
             }
-            None => WorkspaceDoc::pair(),
+            None => WorkspaceDoc::first_run(first_run),
         },
     };
     if let Err(e) = doc.normalise() {
         reports.push(format!("saved workspace: {e}; loaded the default"));
-        doc = WorkspaceDoc::pair();
+        doc = WorkspaceDoc::first_run(first_run);
     }
     if instrument.is_some() {
         doc.retarget_all(instrument);
@@ -1965,8 +1970,13 @@ fn preset_doc(l: LayoutKind) -> WorkspaceDoc {
     wsdoc::builtin(p.name()).expect("presets are built in")
 }
 
-/// Screenshot/benchmark workspaces: a built-in, or a workspace file given by path.
-fn fixed_workspace(w: &str) -> Result<WorkspaceDoc> {
+/// Screenshot/benchmark workspaces: a built-in, `first-run` (what a first run opens with
+/// this run's sources), or a workspace file given by path.
+fn fixed_workspace(w: &str, first_run: Option<lines_core::ProductId>) -> Result<WorkspaceDoc> {
+    // A file of that name wins: `first-run` is only the choice when no such file exists.
+    if w.eq_ignore_ascii_case("first-run") && !std::path::Path::new(w).exists() {
+        return Ok(WorkspaceDoc::first_run(first_run));
+    }
     if let Some(doc) = wsdoc::builtin(w) {
         return Ok(doc);
     }
