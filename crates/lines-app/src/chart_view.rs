@@ -112,14 +112,15 @@ fn label_px() -> f32 {
 const MAX_CACHED_LABELS: usize = 4096;
 
 /// The space between the corner's two words, and their margin from its edges (at 100 %).
-const CORNER_GAP_100: f32 = 6.0;
+const CORNER_GAP_100: f32 = 8.0;
 const CORNER_MARGIN_100: f32 = 4.0;
 
 /// The corner under the price axis holds two words: "manual" (the price scale is frozen) and
 /// the display zone ("ET"). Where each goes, as offsets from the corner's left edge (`None`: not
 /// drawn): side by side, "manual" first, when both fit inside its margins; else "manual" alone
-/// (the frozen scale matters more; the crosshair's tag still names the zone). Never overlapping
-/// at any width, zoom or DPI.
+/// (the frozen scale matters more; the crosshair's tag still names the zone). The two never
+/// overlap at any width, zoom or DPI; in a pane narrower than "manual" plus its margins, the
+/// word starts at the margin and is clipped by the pane, as before.
 pub(crate) fn corner_layout(
     corner_w: f32,
     manual_w: Option<f32>,
@@ -7005,51 +7006,44 @@ fn dashed_box(window: &mut Window, r: Bounds<Pixels>, hair: f32, color: Hsla) {
     }
 }
 
-/// "manual" and the zone never overlap in the corner: at the narrowest axis (80 % zoom) with
-/// the widest zone label ("+0545") the zone yields and "manual" stays; where both fit they sit
-/// side by side, inside the corner.
+/// "manual" and the zone never overlap in the corner. The widths are the axis font's at 100 %
+/// ("manual" about 38 px, "ET" 13, "+0545" 31); a uniform zoom scales everything alike, so
+/// the cases that matter are the corner's width against the words: the usual axis, a pane so
+/// narrow its corner is smaller than the axis, and the widest zone label.
 #[cfg(test)]
 #[test]
 fn the_corner_never_overlaps_manual_and_the_zone() {
-    // Text widths at 100 % (about 6.2 px a character at the axis font), scaled with the zoom.
     let (manual, et, wide) = (38.0_f32, 13.0_f32, 31.0_f32);
-    for zoom in [0.8_f32, 0.9, 1.0, 1.1, 1.25, 1.5] {
-        let corner = AXIS_W_100 * zoom;
-        let (gap, margin) = (CORNER_GAP_100 * zoom, CORNER_MARGIN_100 * zoom);
+    let (gap, margin) = (CORNER_GAP_100, CORNER_MARGIN_100);
+    for corner in [AXIS_W_100, AXIS_W_100 * 0.75, 50.0, 30.0] {
         for zone in [et, wide] {
-            let (m, z) = (manual * zoom, zone * zoom);
-            let (mx, zx) = corner_layout(corner, Some(m), Some(z), gap, margin);
+            let (mx, zx) = corner_layout(corner, Some(manual), Some(zone), gap, margin);
             let mx = mx.expect("manual always shows");
-            assert!(
-                mx >= 0.0 && mx + m <= corner,
-                "manual inside the corner at {zoom}"
-            );
             if let Some(zx) = zx {
-                assert!(mx + m + gap <= zx, "no overlap at {zoom}: {mx}+{m} vs {zx}");
-                assert!(zx + z <= corner - margin + 0.01, "zone inside at {zoom}");
+                assert!(
+                    mx + manual + gap <= zx,
+                    "no overlap in {corner}: {mx} vs {zx}"
+                );
+                assert!(zx + zone <= corner - margin + 0.01, "zone inside {corner}");
+                assert!(mx >= margin - 0.01, "manual inside {corner}");
             }
         }
-        // The usual zone ("ET") fits beside "manual" at every zoom.
-        let (_, zx) = corner_layout(corner, Some(manual * zoom), Some(et * zoom), gap, margin);
-        assert!(zx.is_some(), "ET beside manual at {zoom}");
     }
-    // The narrowest axis and the widest zone: the zone yields, "manual" stays.
-    let zoom = 0.8;
-    let (mx, zx) = corner_layout(
-        AXIS_W_100 * zoom,
-        Some(manual * zoom),
-        Some(wide * zoom + 20.0),
-        CORNER_GAP_100 * zoom,
-        CORNER_MARGIN_100 * zoom,
-    );
+    // The usual axis: ET fits beside "manual"; the widest zone yields and "manual" stays.
+    let (mx, zx) = corner_layout(AXIS_W_100, Some(manual), Some(et), gap, margin);
+    assert!(mx.is_some() && zx.is_some());
+    let (mx, zx) = corner_layout(AXIS_W_100, Some(manual), Some(wide), gap, margin);
+    assert!(mx.is_some() && zx.is_none(), "+0545 yields to manual");
+    // A corner too small for both: manual alone.
+    let (mx, zx) = corner_layout(50.0, Some(manual), Some(et), gap, margin);
     assert!(mx.is_some() && zx.is_none());
     // Alone, each is centred.
     assert_eq!(
-        corner_layout(78.0, None, Some(14.0), 6.0, 4.0),
+        corner_layout(78.0, None, Some(14.0), gap, margin),
         (None, Some(32.0))
     );
     assert_eq!(
-        corner_layout(78.0, Some(38.0), None, 6.0, 4.0),
+        corner_layout(78.0, Some(38.0), None, gap, margin),
         (Some(20.0), None)
     );
 }
