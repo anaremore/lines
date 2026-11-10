@@ -239,6 +239,7 @@ pub fn part_defs(def: &'static SeriesStudyDef) -> &'static [study_style::PartDef
 
 /// Paint `frame`'s lines in the pane (`origin`: its top-left), and the dashed zero line when
 /// the study has one and zero is in range.
+#[allow(clippy::too_many_arguments)]
 pub fn paint(
     frame: &ExtFrame,
     def: &SeriesStudyDef,
