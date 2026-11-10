@@ -1304,7 +1304,7 @@ impl DomView {
                             .flex_row()
                             .gap_2()
                             .items_center()
-                            .children(pane::link_chip(self.common.link, &t))
+                            .child(pane::market_link_chip(self.common.link, &t))
                             .child(
                                 div()
                                     .text_color(t.text_main)

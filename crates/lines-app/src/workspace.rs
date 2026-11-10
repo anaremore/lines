@@ -1959,20 +1959,43 @@ impl WindowView {
 
     /// A fresh trading tab on the focused pane's market, in its link group.
     fn fresh_tab(&self, cx: &mut App) -> Tab {
-        let (target, link, source) =
-            match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
-                Some(h) => {
-                    let f = h.feed(cx);
-                    (f.target_doc, h.link(cx), f.source_doc)
-                }
-                None => (None, Some(0), None),
-            };
+        // The focused pane's market, in a link group of its own: the first no other tab of any
+        // window uses (`layout::first_free_group`), so a symbol change here never ripples into
+        // another tab; none (unlinked) when every group is taken.
+        let (target, source) = match self.tabs.get(self.active).and_then(|t| t.focused_handle()) {
+            Some(h) => {
+                let f = h.feed(cx);
+                (f.target_doc, f.source_doc)
+            }
+            None => (None, None),
+        };
+        let link = crate::layout::first_free_group(&self.groups_in_use(cx));
         let layout = trading_group(link, &mut |k, l| {
             let mut d = PaneDoc::new(k, l, target.clone());
             d.source = source.clone();
             d
         });
         Self::build_tab(&TabDoc::of(layout), cx)
+    }
+
+    /// Every link group a tab of any window uses (this window's tabs, then the others').
+    fn groups_in_use(&self, cx: &mut App) -> Vec<LinkGroup> {
+        let mut handles: Vec<PaneHandle> = self
+            .tabs
+            .iter()
+            .flat_map(|t| t.handles())
+            .cloned()
+            .collect();
+        let me = self.window_id;
+        for w in cx.global::<Workspace>().windows.clone() {
+            if w.window_id() == me {
+                continue;
+            }
+            if let Ok(wv) = w.read(cx) {
+                handles.extend(wv.tabs.iter().flat_map(|t| t.handles()).cloned());
+            }
+        }
+        handles.iter().map(|h| h.link(cx)).collect()
     }
 
     /// Reopen the most recently closed tab where it was (layout, panes and states as saved).
