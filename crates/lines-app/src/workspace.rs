@@ -2943,6 +2943,19 @@ impl WindowView {
                 Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
                 cx,
             );
+        } else if m.measure {
+            let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
+                shot_menu_failed("`measure` needs a focused chart");
+            };
+            if !chart.read(cx).measure_shown() {
+                return false;
+            }
+            let show = crate::picker_view::settings(cx).measure;
+            let o = crate::pane_menu::MenuObject::Measure { show };
+            self.show_menu(
+                Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
+                cx,
+            );
         } else if m.tab {
             self.open_tab_menu(at, cx);
         } else {

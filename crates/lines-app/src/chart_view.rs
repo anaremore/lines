@@ -227,6 +227,9 @@ pub struct Fixture {
     /// A Shift+drag from the first plot-local point to the second, released (screenshots:
     /// `--shift-drag X0,Y0:X1,Y1`): the measure it leaves, through the press path's own calls.
     pub shift_drag: Option<ShiftDrag>,
+    /// Then a drag inside that measure from the first point to the second, released
+    /// (`--move-measure X0,Y0:X1,Y1`): the measure moved.
+    pub move_measure: Option<ShiftDrag>,
     /// Zoom the auto-fitted price range by this factor around the plot's centre, as Ctrl+wheel
     /// would (turns auto-scale off).
     pub price_zoom: Option<f64>,
@@ -455,6 +458,8 @@ pub struct ChartView {
     drag_position: Option<f32>,
     /// Screenshot fixture: a Shift+drag, replayed each frame.
     shift_drag: Option<ShiftDrag>,
+    /// Screenshot fixture: a drag moving that measure, replayed each frame.
+    move_measure: Option<ShiftDrag>,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
     /// groups: they share the market only.
     timeframe: Timeframe,
@@ -737,6 +742,7 @@ impl ChartView {
             trading_cache: crate::trading::Trading::try_global(cx).map(|t| t.cache.clone()),
             drag_position: fixture.drag_position,
             shift_drag: fixture.shift_drag,
+            move_measure: fixture.move_measure,
             timeframe: Timeframe::ONE_MINUTE,
             derived: None,
             ticks: None,
@@ -3217,6 +3223,11 @@ impl ChartView {
                 let (from, to) = (at(a), at(b));
                 self.drawings.quick_down(a.0, a.1, from);
                 self.drawings.on_up(b.0, b.1, to);
+                if let Some((m0, m1)) = self.move_measure
+                    && let (Some(f), Some(t)) = (at(m0), at(m1))
+                {
+                    self.drawings.screenshot_move_measure(f, t, &axis, fmt.tick);
+                }
             }
             self.drawings.set_pointer(self.hover);
             self.drawings.prepare(
@@ -5391,6 +5402,12 @@ impl ChartView {
             other => d.run(other),
         }
         cx.notify();
+    }
+
+    /// Whether a temporary measure is shown (screenshots' `--context-menu measure`).
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub fn measure_shown(&self) -> bool {
+        self.drawings.measure_shown().is_some()
     }
 
     pub fn drawings_hidden(&self) -> bool {

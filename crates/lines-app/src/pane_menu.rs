@@ -96,6 +96,8 @@ pub enum MenuObject {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShotMenu {
     pub order: bool,
+    /// The focused chart's temporary measure's menu (`measure`).
+    pub measure: bool,
     /// The tab's menu (`tab`).
     pub tab: bool,
     pub sub: Option<String>,
@@ -125,14 +127,16 @@ pub fn parse_shot_menu(s: &str) -> Result<ShotMenu, String> {
         Some((w, sub)) => (w, Some(sub.to_owned())),
         None => (rest, None),
     };
-    let (order, tab) = match what {
-        "pane" => (false, false),
-        "order" => (true, false),
-        "tab" => (false, true),
-        other => return Err(format!("{other}: expected pane, order or tab")),
+    let (order, tab, measure) = match what {
+        "pane" => (false, false, false),
+        "order" => (true, false, false),
+        "tab" => (false, true, false),
+        "measure" => (false, false, true),
+        other => return Err(format!("{other}: expected pane, order, tab or measure")),
     };
     Ok(ShotMenu {
         order,
+        measure,
         tab,
         sub,
         at,
@@ -779,10 +783,12 @@ mod tests {
 
     #[test]
     fn screenshot_menus_parse() {
+        assert!(parse_shot_menu("measure@700,300").unwrap().measure);
         assert_eq!(
             parse_shot_menu("pane:Show@1400,300"),
             Ok(ShotMenu {
                 order: false,
+                measure: false,
                 tab: false,
                 sub: Some("Show".into()),
                 at: (1400.0, 300.0)

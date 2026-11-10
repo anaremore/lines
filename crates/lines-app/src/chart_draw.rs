@@ -505,6 +505,27 @@ impl ChartDrawings {
     /// Whether a press at plot-local (`x`, `y`) belongs to the drawings (else the chart
     /// pans or scales as usual). `anchor`: the pointer snapped (grid or magnet). Ctrl+click
     /// never does: it is reserved for chart trading.
+    /// Screenshots (`--move-measure`): the measure moved as a drag inside it from `from` to
+    /// `to` would move it (the same bar and tick steps).
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub fn screenshot_move_measure(
+        &mut self,
+        from: Anchor,
+        to: Anchor,
+        axis: &TimeAxis<'_>,
+        tick: i64,
+    ) {
+        if let Some(m) = self.measure {
+            let d = MeasureDrag {
+                grip: Grip::Move,
+                original: m,
+                from,
+                press: (0.0, 0.0),
+            };
+            self.measure = Some(d.follow(to, axis, tick));
+        }
+    }
+
     /// A press at plot-local (`x`, `y`) on the temporary measure (drawn over the drawings):
     /// it moves or resizes it ([`grip`]). The chart asks before [`Self::on_down`], never with
     /// a tool chosen, Ctrl or Shift (a new ruler), or over an order's tag (its own press).
@@ -1029,6 +1050,34 @@ impl MeasurePart {
 }
 
 impl MeasureShow {
+    /// `ticks,bars` (screenshots' `--measure-parts`): only those parts on.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub fn parse(s: &str) -> Result<MeasureShow, String> {
+        let mut m = MeasureShow {
+            ticks: false,
+            points: false,
+            pnl: false,
+            bars: false,
+            time: false,
+        };
+        for part in s.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+            let p = match part {
+                "ticks" => MeasurePart::Ticks,
+                "points" => MeasurePart::Points,
+                "pnl" => MeasurePart::Pnl,
+                "bars" => MeasurePart::Bars,
+                "time" => MeasurePart::Time,
+                other => {
+                    return Err(format!(
+                        "{other}: expected ticks, points, pnl, bars or time"
+                    ));
+                }
+            };
+            m.toggle(p);
+        }
+        Ok(m)
+    }
+
     pub fn is_default(&self) -> bool {
         *self == MeasureShow::default()
     }
