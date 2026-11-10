@@ -294,7 +294,9 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
             vec![
                 toggle("Price trail", Command::DomTrail, d.trail),
                 MenuItem {
+                    // A value, not a key: never replaced by caps.
                     hint: format!("{:.1} s", f64::from(d.half_life_ms) / 1000.0),
+                    key: None,
                     ..row("Next trail half-life", Command::DomTrailHalfLife)
                 },
             ],

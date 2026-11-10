@@ -21,7 +21,8 @@ pub const DELAY: Duration = Duration::from_millis(400);
 
 pub struct Tooltip {
     name: SharedString,
-    cmd: Option<Command>,
+    /// The key, one entry per cap (`keycap`); empty: none.
+    keys: Vec<String>,
     theme: Theme,
 }
 
@@ -42,7 +43,7 @@ impl Render for Tooltip {
             .items_center()
             .gap_2()
             .child(self.name.clone())
-            .children(self.cmd.and_then(|c| crate::keycap::caps(c, &t)))
+            .children(crate::keycap::caps_of(&self.keys, &t))
     }
 }
 
@@ -54,6 +55,18 @@ pub fn with_tip<E: StatefulInteractiveElement>(
     cmd: Option<Command>,
     t: &Theme,
 ) -> E {
+    let keys = cmd.map(crate::commands::keys).unwrap_or_default();
+    tip_keys(el, name, keys, t)
+}
+
+/// [`with_tip`] for a key that isn't a command (a list's own keys: "Move up" with `Ctrl` `↑`),
+/// one entry per cap.
+pub fn tip_keys<E: StatefulInteractiveElement>(
+    el: E,
+    name: &str,
+    keys: Vec<String>,
+    t: &Theme,
+) -> E {
     let tip: SharedString = name.to_owned().into();
     let theme = *t;
     el.role(gpui::Role::Button)
@@ -61,7 +74,7 @@ pub fn with_tip<E: StatefulInteractiveElement>(
         .tooltip(move |_, cx: &mut App| -> AnyView {
             cx.new(|_| Tooltip {
                 name: tip.clone(),
-                cmd,
+                keys: keys.clone(),
                 theme,
             })
             .into()
@@ -85,12 +98,18 @@ mod tests {
     use crate::commands;
     use crate::commands::TradeCmd;
 
+    /// Menus and the panel's lists mark which rows draw caps; a row with a value (a submenu, the
+    /// trail half-life) keeps its text.
     #[test]
-    fn a_tooltip_shows_its_actions_key_as_caps() {
-        // Flatten's key, one cap per key, ending in its letter.
+    fn rows_with_a_key_draw_caps_and_values_stay_text() {
+        let f = crate::menu::MenuItem::of(Command::Trade(TradeCmd::Flatten), false);
+        assert_eq!(f.key, Some(Command::Trade(TradeCmd::Flatten)));
         let k = commands::keys(Command::Trade(TradeCmd::Flatten));
         assert!(k.len() >= 2 && k.last().is_some_and(|l| l == "F"), "{k:?}");
-        // An action without a key gets no caps.
+        assert_eq!(
+            crate::menu::MenuItem::submenu("Pane", "Chart", vec![]).key,
+            None
+        );
         assert!(commands::keys(Command::Strategy(commands::StrategyCmd::Start)).is_empty());
     }
 }

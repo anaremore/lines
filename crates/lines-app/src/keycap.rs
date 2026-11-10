@@ -1,8 +1,8 @@
 //! A command's shortcut drawn as keycaps: one small cap per key (`Ctrl` `Shift` `F`, or
 //! `⇧` `⌘` `F` on macOS) beside an action's name in tooltips, menus, the trade panel's lists, the
 //! palette and Settings › Keys. The keys come from `commands::keys` (`commands::BINDINGS`), the
-//! same source as the text form `commands::hint`, which stays for sentences and accessible
-//! names. Caps are sized in UI-zoom units and colored from theme tokens: `text_dim` on `bg`,
+//! same source as the text form `commands::hint`, which stays for sentences ("Ctrl+Z undoes")
+//! and search. Caps are sized in UI-zoom units and colored from theme tokens: `text_dim` on `bg`,
 //! edged in `control_edge` (AA in every theme; `theme::tests`).
 
 use gpui::{Div, IntoElement, ParentElement, Styled, div};
@@ -38,7 +38,7 @@ fn cap(key: &str, t: &Theme) -> impl IntoElement {
         .flex_none()
         .h(crate::zoom::ui(CAP_H_100))
         .min_w(crate::zoom::ui(CAP_H_100))
-        .px(crate::zoom::ui(3.0))
+        .px(crate::zoom::ui(4.0))
         .flex()
         .items_center()
         .justify_center()

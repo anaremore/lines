@@ -2390,10 +2390,10 @@ impl SettingsWindow {
                                     .flex_none()
                                     .text_color(t.text_dim)
                                     .when(changed, |d| {
-                                        crate::tooltip::tip_div(
+                                        crate::tooltip::tip_keys(
                                             d,
-                                            "Reset to default (Ctrl+R)",
-                                            None,
+                                            "Reset to default",
+                                            vec!["Ctrl".into(), "R".into()],
                                             &t,
                                         )
                                         .cursor_pointer()

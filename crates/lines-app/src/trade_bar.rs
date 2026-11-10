@@ -2894,7 +2894,14 @@ fn menu_row<V: TradePane>(
         .cursor_pointer()
         .hover(move |s| s.bg(accent.opacity(0.16)).border_color(accent))
         .child(div().w(crate::zoom::ui(12.0)).flex_none().child(mark))
-        .child(div().flex_1().text_color(t.text_main).child(label))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(t.text_main)
+                .child(label),
+        )
         .children(key.and_then(|k| crate::keycap::caps(crate::commands::Command::Trade(k), t)))
         .on_mouse_down(
             MouseButton::Left,
@@ -4586,17 +4593,20 @@ fn editor_view<V: TradePane>(
     let action = |id: &'static str,
                   label: &'static str,
                   name: &'static str,
+                  keys: &[&str],
                   f: fn(&mut crate::brackets::Editor)| {
-        tip(cell(id, t).flex_shrink_0().child(label), name, None, t).on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |v: &mut V, _, _, cx| {
-                cx.stop_propagation();
-                if let Some(e) = v.trade().editor.as_mut() {
-                    f(e);
-                }
-                cx.notify();
-            }),
-        )
+        let keys = keys.iter().map(|k| (*k).to_owned()).collect();
+        crate::tooltip::tip_keys(cell(id, t).flex_shrink_0().child(label), name, keys, t)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v: &mut V, _, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(e) = v.trade().editor.as_mut() {
+                        f(e);
+                    }
+                    cx.notify();
+                }),
+            )
     };
     let foot = div()
         .flex()
@@ -4636,22 +4646,29 @@ fn editor_view<V: TradePane>(
         .child(action(
             "bracket-add",
             "+",
-            "Add a preset (Insert)",
+            "Add a preset",
+            &["Insert"],
             crate::brackets::Editor::add,
         ))
         .child(action(
             "bracket-del",
             "−",
-            "Delete the preset (Delete)",
+            "Delete the preset",
+            &["Delete"],
             crate::brackets::Editor::delete,
         ))
-        .child(action("bracket-up", "↑", "Move up (Ctrl+Up)", |e| {
-            e.reorder(-1)
-        }))
+        .child(action(
+            "bracket-up",
+            "↑",
+            "Move up",
+            &["Ctrl", "↑"],
+            |e| e.reorder(-1),
+        ))
         .child(action(
             "bracket-down",
             "↓",
-            "Move down (Ctrl+Down)",
+            "Move down",
+            &["Ctrl", "↓"],
             |e| e.reorder(1),
         ));
     let (head, foot) = if tight {

@@ -178,7 +178,7 @@ pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Windo
 }
 
 /// A clickable icon: [`HIT`] px square, `text_dim` at rest, `text_main` under the pointer,
-/// `accent` while `on` (e.g. chart only active). Carries its tooltip ("Pop out · Ctrl+Shift+O"
+/// `accent` while `on` (e.g. chart only active). Carries its tooltip ("Pop out" with its key as caps,
 /// after `tooltip::DELAY`), the button role and `name` as its accessible label. The caller
 /// adds the click.
 pub fn button(
