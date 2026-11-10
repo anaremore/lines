@@ -337,7 +337,9 @@ impl PaneFeed {
         })
     }
 
-    /// Switch to the source's own symbol (the one-click action on an unavailable pane).
+    /// Switch to the source's own symbol (the one-click action on an unavailable pane goes
+    /// through `sources::to_suggested`, which picks the source too).
+    #[cfg(test)]
     pub fn to_suggested(&self, registry: &FeedRegistry) -> Result<PaneFeed> {
         let s = self
             .suggest

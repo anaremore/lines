@@ -599,7 +599,7 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
             );
             // A run with several sources saves the one the pane shows; a run `--source` limits
             // keeps the workspace's (a mock run never rewrites it).
-            feed.source_doc = if env.sources.limited() {
+            feed.source_doc = if env.sources.limited() || doc.target.is_none() {
                 doc.source.clone()
             } else {
                 Some(entry.name.clone())

@@ -83,7 +83,8 @@ impl Sources {
         saved: Option<&str>,
         target: Option<&TargetDoc>,
     ) -> Result<&SourceEntry, NoSource> {
-        if self.limited {
+        // A pane that shows no market (journal, positions, strategies) needs no source.
+        if self.limited || target.is_none() {
             return Ok(self.primary());
         }
         if let Some(name) = saved {
@@ -206,7 +207,7 @@ impl Pick {
                 } else if self.others.iter().any(|(_, a)| a.check(target).is_ok()) {
                     Ok(())
                 } else {
-                    Err("in no source".to_owned())
+                    Err("no source has it".to_owned())
                 }
             }
         }
@@ -417,6 +418,8 @@ mod tests {
             .for_pane(Some("kraken"), Some(&doc(catalog::BTC_USD)))
             .unwrap_err();
         assert_eq!(err.0, "Kraken is off or not in this build");
+        // A pane that shows no market (a journal) is never unavailable for its source.
+        assert_eq!(s.for_pane(Some("kraken"), None).unwrap().name, "mock");
         // Nothing serves NQ here (the mock is ES only).
         let err = s.for_pane(None, Some(&doc(catalog::NQ))).unwrap_err();
         assert!(
@@ -456,7 +459,7 @@ mod tests {
         assert_eq!(p.tag(&es).as_deref(), Some("Mock"));
         assert_eq!(
             p.check(&Target::Product(catalog::NQ)),
-            Err("in no source".to_owned()),
+            Err("no source has it".to_owned()),
             "with several, why names no one source"
         );
         assert_eq!(s.for_pick("mock", &btc).unwrap().name, "coinbase");
