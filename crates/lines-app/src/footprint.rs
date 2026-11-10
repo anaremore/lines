@@ -22,8 +22,10 @@
 //!   candles) with the open as a small wedge on the strip's left pointing at it (where an
 //!   OHLC bar marks its open), so a bar's direction shows by shape and position, never by
 //!   color alone; a bar with cells cut by the plot's edge is a candle and the legend says so.
-//! - Cells are opaque: the volume profile and study lines (VWAP) are drawn first and pass
-//!   under them, never through a number.
+//! - Cells are drawn in two passes: their opaque fills (the volume profile's rows and band
+//!   fills pass under them), then the study and level lines over the cells, then the numbers,
+//!   each on a tight box of its cell's color: a VWAP or a level stays visible across a cell
+//!   and never runs through a digit.
 //! - Price and crosshair lines break where they cross cells (`hline_segments`).
 //! - **Imbalances** are marked by an underline under the imbalanced number (sell: the left
 //!   half, buy: the right half) as well as the number's color: a horizontal mark inside the
@@ -605,8 +607,8 @@ impl FootprintLayer {
             return None;
         }
         let f = self.fallbacks;
-        // Volume without a side first, then why some bars are candles, then the key (the line
-        // is capped at the legend's width: what matters most comes first).
+        // Volume without a side first, then why some bars are candles (the line is capped at
+        // the legend's width: what matters most comes first).
         let mut notes: Vec<String> = Vec::new();
         if f.no_side > 0 {
             let mut n = String::new();
@@ -617,8 +619,12 @@ impl FootprintLayer {
             (f.narrow || f.rows_short, "zoom in to see cells"),
             (f.too_wide, "some bars: numbers too wide, zoom in"),
             (f.under_legend, "bars under the legend shown as candles"),
-            // Short, so the capped legend line keeps the key word ("candles").
-            (f.at_edge, "edge bars as candles"),
+            // Only while no bar is cells: a bar cut at the plot's edge beside drawn cells is
+            // routine and plain to see (no hint text in panes).
+            (
+                f.at_edge && self.frame.bars.is_empty(),
+                "edge bars as candles",
+            ),
             (f.too_many, "too many cells: some bars as candles"),
             (f.no_trades, "footprint from counted trades only"),
         ] {
@@ -631,13 +637,10 @@ impl FootprintLayer {
         } else {
             String::new()
         };
+        // No key: an imbalance's underline is the footprint's own mark, not a state to report.
         Some((
             format!("Footprint · {}{rows}", self.config.mode.label()),
-            Some({
-                // The key last: if the capped line is cut, the count and reasons stay.
-                notes.push("underline = imbalance".to_owned());
-                notes.join(" · ")
-            }),
+            (!notes.is_empty()).then(|| notes.join(" · ")),
         ))
     }
 
@@ -893,6 +896,8 @@ impl ChartLayer for FootprintLayer {
         self.active = true;
     }
 
+    /// The cells' fills, strips and marks (the numbers come in [`FootprintLayer::paint_numbers`],
+    /// after the study and level lines).
     fn paint(
         &mut self,
         plot: Bounds<Pixels>,
@@ -901,8 +906,37 @@ impl ChartLayer for FootprintLayer {
         window: &mut Window,
         cx: &mut App,
     ) {
+        self.paint_pass(plot, vp, t, false, window, cx);
+    }
+}
+
+impl FootprintLayer {
+    /// The cells' numbers, over the lines drawn after the fills: each number on a tight box of
+    /// its cell's color, so a study or level line crosses a cell but never its digits.
+    pub fn paint_numbers(
+        &mut self,
+        plot: Bounds<Pixels>,
+        vp: &Viewport,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.paint_pass(plot, vp, t, true, window, cx);
+    }
+
+    /// One pass over the drawn cells: their fills, strips and marks, or (`numbers`) their
+    /// numbers on tight boxes of the cell's color.
+    fn paint_pass(
+        &mut self,
+        plot: Bounds<Pixels>,
+        vp: &Viewport,
+        t: &Theme,
+        numbers: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
         let scale = window.scale_factor();
-        if self.scale != scale || self.metrics == TextMetrics::ESTIMATE {
+        if !numbers && (self.scale != scale || self.metrics == TextMetrics::ESTIMATE) {
             // Measured once (and on a scale change): glyph widths are cached by `Glyphs`.
             self.scale = scale;
             let c = t.text_main;
@@ -913,7 +947,9 @@ impl ChartLayer for FootprintLayer {
                 question: self.glyphs.width("?", c, false, window),
             };
         }
-        self.drawn.clear();
+        if !numbers {
+            self.drawn.clear();
+        }
         if !self.active {
             return;
         }
@@ -951,7 +987,7 @@ impl ChartLayer for FootprintLayer {
             let col = Column::of(vp, b.bar, scale);
             let (left, w) = (col.cell_left, col.cell_w);
             // The bar's open → close, as a candle body: its direction by shape too.
-            if let Some(&(open, close)) = self.open_close.get(bi) {
+            if let Some(&(open, close)) = self.open_close.get(bi).filter(|_| !numbers) {
                 let up = close >= open;
                 let color = if up { t.up } else { t.down };
                 let (yo, yc) = (
@@ -993,7 +1029,7 @@ impl ChartLayer for FootprintLayer {
                 if top + row_h <= 0.0 || f64::from(top) >= vp.height {
                     continue; // wholly off the plot: nothing of it is drawn
                 }
-                if self.drawn.len() < self.drawn.capacity() {
+                if !numbers && self.drawn.len() < self.drawn.capacity() {
                     self.drawn.push([left, left + w, top, top + row_h]);
                 }
                 let shade = (c.total.0 as f32 / max).clamp(0.08, 1.0);
@@ -1003,16 +1039,29 @@ impl ChartLayer for FootprintLayer {
                     _ => Tint::Neutral,
                 };
                 let bg = shades.color(tint, shade);
-                // Opaque: what was drawn under the cell (profile, VWAP) never shows through it.
-                let cell = rect(left, top, w, (row_h - hair).max(hair));
-                window.paint_quad(fill(cell, t.bg));
-                window.paint_quad(fill(cell, bg));
+                // Opaque: what was drawn under the cell (profile rows, band fills) never shows
+                // through it. The study and level lines come after, the numbers last.
+                let cell_h = (row_h - hair).max(hair);
+                let (uy, uh) = underline_at(top, row_h, scale);
+                // A number's box: the cell's color (as the cell is drawn) behind it, so a line
+                // crossing the cell stops at its digits; never over the cell's outline or, where
+                // the number is underlined, its imbalance underline ([`number_box`]).
+                let behind = |window: &mut Window, x: f32, tw: f32, underlined: bool| {
+                    let under = underlined.then_some(uy);
+                    let (bx, by, bw, bh) = number_box([left, w, top, row_h], hair, under, x, tw);
+                    let r = rect(bx, by, bw, bh);
+                    window.paint_quad(fill(r, t.bg));
+                    window.paint_quad(fill(r, bg));
+                };
+                if !numbers {
+                    let cell = rect(left, top, w, cell_h);
+                    window.paint_quad(fill(cell, t.bg));
+                    window.paint_quad(fill(cell, bg));
+                }
                 // Imbalance markers: an underline under the imbalanced number (shape and
                 // position, not only color). Sell × buy: exactly under the number (drawn with
                 // the text below); one-number modes: under the side's half.
-                let uh = snap(2.0).max(2.0 / scale); // 2 logical px, at least 2 device px
-                let uy = snap(f64::from(top + row_h - uh - 2.0));
-                if mode != FootprintMode::BidAsk {
+                if !numbers && mode != FootprintMode::BidAsk {
                     for (on, buy, color) in [
                         (c.imbalance.sell, false, imb_sell),
                         (c.imbalance.buy, true, imb_buy),
@@ -1023,7 +1072,7 @@ impl ChartLayer for FootprintLayer {
                         }
                     }
                 }
-                if b.poc == Some(k) {
+                if !numbers && b.poc == Some(k) {
                     // Outlined, one device pixel.
                     let (r, bot) = (left + w - hair, top + row_h - hair);
                     for q in [
@@ -1034,6 +1083,9 @@ impl ChartLayer for FootprintLayer {
                     ] {
                         window.paint_quad(fill(q, poc_color));
                     }
+                }
+                if !numbers {
+                    continue;
                 }
                 // Every drawn cell carries its numbers: `prepare` kept only bars whose
                 // numbers fit and rows tall enough for them.
@@ -1051,6 +1103,8 @@ impl ChartLayer for FootprintLayer {
                         let _ = qty.write(c.unknown, &mut s);
                         // Main text color (AA on any cell shade): the `?` marks it neutral.
                         let wtxt = self.glyphs.width(s.as_str(), t.text_main, false, window);
+                        let any = c.imbalance.sell || c.imbalance.buy;
+                        behind(window, left + (w - wtxt) * 0.5, wtxt, any);
                         self.glyphs.paint(
                             s.as_str(),
                             ox + left + (w - wtxt) * 0.5,
@@ -1080,8 +1134,11 @@ impl ChartLayer for FootprintLayer {
                             t.text_main
                         };
                         num(&mut s, c.sell.0);
+                        let tw = self
+                            .glyphs
+                            .width(s.as_str(), sell, c.imbalance.sell, window);
+                        behind(window, mid_x - GUTTER - tw, tw, c.imbalance.sell);
                         if c.imbalance.sell {
-                            let tw = self.glyphs.width(s.as_str(), sell, true, window);
                             let x = mid_x - GUTTER - tw - 1.0;
                             window.paint_quad(fill(rect(x, uy, tw + 2.0, uh), imb_sell));
                         }
@@ -1096,8 +1153,9 @@ impl ChartLayer for FootprintLayer {
                             cx,
                         );
                         num(&mut s, c.buy.0);
+                        let tw = self.glyphs.width(s.as_str(), buy, c.imbalance.buy, window);
+                        behind(window, mid_x + GUTTER, tw, c.imbalance.buy);
                         if c.imbalance.buy {
-                            let tw = self.glyphs.width(s.as_str(), buy, true, window);
                             let x = mid_x + GUTTER - 1.0;
                             window.paint_quad(fill(rect(x, uy, tw + 2.0, uh), imb_buy));
                         }
@@ -1120,6 +1178,8 @@ impl ChartLayer for FootprintLayer {
                         };
                         num(&mut s, v);
                         let wtxt = self.glyphs.width(s.as_str(), t.text_main, false, window);
+                        let any = c.imbalance.sell || c.imbalance.buy;
+                        behind(window, left + (w - wtxt) * 0.5, wtxt, any);
                         self.glyphs.paint(
                             s.as_str(),
                             ox + left + (w - wtxt) * 0.5,
@@ -1138,6 +1198,34 @@ impl ChartLayer for FootprintLayer {
     }
 }
 
+/// A cell's imbalance underline: its top and height (2 logical px, at least 2 device px), 2 px
+/// above the row's bottom, on device pixels. The underline and the number boxes both use it.
+pub fn underline_at(top: f32, row_h: f32, scale: f32) -> (f32, f32) {
+    let snap = |v: f64| lines_core::geometry::snap(v, scale);
+    let uh = snap(2.0).max(2.0 / scale);
+    (snap(f64::from(top + row_h - uh - 2.0)), uh)
+}
+
+/// A footprint number's box (x, y, width, height), drawn in its cell's color behind the number
+/// (`x`, `tw` wide) so a line crossing the cell stops at its digits: 2 px either side of the
+/// number, kept inside the cell's outline (`[left, width, top, row height]`, one `hair` in from
+/// each side, so a POC outline stays whole); it ends above the number's imbalance underline
+/// (`underline`, its top, [`underline_at`]) when it has one, else at the cell's bottom. Pure.
+pub fn number_box(
+    cell: [f32; 4],
+    hair: f32,
+    underline: Option<f32>,
+    x: f32,
+    tw: f32,
+) -> (f32, f32, f32, f32) {
+    let [left, w, top, row_h] = cell;
+    let x0 = (x - 2.0).max(left + hair);
+    let x1 = (x + tw + 2.0).min(left + w - hair);
+    let y0 = top + hair;
+    let y1 = underline.unwrap_or(top + row_h - 2.0 * hair).max(y0 + hair);
+    (x0, y0, (x1 - x0).max(0.0), y1 - y0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1147,6 +1235,46 @@ mod tests {
     use lines_feed::store::ChartStore;
 
     const MIN: i64 = 60_000;
+
+    /// A number's box never covers the cell's outline (a POC) or its imbalance underline: it
+    /// ends above the underline and stays a hair inside the cell's sides, also for a number
+    /// as wide as its room.
+    #[test]
+    fn number_box_keeps_the_outline_and_underline() {
+        for (row_h, scale) in [(15.0, 1.0), (17.0, 1.0), (18.0, 2.0), (24.0, 1.5)] {
+            let (left, w, top) = (100.0, 60.0, 40.0);
+            let hair = 1.0 / scale;
+            let (uy, uh) = underline_at(top, row_h, scale);
+            assert!(
+                uy + uh <= top + row_h - hair,
+                "the underline sits in the row"
+            );
+            for (x, tw) in [
+                (120.0, 20.0),
+                (left, w),
+                (left - 5.0, w + 10.0),
+                (150.0, 30.0),
+            ] {
+                let cell = [left, w, top, row_h];
+                // Underlined: the box ends at the underline's top, never over it.
+                let (bx, by, bw, bh) = number_box(cell, hair, Some(uy), x, tw);
+                assert!(
+                    by + bh <= uy,
+                    "box bottom {} under the underline {uy}",
+                    by + bh
+                );
+                assert!(by >= top + hair);
+                assert!(bx >= left + hair && bx + bw <= left + w - hair, "{bx} {bw}");
+                // Not underlined: the box covers the row down to its bottom outline, so a line
+                // low in a short row never shows through the digits' bottom.
+                let (_, by, _, bh) = number_box(cell, hair, None, x, tw);
+                assert!(
+                    by + bh >= uy + uh && by + bh <= top + row_h - hair,
+                    "{row_h}"
+                );
+            }
+        }
+    }
 
     /// ES, a history bar at minute 0, then trades in minutes 1..=3.
     fn store() -> ChartStore {
@@ -1250,12 +1378,7 @@ mod tests {
         let (label, note) = fp.legend().unwrap();
         assert_eq!(label, "Footprint · sell × buy");
         // Bar 3 has trades but is cut by the plot's edge: the legend says why it's a candle.
-        assert_eq!(
-            note.as_deref(),
-            Some(
-                "edge bars as candles · footprint from counted trades only · underline = imbalance"
-            )
-        );
+        assert_eq!(note.as_deref(), Some("footprint from counted trades only"));
         fp.check_drawable(&vp).unwrap();
         // Narrow bars: no cells at all; the legend asks to zoom in.
         let narrow = view(20.0);
@@ -1263,7 +1386,7 @@ mod tests {
         assert!(!fp.is_active() && !fp.covers(1));
         assert_eq!(
             fp.legend().unwrap().1.as_deref(),
-            Some("zoom in to see cells · underline = imbalance")
+            Some("zoom in to see cells")
         );
         // Off: nothing, and no legend line.
         fp.set_config(FootprintConfig::default());
@@ -1439,13 +1562,13 @@ mod tests {
         assert_eq!(fp.fallbacks().no_side, 21);
         let note = fp.legend().unwrap().1.unwrap();
         assert!(note.starts_with("? 21 without aggressor side"), "{note}");
-        // With a reason too, the count comes first and the reason before the key, so the
-        // capped legend line cuts the key, never the count.
+        // With a reason too, the count comes first, so the capped legend line cuts the
+        // reason, never the count.
         fp.fallbacks.under_legend = true;
         let note = fp.legend().unwrap().1.unwrap();
         assert_eq!(
             note,
-            "? 21 without aggressor side · bars under the legend shown as candles · underline = imbalance"
+            "? 21 without aggressor side · bars under the legend shown as candles"
         );
         // Bars cut at the plot's top: none drawn, nothing counted.
         let mut cut = around(600_000, 25, 80.0, 3.0);
@@ -1463,8 +1586,8 @@ mod tests {
         let note = fp.legend().unwrap().1.unwrap();
         assert!(note.starts_with("? 14 without aggressor side"), "{note}");
         assert!(
-            note.ends_with("underline = imbalance"),
-            "the key last: {note}"
+            !note.contains("edge bars") && !note.contains("underline"),
+            "cells drawn: an edge candle and the key need no words: {note}"
         );
         // Delta mode prints `?N` for side-less cells too (never a balanced-looking 0).
         let mut dm = FootprintLayer::new(FootprintConfig {
@@ -1485,10 +1608,7 @@ mod tests {
         vm.prepare(&d, bars, &vp);
         vm.check_drawable(&vp).unwrap();
         assert_eq!(vm.fallbacks().no_side, 0);
-        assert_eq!(
-            vm.legend().unwrap().1.as_deref(),
-            Some("underline = imbalance")
-        );
+        assert_eq!(vm.legend().unwrap().1, None, "nothing to say");
     }
 
     /// The imbalance mark is a horizontal underline inside the cell, under its side's half:

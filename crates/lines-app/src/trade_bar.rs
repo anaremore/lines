@@ -2467,19 +2467,32 @@ fn market_px(width: f32) -> (f32, f32) {
 
 /// A Buy or Sell button's text at `width` for `size` and the price it would hit (`None`: no
 /// market, shown as "—"). Both buttons decide by Sell's longer word, so they always match.
-pub fn market_text(buy: bool, size: i64, price: Option<&str>, width: f32) -> MarketText {
+/// `locked` (entries locked): the second line says "Locked" instead of the price, wherever it
+/// fits, and the room allows for the dimmed button's 2 px edge.
+pub fn market_text(
+    buy: bool,
+    size: i64,
+    price: Option<&str>,
+    width: f32,
+    locked: bool,
+) -> MarketText {
     let word = if buy { "Buy" } else { "Sell" };
     let title = format!("{word} {size}");
     let (pad, title_px) = market_px(width);
     let inner = if width == 0.0 {
         f32::MAX
     } else {
-        pair_inner(width, pad)
+        // A dimmed button's edge is 2 px, not 1: a pixel less each side.
+        pair_inner(width, pad) - if locked { 2.0 } else { 0.0 }
     };
     if text_w(&format!("Sell {size}"), title_px) > inner {
         return MarketText::Stacked(word, size.to_string());
     }
-    let line = format!("Market · {}", price.unwrap_or("—"));
+    let line = if locked {
+        "Locked".to_owned()
+    } else {
+        format!("Market · {}", price.unwrap_or("—"))
+    };
     if text_w(&line, 11.0) <= inner {
         MarketText::Full(title, line)
     } else {
@@ -3274,7 +3287,7 @@ pub fn dom_bar<V: TradePane>(
         }
     } else {
         if rows.entry {
-            panel = panel.child(controls(v, product, width, entries_dim, t, cx));
+            panel = panel.child(controls(v, product, width, t, cx));
         }
         if rows.buttons {
             panel = panel.child(market_buttons(v, product, width, entries_dim, t, cx));
@@ -3361,7 +3374,12 @@ pub fn dom_bar<V: TradePane>(
                 .font_weight(FontWeight::BOLD);
         }
         if exit_dims(cmd, flat, entries_dim) {
-            b = b.opacity(0.4);
+            // Dimmed as Buy and Sell are: a 2 px dashed edge and dim text (readable, not faded).
+            b = b
+                .border_2()
+                .border_dashed()
+                .border_color(t.control_edge)
+                .text_color(t.text_dim);
         }
         let b = run_on_click(tip(b, name, Some(cmd), t), cmd, cx);
         if entry {
@@ -3985,7 +4003,6 @@ fn controls<V: TradePane>(
     v: &V,
     product: &Product,
     width: f32,
-    dim: bool,
     t: &Theme,
     cx: &mut Context<V>,
 ) -> gpui::Div {
@@ -4246,7 +4263,7 @@ fn controls<V: TradePane>(
         .items_start()
         .gap(crate::zoom::ui(PAIR_GAP))
         .h(crate::zoom::ui(CTRL_H))
-        .when(dim, |d| d.opacity(0.4))
+        // Never dimmed: a size and a bracket can be chosen while entries are locked.
         .child(qty)
         .child(bracket)
 }
@@ -4265,7 +4282,7 @@ fn inside<V: TradePane>(v: &V) -> (Option<Price>, Option<Price>) {
 }
 
 /// Buy and Sell (mock 2): solid in the side's color, "Buy 10" over "Market · 7572.00" (the price it
-/// would hit); Sell's text to the right. Dimmed while entries are.
+/// would hit); Sell's text to the right. While entries are locked: unfilled, dashed, "Locked".
 fn market_buttons<V: TradePane>(
     v: &V,
     product: &Product,
@@ -4278,7 +4295,7 @@ fn market_buttons<V: TradePane>(
     let size = pane_size(v, cx);
     let button = |id: &'static str, buy: bool, p: Option<Price>| {
         let price = p.map(|p| product.price.format::<32>(p));
-        let text = market_text(buy, size, price.as_ref().map(|p| p.as_str()), width);
+        let text = market_text(buy, size, price.as_ref().map(|p| p.as_str()), width, dim);
         // The second line: the market and its price (small), or a size too long for the first
         // line (as loud as the first).
         let (top, below, stacked_size): (String, Option<String>, bool) = match text {
@@ -4286,7 +4303,15 @@ fn market_buttons<V: TradePane>(
             MarketText::Size(a) => (a, None, false),
             MarketText::Stacked(w, s) => (w.to_owned(), Some(s), true),
         };
-        let fill = if buy { t.up } else { t.down };
+        // Dimmed (entries locked): no fill, a 2 px dashed edge in the side's color (GPUI's dash
+        // is twice the width: 4 on, 2 off) and dim text saying "Locked", so it never looks
+        // armed: solid fill means it would send.
+        let side = if buy { t.up } else { t.down };
+        let (fill, edge, text) = if dim {
+            (t.panel, side, t.text_dim)
+        } else {
+            (side, side, t.bg)
+        };
         let (pad, title_px) = market_px(width);
         div()
             .id(id)
@@ -4301,9 +4326,10 @@ fn market_buttons<V: TradePane>(
             .rounded_md()
             .bg(fill)
             .border_1()
-            .border_color(fill)
-            // Text in the background color on the side's (AA both ways).
-            .text_color(t.bg)
+            .when(dim, |d| d.border_2().border_dashed())
+            .border_color(edge)
+            // Text in the background color on the side's (AA both ways); dimmed, the theme's.
+            .text_color(text)
             .cursor_pointer()
             .whitespace_nowrap()
             .overflow_hidden()
@@ -4319,7 +4345,6 @@ fn market_buttons<V: TradePane>(
                     .when(stacked_size, |d| d.font_weight(FontWeight::BOLD))
                     .child(b)
             }))
-            .when(dim, |d| d.opacity(0.4))
     };
     let buy = tip(
         button("buy-mkt", true, ask),
@@ -6643,34 +6668,36 @@ mod tests {
     #[test]
     fn buy_and_sell_keep_the_size_and_drop_the_price_first() {
         let price = Some("7572.00");
-        let full = |w: f32| matches!(market_text(true, 10, price, w), MarketText::Full(..));
+        let full = |w: f32| matches!(market_text(true, 10, price, w, false), MarketText::Full(..));
         assert!(!full(MIN_DOM_WIDTH) && !full(200.0) && !full(EXITS_ONE_ROW));
         assert!(full(320.0) && full(420.0) && full(0.0));
         assert_eq!(
-            market_text(true, 10, price, 420.0),
+            market_text(true, 10, price, 420.0, false),
             MarketText::Full("Buy 10".into(), "Market · 7572.00".into())
         );
         assert_eq!(
-            market_text(false, 10, None, 420.0),
+            market_text(false, 10, None, 420.0, false),
             MarketText::Full("Sell 10".into(), "Market · —".into())
         );
         for width in WIDTHS {
             for size in [1, 10, 100, 9999] {
-                for buy in [true, false] {
-                    let t = market_text(buy, size, price, width);
-                    let other = market_text(!buy, size, price, width);
+                for (buy, locked) in [(true, false), (false, false), (true, true), (false, true)] {
+                    let t = market_text(buy, size, price, width, locked);
+                    let other = market_text(!buy, size, price, width, locked);
                     assert_eq!(
                         std::mem::discriminant(&t),
                         std::mem::discriminant(&other),
                         "{width} {size}: both buttons alike"
                     );
-                    // The size always shows, whole, in its room.
+                    // The size always shows, whole, in its room (a locked button's 2 px edge
+                    // takes a pixel more each side).
                     let (pad, title_px) = market_px(width);
-                    let inner = pair_inner(width, pad);
+                    let inner = pair_inner(width, pad) - if locked { 2.0 } else { 0.0 };
                     match t {
                         MarketText::Full(a, b) => {
                             assert!(a.ends_with(&size.to_string()));
                             assert!(text_w(&a, title_px) <= inner && text_w(&b, 11.0) <= inner);
+                            assert_eq!(locked, b == "Locked", "{width}: {b}");
                         }
                         MarketText::Size(a) => {
                             assert!(a.ends_with(&size.to_string()));
@@ -6686,11 +6713,11 @@ mod tests {
         }
         // The narrowest panel keeps a two-digit size on one line, a four-digit one stacked.
         assert_eq!(
-            market_text(true, 10, price, MIN_DOM_WIDTH),
+            market_text(true, 10, price, MIN_DOM_WIDTH, false),
             MarketText::Size("Buy 10".into())
         );
         assert_eq!(
-            market_text(false, 9999, price, MIN_DOM_WIDTH),
+            market_text(false, 9999, price, MIN_DOM_WIDTH, false),
             MarketText::Stacked("Sell", "9999".into())
         );
     }

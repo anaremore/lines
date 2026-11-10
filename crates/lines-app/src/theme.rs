@@ -406,9 +406,10 @@ impl Theme {
     }
 
     /// What the plot can show under text on the legend box (`label_bg`), as composited: the
-    /// chart, the grid, candles, the last price, the profile's value area and POC, and the
-    /// study colors. The label-box test and [`Theme::legend_text`] both check these.
-    pub fn chart_underlays(&self) -> [(&'static str, Rgb); 12] {
+    /// chart, the grid, candles, the last price, the profile's value area, POC and split rows
+    /// (the profile grows from the plot's left edge, under the legends), and the study colors.
+    /// The label-box test and [`Theme::legend_text`] both check these.
+    pub fn chart_underlays(&self) -> [(&'static str, Rgb); 14] {
         use lines_core::style::over;
         let pct = |a: f32| (a * 100.0).round() as u8;
         let bg = rgb_of(self.bg);
@@ -420,6 +421,8 @@ impl Theme {
             ("grid", rgb_of(self.grid)),
             ("profile_va", on_bg(self.profile_va)),
             ("profile_poc", on_bg(self.profile_poc)),
+            ("profile_buy", on_bg(self.profile_buy)),
+            ("profile_sell", on_bg(self.profile_sell)),
             ("last", rgb_of(self.last)),
             ("study0", rgb_of(self.study[0])),
             ("study1", rgb_of(self.study[1])),
@@ -443,6 +446,23 @@ impl Theme {
             .iter()
             .all(|(_, u)| contrast(c, over(rgb_of(self.label_bg), pct, *u)) >= 4.5);
         if reads { color } else { self.text_main }
+    }
+
+    /// A lower pane's title text for a line drawn in `color` (an external series study's):
+    /// that color where it is AA on the title's box (`label_bg`) over everything the pane can
+    /// show under the box (its background, its grid, and each of its lines as drawn, `lines`),
+    /// else the theme's text (AA over any color: `level_labels_meet_aa_over_any_level_color`).
+    /// The title's sample shows the line's color either way. No allocation.
+    pub fn pane_title_text(&self, color: Hsla, lines: &[Hsla]) -> Hsla {
+        use lines_core::style::{contrast, over};
+        let pct = |a: f32| (a.clamp(0.0, 1.0) * 100.0).round() as u8;
+        let (c, bg, label) = (rgb_of(color), rgb_of(self.bg), rgb_of(self.label_bg));
+        let boxed = pct(self.label_bg.a);
+        let reads = |under: Rgb| contrast(c, over(label, boxed, under)) >= 4.5;
+        let reads_all = reads(bg)
+            && reads(rgb_of(self.grid))
+            && lines.iter().all(|l| reads(over(rgb_of(*l), pct(l.a), bg)));
+        if reads_all { color } else { self.text_main }
     }
 
     /// A fill drawn under the candles (a VWAP's band fill, `layers` nested; a level zone, 1),
@@ -934,6 +954,103 @@ mod tests {
 "
             )
         );
+    }
+
+    /// A level's label is the theme's text on a `label_bg` chip in the levels' gutter, where it
+    /// can sit over any level's line or zone (a source's own color, decision 0022, or any color
+    /// a user picks): AA over every color (216 sampled), the chart and each underlay, in every
+    /// theme and palette.
+    #[test]
+    fn level_labels_meet_aa_over_any_level_color() {
+        for t in Theme::all() {
+            let chart = t.chart_underlays();
+            let unders = any_user_color()
+                .chain(chart.iter().map(|(_, u)| user_color(*u, 100)))
+                .chain([t.bg]);
+            for u in unders {
+                let r = contrast(t.text_main, over(t.label_bg, u));
+                assert!(r >= 4.5, "{}: over {:?}: {r:.2}", t.name, rgb_of(u));
+            }
+        }
+    }
+
+    /// A lower pane's title names each line in its color only where that is AA on the title's
+    /// box over the pane's background, its grid and every line the pane draws: the theme's
+    /// series colors, faded (stale), and any color a user picks (216 sampled, two per pane),
+    /// in every theme and palette.
+    #[test]
+    fn pane_title_text_meets_aa_over_the_pane() {
+        for t in Theme::all() {
+            let fade = crate::series_pane::STALE_FADE;
+            let mut panes: Vec<Vec<Hsla>> = vec![
+                t.series.to_vec(),
+                t.series.iter().map(|c| c.opacity(fade)).collect(),
+            ];
+            let users: Vec<Hsla> = any_user_color().collect();
+            for (k, u) in users.iter().enumerate() {
+                panes.push(vec![*u, users[(k * 7 + 3) % users.len()], t.series[k % 4]]);
+            }
+            let mut colored = 0;
+            for lines in &panes {
+                for c in lines {
+                    let shown = t.pane_title_text(*c, lines);
+                    if shown == *c {
+                        colored += 1;
+                    } else {
+                        assert_eq!(shown, t.text_main, "{}", t.name);
+                    }
+                    let unders = [t.bg, t.grid]
+                        .into_iter()
+                        .chain(lines.iter().map(|l| over(*l, t.bg)));
+                    for u in unders {
+                        let r = contrast(shown, over(t.label_bg, u));
+                        assert!(
+                            r >= 4.5,
+                            "{}: {:?} over {:?}: {r:.2}",
+                            t.name,
+                            rgb_of(*c),
+                            rgb_of(u)
+                        );
+                    }
+                }
+            }
+            // The check isn't a blanket fallback: the theme's own series keep their colors.
+            assert!(colored > 0, "{}", t.name);
+        }
+    }
+
+    /// A dimmed Buy or Sell (entries locked) is drawn unfilled on the panel: its words and
+    /// price in dim text (AA) and its dashed edge in the side's color (3:1, a UI part), in
+    /// every theme and palette; BE and Reverse dimmed: a dashed `control_edge`, dim text.
+    #[test]
+    fn dimmed_trade_buttons_stay_readable() {
+        for t in Theme::all() {
+            // On the panel (Buy and Sell) and on the panel root's background (BE, Reverse).
+            for under in [t.panel, t.bg] {
+                assert!(contrast(t.text_dim, under) >= 4.5, "{}", t.name);
+                for side in [t.up, t.down] {
+                    assert!(contrast(side, under) >= 3.0, "{}", t.name);
+                }
+                assert!(contrast(t.control_edge, under) >= 3.0, "{}", t.name);
+            }
+        }
+    }
+
+    /// The economic calendar's tags (`crate::econ_layer`): a high-importance tag is `on_warn`
+    /// on `warn`, a medium one the theme's text on `panel` with a `control_edge` outline, both
+    /// opaque over the plot; their dashed guide is `control_edge` on the chart. AA for the text,
+    /// 3:1 for the outline and guide, in every theme and palette.
+    #[test]
+    fn econ_tags_read() {
+        for t in Theme::all() {
+            assert!(contrast(t.on_warn, t.warn) >= 4.5, "{}", t.name);
+            assert!(contrast(t.text_main, t.panel) >= 4.5, "{}", t.name);
+            for bg in [t.bg, t.panel] {
+                assert!(contrast(t.control_edge, bg) >= 3.0, "{}", t.name);
+            }
+            // The high tag stands out from the chart it sits on.
+            assert!(contrast(t.warn, t.bg) >= 3.0, "{}", t.name);
+        }
     }
 
     /// The header's recording dot reads on the header (3:1, WCAG 1.4.11) in every theme and
