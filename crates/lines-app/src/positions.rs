@@ -415,6 +415,13 @@ impl Col {
 const DROP: [Col; 5] = [Col::Exits, Col::Last, Col::Avg, Col::Side, Col::Account];
 
 /// The columns that fit `width` px, in order.
+/// The columns a pane `width` px wide shows at UI zoom `zoom`: the columns are drawn `zoom`
+/// times their width, so they are fitted in 100 % units (the row's 16 px of padding and
+/// slack stay as they are).
+pub fn shown_at(width: f32, zoom: f32) -> Vec<Col> {
+    shown((width - 16.0) / zoom.max(0.01))
+}
+
 pub fn shown(width: f32) -> Vec<Col> {
     let mut cols = Col::ALL.to_vec();
     let total = |cols: &[Col]| cols.iter().map(|c| c.width()).sum::<f32>();
@@ -430,6 +437,18 @@ pub fn shown(width: f32) -> Vec<Col> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// At 150 % a pane fits the columns it would at two thirds of its width at 100 %: a
+    /// 1000 px pane drops columns rather than run Open P&L and Flatten past its edge.
+    #[test]
+    fn columns_are_fitted_at_the_ui_zoom() {
+        assert_eq!(shown_at(1000.0, 1.0), shown(984.0));
+        assert_eq!(shown_at(1000.0, 1.5), shown(656.0));
+        let at = shown_at(1000.0, 1.5);
+        assert!(at.len() < Col::ALL.len(), "some go");
+        let drawn: f32 = at.iter().map(|c| c.width() * 1.5).sum();
+        assert!(drawn <= 1000.0 - 16.0 + 0.01, "{drawn}");
+    }
     use lines_core::{CivilDate, Qty, Right};
     use lines_feed::catalog;
     use lines_trading::trigger::{Direction, TriggerId, TriggerState};

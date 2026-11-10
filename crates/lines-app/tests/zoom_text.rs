@@ -3,8 +3,9 @@
 //! `zoom::f` or a `*_px()` helper. Counted as unscaled: a literal `text_size(px(..))`, a
 //! `Glyphs::fixed`, and a `shape_line`/`shape_sized` given a `px(..)` constant or a `*_100`
 //! size. That is the bug the owner found in the Positions pane (#114): text that stays at
-//! 100 % while the rest zooms. A fixed-height or fixed-width container around zoomed text is
-//! not caught here (review it by hand).
+//! 100 % while the rest zooms. A size wrapped in `zoom::f`/`zoom::ui`/`zoom::get` counts as
+//! scaled. Not caught here (review by hand): a fixed-height or fixed-width container around
+//! zoomed text, and a size passed in through a local variable.
 //!
 //! The exceptions are surfaces that don't zoom yet (docs/known-gaps.md, UI zoom), each listed
 //! with its file and reason; a new one fails this test until it scales or is listed.
@@ -20,8 +21,8 @@ const NOT_YET: &[(&str, &str, usize)] = &[
     ),
     (
         "chart_view.rs",
-        "the order strip (`chart_trade::strip_box`), the position tag's glyphs, and drawing \
-         tags (boxes that don't zoom)",
+        "the order strip (`chart_trade::strip_box`), the position tag's glyphs, and a note \
+         being typed (drawings don't zoom)",
         3,
     ),
     ("order_group_view.rs", "the group tag's order list", 1),
@@ -44,11 +45,16 @@ fn unscaled(src: &str) -> usize {
             // The call's arguments (enough to reach the size).
             let args: String = src[i + call.len()..].chars().take(160).collect();
             let args = args.split(";").next().unwrap_or("");
-            let fixed = args.contains("_100")
-                || args.match_indices("px(").any(|(j, _)| {
-                    args[j + 3..]
-                        .starts_with(|c: char| c.is_ascii_digit() || c.is_ascii_uppercase())
-                });
+            // Scaled where the size goes through the zoom.
+            let zoomed = ["zoom::f(", "zoom::ui(", "zoom::get()"]
+                .iter()
+                .any(|z| args.contains(z));
+            let fixed = !zoomed
+                && (args.contains("_100")
+                    || args.match_indices("px(").any(|(j, _)| {
+                        args[j + 3..]
+                            .starts_with(|c: char| c.is_ascii_digit() || c.is_ascii_uppercase())
+                    }));
             if fixed {
                 n += 1;
             }
@@ -123,4 +129,12 @@ fn the_scan_counts_each_unscaled_pattern() {
         1
     );
     assert_eq!(unscaled("self.shape_sized(&s, c, label_px(), window);"), 0);
+    assert_eq!(
+        unscaled("self.shape_sized(&s, c, crate::zoom::f(LABEL_PX_100), window);"),
+        0
+    );
+    assert_eq!(
+        unscaled("x.shape_line(s, px(TAG_PX * crate::zoom::get()), &[r], None);"),
+        0
+    );
 }

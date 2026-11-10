@@ -823,8 +823,8 @@ impl Render for PositionsView {
         }
         // Not measured yet (the first frame): every column, until the width is known.
         let cols = if self.width > 0.0 {
-            // In 100 % units: the columns are drawn at the UI zoom.
-            model::shown((self.width - 16.0) / crate::zoom::get())
+            // Fitted at the UI zoom (the columns are drawn at it).
+            model::shown_at(self.width, crate::zoom::get())
         } else {
             Col::ALL.to_vec()
         };
@@ -866,8 +866,8 @@ impl Render for PositionsView {
                             let before = v.width;
                             v.width = w;
                             if before <= 0.0
-                                || model::shown((before - 16.0) / crate::zoom::get())
-                                    != model::shown((w - 16.0) / crate::zoom::get())
+                                || model::shown_at(before, crate::zoom::get())
+                                    != model::shown_at(w, crate::zoom::get())
                             {
                                 // Other columns fit: drawn again with them.
                                 v.seen_revision = u64::MAX;
