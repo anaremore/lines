@@ -227,7 +227,8 @@ pub enum Command {
     /// strategy.
     SetGroupMembers {
         group: String,
-        #[serde(default)]
+        /// Required: a payload missing it by mistake must not empty the group (an empty list,
+        /// sent, does).
         members: Vec<AccountId>,
     },
     /// [`Command::CancelAll`] on every member of a group, as one member command each (its own
