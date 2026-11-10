@@ -2132,10 +2132,28 @@ pub fn editor_fits(width: f32, pane_h: f32, joins: bool) -> bool {
     r.account && pane_header_h() + r.height(width) <= pane_h
 }
 
-/// The bracket editor's preset rows in a slot `h` tall (its head, foot and padding take the rest):
-/// at least one, at most four.
-fn editor_list_rows(h: f32) -> usize {
-    (((h - EDITOR_HEAD_H - EDITOR_FOOT_H - 8.0) / EDITOR_ROW_H).floor() as usize).clamp(1, 4)
+/// The bracket editor's preset rows in a slot `h` tall at `width` and zoom `z` (its head, foot
+/// and padding take the rest): at least one, at most four. All in 100 % units, with the row that
+/// holds the + − ↑ ↓ buttons (the header when tight, else the footer) a hit target tall, which
+/// `zoom::hit` never shrinks: below 100 % it takes more units ([`hit_units`]).
+fn editor_list_rows(h: f32, width: f32, z: f32) -> usize {
+    let (head, foot) = editor_head_foot(width, z);
+    (((h - head - foot - 8.0) / EDITOR_ROW_H).floor() as usize).clamp(1, 4)
+}
+
+/// The editor's header and footer heights in 100 % units at `width` and zoom `z`.
+fn editor_head_foot(width: f32, z: f32) -> (f32, f32) {
+    if is_tight(width) {
+        (hit_units(EDITOR_HEAD_H, z), EDITOR_FOOT_H)
+    } else {
+        (EDITOR_HEAD_H, hit_units(EDITOR_FOOT_H, z))
+    }
+}
+
+/// A hit target's size `v` (100 % units) at zoom `z`, in 100 % units: `zoom::hit` keeps it at
+/// least `v` real pixels, so below 100 % it takes `v / z` units.
+pub fn hit_units(v: f32, z: f32) -> f32 {
+    if z < 1.0 { v / z } else { v }
 }
 /// The editor's header: as tall as the action buttons it holds in a tight panel.
 const EDITOR_HEAD_H: f32 = MIN_HIT + 2.0;
@@ -3235,7 +3253,7 @@ pub fn dom_bar<V: TradePane>(
         if rows.entry && rows.buttons {
             let h = rows.editor_h(width);
             if let Some(c) = &pt.bracket_confirm {
-                panel = panel.child(bracket_confirm_view(c, v, product, h, t, cx));
+                panel = panel.child(bracket_confirm_view(c, v, product, h, width, t, cx));
             } else if let Some(ed) = &pt.editor {
                 panel = panel.child(editor_view(
                     ed,
@@ -4395,7 +4413,7 @@ fn editor_view<V: TradePane>(
     cx: &mut Context<V>,
 ) -> gpui::Div {
     use crate::brackets::Field;
-    let rows_shown = editor_list_rows(h);
+    let rows_shown = editor_list_rows(h, width, crate::zoom::get());
     let first = ed.row.saturating_sub(rows_shown - 1);
     let tight = is_tight(width);
     let unit = ed.units.word();
@@ -4404,7 +4422,12 @@ fn editor_view<V: TradePane>(
         .flex_row()
         .items_center()
         .gap_2()
-        .h(crate::zoom::hit(EDITOR_HEAD_H))
+        // The row with the actions is a hit target tall at every zoom ([`editor_head_foot`]).
+        .h(if tight {
+            crate::zoom::hit(EDITOR_HEAD_H)
+        } else {
+            crate::zoom::ui(EDITOR_HEAD_H)
+        })
         .flex_shrink_0()
         .whitespace_nowrap()
         .overflow_hidden()
@@ -4553,7 +4576,12 @@ fn editor_view<V: TradePane>(
         .flex_row()
         .items_center()
         .gap_1()
-        .h(crate::zoom::ui(EDITOR_FOOT_H))
+        .h(if tight {
+            crate::zoom::ui(EDITOR_FOOT_H)
+        } else {
+            crate::zoom::hit(EDITOR_FOOT_H)
+        })
+        .flex_shrink_0()
         // Tight: 11 px, so both prices fit whole ("S 21450.25  T 21460.25" in 149 px).
         .when(tight, |d| d.text_size(crate::zoom::ui(11.0)))
         .child(match problem {
@@ -5383,6 +5411,7 @@ fn bracket_confirm_view<V: TradePane>(
     v: &V,
     product: &Product,
     h: f32,
+    width: f32,
     t: &Theme,
     cx: &mut Context<V>,
 ) -> gpui::Div {
@@ -5404,7 +5433,8 @@ fn bracket_confirm_view<V: TradePane>(
     };
     // One compact question everywhere (the rows it replaces are 80 to 114 px): what is cancelled
     // and what replaces it, at most three lines ([`confirm_lines`]), over Keep and Replace.
-    let what = confirm_compact_text(n, &preset);
+    let label = c.contract.label(product);
+    let what = confirm_text(n, &preset, label.as_str(), width);
     let (keep, replace_text) = ("Keep", format!("Replace {n}"));
     let cancel = tip(
         cell("bracket-confirm-cancel", t)
@@ -5489,8 +5519,7 @@ const CONFIRM_LINE_H: f32 = 14.0;
 
 /// How many lines the confirmation's question takes at `width`, words wrapped whole at the
 /// panel's wide glyph estimate: it must be at most three in the rows it replaces.
-#[cfg(test)]
-fn confirm_lines(text: &str, width: f32) -> usize {
+pub fn confirm_lines(text: &str, width: f32) -> usize {
     let room = width - 2.0 * SIDE;
     let (mut lines, mut used) = (1, 0.0f32);
     for word in text.split(' ') {
@@ -5506,10 +5535,25 @@ fn confirm_lines(text: &str, width: f32) -> usize {
     lines
 }
 
-/// The compact confirmation's question: what is cancelled and what replaces it, in full.
-pub fn confirm_compact_text(n: usize, preset: &str) -> String {
+/// The confirmation's question at `width`: the longest of its forms that fits three lines
+/// ([`confirm_lines`]): with the contract and "for the whole position", with the contract, or
+/// (the narrowest panels) what is cancelled and what replaces it alone.
+pub fn confirm_text(n: usize, preset: &str, contract: &str, width: f32) -> String {
     let s = if n == 1 { "" } else { "s" };
-    format!("Replace {n} exit{s} with one bracket ({preset})?")
+    let forms = [
+        format!(
+            "Replace {n} {contract} exit{s} with one bracket ({preset}) for the whole position?"
+        ),
+        format!("Replace {n} {contract} exit{s} with one bracket ({preset})?"),
+        format!("Replace {n} exit{s} with one bracket ({preset})?"),
+    ];
+    let last = forms.len() - 1;
+    forms
+        .into_iter()
+        .enumerate()
+        .find(|(i, f)| *i == last || confirm_lines(f, width) <= 3)
+        .map(|(_, f)| f)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -6282,14 +6326,21 @@ mod tests {
             (PanelRows::ALL, MIN_DOM_WIDTH),
         ] {
             let h = rows.editor_h(w);
-            let n = editor_list_rows(h);
-            assert!(n >= 1, "{w}");
-            assert!(
-                EDITOR_HEAD_H + n as f32 * EDITOR_ROW_H + EDITOR_FOOT_H + 8.0 <= h,
-                "{w}: {h}"
-            );
+            // At 80 %, 100 % and 150 %: the hit-target row takes more units below 100 %.
+            for z in [0.8, 1.0, 1.5] {
+                let n = editor_list_rows(h, w, z);
+                let (head, foot) = editor_head_foot(w, z);
+                assert!(n >= 1, "{w} at {z}");
+                assert!(
+                    head + n as f32 * EDITOR_ROW_H + foot + 8.0 <= h + 0.01,
+                    "{w} at {z}: {head} + {n} rows + {foot} in {h}"
+                );
+            }
         }
-        assert_eq!(editor_list_rows(PanelRows::ALL.editor_h(420.0)), 3);
+        assert_eq!(
+            editor_list_rows(PanelRows::ALL.editor_h(420.0), 420.0, 1.0),
+            3
+        );
     }
 
     /// Every pane height a split leaves a DOM, at every width the owner named and the joins on and
@@ -6762,17 +6813,35 @@ mod tests {
                 ..PanelRows::ALL
             }
             .editor_h(width);
-            for text in [
-                confirm_compact_text(1, "8/16 t"),
-                confirm_compact_text(12, "100/200 pt"),
-            ] {
+            for (n, preset, contract) in [(1, "8/16 t", "ESZ26"), (12, "100/200 pt", "MNQZ26")] {
+                let text = confirm_text(n, preset, contract, width);
                 let lines = confirm_lines(&text, width);
                 assert!(lines <= 3, "{width}: {text} takes {lines} lines");
-                // Lines, the gap, the buttons' margin and the buttons.
-                let need = lines as f32 * CONFIRM_LINE_H + 4.0 + 4.0 + MIN_HIT + 2.0;
-                assert!(need <= h, "{width}: {need} in {h}");
+                // At 80 %, 100 % and 150 %: the lines, the gap, the buttons' margin and the
+                // buttons, a hit target tall (more units below 100 %).
+                for z in [0.8, 1.0, 1.5] {
+                    let need =
+                        lines as f32 * CONFIRM_LINE_H + 4.0 + 4.0 + hit_units(MIN_HIT + 2.0, z);
+                    assert!(need <= h, "{width} at {z}: {need} in {h}");
+                }
             }
         }
+        // The contract and "the whole position" where they fit: "the whole position" goes first,
+        // and the contract still shows at the narrowest width.
+        let wide = confirm_text(2, "8/16 t", "ESZ26", 320.0);
+        assert!(
+            wide.contains("ESZ26") && wide.contains("whole position"),
+            "{wide}"
+        );
+        assert_eq!(
+            confirm_text(2, "8/16 t", "ESZ26", MIN_DOM_WIDTH),
+            "Replace 2 ESZ26 exits with one bracket (8/16 t)?"
+        );
+        // Where nothing longer fits three lines, the plain question.
+        assert_eq!(
+            confirm_text(2, "8/16 t", "ESZ26", 60.0),
+            "Replace 2 exits with one bracket (8/16 t)?"
+        );
     }
 
     /// A read-only account's exits say "off" whole: both where they fit, else one "Exits off".
