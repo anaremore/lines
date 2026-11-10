@@ -671,6 +671,8 @@ pub fn hint(c: Command) -> String {
         "pageup" => "PgUp".to_owned(),
         "up" => "↑".to_owned(),
         "space" => "Space".to_owned(),
+        // A lone comma reads as punctuation in a row's hint: named, as macOS shows "⌘,".
+        "," if !mac => "Comma".to_owned(),
         k => k.to_uppercase(),
     };
     if mac {

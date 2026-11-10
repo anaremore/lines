@@ -836,6 +836,20 @@ mod tests {
         );
     }
 
+    /// Every pane kind's "Settings…" opens at a section that has settings (never an empty page).
+    #[test]
+    fn every_pane_opens_settings_at_a_section_with_settings() {
+        for kind in KINDS {
+            let at = settings_section(kind);
+            assert!(
+                crate::settings_schema::all()
+                    .iter()
+                    .any(|s| s.section == at),
+                "{kind:?}: {at:?} has no settings"
+            );
+        }
+    }
+
     /// Every pane menu command is also in the palette (or opens it, or the menu itself): a
     /// menu is never the only way to an action.
     #[test]
