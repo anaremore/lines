@@ -134,7 +134,9 @@ mod keychain {
     #[cfg(not(windows))]
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-    /// Run `cmd` with no stdin, waiting at most [`TIMEOUT`]: (exit code, stdout).
+    /// Run `cmd` with no stdin, waiting at most [`TIMEOUT`]: (exit code, stdout). For small
+    /// outputs only (a key): stdout is read after the tool exits, so one that filled the pipe
+    /// would wait out the timeout.
     #[cfg(not(windows))]
     fn run(mut cmd: std::process::Command) -> std::io::Result<(Option<i32>, Vec<u8>)> {
         use std::io::Read;

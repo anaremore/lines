@@ -1113,6 +1113,10 @@ fn run_sources(
         .map(|d| source_prefs(&d.join("settings.json")))
         .unwrap_or_default();
     let choices = enabled_sources(ext, &prefs, |name| name != DATABENTO || databento_set_up());
+    // A caller's own `databento` (not key-gated) too: its key looked up now, never from the UI.
+    if choices.iter().any(|c| c.name() == DATABENTO) {
+        let _ = databento_set_up();
+    }
     if choices.is_empty() {
         // Every source off: the app still opens (on the mock, offline, as `--source mock`
         // would), so Settings › Data can turn one back on.

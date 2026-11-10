@@ -563,6 +563,8 @@ mod tests {
         "FAKE-ACCT-0002",
         "FAKE-ACCT-0003",
         "sk_FAKE_0123456789abcdefABCDEF",
+        // A Databento key's shape with no digit (the general token rule needs one).
+        "db-FAKEFAKEFAKEFAKEFAKEFAKEFAKEF",
         "fake.person@example.com",
         "FAKE-session-cookie",
         "9f8e7d6c5b4a39281706f5e4d3c2b1a0",
@@ -598,7 +600,7 @@ mod tests {
                 "connections":{"rithmic":{"user":"trader-FAKE-user","password":"FAKE-pass-123",
                   "account_ids":["FAKE-ACCT-0001"],"api_key":"sk_FAKE_0123456789abcdefABCDEF"}},
                 "contact":"fake.person@example.com","session":"FAKE-session-cookie",
-                "note":"databento db-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAK",
+                "note":"databento db-FAKEFAKEFAKEFAKEFAKEFAKEFAKEF",
                 "guardrails":{"FAKE-ACCT-0004":{"max_trades_per_day":3}},
                 "bracket_presets":{"FAKE-ACCT-0005":{"presets":[]}},
                 "prop_rules":{"FAKE-ACCT-0006":{"preset":"50K evaluation"}}}"#,

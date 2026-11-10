@@ -276,6 +276,15 @@ fn home_paths(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A Databento key's shape is a token even with no digit; near misses are not.
+    #[test]
+    fn a_databento_key_is_a_token() {
+        assert!(looks_like_token("db-FAKEFAKEFAKEFAKEFAKEFAKEFAKEF"));
+        assert!(!looks_like_token("db-FAKEFAKEFAKEFAKEFAKEFAKEFAKE"), "31");
+        assert!(!looks_like_token("db-FAKEFAKEFAKEFAKEFAKEFAKEFAKEFA"), "33");
+        assert!(!looks_like_token("xx-FAKEFAKEFAKEFAKEFAKEFAKEFAKEF"));
+    }
+
     #[test]
     fn sensitive_keys() {
         for k in [

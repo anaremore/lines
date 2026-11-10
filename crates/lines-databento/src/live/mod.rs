@@ -239,7 +239,8 @@ impl SourceExtension for DatabentoExtension {
     ) -> BoxFuture<'static, anyhow::Result<Box<dyn DynTransport>>> {
         let gateway = self.gateway.clone();
         Box::pin(async move {
-            let key = ApiKey::load()?;
+            // The keychain read may start a process (up to 5 s): never on a runtime worker.
+            let key = tokio::task::spawn_blocking(ApiKey::load).await??;
             let t = transport::LiveTransport::connect(&gateway, key).await?;
             Ok(Box::new(t) as Box<dyn DynTransport>)
         })

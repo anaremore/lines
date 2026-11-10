@@ -1654,11 +1654,11 @@ fn table() -> Vec<Setting> {
             |p, _, _| {
                 // The startup lookup's answer; never a lookup from here.
                 Value::Text(
-                    match (source_on(p, crate::DATABENTO), crate::databento_known()) {
-                        (false, _) => "Off",
-                        (true, Some(true)) => "Set up",
-                        (true, Some(false)) => "Not set up",
-                        (true, None) => "Checked at the next start",
+                    match (crate::databento_known(), source_on(p, crate::DATABENTO)) {
+                        (Some(true), _) => "Set up",
+                        (Some(false), _) => "Not set up",
+                        (None, false) => "Off",
+                        (None, true) => "Checked when a run uses Databento",
                     }
                     .to_owned(),
                 )
