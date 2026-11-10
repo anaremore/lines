@@ -1031,8 +1031,8 @@ impl Staged {
 }
 
 /// Whether a key goes to the staged order (Enter places it, Esc discards it): plain keys only,
-/// and never while a text field on the chart is open (`typing`: a size, a working order's
-/// resize, a drawing's note, a typed timeframe), whose Enter and Esc are its own.
+/// and never while something else on the chart holds the key (`typing`: a text field, a drawing
+/// gesture, an open list, an order drag or price pick), whose Enter and Esc are its own.
 pub fn staged_takes_key(staged: bool, key: &str, plain: bool, typing: bool) -> bool {
     staged && plain && !typing && matches!(key, "enter" | "escape")
 }

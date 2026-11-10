@@ -202,6 +202,12 @@ impl ChartDrawings {
             }
     }
 
+    /// Drop the temporary measure (not a pinned one): an order staged after it takes Enter.
+    pub fn drop_measure(&mut self) {
+        self.measure = None;
+        self.measure_drag = None;
+    }
+
     /// Choose a tool (again: leave drawing mode).
     pub fn set_tool(&mut self, tool: Tool) {
         self.end_quick();

@@ -214,6 +214,14 @@ fn notes_measures_delete_and_clear() {
     assert_eq!(r.d.tool(), None);
     assert!(!r.d.wants("escape"));
     assert_eq!(r.d.key("escape", None), Key::Ignored);
+    // A temporary measure dropped (an order staged after it): Enter is free, the pinned one stays.
+    r.d.set_tool(Tool::Measure);
+    r.down(200.0, 300.0);
+    r.down(400.0, 100.0);
+    assert!(r.d.wants("enter"));
+    r.d.drop_measure();
+    assert!(!r.d.wants("enter"));
+    assert_eq!(r.items().len(), 1, "nothing pinned or removed");
 
     // Delete all waits for Enter (Esc keeps them), and undo brings them back.
     r.d.confirm_clear = true;

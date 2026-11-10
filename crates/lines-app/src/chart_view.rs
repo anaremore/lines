@@ -1809,12 +1809,22 @@ impl ChartView {
         }
         // A staged order: Enter places it, Esc discards it (the pane's own keys, never in
         // `commands::BINDINGS`: they act on what this chart shows). After the size fields
-        // above, and never while a note or a timeframe is typed or a drawing gesture (a tool,
-        // a placement, a measure) has a use for the key: those are the trader's latest act.
+        // above, and never while a note or a timeframe is typed, a drawing gesture (a tool,
+        // a placement, a measure) has a use for the key, a list is open over the chart, or an
+        // order or price pick is mid-gesture: those are the trader's latest act, and an Enter
+        // there never sends the staged order.
         let typing = self.drawings.wants(&k.key)
             || self.tf_entry.is_some()
             || self.trade.qty_edit.is_some()
-            || self.trade.resize_edit.is_some();
+            || self.trade.resize_edit.is_some()
+            || self.tf_menu
+            || self.trade.account_menu
+            || self.ct.group_menu.is_some()
+            || self.ct.staged_drag.is_some()
+            || self.ct.drag.is_some()
+            || self.ct.adding.is_some()
+            || self.ct.pos_drag
+            || self.ct.strip_pick.is_some();
         let plain = !(m.control || m.alt || m.platform || m.shift);
         if crate::chart_trade::staged_takes_key(self.ct.staged.is_some(), &k.key, plain, typing) {
             if k.key == "enter" {
@@ -6444,6 +6454,8 @@ impl ChartView {
                     Ok(s) => {
                         self.ct.strip_pick = None;
                         self.ct.staged_drag = None;
+                        // A temporary measure left from before would hold Enter and Esc.
+                        self.drawings.drop_measure();
                         self.ct.staged = Some(s);
                     }
                     Err(why) => self.trade.flash(why),
