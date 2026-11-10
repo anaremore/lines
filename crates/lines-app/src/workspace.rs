@@ -1566,6 +1566,7 @@ impl WindowView {
                 });
             }
             Command::ResetPanels => {
+                crate::popover::forget_drag();
                 crate::picker_view::update_settings(cx, |s| s.panel_places.clear());
             }
             Command::Open => {

@@ -511,23 +511,28 @@ thread_local! {
     static WHEEL_CARRY: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
 }
 
-/// A line-based wheel event (`lines` > 0: up) as rows: one per event.
-pub fn notch_rows(lines: f32) -> isize {
-    if lines > 0.0 {
-        -1
-    } else if lines < 0.0 {
-        1
-    } else {
-        0
+/// A line-based wheel event (`lines` > 0: up; Windows reports every wheel and touchpad
+/// event so) as rows: a whole notch (a line or more) is one row, whatever the system's lines
+/// per notch; smaller deltas (a touchpad, a smooth-scrolling wheel) add up in `carry`, a row
+/// per line.
+pub fn notch_rows(carry: &mut f32, lines: f32) -> isize {
+    if lines.abs() >= 1.0 {
+        *carry = 0.0;
+        return if lines > 0.0 { -1 } else { 1 };
     }
+    wheel_steps(carry, lines, 1.0)
 }
 
 /// [`wheel_steps`] for a wheel event over a panel's list (a line-based one: [`notch_rows`]).
 pub fn wheel_rows(ev: &gpui::ScrollEvent, window: &Window) -> isize {
     // A mouse wheel's notch is one row, however many lines the system scrolls per notch.
     if let gpui::ScrollDelta::Lines(l) = ev.delta {
-        WHEEL_CARRY.with(|c| c.set(0.0));
-        return notch_rows(l.y);
+        return WHEEL_CARRY.with(|c| {
+            let mut carry = c.get();
+            let n = notch_rows(&mut carry, l.y);
+            c.set(carry);
+            n
+        });
     }
     let line = window.line_height();
     let dy = f32::from(ev.delta.pixel_delta(line).y);
@@ -577,6 +582,8 @@ struct PanelDrag {
     /// Where the press was, and whether the pointer has since gone further than a click's slop.
     press: (f32, f32),
     moved: bool,
+    /// The panel's size and the window's, as last drawn: a release keeps the place clamped.
+    room: Option<((f32, f32), (f32, f32))>,
 }
 
 /// How far a press may wander and stay a click (logical px): a click on the title bar keeps
@@ -591,28 +598,45 @@ impl PanelDrag {
             at,
             press: pointer,
             moved: false,
+            room: None,
         }
     }
 
-    /// The pointer moved with the left button held: the panel follows it.
+    /// The pointer moved with the left button held: the panel follows it, once it has gone
+    /// past a click's slop.
     fn follow(self, pointer: (f32, f32)) -> PanelDrag {
         let far = (pointer.0 - self.press.0)
             .abs()
             .max((pointer.1 - self.press.1).abs())
             > DRAG_SLOP;
+        if !(self.moved || far) {
+            return self;
+        }
         PanelDrag {
             at: (pointer.0 - self.grab.0, pointer.1 - self.grab.1),
-            moved: self.moved || far,
+            moved: true,
             ..self
         }
     }
 
     /// The drag ended (a release, or a move with no button held: a release the window
-    /// missed): the place to keep, only if it moved.
+    /// missed): the place to keep, only if it moved, kept inside the window as last drawn.
     fn end(self) -> Option<(i32, i32)> {
-        self.moved
-            .then(|| (self.at.0.round() as i32, self.at.1.round() as i32))
+        if !self.moved {
+            return None;
+        }
+        let at = match self.room {
+            Some((size, window)) => clamp_place(self.at, size, window),
+            None => self.at,
+        };
+        Some((at.0.round() as i32, at.1.round() as i32))
     }
+}
+
+/// Forget any drag in progress (Reset pop-up panel positions: a drag whose release was missed
+/// must not bring a place back).
+pub fn forget_drag() {
+    PANEL_DRAG.with(|d| d.set(None));
 }
 
 /// End `panel`'s drag, keeping its place if it moved.
@@ -803,6 +827,10 @@ impl Element for Floating {
         // A drag keeps the place as drawn (inside the window), which is what a release saves.
         if let Some(mut d) = dragged(self.panel) {
             d.at = at;
+            d.room = Some((
+                (w, h + title_h()),
+                (f32::from(v.width), f32::from(v.height)),
+            ));
             PANEL_DRAG.with(|c| c.set(Some(d)));
         }
         let rect = Rect::new(at.0, at.1, w, h + title_h());
@@ -941,9 +969,17 @@ mod panel_tests {
     /// A notch is one row whatever the system's lines per notch.
     #[test]
     fn a_notch_is_one_row() {
-        assert_eq!(notch_rows(3.0), -1);
-        assert_eq!(notch_rows(-3.0), 1);
-        assert_eq!(notch_rows(0.0), 0);
+        let mut carry = 0.0;
+        assert_eq!(notch_rows(&mut carry, 3.0), -1);
+        assert_eq!(notch_rows(&mut carry, -3.0), 1);
+        assert_eq!(notch_rows(&mut carry, 0.0), 0);
+        // A touchpad's quarter lines: a row per four.
+        let steps: isize = (0..8).map(|_| notch_rows(&mut carry, -0.25)).sum();
+        assert_eq!(steps, 2);
+        // A whole notch after a partial one: one row, the partial dropped.
+        notch_rows(&mut carry, -0.5);
+        assert_eq!(notch_rows(&mut carry, -1.0), 1);
+        assert_eq!(carry, 0.0);
     }
 
     /// A drag follows the pointer by where it was grabbed; only one that moved keeps a place
@@ -954,11 +990,18 @@ mod panel_tests {
         assert_eq!(d.end(), None, "a click");
         let d = d.follow((112.0, 61.0));
         assert_eq!(d.end(), None, "within the slop");
+        assert_eq!(d.at, (100.0, 50.0), "and it doesn't move");
         let d = d.follow((310.0, 260.0));
         assert_eq!(d.at, (300.0, 250.0), "the grab offset is kept");
         assert_eq!(d.end(), Some((300, 250)));
         // Back where it started: still a move.
         assert_eq!(d.follow((110.0, 60.0)).end(), Some((100, 50)));
+        // Released past the window's edge before a frame clamped it: kept inside.
+        let d = PanelDrag {
+            room: Some(((400.0, 300.0), (1000.0, 600.0))),
+            ..d.follow((1210.0, 60.0))
+        };
+        assert_eq!(d.end(), Some((600, 50)));
     }
 
     #[test]
