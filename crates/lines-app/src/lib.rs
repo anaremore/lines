@@ -1181,6 +1181,8 @@ fn run_sources(
         enabled_sources(ext, &prefs, |name| name != DATABENTO || databento_set_up())
             .into_iter()
             .filter(|c| match c {
+                // Databento has its own key gate above (it also reads a key file).
+                SourceChoice::Extension(e) if e.name() == DATABENTO => true,
                 SourceChoice::Extension(e) => match connections::needs(e.name(), &e.fields()) {
                     None => true,
                     Some(field) => {

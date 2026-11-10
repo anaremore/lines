@@ -44,6 +44,7 @@ impl SourceExtension for Keyed {
             kind: FieldKind::Secret,
             required: true,
             env: Some("LINES_KEYED_TEST_KEY"),
+            keychain: None,
         }]
     }
 }

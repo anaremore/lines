@@ -42,6 +42,10 @@ pub struct Field {
     pub required: bool,
     /// An environment variable that overrides the stored value (tests, headless runs).
     pub env: Option<&'static str>,
+    /// For a secret: the OS keychain entry the connector already reads itself (its target on
+    /// Windows, its service on macOS and Linux), so a key saved in Settings is the one it
+    /// uses. `None`: Lines' own entry (service `lines`, account `<source>.<key>`).
+    pub keychain: Option<&'static str>,
 }
 
 /// How a [`Field`] is entered.

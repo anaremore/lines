@@ -97,7 +97,12 @@ impl Scope {
 /// The Connections section's list of sources (`connections_view` draws it).
 pub const CONNECTIONS_LIST: &str = "connections.list";
 /// The public sources' switches: rows for search and the palette, drawn on their cards.
-pub const SOURCE_SWITCHES: [&str; 2] = ["data.coinbase", "data.kraken"];
+pub const SOURCE_SWITCHES: [&str; 4] = [
+    "data.coinbase",
+    "data.kraken",
+    "data.databento",
+    "data.databento_key",
+];
 
 /// Trading-affecting settings are marked in the window and loosening them asks first
 /// (decision 0021).
@@ -1591,42 +1596,6 @@ fn table() -> Vec<Setting> {
             },
             None,
         ),
-        with_default(
-            s(
-                "data.databento",
-                Sec::Data,
-                "Databento",
-                "CME futures through your own Databento account, billed by Databento. Off until your API key is set up (DATABENTO_API_KEY, or the OS keychain entry lines-databento); without it Lines makes no Databento requests. Applies when Lines next starts.",
-                Scope::App,
-                Normal,
-                Toggle,
-                |p, _, _| Value::Bool(source_on(p, crate::DATABENTO)),
-                Some(|p, _, v| set_source(p, crate::DATABENTO, want_bool(v)?)),
-            ),
-            Value::Bool(true),
-        ),
-        s(
-            "data.databento_key",
-            Sec::Data,
-            "Databento key",
-            "Whether this run found your Databento API key (DATABENTO_API_KEY, or the OS keychain entry lines-databento; a key added later counts from the next start). The key itself is never shown.",
-            Scope::ReadOnly,
-            Normal,
-            Info,
-            |p, _, _| {
-                // The startup lookup's answer; never a lookup from here.
-                Value::Text(
-                    match (crate::databento_known(), source_on(p, crate::DATABENTO)) {
-                        (Some(true), _) => "Set up",
-                        (Some(false), _) => "Not set up",
-                        (None, false) => "Off",
-                        (None, true) => "Checked when a run uses Databento",
-                    }
-                    .to_owned(),
-                )
-            },
-            None,
-        ),
         s(
             DATA_FOLDER_KEY,
             Sec::Data,
@@ -1747,6 +1716,42 @@ fn table() -> Vec<Setting> {
                 Some(|p, _, v| set_source(p, "kraken", want_bool(v)?)),
             ),
             Value::Bool(true),
+        ),
+        with_default(
+            s(
+                "data.databento",
+                Sec::Connections,
+                "Databento",
+                "CME futures through your own Databento account, billed by Databento. Off until your API key is set up (DATABENTO_API_KEY, or the OS keychain entry lines-databento); without it Lines makes no Databento requests. Applies when Lines next starts.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(source_on(p, crate::DATABENTO)),
+                Some(|p, _, v| set_source(p, crate::DATABENTO, want_bool(v)?)),
+            ),
+            Value::Bool(true),
+        ),
+        s(
+            "data.databento_key",
+            Sec::Connections,
+            "Databento key",
+            "Whether this run found your Databento API key (DATABENTO_API_KEY, or the OS keychain entry lines-databento; a key added later counts from the next start). The key itself is never shown.",
+            Scope::ReadOnly,
+            Normal,
+            Info,
+            |p, _, _| {
+                // The startup lookup's answer; never a lookup from here.
+                Value::Text(
+                    match (crate::databento_known(), source_on(p, crate::DATABENTO)) {
+                        (Some(true), _) => "Set up",
+                        (Some(false), _) => "Not set up",
+                        (None, false) => "Off",
+                        (None, true) => "Checked when a run uses Databento",
+                    }
+                    .to_owned(),
+                )
+            },
+            None,
         ),
         // Keys.
         s(

@@ -281,7 +281,8 @@ fn missing_reason_with(name: &str, databento: Option<bool>) -> String {
         );
     }
     if name == crate::DATABENTO && databento == Some(false) {
-        return "Databento is not set up: no API key (see Settings › Data)".to_owned();
+        return "Databento is not set up: no API key. Set it up in Settings › Connections"
+            .to_owned();
     }
     format!("{} is off or not in this build", source_label(name))
 }
@@ -530,7 +531,7 @@ mod tests {
         // Databento without a key says so; switched off (never looked up) it is "off".
         assert_eq!(
             missing_reason_with("databento", Some(false)),
-            "Databento is not set up: no API key (see Settings › Data)"
+            "Databento is not set up: no API key. Set it up in Settings › Connections"
         );
         assert_eq!(
             missing_reason_with("databento", None),

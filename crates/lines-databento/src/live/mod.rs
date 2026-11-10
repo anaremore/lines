@@ -202,8 +202,29 @@ impl DatabentoExtension {
 }
 
 impl SourceExtension for DatabentoExtension {
+    fn api_version(&self) -> u32 {
+        lines_feed::extension::API_VERSION
+    }
     fn name(&self) -> &'static str {
         "databento"
+    }
+    /// The API key, for Settings › Connections (decision 0030 §3): kept in the keychain entry
+    /// this source already reads (`lines-databento`); `DATABENTO_API_KEY` overrides it.
+    fn fields(&self) -> Vec<lines_feed::extension::Field> {
+        vec![lines_feed::extension::Field {
+            key: "api-key",
+            label: "API key",
+            kind: lines_feed::extension::FieldKind::Secret,
+            required: true,
+            env: Some(crate::key::ENV),
+            keychain: Some(crate::key::CREDENTIAL),
+        }]
+    }
+    fn plan(&self) -> Option<String> {
+        Some(
+            "Your own Databento account, billed by Databento: CME futures, trades and top of book"
+                .to_owned(),
+        )
     }
     fn help(&self) -> &'static str {
         "Databento live CME Globex (GLBX.MDP3): the catalog's CME Group futures (equity index, rates, energy, metals, FX, grains); trades, top of book, replay back-fill."

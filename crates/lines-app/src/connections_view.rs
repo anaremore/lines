@@ -837,6 +837,7 @@ mod tests {
                     kind,
                     required: true,
                     env: None,
+                    keychain: None,
                 },
                 buf: buf.into(),
             }),

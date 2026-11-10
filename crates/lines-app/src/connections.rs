@@ -25,21 +25,27 @@ const BUILTIN: [&str; 2] = ["coinbase", "kraken"];
 /// Every source the page lists: each registered extension, then Coinbase and Kraken (the
 /// developer sources, mock and replay, stay behind their flags).
 pub fn rows() -> Vec<Row> {
-    let mut out: Vec<Row> = extension::registered()
+    let ext = extension::registered();
+    let row = |e: &std::sync::Arc<dyn extension::SourceExtension>| Row {
+        name: e.name().to_owned(),
+        fields: e.fields(),
+        plan: e
+            .plan()
+            .unwrap_or_else(|| "Not reported by the connector".to_owned()),
+    };
+    // The caller's own extensions, Coinbase, Kraken, then the built-in Databento: the order a
+    // run prefers them in.
+    let mut out: Vec<Row> = ext
         .iter()
-        .map(|e| Row {
-            name: e.name().to_owned(),
-            fields: e.fields(),
-            plan: e
-                .plan()
-                .unwrap_or_else(|| "Not reported by the connector".to_owned()),
-        })
+        .filter(|e| e.name() != crate::DATABENTO)
+        .map(row)
         .collect();
     out.extend(BUILTIN.iter().map(|n| Row {
         name: (*n).to_owned(),
         fields: Vec::new(),
         plan: "Public data, no account: trades, top of book and depth".to_owned(),
     }));
+    out.extend(ext.iter().filter(|e| e.name() == crate::DATABENTO).map(row));
     out
 }
 
@@ -204,12 +210,29 @@ pub fn memory_keychain() -> bool {
     )
 }
 
+/// The keychain entry a registered source's field names for itself (`Field::keychain`).
+fn own_entry(source: &str, key: &str) -> Option<&'static str> {
+    extension::by_name(source)?
+        .fields()
+        .into_iter()
+        .find(|f| f.key == key)?
+        .keychain
+}
+
 fn account(source: &str, key: &str) -> String {
-    format!("{source}.{key}")
+    match own_entry(source, key) {
+        Some(entry) => entry.to_owned(),
+        None => format!("{source}.{key}"),
+    }
 }
 
 fn os_entry(source: &str, key: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, &account(source, key)).map_err(|e| e.to_string())
+    match own_entry(source, key) {
+        // The connector's own entry: its target (Windows) and service (macOS, Linux).
+        Some(entry) => keyring::Entry::new_with_target(entry, entry, SERVICE),
+        None => keyring::Entry::new(SERVICE, &account(source, key)),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// A source's saved secret (`Ok(None)`: none saved). May block briefly: never call it while
@@ -388,6 +411,7 @@ impl extension::SourceExtension for Example {
                 kind: FieldKind::Secret,
                 required: true,
                 env: Some("LINES_EXAMPLE_KEY"),
+                keychain: None,
             },
             Field {
                 key: "dataset",
@@ -395,6 +419,7 @@ impl extension::SourceExtension for Example {
                 kind: FieldKind::Choice(&["Futures", "Equities"]),
                 required: false,
                 env: None,
+                keychain: None,
             },
         ]
     }
@@ -504,6 +529,7 @@ mod tests {
             kind: FieldKind::Choice(&["GLBX.MDP3", "XNAS.ITCH"]),
             required: false,
             env: None,
+            keychain: None,
         };
         let mut saved = Plain::new();
         assert_eq!(

@@ -134,7 +134,7 @@ lines --source replay --replay recordings/esz6-2026-11-09.lfr --speed 10
 ## Live market data
 
 With a key, `lines` has the `databento` source next to Coinbase and Kraken: a chart or DOM of a
-product in the table above opens on it (Settings › Data turns it off). `--source databento`
+product in the table above opens on it (Settings › Connections turns it off and takes its key). `--source databento`
 limits a run to it. Live data is billed by Databento; what it asks for per contract shown:
 - `definition` replayed from the start of the weekly session (one contract: small);
 - `trades` replayed from up to 24 hours back (the chart's back-fill), then live;
