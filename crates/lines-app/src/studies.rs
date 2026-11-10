@@ -703,13 +703,15 @@ impl Studies {
     }
 }
 
-/// An overlay bar's half width for a candle body of half width `body` at `dpi`: about 60 % of
-/// the body, an odd number of device pixels (centered on the candle's device-pixel centre, as
+/// An overlay bar's half width for a candle body of half width `body` at `dpi`: the odd number
+/// of device pixels nearest 60 % of the body (centered on the candle's device-pixel centre, as
 /// the body is), and narrower than the body whenever the body is wider than one device pixel.
 pub fn overlay_half_width(body: f32, dpi: f32) -> f32 {
     let body_dev = (body * 2.0 * dpi).round() as i32;
-    let target = (body_dev as f32 * 0.6).round() as i32;
-    let odd = if target % 2 == 0 { target - 1 } else { target };
+    // The odd number of device pixels nearest 60 % of the body, at most the body less one
+    // device pixel each side.
+    let target = body_dev as f32 * 0.6;
+    let odd = ((target - 1.0) * 0.5).round() as i32 * 2 + 1;
     let dev = odd.clamp(1, (body_dev - 2).max(1));
     dev as f32 / dpi * 0.5
 }
@@ -1084,14 +1086,23 @@ mod tests {
                 assert_eq!(o.round() as i32 % 2, 1, "{dpi} {bar_px}: odd, {o}");
                 if b.round() > 1.0 {
                     assert!(o < b, "{dpi} {bar_px}: {o} not under the body's {b}");
-                    assert!(o >= (b * 0.6).round() - 2.0, "{dpi} {bar_px}: {o} of {b}");
+                    // The nearest odd width to 60 %, unless the body leaves no room for it.
+                    let want = (b * 0.6).min(b - 2.0);
+                    assert!((o - want).abs() <= 1.0, "{dpi} {bar_px}: {o} of {b}");
                 } else {
                     assert_eq!(o, 1.0);
                 }
             }
         }
-        // At DPI 2.0, a 9-device-px body gets a 5-px bar (60 % rounded down to odd).
-        assert_eq!(overlay_half_width(9.0 / 4.0, 2.0) * 4.0, 5.0);
+        // Device pixels: a 9-px body gets a 5-px bar, a 7-px body 5 (4.2 to the nearest odd), a
+        // 3-px body 1 (never as wide as the body), a 13-px body 7.
+        for (body_dev, bar_dev) in [(9.0, 5.0), (7.0, 5.0), (3.0, 1.0), (13.0, 7.0), (1.0, 1.0)] {
+            assert_eq!(
+                overlay_half_width(body_dev / 4.0, 2.0) * 4.0,
+                bar_dev,
+                "{body_dev}"
+            );
+        }
     }
 
     /// The pane's one scale: with study labels hidden (or the study's own label off) there is
