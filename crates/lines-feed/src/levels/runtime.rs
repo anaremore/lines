@@ -165,6 +165,11 @@ impl LevelState {
     /// Take a decode's result, received at `time` (the runtime and a backtest alike).
     pub fn take(&mut self, result: Result<Option<LevelMap>, String>, time: UtcMillis) {
         match result {
+            // New series only: the levels' freshness and error are left as they were.
+            Ok(Some(map)) if map.series_update => {
+                self.map = Some(Arc::new(map));
+                self.series_received = Some(time);
+            }
             // Levels refused, series new: the levels stay stale (their time isn't renewed),
             // the series are current.
             Ok(Some(map)) if map.levels_refused.is_some() => {
@@ -182,8 +187,10 @@ impl LevelState {
             }
             // Unchanged: the map as it was, renewed; a map whose levels were refused stays
             // so (its levels stale, the reason said again).
-            Ok(None) => match &self.map {
-                Some(m) => {
+            // With no map yet, nothing known and nothing new: a reason already shown stays (a
+            // source's keepalive or live push before its first map says nothing about it).
+            Ok(None) => {
+                if let Some(m) = &self.map {
                     self.series_received = Some(time);
                     self.levels_refused = m.levels_refused.is_some();
                     match &m.levels_refused {
@@ -194,11 +201,7 @@ impl LevelState {
                         }
                     }
                 }
-                None => {
-                    self.error = None;
-                    self.levels_refused = false;
-                }
-            },
+            }
             Err(e) => {
                 self.error = Some(e);
                 self.levels_refused = false;
@@ -283,7 +286,8 @@ struct Entry {
     prices: Arc<dyn ChartPrices>,
     /// Live: where its batches are recorded now (set and cleared by [`record_into`]).
     rec: Shared<Recorder>,
-    /// Live: its newest batch and when it came (a recording started later begins with it).
+    /// Live: its newest whole batch (not a series-only push) and when it came (a recording
+    /// started later begins with it).
     last: Shared<(UtcMillis, Vec<LevelFrame>)>,
     source_id: String,
     header: Header,
@@ -307,8 +311,9 @@ pub(crate) fn recorder_slot(
     })))
 }
 
-/// Start recording a running live source into `dir` (`None`: stop): its newest batch first,
-/// at the time it came, then every later batch (`live` writes into `rec`).
+/// Start recording a running live source into `dir` (`None`: stop): its newest whole batch
+/// (never a series-only push) first, at the time it came, then every later batch (`live`
+/// writes into `rec`).
 pub(crate) fn begin(
     rec: &Shared<Recorder>,
     last: &Shared<(UtcMillis, Vec<LevelFrame>)>,
@@ -538,6 +543,7 @@ pub fn wait_settled(timeout: Duration) -> bool {
 }
 
 /// Decode one batch received at `time` and publish the result.
+/// Returns whether the result was a series-only update (`LevelMap::series_update`).
 fn apply(
     source: &dyn LevelSource,
     ctx: &LevelContext,
@@ -545,9 +551,10 @@ fn apply(
     cell: &LevelCell,
     frames: &[LevelFrame],
     time: UtcMillis,
-) {
+) -> bool {
     let prev = cell.read().map.clone();
     let result = source.decode(ctx, prices, prev.as_deref(), frames);
+    let series_only = matches!(&result, Ok(Some(m)) if m.series_update);
     cell.update(|s| match result {
         Ok(Some(map)) if map.product != ctx.product.id || map.source != source.id() => {
             s.error = Some(format!(
@@ -557,6 +564,7 @@ fn apply(
         }
         r => s.take(r, time),
     });
+    series_only
 }
 
 pub(crate) struct Recorder {
@@ -582,7 +590,8 @@ impl Recorder {
         let mut buf = Vec::new();
         encode_batch(frames, &mut buf);
         let since = Duration::from_millis((time.0 - self.header.start_wall_ms).max(0) as u64);
-        // Batches are rare (seconds apart): flush each, so an aborted task loses nothing.
+        // Batches come about a second apart at most (a source's live push): flush each, so an
+        // aborted task loses nothing.
         if let Some(w) = self.writer.as_mut()
             && let Err(e) = w
                 .write(Direction::FromServer, since, &Frame::binary(buf))
@@ -619,15 +628,18 @@ pub(crate) async fn live(
 ) {
     let batch = |frames: &[LevelFrame]| {
         let now = crate::now_utc();
+        let series_only = apply(&*source, &ctx, &*prices, &cell, frames, now);
         // Under the recorder's lock, so a recording starting now (`begin`) writes this batch
-        // either as its first or from here, never neither.
+        // either as its first or from here, never neither. A recording opens with the newest
+        // whole refresh, never a series-only push (which decodes to nothing without a map).
         let mut slot = rec.lock();
         if let Some(r) = slot.as_mut() {
             r.write(now, frames);
         }
-        *last.lock() = Some((now, frames.to_vec()));
+        if !series_only {
+            *last.lock() = Some((now, frames.to_vec()));
+        }
         drop(slot);
-        apply(&*source, &ctx, &*prices, &cell, frames, now);
     };
     let mut backoff = Duration::from_secs(1);
     let fail = |cell: &LevelCell, e: anyhow::Error| {

@@ -236,6 +236,9 @@ pub struct LevelMap {
     /// are stale): the map carries its previous levels unchanged, shown stale with this reason,
     /// while its series are new and judged on their own freshness.
     pub levels_refused: Option<String>,
+    /// Only its series are new (a source's live push between refreshes): its levels are the
+    /// previous map's, so their freshness and error stay as they were.
+    pub series_update: bool,
 }
 
 impl LevelMap {
@@ -252,6 +255,7 @@ impl LevelMap {
                 values: Vec::new(),
                 series: Vec::new(),
                 levels_refused: None,
+                series_update: false,
             },
             error: None,
         }
@@ -441,6 +445,12 @@ impl LevelMapBuilder {
     /// Add a line series for lower panes: see [`Series`].
     pub fn series(mut self, s: std::sync::Arc<Series>) -> Self {
         self.map.series.push(s);
+        self
+    }
+
+    /// See [`LevelMap::series_update`].
+    pub fn series_update(mut self) -> Self {
+        self.map.series_update = true;
         self
     }
 
