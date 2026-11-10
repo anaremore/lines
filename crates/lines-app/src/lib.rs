@@ -1198,7 +1198,9 @@ fn run_sources(
     if choices.is_empty() {
         // Every source off: the app still opens (on the mock, offline, as `--source mock`
         // would), so Settings › Connections can turn one back on.
-        tracing::warn!("every data source is off in Settings › Data: starting on the mock");
+        tracing::warn!(
+            "every data source is off or not set up in Settings › Connections: starting on the mock"
+        );
         let mock = SourceChoice::Builtin(SourceKind::Mock);
         return Ok((vec![(mock.name(), feed_config(cli, &mock, store)?)], true));
     }

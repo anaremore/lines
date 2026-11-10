@@ -65,6 +65,10 @@ pub enum State {
     },
     /// The provider refused, with its reason.
     Refused(String),
+    /// A connection dropped or was refused and is being tried again, with the last reason.
+    Retrying(String),
+    /// Its feeds were stopped.
+    Stopped,
 }
 
 /// How a state reads at a glance (paired with its words).
@@ -81,22 +85,24 @@ impl State {
         match self {
             State::Off { running: false } => "Off".to_owned(),
             State::Off { running: true } => "Off when Lines restarts".to_owned(),
-            State::NotSetUp { needs } => format!("Not set up: needs {needs}"),
+            State::NotSetUp { needs } => format!("Not set up: needs {needs}, so not started"),
             State::NextStart => "On when Lines restarts".to_owned(),
             State::Idle => "Idle: connects when a pane shows its symbols".to_owned(),
             State::Connecting => "Connecting…".to_owned(),
             State::Connected { feeds: 1 } => "Connected: 1 symbol".to_owned(),
             State::Connected { feeds } => format!("Connected: {feeds} symbols"),
             State::Refused(why) => format!("Refused: {why}"),
+            State::Retrying(why) => format!("Reconnecting: {why}"),
+            State::Stopped => "Stopped".to_owned(),
         }
     }
 
     pub fn tone(&self) -> Tone {
         match self {
-            State::Off { .. } | State::NextStart | State::Idle => Tone::Quiet,
+            State::Off { .. } | State::NextStart | State::Idle | State::Stopped => Tone::Quiet,
             State::Connecting => Tone::Busy,
             State::Connected { .. } => Tone::Good,
-            State::NotSetUp { .. } | State::Refused(_) => Tone::Bad,
+            State::NotSetUp { .. } | State::Refused(_) | State::Retrying(_) => Tone::Bad,
         }
     }
 }
@@ -113,14 +119,24 @@ pub fn state(on: bool, in_run: bool, needs: Option<&'static str>, feeds: &[FeedS
     if !in_run {
         return State::NextStart;
     }
+    // A problem on any of its feeds shows first: never hidden behind another's connection.
     if let Some(why) = feeds.iter().find_map(|s| match s {
         FeedStatus::Failed(why) => Some(why.clone()),
         _ => None,
     }) {
         return State::Refused(why);
     }
+    if let Some(why) = feeds.iter().find_map(|s| match s {
+        FeedStatus::Reconnecting { reason, .. } => Some(reason.clone()),
+        _ => None,
+    }) {
+        return State::Retrying(why);
+    }
     if feeds.is_empty() {
         return State::Idle;
+    }
+    if feeds.iter().all(|s| *s == FeedStatus::Stopped) {
+        return State::Stopped;
     }
     let live = feeds.iter().filter(|s| **s == FeedStatus::Live).count();
     if live > 0 {
@@ -259,7 +275,14 @@ struct AppStore;
 impl SettingsStore for AppStore {
     fn get(&self, source: &str, field: &Field) -> Option<String> {
         match field.kind {
-            FieldKind::Secret => match secret(source, field.key) {
+            // On a thread of its own: connectors read settings in `connect`, on a feed's
+            // Tokio runtime, and a keychain backend may run (and block on) a runtime of its own
+            // (the Secret Service on Linux), which can't start inside another.
+            FieldKind::Secret => match std::thread::scope(|sc| {
+                sc.spawn(|| secret(source, field.key))
+                    .join()
+                    .unwrap_or_else(|_| Err("the keychain read panicked".to_owned()))
+            }) {
                 Ok(v) => v,
                 Err(e) => {
                     // The keychain's message, never the secret.
@@ -337,7 +360,7 @@ impl extension::SourceExtension for Example {
         ]
     }
     fn plan(&self) -> Option<String> {
-        Some("Example only: live futures with depth".to_owned())
+        Some("Example only: real-time futures with depth".to_owned())
     }
 }
 
@@ -355,7 +378,7 @@ mod tests {
             State::Off { running: false }
         );
         assert_eq!(
-            state(false, true, None, &[live.clone()]),
+            state(false, true, None, std::slice::from_ref(&live)),
             State::Off { running: true }
         );
         assert_eq!(
@@ -364,7 +387,23 @@ mod tests {
         );
         assert_eq!(state(true, false, None, &[]), State::NextStart);
         assert_eq!(state(true, true, None, &[]), State::Idle);
-        assert_eq!(state(true, true, None, &[busy.clone()]), State::Connecting);
+        assert_eq!(
+            state(true, true, None, std::slice::from_ref(&busy)),
+            State::Connecting
+        );
+        // A dropped feed shows with its reason, even beside a live one.
+        let retry = FeedStatus::Reconnecting {
+            attempt: 2,
+            reason: "401 unauthorized".into(),
+        };
+        assert_eq!(
+            state(true, true, None, &[live.clone(), retry]),
+            State::Retrying("401 unauthorized".into())
+        );
+        assert_eq!(
+            state(true, true, None, &[FeedStatus::Stopped]),
+            State::Stopped
+        );
         assert_eq!(
             state(
                 true,

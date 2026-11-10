@@ -848,6 +848,7 @@ impl SettingsWindow {
     /// Leave whatever is half done (a number being typed, a confirmation, the preset
     /// editor): the account, product or section changed under it.
     fn drop_unfinished(&mut self) {
+        self.conn.leave();
         self.edit = None;
         self.cancel_pending();
         self.editor = None;
@@ -1208,7 +1209,10 @@ impl SettingsWindow {
             return;
         }
         // A source's field being typed takes every key (Enter saves, Esc cancels).
-        if self.conn.edit.is_some() {
+        if self.conn.edit.is_some()
+            && self.section == Section::Connections
+            && self.query.trim().is_empty()
+        {
             if let Some(c) = self.conn.key(ev, cx) {
                 self.conn_commit(c, cx);
             }
@@ -2536,9 +2540,13 @@ impl SettingsWindow {
                     buf,
                 });
             }
-            Action::Remove(name, key) => self.conn.reload(Some(Box::new(move || {
-                crate::connections::remove_secret(&name, key)
-            }))),
+            Action::Remove(name, key) => {
+                if self.conn.press_remove(&name, key) {
+                    self.conn.reload(Some(Box::new(move || {
+                        crate::connections::remove_secret(&name, key)
+                    })));
+                }
+            }
             Action::Set(name, key, value) => {
                 self.conn_commit(crate::connections_view::Commit::Plain(name, key, value), cx)
             }

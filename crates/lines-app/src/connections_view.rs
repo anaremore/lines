@@ -47,11 +47,28 @@ struct Test {
     last_reason: Option<String>,
 }
 
+/// One keychain job: an optional write, then a fresh read of everything.
+type Job = Box<dyn FnOnce() -> Loaded + Send>;
+
+/// The keychain worker: one thread, jobs in order (a Remove then a Replace never land
+/// out of order).
+struct Worker {
+    jobs: mpsc::Sender<Job>,
+    done: mpsc::Receiver<Loaded>,
+    /// Jobs sent and not yet answered.
+    out: usize,
+}
+
+/// How long a first press on Remove waits for the second.
+const REMOVE_CONFIRM: Duration = Duration::from_secs(4);
+
 /// What the page holds between frames.
 #[derive(Default)]
 pub(crate) struct ConnPage {
     loaded: Option<Loaded>,
-    worker: Option<mpsc::Receiver<Loaded>>,
+    worker: Option<Worker>,
+    /// A secret's Remove pressed once: a second press within `REMOVE_CONFIRM` removes it.
+    remove_armed: Option<(String, &'static str, Instant)>,
     /// Secrets shown in full (Show pressed), until the window closes.
     shown: HashSet<(String, &'static str)>,
     pub(crate) edit: Option<Edit>,
@@ -110,17 +127,29 @@ impl ConnPage {
         // Secrets in memory (screenshots, tests) never block: read them now.
         if conn::memory_keychain() {
             self.loaded = Some(read());
-            self.worker = None;
             return;
         }
-        let (tx, rx) = mpsc::channel();
-        let spawned = std::thread::Builder::new()
-            .name("lines-keychain".into())
-            .spawn(move || {
-                let _ = tx.send(read());
-            });
-        if spawned.is_ok() {
-            self.worker = Some(rx);
+        if self.worker.is_none() {
+            let (jobs, rx) = mpsc::channel::<Job>();
+            let (tx, done) = mpsc::channel();
+            let spawned = std::thread::Builder::new()
+                .name("lines-keychain".into())
+                .spawn(move || {
+                    for job in rx {
+                        if tx.send(job()).is_err() {
+                            break;
+                        }
+                    }
+                });
+            if spawned.is_err() {
+                return;
+            }
+            self.worker = Some(Worker { jobs, done, out: 0 });
+        }
+        if let Some(w) = &mut self.worker
+            && w.jobs.send(Box::new(read)).is_ok()
+        {
+            w.out += 1;
         }
     }
 
@@ -129,14 +158,65 @@ impl ConnPage {
         self.loaded.is_some() || self.worker.is_some()
     }
 
+    /// Leaving the page (another section, a search): a field being typed is dropped, so its
+    /// keys can't land in it unseen.
+    pub(crate) fn leave(&mut self) {
+        self.edit = None;
+        self.remove_armed = None;
+    }
+
+    /// Remove pressed: `true` on the second press within `REMOVE_CONFIRM` (remove now); the
+    /// first only arms it (the button then asks to press again).
+    pub(crate) fn press_remove(&mut self, source: &str, key: &'static str) -> bool {
+        let now = Instant::now();
+        let again = self.remove_armed.as_ref().is_some_and(|(s, k, at)| {
+            s == source && *k == key && now.duration_since(*at) < REMOVE_CONFIRM
+        });
+        self.remove_armed = if again {
+            None
+        } else {
+            Some((source.to_owned(), key, now))
+        };
+        again
+    }
+
+    fn remove_asks(&self, source: &str, key: &'static str) -> bool {
+        self.remove_armed
+            .as_ref()
+            .is_some_and(|(s, k, at)| s == source && *k == key && at.elapsed() < REMOVE_CONFIRM)
+    }
+
     /// The window's poll: the worker's answer, the running Test. `true`: redraw.
     pub(crate) fn tick(&mut self) -> bool {
         let mut changed = false;
-        if let Some(rx) = &self.worker
-            && let Ok(l) = rx.try_recv()
+        if let Some(w) = &mut self.worker {
+            loop {
+                match w.done.try_recv() {
+                    Ok(l) => {
+                        w.out = w.out.saturating_sub(1);
+                        self.loaded = Some(l);
+                        changed = true;
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        // The worker died (a panic): say so; the next press starts another.
+                        self.loaded = Some(Loaded {
+                            error: Some("the keychain reader stopped".to_owned()),
+                            ..Loaded::default()
+                        });
+                        self.worker = None;
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if self
+            .remove_armed
+            .as_ref()
+            .is_some_and(|(_, _, at)| at.elapsed() >= REMOVE_CONFIRM)
         {
-            self.loaded = Some(l);
-            self.worker = None;
+            self.remove_armed = None;
             changed = true;
         }
         if let Some(t) = &mut self.test {
@@ -221,8 +301,9 @@ impl ConnPage {
             }
             "v" if (m.control || m.platform) && !m.alt => {
                 if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
-                    // One line: a pasted key often ends with a newline.
-                    edit.buf.push_str(text.trim());
+                    // One line: a pasted key often carries a newline; no control characters.
+                    edit.buf
+                        .extend(text.trim().chars().filter(|c| !c.is_control()));
                 }
             }
             _ => {
@@ -332,6 +413,20 @@ fn line(label: &str, content: AnyElement, t: &Theme) -> AnyElement {
         .into_any_element()
 }
 
+/// An empty field: "Not set", dimmed so it never reads as a saved value.
+fn empty_box(t: &Theme) -> AnyElement {
+    div()
+        .flex_none()
+        .min_w(crate::zoom::ui(160.0))
+        .px_2()
+        .rounded_sm()
+        .border_1()
+        .border_color(t.axis_line)
+        .text_color(t.text_dim)
+        .child("Not set")
+        .into_any_element()
+}
+
 fn field_box(text: String, editing: bool, t: &Theme) -> AnyElement {
     div()
         .flex_none()
@@ -391,7 +486,7 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
             Tone::Quiet => div()
                 .size(crate::zoom::ui(8.0))
                 .rounded_full()
-                .border_1()
+                .border_2()
                 .border_color(t.text_dim),
         };
         let state_text = if checking {
@@ -484,15 +579,13 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                     match saved {
                         None => d = d.child(field_box("…".to_owned(), false, t)),
                         Some(None) => {
-                            d = d
-                                .child(field_box("Not set".to_owned(), false, t))
-                                .child(button(
-                                    format!("{id}-enter"),
-                                    "Enter",
-                                    Action::Edit(name.clone(), f.clone()),
-                                    t,
-                                    cx,
-                                ))
+                            d = d.child(empty_box(t)).child(button(
+                                format!("{id}-enter"),
+                                "Enter",
+                                Action::Edit(name.clone(), f.clone()),
+                                t,
+                                cx,
+                            ))
                         }
                         Some(Some(v)) => {
                             let open = page.shown.contains(&(name.clone(), f.key));
@@ -512,13 +605,17 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                                     t,
                                     cx,
                                 ))
-                                .child(button(
+                                .child(div().ml_3().text_color(t.destructive).child(button(
                                     format!("{id}-remove"),
-                                    "Remove",
+                                    if page.remove_asks(&name, f.key) {
+                                        "Press again to remove"
+                                    } else {
+                                        "Remove"
+                                    },
                                     Action::Remove(name.clone(), f.key),
                                     t,
                                     cx,
-                                ));
+                                )));
                         }
                     }
                     d.into_any_element()
@@ -527,11 +624,10 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                     .flex()
                     .flex_row()
                     .gap_1()
-                    .child(field_box(
-                        conn::plain_value(&plain, &name, f).unwrap_or_else(|| "Not set".to_owned()),
-                        false,
-                        t,
-                    ))
+                    .child(match conn::plain_value(&plain, &name, f) {
+                        Some(v) => field_box(v, false, t),
+                        None => empty_box(t),
+                    })
                     .child(button(
                         format!("{id}-edit"),
                         "Edit",
@@ -647,6 +743,20 @@ mod tests {
             Some(Commit::Plain(_, "k", v)) if v == "GLBX"
         ));
         assert!(ConnPage::default().finish().is_none());
+    }
+
+    /// Decision 0030 §4: Remove deletes a saved secret only on a second press; leaving the
+    /// page drops a field being typed (its keys can't land in it unseen).
+    #[test]
+    fn remove_takes_two_presses_and_leaving_drops_an_edit() {
+        let mut p = edit(FieldKind::Secret, "half-typed");
+        assert!(!p.press_remove("acme", "k"));
+        assert!(p.remove_asks("acme", "k"));
+        assert!(!p.remove_asks("acme", "other"));
+        assert!(p.press_remove("acme", "k"));
+        assert!(!p.remove_asks("acme", "k"));
+        p.leave();
+        assert!(p.edit.is_none());
     }
 
     /// Show toggles a secret in full and back.

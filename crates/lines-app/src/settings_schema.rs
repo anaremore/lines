@@ -1597,7 +1597,7 @@ fn table() -> Vec<Setting> {
             CONNECTIONS_LIST,
             Sec::Connections,
             "Data sources",
-            "Each source connects only when a pane shows one of its symbols. Switches apply when Lines next starts. Secrets are kept in the system's keychain.",
+            "Each source connects only when a pane shows one of its symbols. A source's switch applies when Lines restarts; its settings, the next time it connects. Secrets are kept in the system's keychain.",
             Scope::App,
             Normal,
             Info,
