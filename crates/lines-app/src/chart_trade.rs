@@ -627,6 +627,9 @@ pub const NO_PRICE_ROW: &str = "No live price";
 pub const MARKET_MOVED: &str = "The market moved: right-click again";
 /// A menu order chosen after its chart moved to another contract, account or size.
 pub const CHART_CHANGED: &str = "The chart changed: right-click again";
+/// Place pressed on a staged entry that would now fill or trigger at once, whether the market
+/// moved or the trader dragged it there: it stays staged, to drag back.
+pub const STAGED_CROSSES: &str = "The entry would fill now: drag it back";
 
 /// The two orders a right click at `at` offers, never one that fills at once. The market is
 /// the inside (bid and ask, either falling back to the last trade, as the trade panel does).
@@ -1027,9 +1030,16 @@ impl Staged {
     }
 }
 
+/// Whether a key goes to the staged order (Enter places it, Esc discards it): plain keys only,
+/// and never while a text field on the chart is open (`typing`: a size, a working order's
+/// resize, a drawing's note, a typed timeframe), whose Enter and Esc are its own.
+pub fn staged_takes_key(staged: bool, key: &str, plain: bool, typing: bool) -> bool {
+    staged && plain && !typing && matches!(key, "enter" | "escape")
+}
+
 /// The one command Place sends, or why not (shown as a flash, nothing sent):
 /// - the chart's contract, size or account changed since staging: [`CHART_CHANGED`];
-/// - the entry would now fill or trigger at once: [`MARKET_MOVED`];
+/// - the entry would now fill or trigger at once: [`STAGED_CROSSES`];
 /// - a leg on the wrong side of the entry; legs on an order that now reduces the position.
 ///
 /// With a leg: `PlaceBracket` with exactly the legs on the chart; with none: `PlaceOrder`. The
@@ -1047,7 +1057,7 @@ pub fn staged_command(
         return Err(Refusal(CHART_CHANGED));
     }
     if crosses(&s.order, ctx.best_bid, ctx.best_ask, ctx.last) {
-        return Err(Refusal(MARKET_MOVED));
+        return Err(Refusal(STAGED_CROSSES));
     }
     if let Some(why) = s.leg_refusal() {
         return Err(Refusal(why));
@@ -1347,7 +1357,8 @@ impl Default for ChartTradeState {
             on_plot: Vec::with_capacity(RESERVED_ORDERS),
             groups: [TagGroup::default(); MAX_TAGS],
             n_groups: 0,
-            tag_lines: Vec::with_capacity(MAX_TAGS),
+            // The groups' tags and a staged order's three (`chart_view::draw_orders`).
+            tag_lines: Vec::with_capacity(MAX_TAGS + 3),
             group_menu: None,
             tags: [TagBox::default(); MAX_TAGS],
             n_tags: 0,
@@ -1471,6 +1482,11 @@ impl ChartTradeState {
         self.placing = self.staged.take();
         self.staged_drag = None;
         self.staged_handles = [None, None];
+    }
+
+    /// The window sent what Place built: it never comes back.
+    pub fn place_sent(&mut self) {
+        self.placing = None;
     }
 
     /// The window refused what Place sent (no linked DOM enabled): it goes back on the chart.
@@ -2645,7 +2661,11 @@ mod tests {
         assert!(staged_command(&s, &preset).is_ok());
         let mut moved = c.clone();
         (moved.best_bid, moved.best_ask) = (Some(p(6009.75)), Some(p(6010.00)));
-        assert_eq!(staged_command(&s, &moved), Err(Refusal(MARKET_MOVED)));
+        assert_eq!(staged_command(&s, &moved), Err(Refusal(STAGED_CROSSES)));
+        // Dragged through the market by the trader: the same, and dragging it back places.
+        let mut dragged = s;
+        dragged.order.price = p(6012.50);
+        assert_eq!(staged_command(&dragged, &c), Err(Refusal(STAGED_CROSSES)));
         let mut wrong = s;
         wrong.stop = Some(p(6010.25));
         assert_eq!(staged_command(&wrong, &c), Err(Refusal(STOP_ABOVE)));
@@ -2802,6 +2822,33 @@ mod tests {
         assert!(st.staged.is_none() && st.placing.is_some());
         st.place_refused();
         assert!(st.staged.is_some() && st.placing.is_none());
+        // Sent: a refusal after that (another chart order's) never brings it back.
+        st.placed();
+        st.place_sent();
+        st.place_refused();
+        assert!(st.staged.is_none() && st.placing.is_none());
+    }
+
+    #[test]
+    fn a_text_field_keeps_its_own_enter_and_esc() {
+        for key in ["enter", "escape"] {
+            assert!(staged_takes_key(true, key, true, false));
+            // A size, a resize, a note or a typed timeframe open: the key is the field's, so
+            // a stray Enter never places and Esc never discards.
+            assert!(
+                !staged_takes_key(true, key, true, true),
+                "{key} while typing"
+            );
+            assert!(
+                !staged_takes_key(true, key, false, false),
+                "{key} with a modifier"
+            );
+            assert!(
+                !staged_takes_key(false, key, true, false),
+                "{key} with nothing staged"
+            );
+        }
+        assert!(!staged_takes_key(true, "a", true, false));
     }
 
     #[test]

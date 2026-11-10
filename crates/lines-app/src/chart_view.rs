@@ -678,6 +678,7 @@ impl crate::trade_bar::TradePane for ChartView {
                     cx.emit(ChartOrder {
                         command: leg.command,
                         refused: crate::chart_trade::ENABLE_TO_GROW,
+                        staged: false,
                         account: account.clone(),
                         contract,
                         link: self.common.link,
@@ -1791,22 +1792,6 @@ impl ChartView {
             cx.notify();
             return;
         }
-        // A staged order: Enter places it, Esc discards it (the pane's own keys, never in
-        // `commands::BINDINGS`: they act on what this chart shows).
-        if self.ct.staged.is_some() && !(m.control || m.alt || m.platform || m.shift) {
-            match k.key.as_str() {
-                "enter" => self.place_staged(cx),
-                "escape" => {
-                    self.ct.discard("");
-                }
-                _ => {}
-            }
-            if matches!(k.key.as_str(), "enter" | "escape") {
-                cx.stop_propagation();
-                cx.notify();
-                return;
-            }
-        }
         // A working order's size being typed (Alt+Enter: one leg of a linked pair).
         if !(m.control || m.platform)
             && crate::trade_bar::resize_key(self, k.key.as_str(), m.alt, cx)
@@ -1820,6 +1805,24 @@ impl ChartView {
             && crate::trade_bar::qty_key(self, k.key.as_str(), cx)
         {
             cx.stop_propagation();
+            return;
+        }
+        // A staged order: Enter places it, Esc discards it (the pane's own keys, never in
+        // `commands::BINDINGS`: they act on what this chart shows). After the size fields
+        // above, and never while a note or a timeframe is typed: their Enter is their own.
+        let typing = self.drawings.typing()
+            || self.tf_entry.is_some()
+            || self.trade.qty_edit.is_some()
+            || self.trade.resize_edit.is_some();
+        let plain = !(m.control || m.alt || m.platform || m.shift);
+        if crate::chart_trade::staged_takes_key(self.ct.staged.is_some(), &k.key, plain, typing) {
+            if k.key == "enter" {
+                self.place_staged(cx);
+            } else {
+                self.ct.discard("");
+            }
+            cx.stop_propagation();
+            cx.notify();
             return;
         }
         // Drawings: a note being typed or a confirmation takes every key; Esc, Enter, Delete
@@ -3117,6 +3120,7 @@ impl ChartView {
             Ok(command) => cx.emit(ChartOrder {
                 command,
                 refused: crate::chart_trade::ENABLE_TO_ADD,
+                staged: false,
                 resize: None,
                 account,
                 contract,
@@ -3173,13 +3177,18 @@ impl ChartView {
         at: Option<Price>,
         cx: &mut Context<Self>,
     ) {
-        self.send_entry(|ctx| crate::chart_trade::strip_command(o, at, ctx), cx);
+        self.send_entry(
+            false,
+            |ctx| crate::chart_trade::strip_command(o, at, ctx),
+            cx,
+        );
     }
 
     /// Send an entry built from the chart's size and bracket (a strip order, a menu order):
     /// through the window like an exit (a linked DOM's switch), or say why not.
     fn send_entry(
         &mut self,
+        staged: bool,
         build: impl FnOnce(
             &crate::dom_trade::EntryCtx,
         ) -> Result<lines_trading::Command, crate::dom_trade::Refusal>,
@@ -3206,6 +3215,7 @@ impl ChartView {
                     cx.emit(ChartOrder {
                         command,
                         refused: ENABLE_TO_ORDER,
+                        staged,
                         resize: None,
                         account: ctx.account,
                         contract: ctx.contract,
@@ -3231,7 +3241,7 @@ impl ChartView {
         let Some(s) = self.ct.staged else {
             return;
         };
-        if self.send_entry(|ctx| crate::chart_trade::staged_command(&s, ctx), cx) {
+        if self.send_entry(true, |ctx| crate::chart_trade::staged_command(&s, ctx), cx) {
             self.ct.placed();
         }
     }
@@ -4029,6 +4039,7 @@ impl ChartView {
             });
         }
         // The staged order's tags: the entry ends in Place and × Esc, a leg in its ×.
+        let n_working = self.ct.tag_lines.len();
         let mut st_text = [FixedStr::<128>::new(); 3];
         let mut st_pnl = [FixedStr::<48>::new(); 3];
         let mut st_money: [Option<lines_trading::Money>; 3] = [None; 3];
@@ -4087,6 +4098,9 @@ impl ChartView {
                 });
             }
         }
+        // Staged first: on a plot too short for every tag, the working ones lose theirs (the
+        // edge and the line still show them), never Place, × or a leg's handle.
+        self.ct.tag_lines.rotate_left(n_working);
         self.ct.n_tags = layout_tags(
             &self.vp,
             &self.ct.tag_lines,
@@ -6403,7 +6417,11 @@ impl ChartView {
                 {
                     self.trade.flash(crate::chart_trade::CHART_CHANGED);
                 } else {
-                    self.send_entry(|ctx| crate::chart_trade::menu_command(o, offer, ctx), cx);
+                    self.send_entry(
+                        false,
+                        |ctx| crate::chart_trade::menu_command(o, offer, ctx),
+                        cx,
+                    );
                 }
             }
             // "…with bracket": on the chart, unsent until Place (one per chart: it replaces
@@ -7608,6 +7626,9 @@ impl EventEmitter<FeedChanged> for ChartView {}
 pub struct ChartOrder {
     pub command: lines_trading::Command,
     pub refused: &'static str,
+    /// A staged order's Place: refused, it goes back on the chart; sent, it is gone for good.
+    /// No other order's answer touches the staged one.
+    pub staged: bool,
     /// A working order's resize: its order, price and new total, so the chart tracks the answer.
     pub resize: Option<(lines_trading::OrderId, Price, lines_core::Qty)>,
     /// The chart's link group: the DOMs whose switch may send it.
@@ -7622,9 +7643,11 @@ impl EventEmitter<ChartOrder> for ChartView {}
 impl ChartView {
     /// The window refused a chart order (no linked DOM with trading enabled): say so on the
     /// chart.
-    pub fn exit_refused(&mut self, why: &'static str, cx: &mut Context<Self>) {
+    pub fn exit_refused(&mut self, why: &'static str, staged: bool, cx: &mut Context<Self>) {
         // A staged order's Place: back on the chart, to place once trading is on.
-        self.ct.place_refused();
+        if staged {
+            self.ct.place_refused();
+        }
         self.trade.flash(why);
         cx.notify();
     }
@@ -7755,9 +7778,7 @@ impl Pane for ChartView {
         // waits for the next one; a frame's marks can be briefly empty), and closes if the
         // chart's account changed.
         let mut group = self.ct.account_changed(self.trade.account.as_ref());
-        // A staged order: discarded on another account; a discard while hidden said now; and
-        // a Place the window has answered by now (a refusal put it back already).
-        self.ct.placing = None;
+        // A staged order: discarded on another account; a discard while hidden said now.
         if let Some(n) = self
             .ct
             .staged_account(self.trade.account.as_ref())

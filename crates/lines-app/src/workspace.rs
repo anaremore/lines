@@ -992,6 +992,10 @@ impl WindowView {
         match crate::trading::Trading::try_global(cx) {
             Some(t) if ok => {
                 let id = t.submit(lines_trading::Source::Chart, ev.issued, ev.command.clone());
+                if ev.staged {
+                    // Sent: a later refusal of another chart order never brings it back.
+                    chart.update(cx, |c, _| c.ct.place_sent());
+                }
                 if let Some((order, price, qty)) = ev.resize {
                     chart.update(cx, |c, cx| {
                         c.track_resize(order, price, qty, id);
@@ -999,7 +1003,7 @@ impl WindowView {
                     });
                 }
             }
-            _ => chart.update(cx, |c, cx| c.exit_refused(ev.refused, cx)),
+            _ => chart.update(cx, |c, cx| c.exit_refused(ev.refused, ev.staged, cx)),
         }
     }
 
