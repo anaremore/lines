@@ -75,8 +75,11 @@ pub const SENT_PREFIX: &[u8] = b"\0lines-databento: sent ";
 pub const DATASET: &str = "GLBX.MDP3";
 /// The only DBN version this build decodes.
 pub const DBN_VERSION: u8 = 3;
-/// Intraday replay reaches 24 hours back (less over weekends); ask for a little less.
-pub const REPLAY_WINDOW_MS: i64 = 23 * 3_600_000 + 55 * 60_000;
+/// Intraday replay reaches 24 hours back (less over weekends), from the next 10-minute
+/// boundary (at 17:01 the gateway took 17:10 the day before at the earliest); ask for less, so
+/// the first try is accepted. A start refused anyway names the earliest, and the next connection
+/// starts there ([`invalid_start_floor`]).
+pub const REPLAY_WINDOW_MS: i64 = 23 * 3_600_000 + 40 * 60_000;
 /// Market events held while the contract's definition hasn't arrived.
 pub const MAX_HELD: usize = 200_000;
 /// Gateway heartbeats are requested this often.
@@ -239,6 +242,35 @@ pub struct DatabentoSession {
     stats: SessionStats,
 }
 
+/// Whether an error refuses the replay's start ("Invalid start time …", the words in any case).
+fn refuses_start(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("invalid start time")
+}
+
+/// The earliest start a refused replay names: Databento's "Invalid start time. Must be
+/// 2026-11-09T17:10:00Z or later, or 0" (ns). The words may be in any case; the time is
+/// Databento's form (`T` and `Z`, or a `+00:00` offset, fractional seconds allowed), trailing
+/// `.,;:` trimmed. Rounded up to the next millisecond (a lower bound: a start before it is
+/// refused again). `None` when no such time follows "must be" (the caller then uses now).
+fn invalid_start_floor(text: &str) -> Option<u64> {
+    let lower = text.to_ascii_lowercase();
+    let at = lower.find("invalid start time")?;
+    let must = lower[at..].find("must be")? + at + "must be".len();
+    let token = text[must..].split_whitespace().next()?;
+    let token = token.trim_end_matches(['.', ',', ';', ':']);
+    let iso = token
+        .strip_suffix("+00:00")
+        .map_or_else(|| token.to_owned(), |s| format!("{s}Z"));
+    let t = UtcMillis::parse_iso(&iso)?;
+    // Digits beyond the millisecond that aren't all zero: round up.
+    let sub_ms = iso
+        .split_once('.')
+        .map(|(_, f)| f.trim_end_matches('Z'))
+        .is_some_and(|f| f.len() > 3 && f[3..].bytes().any(|b| b != b'0'));
+    let ms = if sub_ms { t.0.checked_add(1)? } else { t.0 };
+    u64::try_from(ms).ok()?.checked_mul(1_000_000)
+}
+
 /// The largest integer in `text` that looks like a nanosecond timestamp.
 fn ns_in(text: &str) -> Option<u64> {
     text.split(|c: char| !c.is_ascii_digit())
@@ -374,7 +406,9 @@ impl DatabentoSession {
             let earliest = (now_ms - reach).max(floor_ms.unwrap_or(i64::MIN));
             let earliest = UtcMillis(earliest + period - 1).floor_to(period).0;
             let latest = self.now.floor_to(period).0;
-            Some(wanted.max(earliest).min(latest).max(0))
+            // Nothing Databento still holds before now (a floor at or after it): live only,
+            // no replay to be refused again.
+            (earliest <= latest).then(|| wanted.max(earliest).min(latest).max(0))
         };
         let line = |s: String| Outgoing::Frame(Frame::text(s));
         out.push(line(format!(
@@ -779,6 +813,30 @@ impl DatabentoSession {
         self.emit(MarketEvent::HistoryComplete, events);
     }
 
+    /// Databento no longer holds the replay start asked for: the next connection starts no
+    /// earlier than `floor_ns` (shared by feeds of the contract); what lies before it is a gap.
+    /// A retryable error (the feed reconnects).
+    fn replay_floor(
+        &mut self,
+        floor_ns: u64,
+        text: &str,
+        events: &mut Vec<MarketEvent>,
+    ) -> SessionError {
+        if let Some(k) = self.contract {
+            let mut f = self.floors.lock().expect("floors");
+            let v = f.entry(k).or_insert(floor_ns);
+            *v = (*v).max(floor_ns);
+        }
+        let from = UtcMillis(self.replay_start.unwrap_or(self.now.0));
+        let to = UtcMillis((floor_ns / 1_000_000) as i64).min(self.now);
+        if to > from {
+            events.push(MarketEvent::HistoryGap { from, to });
+        }
+        SessionError::Protocol(format!(
+            "Databento replay start refused ({text}); reconnecting from the earliest data it holds"
+        ))
+    }
+
     fn on_error(
         &mut self,
         e: &ErrorMsg,
@@ -787,6 +845,14 @@ impl DatabentoSession {
         let text = e.err().unwrap_or("").to_string();
         if let Ok(ErrorCode::AuthFailed | ErrorCode::ApiKeyDeactivated) = e.code() {
             return Err(SessionError::LogonRejected { code: 0, text });
+        }
+        // A replay start Databento no longer holds, refused as a subscription (not as an aged-out
+        // replay): the next connection starts at the earliest it names; naming none, at now (as
+        // an aged-out replay that names none). Never a stopped feed.
+        if refuses_start(&text) {
+            let now_ns = (self.now.0.max(0) as u64) * 1_000_000;
+            let floor_ns = invalid_start_floor(&text).unwrap_or(now_ns);
+            return Err(self.replay_floor(floor_ns, &text, events));
         }
         match not_authorized_schema(&text) {
             Some(schema @ ("mbp-10" | "mbp-1")) => {
@@ -836,25 +902,12 @@ impl DatabentoSession {
                 Ok(())
             }
             Ok(ErrorCode::ReplayDataAgedOut) => {
-                // The next connection starts no earlier than what Databento still holds (the
-                // start it names; else now). What lies before it is a gap.
                 // Without a named start, the floor is now: asking again for the same start
-                // would only fail again (this contract replays nothing more until restart).
+                // would only fail again. A reconnect in the same bar is live only; a later one
+                // replays from the next bar boundary after the floor.
                 let now_ns = (self.now.0.max(0) as u64) * 1_000_000;
                 let floor_ns = ns_in(&text).unwrap_or(now_ns);
-                if let Some(k) = self.contract {
-                    let mut f = self.floors.lock().expect("floors");
-                    let v = f.entry(k).or_insert(floor_ns);
-                    *v = (*v).max(floor_ns);
-                }
-                let from = UtcMillis(self.replay_start.unwrap_or(self.now.0));
-                let to = UtcMillis((floor_ns / 1_000_000) as i64).min(self.now);
-                if to > from {
-                    events.push(MarketEvent::HistoryGap { from, to });
-                }
-                Err(SessionError::Protocol(format!(
-                    "Databento replay aged out ({text}); reconnecting from the earliest data it holds"
-                )))
+                Err(self.replay_floor(floor_ns, &text, events))
             }
             _ => Err(SessionError::Protocol(format!("Databento: {text}"))),
         }
@@ -986,5 +1039,41 @@ impl ProviderSession for DatabentoSession {
     /// The trades replay is back-fill until it completes.
     fn backfill_frame(&self) -> bool {
         self.phase == Phase::Streaming && !self.history_done
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(iso: &str) -> u64 {
+        UtcMillis::parse_iso(iso).unwrap().0 as u64 * 1_000_000
+    }
+
+    /// The gateway's refusal, as seen live, and the phrasings it might also take.
+    #[test]
+    fn a_refused_start_names_its_floor() {
+        let named = at("2026-11-09T17:10:00Z");
+        for text in [
+            "Invalid start time. Must be 2026-11-09T17:10:00Z or later, or 0",
+            "invalid start time. must be 2026-11-09T17:10:00Z or later",
+            "Invalid start time: must be 2026-11-09T17:10:00Z.",
+            "Invalid start time. Must be 2026-11-09T17:10:00+00:00 or later",
+            "Invalid start time. Must be 2026-11-09T17:10:00.000000000Z or later",
+        ] {
+            assert!(refuses_start(text), "{text}");
+            assert_eq!(invalid_start_floor(text), Some(named), "{text}");
+        }
+        // Past the millisecond: up, never down (a lower bound).
+        assert_eq!(
+            invalid_start_floor(
+                "Invalid start time. Must be 2026-11-09T17:10:00.000000001Z or later"
+            ),
+            Some(named + 1_000_000)
+        );
+        // Refused, but no time: the caller starts from now.
+        assert!(refuses_start("Invalid start time"));
+        assert_eq!(invalid_start_floor("Invalid start time"), None);
+        assert!(!refuses_start("Invalid symbol"));
     }
 }

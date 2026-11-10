@@ -958,7 +958,8 @@ fn an_aged_out_replay_moves_the_next_start_forward() {
         &[GREETING, SUCCESS],
     );
     assert_eq!(out[2], trades_line(ms(earliest_ns).0));
-    // A floor after now never puts the start in the future.
+    // A floor after now never puts the start in the future, nor asks again for a start
+    // before the floor (refused again): live only.
     floors
         .lock()
         .unwrap()
@@ -967,7 +968,120 @@ fn an_aged_out_replay_moves_the_next_start_forward() {
         &mut session(&floors, ReplayLimit::default()),
         &[GREETING, SUCCESS],
     );
-    assert_eq!(out[2], trades_line(now().floor_to(MIN).0));
+    assert_eq!(
+        out[2],
+        "schema=trades|stype_in=raw_symbol|symbols=ESZ6|snapshot=0|is_last=1\n"
+    );
+}
+
+/// The owner's live failure (2026-11-10): a pane whose stored bars ended more than a day ago
+/// asked for the replay window's edge, and Databento refused it as a subscription, "Invalid
+/// start time. Must be <time> or later, or 0", which stopped the feed ("failed", no last
+/// price). Now it is like an aged-out replay: a gap to the time named, a retryable error, and
+/// the next connection starts there.
+#[test]
+fn a_refused_start_reconnects_from_the_earliest_named() {
+    let floors = Floors::default();
+    let earliest = UtcMillis(window_start() + 9 * MIN);
+    let (y, mo, d, h, mi, s) = earliest.to_civil();
+    let text = format!(
+        "Invalid start time. Must be {y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z or later, or 0"
+    );
+    let refused = dbn(|e| {
+        e.encode_record(&ErrorMsg::new(
+            T0,
+            Some(ErrorCode::InvalidSubscription),
+            &text,
+            true,
+        ))
+        .unwrap();
+    });
+    let (events, _, err) = run_conn(
+        &mut session(&floors, ReplayLimit::default()),
+        &connection(refused),
+    );
+    assert!(
+        err.as_ref().is_some_and(|e| e.is_retryable()),
+        "the feed reconnects, never stops: {err:?}"
+    );
+    assert!(events.contains(&MarketEvent::HistoryGap {
+        from: UtcMillis(window_start()),
+        to: earliest,
+    }));
+    assert_eq!(floors.lock().unwrap()[&z6()], earliest.0 as u64 * 1_000_000);
+    let (_, out, _) = run(
+        &mut session(&floors, ReplayLimit::default()),
+        &[GREETING, SUCCESS],
+    );
+    assert_eq!(
+        out[2],
+        trades_line(earliest.0),
+        "the next start is the one named"
+    );
+    // Another invalid subscription (a symbol) still stops the feed.
+    let other = dbn(|e| {
+        e.encode_record(&ErrorMsg::new(
+            T0,
+            Some(ErrorCode::InvalidSubscription),
+            "Invalid symbol",
+            true,
+        ))
+        .unwrap();
+    });
+    let (_, _, err) = run_conn(&mut cold(), &connection(other));
+    assert!(err.is_some_and(|e| !e.is_retryable()));
+}
+
+/// A refused start naming no time: the floor is the error's time. A reconnect in the same bar
+/// subscribes live only, its gap reaching now (nothing silently missing); one in a later bar
+/// replays from the next bar boundary.
+#[test]
+fn a_refused_start_naming_no_time_floors_at_now() {
+    let floors = Floors::default();
+    let at = |s: i64| UtcMillis(now().0 + s * 1000);
+    let refused = connection(dbn(|e| {
+        e.encode_record(&ErrorMsg::new(
+            T0,
+            Some(ErrorCode::InvalidSubscription),
+            "Invalid start time",
+            true,
+        ))
+        .unwrap();
+    }));
+    let frames: Vec<(&[u8], UtcMillis)> = refused.iter().map(|f| (f.as_slice(), at(30))).collect();
+    let c = |t: UtcMillis| StartContext {
+        now: t,
+        ..ctx(None)
+    };
+    let (_, _, err) = run_at(
+        &mut session(&floors, ReplayLimit::default()),
+        c(at(30)),
+        &frames,
+    );
+    assert!(err.is_some_and(|e| e.is_retryable()));
+    assert_eq!(floors.lock().unwrap()[&z6()], at(30).0 as u64 * 1_000_000);
+    // The same bar: live only, and the gap runs to now.
+    let (events, out, _) = run_at(
+        &mut session(&floors, ReplayLimit::default()),
+        c(at(40)),
+        &[(GREETING, at(40)), (SUCCESS, at(40))],
+    );
+    assert_eq!(
+        out[2],
+        "schema=trades|stype_in=raw_symbol|symbols=ESZ6|snapshot=0|is_last=1
+"
+    );
+    assert!(events.contains(&MarketEvent::HistoryGap {
+        from: UtcMillis(at(40).0 - 3 * 86_400_000),
+        to: at(40),
+    }));
+    // A later bar: from the next bar boundary after the floor.
+    let (_, out, _) = run_at(
+        &mut session(&floors, ReplayLimit::default()),
+        c(at(90)),
+        &[(GREETING, at(90)), (SUCCESS, at(90))],
+    );
+    assert_eq!(out[2], trades_line(now().0 + MIN));
 }
 
 /// A recording spanning a reconnect: each connection starts with the transport's marker, so
