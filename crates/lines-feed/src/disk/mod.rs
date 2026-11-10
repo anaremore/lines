@@ -18,6 +18,8 @@
 //!   size budget, and the trade-date partition key.
 //! - [`replay`]: a stored contract (or one day of it) replays like a recording, through the
 //!   `lines` provider.
+//! - [`day`]: one whole past trade date written at once ("Download days", decision 0030 §8):
+//!   a part file renamed into place on completion, under the contract's writer lock.
 //! - [`orderflow`]: at feed startup, the stored trades of the covered ranges replay into the
 //!   order-flow consumers (profile, footprint, VAP, tape, the indicator engine).
 //!
@@ -27,6 +29,7 @@
 pub mod bars;
 pub mod coverage;
 mod crc;
+pub mod day;
 pub mod orderflow;
 pub mod partition;
 pub mod replay;
