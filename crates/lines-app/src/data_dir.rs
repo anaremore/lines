@@ -1,4 +1,4 @@
-//! The data folder (Settings › Data › Data folder): where the local store (`store-v1/`),
+//! The data folder (Settings › Data folder): where the local store (`store-v1/`),
 //! `recordings/`, `logs/`, the paper accounts (`paper/`), the journal (`journal/`, with
 //! `journal/shots/`) and update backups (`backups/`) live. Settings and workspaces stay in the
 //! config folder (`crate::persist::config_dir`).
@@ -1761,7 +1761,7 @@ pub fn show_for_screenshot(state: &str) -> Result<(), String> {
 
 // ---- the store's settings ---------------------------------------------------------------
 
-/// Settings › Data's store fields as saved (absent: the defaults).
+/// Settings › Data folder's store fields as saved (absent: the defaults).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StorePrefs {
     pub store: Option<bool>,

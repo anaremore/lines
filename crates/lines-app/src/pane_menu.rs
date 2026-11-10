@@ -339,7 +339,7 @@ pub fn settings_section(kind: PaneKind) -> crate::settings_schema::Section {
         PaneKind::Chart => Section::Charts,
         PaneKind::Dom | PaneKind::Tape => Section::Dom,
         PaneKind::Positions => Section::Accounts,
-        PaneKind::Journal | PaneKind::Strategies | PaneKind::Chain => Section::Trading,
+        PaneKind::Journal | PaneKind::Strategies | PaneKind::Chain => Section::OrderEntry,
     }
 }
 

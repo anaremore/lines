@@ -204,7 +204,7 @@ pub struct Settings {
     /// → value. Optional. Secrets are never here: they are in the OS keychain.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub connections: crate::connections::Plain,
-    /// The display time zone (Settings › Appearance; `lines_core::display_tz`): absent is
+    /// The display time zone (Settings › General; `lines_core::display_tz`): absent is
     /// the exchange's (ET), "System" the OS zone, else an IANA name. Display only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_zone: Option<String>,
@@ -250,15 +250,15 @@ pub struct Settings {
     /// account without one has no limit. `--max-order-qty` wins for its run.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub max_order_qty: std::collections::BTreeMap<String, i64>,
-    /// Settings › Data: keep the local market-data store (`crate::data_dir::store_run`).
+    /// Settings › Data folder: keep the local market-data store (`crate::data_dir::store_run`).
     /// Optional: absent is on. `--no-store` wins for its run; applies at the next start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store: Option<bool>,
-    /// Settings › Data: the store's size budget in GiB. Optional: absent is 4.
+    /// Settings › Data folder: the store's size budget in GiB. Optional: absent is 4.
     /// `--store-budget-gb` wins for its run; applies at the next start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_budget_gb: Option<f64>,
-    /// Settings › Data: catalog symbols whose order-book depth is stored. Optional: absent is
+    /// Settings › Data folder: catalog symbols whose order-book depth is stored. Optional: absent is
     /// none. A symbol this build doesn't know is kept. `--store-depth` wins for its run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub store_depth: Option<Vec<String>>,

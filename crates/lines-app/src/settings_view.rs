@@ -1,17 +1,20 @@
 //! The Settings window (decision 0021, roadmap 6c): Ctrl+, opens one window with a search
-//! box and the sections down the left. Every row comes from `crate::settings_schema`: no
-//! setting has its own form. Most changes apply at once (Data's after a restart; no OK
-//! button); Ctrl+Z undoes and ↺
-//! resets one setting. Settings that affect trading are marked; loosening a guardrail asks
-//! first and takes effect at the next trade date (the trading core's rule), tightening
-//! applies now.
+//! box and the sections down the left under their groups (App, Panes, Trading, Data, About).
+//! Every row comes from `crate::settings_schema` and its pages (`schema::page`): no setting
+//! has its own form. Rows are quiet: one line each, the description only on the selected
+//! one; a ● marks a setting changed from its default (on its row and its section), and ↺
+//! resets it. Most changes apply at once (Data folder's after a restart; no OK button);
+//! Ctrl+Z undoes. Loosening a guardrail asks first and takes effect at the next trade date
+//! (the trading core's rule), tightening applies now; Accounts says so once, under its one
+//! account picker.
 //!
-//! Keys: type to search (Esc clears it, then closes), ↑↓ settings, ←→ change a choice,
-//! Space or Enter toggles, Enter edits a number (Enter keeps it, Esc drops it), Tab and
-//! Shift+Tab move between sections, Alt+A and Alt+P step the account and the product,
-//! Ctrl+R resets, Ctrl+Z undoes; a loosening is confirmed with Y (Esc cancels). On Data ›
-//! Data folder, Enter opens Change… (or Cancel while a folder waits) and Alt+D uses the
-//! default folder; in its choice M moves, S starts empty (U uses the data already there).
+//! Keys: type to search (Esc clears it, then closes), ↑↓ settings, ←→ change a choice (or move
+//! between the two numbers of one line), Space or Enter toggles, Enter edits a number (Enter
+//! keeps it, Esc drops it), Tab and Shift+Tab move between sections, Alt+A and Alt+P step the
+//! account and the product, Ctrl+R resets, Ctrl+Z undoes; a loosening is confirmed with Y (Esc
+//! cancels). On Data folder, Enter opens Change… (or Cancel while a folder waits) and Alt+D
+//! uses the default folder; in its choice M moves, S starts empty (U uses the data already
+//! there). On Accounts, Enter on the prop values opens (or folds) their overrides.
 
 use std::time::Instant;
 
@@ -25,8 +28,7 @@ use crate::brackets::{self, EditorKey};
 use crate::display_zone;
 use crate::picker_view::{settings, update_settings};
 use crate::settings_schema::{
-    self as schema, AccountFact, Facts, Kind, Prefs, Safety, Scope, Section, Target, Value,
-    WorkspacePrefs,
+    self as schema, AccountFact, Facts, Kind, Prefs, Scope, Section, Target, Value, WorkspacePrefs,
 };
 use crate::theme::Theme;
 use crate::workspace::Workspace;
@@ -201,6 +203,14 @@ pub struct SettingsWindow {
     /// Settings › Connections (decision 0030): secrets read off-thread, a field being typed,
     /// a running Test.
     pub(crate) conn: crate::connections_view::ConnPage,
+    /// Accounts › Prop rules: the overrides are shown (Override…).
+    overrides_open: bool,
+    /// Parts hidden while their guardrail is off (the cooldown without a losing streak), as
+    /// of the last frame (`schema::dormant`).
+    dormant: Vec<usize>,
+    /// A selection waiting for the list's first layout to scroll into view, and how many
+    /// frames it has waited (a few at most).
+    scroll_wait: Option<((Section, usize, String), u8)>,
 }
 
 /// The window's size (logical px).
@@ -210,16 +220,24 @@ pub const MIN_SIZE: (f32, f32) = (640.0, 420.0);
 /// A row's label and description never get narrower than this (logical px): a control that
 /// doesn't fit beside them moves to its own line below, and a choice's chips wrap.
 pub const LABEL_MIN_W: f32 = 240.0;
-/// A scope chip's widest (an account's name and product: "…" past it).
-const SCOPE_MAX_W: f32 = 160.0;
 /// The section list's width (logical px).
 const NAV_W: f32 = 150.0;
+/// The ● slot before a row's control (every row has it: a change moves nothing).
+const DOT_W: f32 = 12.0;
+/// The fade at the bottom of a page longer than the window (an overflow cue).
+const FADE_H: f32 = 16.0;
+/// The ↺ slot (its hit target, each way).
+const RESET_W: f32 = 24.0;
+/// A line's right end after its controls: the gap, ●, gap, ↺ and the line's padding.
+const MARKS_W: f32 = 8.0 + DOT_W + 8.0 + RESET_W + 8.0;
+/// A number field's narrowest.
+const NUMBER_W: f32 = 72.0;
+/// The tighter/looser rule, said once under the account picker.
+const RULE_NOTE: &str = "Tighter applies at once; looser waits for the next session.";
 
 #[cfg(feature = "screenshot")]
 fn section_named(name: &str) -> Option<Section> {
-    Section::ALL
-        .into_iter()
-        .find(|s| s.name().eq_ignore_ascii_case(name))
+    Section::parse(name)
 }
 
 /// `KEY=VALUE` for `--settings-set`: the setting and its value.
@@ -261,8 +279,8 @@ fn parse_set(s: &str) -> Result<(usize, Value, bool), String> {
 pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
     if section_named(section).is_none() {
         anyhow::bail!(
-            "--settings {section:?}: one of {}",
-            Section::ALL.map(|s| s.name().to_lowercase()).join(", ")
+            "--settings {section:?}: one of {} (or risk, trading, diagnostics, data)",
+            Section::ALL.map(Section::slug).join(", ")
         );
     }
     // `account=NAME` picks the window's account (by name or id), `appearance.time_zone=list:Q`
@@ -443,12 +461,23 @@ pub fn run(c: schema::SettingCmd, cx: &mut App) -> Result<Option<String>, &'stat
     match c.value() {
         Some(v) => {
             let facts = gather_facts(cx);
-            let target = default_target(&facts);
+            // The account the change lands on: the open window's, else the first. The check
+            // for a loosening and the change itself use the same one.
+            let target = cx
+                .try_global::<SettingsWindowGlobal>()
+                .and_then(|g| g.0)
+                .and_then(|h| h.read(cx).ok().map(|w| w.target.clone()))
+                .unwrap_or_else(|| default_target(&facts));
             let before = current_prefs(cx);
+            let mut before = before;
+            if st.key.starts_with("prop.") {
+                schema::seed_prop_doc(&mut before, &target, &facts);
+            }
             let old = (st.get)(&before, &target, &facts);
             let mut after = before.clone();
             st.apply(&mut after, &target, v.clone())?;
-            if schema::loosening(st, &old, &v, &Default::default(), &Default::default()) {
+            // The same rule as the window's rows: the account's guardrails and prop rules.
+            if schema::change_loosens(st, (&old, &v), (&before, &after), &target, &facts) {
                 // A loosening needs a yes: ask in the window.
                 let i = c.index as usize;
                 open(Some(i), cx);
@@ -643,6 +672,10 @@ fn facts_now(cx: &App, wait: bool) -> Option<Facts> {
         ..Facts::default()
     };
     (f.store_start, f.store_flags) = crate::data_dir::store_at_start();
+    f.look_flags = cx
+        .try_global::<Workspace>()
+        .map(|w| w.env.look_flags.get())
+        .unwrap_or_default();
     f.version = env!("CARGO_PKG_VERSION").to_owned();
     f.can_update =
         crate::update::verify::PUBLIC_KEY.is_some() && crate::update::manifest::supported();
@@ -748,6 +781,9 @@ impl SettingsWindow {
             awaiting: Vec::new(),
             conn: Default::default(),
             seen_revision: 0,
+            overrides_open: false,
+            dormant: Vec::new(),
+            scroll_wait: None,
         }
     }
 
@@ -852,29 +888,77 @@ impl SettingsWindow {
         self.data_holds = None;
     }
 
-    /// Show setting `i`: its section, selected, the search cleared.
+    /// Show setting `i`: its section, selected, the search cleared (a prop override unfolds).
     fn show(&mut self, i: usize) {
         if let Some(st) = schema::all().get(i) {
             self.drop_unfinished();
             self.query.clear();
             self.section = st.section;
+            if schema::PROP_OVERRIDES.contains(&st.key) {
+                self.overrides_open = true;
+            }
             self.row = self.rows().iter().position(|&r| r == i).unwrap_or(0);
         }
     }
 
-    /// The settings shown: the search's matches, else the section's.
+    /// Whether setting `i` is shown as a line on its page (the prop overrides only while
+    /// unfolded; never a source's switch, which is on its card).
+    fn on_page(&self, i: usize) -> bool {
+        let key = schema::all()[i].key;
+        // The sources' switches are drawn on their Connections cards.
+        !schema::SOURCE_SWITCHES.contains(&key)
+            && !self.dormant.contains(&i)
+            && (self.overrides_open || !schema::PROP_OVERRIDES.contains(&key))
+    }
+
+    /// The settings shown, in the order ↑↓ walk them: the search's matches, else the
+    /// section's page, line by line (a line of two settings has both, left to right).
     fn rows(&self) -> Vec<usize> {
         if self.query.trim().is_empty() {
-            schema::all()
+            schema::page(self.section)
                 .iter()
-                .enumerate()
-                .filter(|(_, s)| s.section == self.section)
-                // The sources' switches are drawn on their Connections cards.
-                .filter(|(_, s)| !schema::SOURCE_SWITCHES.contains(&s.key))
-                .map(|(i, _)| i)
+                .flat_map(|g| g.lines.iter())
+                .flat_map(|l| l.keys())
+                .filter_map(schema::index_of)
+                .filter(|&i| self.on_page(i))
                 .collect()
         } else {
             schema::search(&self.query)
+        }
+    }
+
+    /// Change the section shown (the sidebar, Tab): the search cleared, the first row.
+    fn go_to(&mut self, s: Section) {
+        self.section = s;
+        self.overrides_open = false;
+        self.query.clear();
+        self.row = 0;
+        self.drop_unfinished();
+    }
+
+    /// ←→ on a line of two numbers ("after 3 losses, for 15 min"): the other field.
+    fn step_field(&mut self, i: usize, right: bool) -> bool {
+        if !self.query.trim().is_empty() {
+            return false;
+        }
+        let Some(p) = schema::places()[i] else {
+            return false;
+        };
+        let keys: Vec<usize> = p.line.keys().filter_map(schema::index_of).collect();
+        let Some(k) = keys.iter().position(|&x| x == i) else {
+            return false;
+        };
+        let next = if right {
+            keys.get(k + 1)
+        } else {
+            k.checked_sub(1).and_then(|k| keys.get(k))
+        };
+        match next {
+            Some(&n) => {
+                self.select(n);
+                true
+            }
+            None => false,
         }
     }
 
@@ -909,13 +993,9 @@ impl SettingsWindow {
         // Whatever was waiting for a yes is dropped (an undo's goes back on the list).
         self.cancel_pending();
         let guard = st.key.starts_with("guard.");
-        let (g0, g1) = (
-            self.target.guardrails(&before),
-            self.target.guardrails(&after),
-        );
         let prop = st.key.starts_with("prop.");
-        let loosens = schema::loosening(st, &old, &v, &g0, &g1)
-            || (prop && schema::prop_loosens(&before, &after, &self.target, &self.facts));
+        let loosens =
+            schema::change_loosens(st, (&old, &v), (&before, &after), &self.target, &self.facts);
         // A preset for another account size is refused here, with the reason (the core
         // refuses it too).
         if st.key == "prop.preset"
@@ -943,7 +1023,10 @@ impl SettingsWindow {
             return;
         }
         if loosens && !sure {
-            let (from, to) = (st.value_text(&old), st.value_text(&v));
+            let (from, to) = (
+                st.value_text(&old),
+                schema::shown_after(st, &after, &self.target, &self.facts),
+            );
             self.pending = Some(Pending {
                 index: i,
                 value: v.clone(),
@@ -988,19 +1071,18 @@ impl SettingsWindow {
             value: old.clone(),
             look,
         });
+        let to = schema::shown_after(st, &after, &self.target, &self.facts);
         let text = if guard {
             if loosens {
                 format!(
-                    "Loosened {} → {}: takes effect at the next session.",
+                    "Loosened {} → {to}: takes effect at the next session.",
                     st.value_text(&old),
-                    st.value_text(&v)
                 )
             } else {
                 format!(
-                    "{} {} → {}: applies now.",
+                    "{} {} → {to}: applies now.",
                     if old == v { "Kept" } else { "Tightened" },
                     st.value_text(&old),
-                    st.value_text(&v)
                 )
             }
         } else {
@@ -1075,8 +1157,14 @@ impl SettingsWindow {
         }
     }
 
+    /// ↺ / Ctrl+R: back to the value a reset gives (a loosening asks first, as any change).
     fn reset(&mut self, i: usize, cx: &mut Context<Self>) {
-        if let Some(d) = schema::all()[i].default.clone() {
+        let st = &schema::all()[i];
+        let prefs = current_prefs(cx);
+        if !schema::marks(st, &prefs, &self.target, &self.facts).1 {
+            return;
+        }
+        if let Some(d) = st.reset_value(&prefs, &self.target) {
             self.set(i, d, false, cx);
         }
     }
@@ -1092,6 +1180,7 @@ impl SettingsWindow {
             .map_or(0, |k| (k + 1) % a.len());
         self.target.account = Some(a[k].id.clone());
         self.target.account_name = Some(a[k].name.clone());
+        self.overrides_open = false;
         self.drop_unfinished();
     }
 
@@ -1310,7 +1399,7 @@ impl SettingsWindow {
                 }
             }
             ("a", false, false, true) => self.step_account(),
-            // Settings › Data › Data folder: Use the default folder (its button's key).
+            // Settings › Data folder: Use the default folder (its button's key).
             ("d", false, false, true) => {
                 let f = &self.facts.folder;
                 if let Some(i) = sel.filter(|&i| schema::all()[i].key == schema::DATA_FOLDER_KEY)
@@ -1328,10 +1417,7 @@ impl SettingsWindow {
                     .position(|s| *s == self.section)
                     .unwrap_or(0);
                 let n = Section::ALL.len();
-                self.section = Section::ALL[if shift { (k + n - 1) % n } else { (k + 1) % n }];
-                self.query.clear();
-                self.row = 0;
-                self.drop_unfinished();
+                self.go_to(Section::ALL[if shift { (k + n - 1) % n } else { (k + 1) % n }]);
             }
             ("escape", ..) => {
                 if self.query.is_empty() {
@@ -1369,6 +1455,10 @@ impl SettingsWindow {
                             } else {
                                 (self.chip + 1).min(n.saturating_sub(1))
                             };
+                        }
+                        // A line of two numbers: the other one.
+                        (Kind::Number { .. }, _) => {
+                            self.step_field(i, key == "right");
                         }
                         _ => {}
                     }
@@ -1419,6 +1509,9 @@ impl SettingsWindow {
             }
             (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_press(i, false, cx),
             (Kind::Editor, _) if st.key == schema::ROLLBACK_KEY => self.rollback_press(cx),
+            (Kind::Editor, _) if st.key == schema::PROP_OVERRIDES_KEY => {
+                self.overrides_open = !self.overrides_open;
+            }
             (Kind::Editor, _) if st.key == schema::DATA_FOLDER_KEY => {
                 if crate::data_dir::facts().pending() {
                     self.data_cancel(i, cx);
@@ -1845,54 +1938,101 @@ impl SettingsWindow {
 
     // ---- rendering ----------------------------------------------------------------------
 
-    fn nav(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The sidebar: the sections under their groups' headers (App, Panes, Trading, Data, then
+    /// About alone). A ● marks a section with a setting changed from its default; while
+    /// searching, each section's count of matches.
+    fn nav(&self, prefs: &Prefs, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        let counts: Vec<usize> = if self.query.trim().is_empty() {
-            Vec::new()
+        let searching = !self.query.trim().is_empty();
+        let hits = if searching {
+            schema::search(&self.query)
         } else {
-            let hits = schema::search(&self.query);
-            Section::ALL
-                .iter()
-                .map(|s| {
-                    hits.iter()
-                        .filter(|&&i| schema::all()[i].section == *s)
-                        .count()
-                })
-                .collect()
+            Vec::new()
         };
+        // Scrolls when the window is too short for every entry (the smallest window, a large
+        // UI zoom).
         let mut nav = div()
+            .id("settings-nav")
             .flex()
             .flex_col()
             .w(crate::zoom::ui(NAV_W))
             .flex_none()
-            .py_2()
+            .overflow_y_scroll()
+            .pb_2()
             .border_r_1()
             .border_color(t.axis_line);
+        let mut group = None;
         for (k, s) in Section::ALL.into_iter().enumerate() {
-            let on = s == self.section && self.query.trim().is_empty();
-            let count = counts.get(k).copied().filter(|&n| n > 0);
+            // About stands alone: no header (not even an empty one).
+            if group != Some(s.group()) && !s.group().is_empty() {
+                nav = nav.child(
+                    div()
+                        .flex_none()
+                        .px_3()
+                        .pt_2()
+                        .pb_1()
+                        .text_size(crate::zoom::ui(11.0))
+                        .text_color(t.text_dim)
+                        .child(s.group()),
+                );
+            }
+            group = Some(s.group());
+            let on = s == self.section && !searching;
+            let right = if searching {
+                // Lines, as the page shows them (a line of two counts once).
+                let in_s: Vec<usize> = hits
+                    .iter()
+                    .copied()
+                    .filter(|&i| schema::all()[i].section == s)
+                    .collect();
+                let n = schema::line_count(&in_s);
+                (n > 0).then(|| (n.to_string(), t.text_dim))
+            } else {
+                schema::section_changed(s, prefs, &self.target, &self.facts)
+                    .then(|| ("●".to_owned(), t.accent))
+            };
             nav = nav.child(
                 div()
                     .id(("section", k))
+                    .flex_none()
+                    // About, alone, set apart from the Data group above it.
+                    .when(s.group().is_empty(), |d| d.mt_3())
                     .flex()
                     .flex_row()
+                    .items_center()
                     .justify_between()
-                    .px_3()
+                    .gap_1()
+                    .pr_3()
                     .py_1()
                     .cursor_pointer()
+                    .when(on, |d| d.bg(t.panel))
                     .text_color(if on { t.text_main } else { t.text_dim })
-                    .when(on, |d| d.bg(t.panel).border_l_2().border_color(t.accent))
-                    .child(s.name())
-                    .children(
-                        count.map(|n| div().text_size(crate::zoom::ui(11.0)).child(n.to_string())),
+                    // The selected section's edge, in a slot every entry has.
+                    .child(
+                        div()
+                            .w(crate::zoom::ui(2.0))
+                            .self_stretch()
+                            .flex_none()
+                            .when(on, |d| d.bg(t.accent)),
                     )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .pl(crate::zoom::ui(10.0))
+                            .child(s.name()),
+                    )
+                    .children(right.map(|(text, color)| {
+                        div()
+                            .flex_none()
+                            .text_size(crate::zoom::ui(11.0))
+                            .text_color(color)
+                            .child(text)
+                    }))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |v, _, _, cx| {
-                            v.section = s;
-                            v.query.clear();
-                            v.row = 0;
-                            v.drop_unfinished();
+                            v.go_to(s);
                             cx.notify();
                         }),
                     ),
@@ -1901,7 +2041,17 @@ impl SettingsWindow {
         nav
     }
 
-    fn control(&self, i: usize, value: &Value, cx: &mut Context<Self>) -> AnyElement {
+    /// A setting's control. `unit`: a number shows its unit ("15 min"; on a line of two the
+    /// words around it may say it instead). `focused`: the selected field of a line of two.
+    fn control(
+        &self,
+        i: usize,
+        value: &Value,
+        unit_shown: bool,
+        focused: bool,
+        muted: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = self.theme;
         let st = &schema::all()[i];
         let selected = self.selected() == Some(i);
@@ -1927,7 +2077,11 @@ impl SettingsWindow {
                             .whitespace_nowrap()
                             .px_2()
                             .cursor_pointer()
-                            .when(on, |d| d.bg(t.accent).text_color(t.bg))
+                            .when(on, |d| {
+                                d.bg(t.accent)
+                                    .text_color(t.bg)
+                                    .font_weight(FontWeight::BOLD)
+                            })
                             .child(*name)
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -1957,7 +2111,11 @@ impl SettingsWindow {
                             .id(("toggle", i * 2 + j))
                             .px_2()
                             .when(!locked, |d| d.cursor_pointer())
-                            .when(on && !locked, |d| d.bg(t.accent).text_color(t.bg))
+                            .when(on && !locked, |d| {
+                                d.bg(t.accent)
+                                    .text_color(t.bg)
+                                    .font_weight(FontWeight::BOLD)
+                            })
                             .when(on && locked, |d| {
                                 d.bg(t.element_selected).text_color(t.text_main)
                             })
@@ -1973,17 +2131,37 @@ impl SettingsWindow {
                 }
                 seg.into_any_element()
             }
-            (Kind::Number { unit, .. }, Value::Number(n)) => {
+            (Kind::Number { unit, optional, .. }, Value::Number(n)) => {
                 let editing = selected && self.edit.is_some();
-                let text = match (&self.edit, editing) {
-                    (Some(e), true) => format!("{e}▏"),
-                    _ => n.map_or_else(|| "None".to_owned(), schema::grouped),
+                // The unit lives in the value: "$1,000", "15 min", "5 contracts".
+                let with_unit = |num: String| match unit {
+                    "$" => format!("${num}"),
+                    "" => num,
+                    u if unit_shown => format!("{num} {u}"),
+                    _ => num,
                 };
-                let unit = if n.is_some() || editing { unit } else { "" };
-                let mut d = div()
+                let (text, dim) = match (&self.edit, editing, n) {
+                    (Some(e), true, _) => (with_unit(format!("{e}▏")), false),
+                    (_, _, Some(n)) => (with_unit(schema::grouped(*n)), false),
+                    // Off: no limit.
+                    (_, _, None) if optional => ("Off".to_owned(), true),
+                    // A part that needs another on first (the cooldown without a losing
+                    // streak, the news window with the blackout off): empty, its unit muted.
+                    (_, _, None) if unit_shown => (unit.to_owned(), true),
+                    (_, _, None) => (String::new(), true),
+                };
+                let dim = dim || muted;
+                let text = schema::flag_text(st, &self.facts)
+                    .filter(|_| locked)
+                    .unwrap_or(text);
+                div()
                     .id(("number", i))
                     .flex_none()
-                    .min_w(crate::zoom::ui(72.0))
+                    .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                        "tnum".into(),
+                        1,
+                    )])))
+                    .min_w(crate::zoom::ui(NUMBER_W))
                     .px_2()
                     .rounded_sm()
                     .border_1()
@@ -1991,50 +2169,34 @@ impl SettingsWindow {
                     .when(locked, |d| d.border_dashed())
                     .flex()
                     .justify_end()
-                    .border_color(if editing { t.accent } else { t.axis_line });
-                if let Some(text) = schema::flag_text(st, &self.facts).filter(|_| locked) {
-                    d = d.child(text);
-                } else if unit == "$" {
-                    d = d.child(format!("${text}"));
-                } else {
-                    d = d.child(text);
-                    if !unit.is_empty() {
-                        d = d.child(div().ml_1().text_color(t.text_dim).child(unit));
-                    }
-                }
-                d.on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |v, _, _, cx| {
-                        v.select(i);
-                        v.activate(i, schema::all()[i].kind, cx);
-                        cx.notify();
-                    }),
-                )
-                .into_any_element()
+                    .whitespace_nowrap()
+                    .border_color(if editing {
+                        t.accent
+                    } else if focused {
+                        t.text_main
+                    } else {
+                        t.axis_line
+                    })
+                    .text_color(if dim { t.text_dim } else { t.text_main })
+                    .child(text)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |v, _, _, cx| {
+                            v.select(i);
+                            v.activate(i, schema::all()[i].kind, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
             }
-            (Kind::Editor, _) if schema::all()[i].key == schema::RESET_KEY => {
-                self.reset_buttons(i, cx)
-            }
-            (Kind::Editor, _) if schema::all()[i].key == schema::DATA_FOLDER_KEY => {
-                self.data_buttons(i, cx)
-            }
-            (Kind::Products, Value::List(l)) => {
-                let locked = schema::flag_value(st, &self.facts).is_some();
-                self.product_chips(i, l, locked, cx)
-            }
-            (Kind::Editor, _) if schema::all()[i].key == schema::ROLLBACK_KEY => {
+            (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_buttons(i, cx),
+            (Kind::Editor, _) if st.key == schema::DATA_FOLDER_KEY => self.data_buttons(i, cx),
+            (Kind::Products, Value::List(l)) => self.product_chips(i, l, locked, cx),
+            (Kind::Editor, _) if st.key == schema::ROLLBACK_KEY => {
                 match self.facts.rollback.clone() {
                     None => div().into_any_element(),
-                    Some(v) => div()
-                        .id(("rollback", i))
-                        .flex_none()
-                        .whitespace_nowrap()
-                        .px_2()
-                        .rounded_sm()
-                        .border_1()
-                        .border_color(t.axis_line)
-                        .cursor_pointer()
-                        .child(format!("Roll back to v{v}"))
+                    Some(v) => self
+                        .button(("rollback", i), format!("Roll back to v{v}"))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |v, _, _, cx| {
@@ -2045,30 +2207,46 @@ impl SettingsWindow {
                         .into_any_element(),
                 }
             }
-            (Kind::Editor, _) => div()
-                .id(("editor", i))
-                .flex_none()
-                .px_2()
-                .rounded_sm()
-                .border_1()
-                .border_color(t.axis_line)
-                .cursor_pointer()
-                .child(if schema::all()[i].key == display_zone::KEY {
+            (Kind::Editor, _) => {
+                let label = if st.key == display_zone::KEY {
                     "Change…"
+                } else if st.key == schema::PROP_OVERRIDES_KEY {
+                    if self.overrides_open {
+                        "Hide overrides"
+                    } else {
+                        "Override…"
+                    }
                 } else {
                     "Edit…"
-                })
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |v, _, _, cx| {
-                        v.select(i);
-                        v.open_editor_for(i, cx);
-                        cx.notify();
-                    }),
-                )
-                .into_any_element(),
+                };
+                self.button(("editor", i), label.to_owned())
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |v, _, _, cx| {
+                            v.select(i);
+                            v.activate(i, Kind::Editor, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .into_any_element()
+            }
             _ => div().into_any_element(),
         }
+    }
+
+    /// A quiet outlined button (Edit…, Change…, Override…).
+    fn button(&self, id: (&'static str, usize), label: String) -> gpui::Stateful<gpui::Div> {
+        let t = self.theme;
+        div()
+            .id(id)
+            .flex_none()
+            .whitespace_nowrap()
+            .px_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(t.axis_line)
+            .cursor_pointer()
+            .child(label)
     }
 
     /// Reset paper account's buttons: keep the journal, or clear it too. An armed one says
@@ -2200,23 +2378,50 @@ impl SettingsWindow {
     }
 
     fn select(&mut self, i: usize) {
+        // A prop override selected (a palette command, a screenshot's change) unfolds.
+        if schema::all()
+            .get(i)
+            .is_some_and(|st| schema::PROP_OVERRIDES.contains(&st.key))
+        {
+            self.overrides_open = true;
+        }
         if let Some(r) = self.rows().iter().position(|&x| x == i) {
             self.row = r;
         }
         self.edit = None;
     }
 
-    fn row_view(&self, i: usize, prefs: &Prefs, cx: &mut Context<Self>) -> AnyElement {
+    /// One line of a page: its label (the selected setting's description under it, only on
+    /// the selected line), then the ● slot, the control(s) and the ↺ slot. Lines under it:
+    /// what the core has in force, a Data line's flag or restart, a summary, a note.
+    fn line_view(
+        &self,
+        label: &str,
+        parts: &[schema::Part],
+        sub: bool,
+        prefs: &Prefs,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let t = self.theme;
-        let st = &schema::all()[i];
-        // A flag ruling a Data row this run: its value in force, not the saved one.
-        let flagged = schema::flag_value(st, &self.facts);
-        let value = flagged
-            .clone()
-            .unwrap_or_else(|| (st.get)(prefs, &self.target, &self.facts));
-        let selected = self.selected() == Some(i);
-        let searching = !self.query.trim().is_empty();
-        let data = st.section == Section::Data;
+        let idx: Vec<usize> = parts
+            .iter()
+            .filter_map(|p| match p {
+                schema::Part::Field(k, _) => schema::index_of(k),
+                schema::Part::Word(_) => None,
+            })
+            .collect();
+        let Some(&first) = idx.first() else {
+            return div().into_any_element();
+        };
+        let sel = self.selected().filter(|s| idx.contains(s));
+        let selected = sel.is_some();
+        let value_of = |i: usize| {
+            let st = &schema::all()[i];
+            // A flag ruling a Data row this run: its value in force, not the saved one.
+            schema::flag_value(st, &self.facts)
+                .unwrap_or_else(|| (st.get)(prefs, &self.target, &self.facts))
+        };
+        let data = schema::all()[first].section == Section::DataFolder;
         let paths = if data { self.data_paths() } else { Vec::new() };
         // A failure or refusal in the error color (its words say so too); the rest amber.
         let tone_color = |line: &str| {
@@ -2226,171 +2431,247 @@ impl SettingsWindow {
                 t.warn
             }
         };
-        // Wraps in the label column (a search's section prefix, the name, the TRADING chip).
-        let mut name = div().flex().flex_row().flex_wrap().items_center().gap_x_2();
-        if searching {
-            name = name.child(
-                div()
-                    .text_size(crate::zoom::ui(11.0))
-                    .text_color(t.text_dim)
-                    .child(format!("{} ›", st.section.name())),
-            );
-        }
-        name = name.child(div().text_color(t.text_main).child(st.name));
-        if st.safety == Safety::Trading {
-            name = name.child(
-                div()
-                    .flex_none()
-                    .px_1()
-                    .text_size(crate::zoom::ui(10.0))
-                    .font_weight(FontWeight::BOLD)
-                    .border_1()
-                    .border_color(t.warn)
-                    .text_color(t.warn)
-                    .rounded_sm()
-                    .child("TRADING"),
-            );
-        }
+        let small = |text: String, color: gpui::Hsla| -> AnyElement {
+            div()
+                .text_size(crate::zoom::ui(11.5))
+                .text_color(color)
+                .child(if data {
+                    self.words(&text, color, &paths)
+                } else {
+                    div().child(text).into_any_element()
+                })
+                .into_any_element()
+        };
         let mut left = div()
             .flex()
             .flex_col()
             .flex_grow_1()
             .flex_basis(crate::zoom::ui(LABEL_MIN_W))
             .min_w(crate::zoom::ui(LABEL_MIN_W))
-            .child(name)
             .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_wrap()
+                    .items_baseline()
+                    .gap_x_2()
+                    .child(div().text_color(t.text_main).child(label.to_owned()))
+                    // Where the value applies when that isn't the app (decision 0021: no
+                    // hidden inheritance): "New panes", "This workspace". Rows under an
+                    // account picker have it there.
+                    .children(schema::all()[first].scope.label().map(|w| {
+                        div()
+                            .flex_none()
+                            .text_size(crate::zoom::ui(11.0))
+                            .text_color(t.text_dim)
+                            .child(w)
+                    })),
+            );
+        // The description, on the selected line only.
+        if let Some(s) = sel {
+            left = left.child(
                 div()
                     .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_dim)
-                    .child(st.description),
-            );
-        if let (Kind::Info, Value::Text(s)) = (st.kind, &value) {
-            // A lockout or breach is the row's warning (by its words and the lock, not color
-            // alone).
-            let warn = s.starts_with('🔒');
-            left = left.child(
-                div()
-                    .text_color(if warn { t.warn } else { t.text_main })
-                    .child(s.clone()),
+                    .child(schema::all()[s].description),
             );
         }
-        // The folder in use, dimmed (in an AA token) while LINES_DATA_DIR rules it.
-        let summary_color = if st.key == schema::DATA_FOLDER_KEY
-            && self.facts.folder.by == crate::data_dir::By::Env
-        {
-            t.text_dim
-        } else {
-            t.text_main
-        };
-        let summary = match (st.kind, &value) {
-            (Kind::Editor, Value::Text(s)) => Some(
-                div()
-                    .text_size(crate::zoom::ui(11.5))
-                    .text_color(summary_color)
-                    .child(if data {
-                        self.words(s, summary_color, &paths)
-                    } else {
-                        div().child(s.clone()).into_any_element()
-                    }),
-            ),
-            _ => None,
-        };
-        // What is in force now, when the core holds a looser value back; a Data row's flag,
-        // restart, progress or failure line.
-        let status = schema::status(st, prefs, &self.target, &self.facts).map(|line| {
-            let color = tone_color(&line);
-            div()
-                .text_size(crate::zoom::ui(11.5))
-                .text_color(color)
-                .child(if data {
-                    self.words(&line, color, &paths)
-                } else {
-                    div().child(line).into_any_element()
-                })
-        });
-        // The data folder: the folder in use, then what waits; other editors: the status
-        // first, then their summary (as before).
-        if st.key == schema::DATA_FOLDER_KEY {
-            left = left.children(summary).children(status);
-        } else {
-            left = left.children(status).children(summary);
-        }
-        // A reset waiting for its second press says what that press will do.
-        if st.key == schema::RESET_KEY
-            && let Some(text) = self.reset_confirm(cx)
-        {
-            left = left.child(
-                div()
-                    .text_size(crate::zoom::ui(11.5))
-                    .text_color(t.warn)
-                    // Armed shows by weight too, not only by color.
-                    .font_weight(FontWeight::BOLD)
-                    .child(text),
-            );
-        }
-        if let Some((n, text, tone)) = self.note.as_ref().filter(|n| n.0 == i) {
-            let _ = n;
-            let color = match tone {
-                Tone::Problem => tone_color(text),
-                Tone::Done => t.text_main,
-            };
-            left = left.child(
-                div()
-                    .text_size(crate::zoom::ui(11.5))
-                    .text_color(color)
-                    .child(if data {
-                        self.words(text, color, &paths)
-                    } else {
-                        div().child(text.clone()).into_any_element()
-                    }),
-            );
-        }
-        let changed = flagged.is_none() && st.changed(prefs, &self.target, &self.facts);
-        let scope = match st.scope {
-            Scope::Account | Scope::AccountProduct => {
-                let mut s = self
-                    .target
-                    .account_name
-                    .clone()
-                    .unwrap_or_else(|| "no account".to_owned());
-                if st.scope == Scope::AccountProduct {
-                    s.push_str(" · ");
-                    s.push_str(self.target.product.as_deref().unwrap_or("?"));
-                }
-                s
+        let mut right = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .ml_auto()
+            .min_w_0()
+            .max_w_full();
+        let mut dot = false;
+        let mut resettable: Option<usize> = None;
+        // A part hidden while its guardrail is off: the line shows its first control alone
+        // ("Cooldown  Off"), no words.
+        let alone = idx
+            .iter()
+            .any(|&i| schema::dormant(&schema::all()[i], prefs, &self.target) == Some(None));
+        for part in parts {
+            if alone
+                && !matches!(part, schema::Part::Field(k, _) if schema::index_of(k) == Some(first))
+            {
+                continue;
             }
-            s => s.label().to_owned(),
+            let i = match part {
+                schema::Part::Word(w) => {
+                    right = right.child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_color(t.text_dim)
+                            .child(*w),
+                    );
+                    continue;
+                }
+                schema::Part::Field(k, unit) => match schema::index_of(k) {
+                    Some(i) => (i, *unit),
+                    None => continue,
+                },
+            };
+            let (i, unit) = i;
+            let st = &schema::all()[i];
+            // The news window while the blackout is off: the minutes it starts with, muted.
+            let resting = schema::dormant(st, prefs, &self.target).flatten();
+            let value = resting.map_or_else(|| value_of(i), |n| Value::Number(Some(n)));
+            let muted = resting.is_some();
+            let (changed, reset) = schema::marks(st, prefs, &self.target, &self.facts);
+            dot |= changed;
+            if reset && (resettable.is_none() || sel == Some(i)) {
+                resettable = Some(i);
+            }
+            match (st.kind, &value) {
+                (Kind::Info, Value::Text(s)) => {
+                    // A lockout or breach is the row's warning (by its words and the lock,
+                    // not color alone).
+                    let color = if s.starts_with('🔒') {
+                        t.warn
+                    } else {
+                        t.text_main
+                    };
+                    if inline_text(s) {
+                        right = right.child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .text_color(color)
+                                .child(s.clone()),
+                        );
+                    } else if !s.is_empty() {
+                        left = left.child(div().text_color(color).child(s.clone()));
+                    }
+                }
+                (Kind::Editor, Value::Text(s)) if summary_beside(st.key) => {
+                    right = right
+                        .child(
+                            div()
+                                .flex_none()
+                                .whitespace_nowrap()
+                                .text_color(t.text_dim)
+                                .child(s.clone()),
+                        )
+                        .child(self.control(i, &value, unit, false, muted, cx));
+                }
+                _ => {
+                    let focused = idx.len() > 1 && sel == Some(i);
+                    right = right.child(self.control(i, &value, unit, focused, muted, cx));
+                }
+            }
+        }
+        // Long summaries go under the label: the data folder, the reset's account, the
+        // rollback's version.
+        for &i in &idx {
+            let st = &schema::all()[i];
+            let summary_color = if st.key == schema::DATA_FOLDER_KEY
+                && self.facts.folder.by == crate::data_dir::By::Env
+            {
+                // The folder in use, dimmed (in an AA token) while LINES_DATA_DIR rules it.
+                t.text_dim
+            } else {
+                t.text_main
+            };
+            let summary = match (st.kind, value_of(i)) {
+                (Kind::Editor, Value::Text(s)) if !summary_beside(st.key) => {
+                    Some(small(s, summary_color))
+                }
+                _ => None,
+            };
+            // What is in force now, when the core holds a looser value back; a Data row's
+            // flag, restart, progress or failure line.
+            let status = schema::status(st, prefs, &self.target, &self.facts).map(|line| {
+                let color = tone_color(&line);
+                small(line, color)
+            });
+            // The data folder: the folder in use, then what waits; other editors: the status
+            // first, then their summary.
+            if st.key == schema::DATA_FOLDER_KEY {
+                left = left.children(summary).children(status);
+            } else {
+                left = left.children(status).children(summary);
+            }
+            // A reset waiting for its second press says what that press will do.
+            if st.key == schema::RESET_KEY
+                && let Some(text) = self.reset_confirm(cx)
+            {
+                left = left.child(
+                    div()
+                        .text_size(crate::zoom::ui(11.5))
+                        .text_color(t.warn)
+                        // Armed shows by weight too, not only by color.
+                        .font_weight(FontWeight::BOLD)
+                        .child(text),
+                );
+            }
+            if let Some((_, text, tone)) = self.note.as_ref().filter(|n| n.0 == i) {
+                let color = match tone {
+                    Tone::Problem => tone_color(text),
+                    Tone::Done => t.text_main,
+                };
+                left = left.child(small(text.clone(), color));
+            }
+        }
+        let reset_slot = div()
+            .id(("reset", first))
+            // A 24 px hit each way.
+            .w(crate::zoom::hit(RESET_W))
+            .h(crate::zoom::hit(RESET_W))
+            .flex()
+            .items_center()
+            .justify_center()
+            .flex_none()
+            // The glyph sits small in its em: at 16 px it reads as large as 13 px text.
+            .text_size(crate::zoom::ui(16.0))
+            .text_color(t.text_main);
+        let reset_slot = match resettable {
+            Some(r) => crate::tooltip::tip_keys(
+                reset_slot,
+                &if idx.len() > 1 {
+                    // Which of the line's settings it resets.
+                    format!("Reset {} to default", schema::all()[r].name.to_lowercase())
+                } else {
+                    "Reset to default".to_owned()
+                },
+                vec!["Ctrl".into(), "R".into()],
+                &t,
+            )
+            .cursor_pointer()
+            .child("↺")
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _, _, cx| {
+                    v.select(r);
+                    v.reset(r, cx);
+                }),
+            ),
+            None => reset_slot,
         };
         let mut row = div()
-            .id(("row", i))
+            .id(("row", first))
             .flex()
             .flex_row()
             .items_center()
             .gap_2()
-            .px_2()
+            .pr_2()
             .py_1()
             .border_b_1()
             .border_color(t.axis_line)
-            .when(selected, |d| {
-                d.bg(t.panel).border_l_2().border_color(t.accent)
-            })
-            .when(st.safety == Safety::Trading, |d| {
-                d.border_l_2().border_color(t.warn)
-            })
-            // A trading row keeps its warn bar; its selection shows as an accent bar beside
-            // it, in a slot every trading row has (selecting never moves the text).
-            .when(st.safety == Safety::Trading, |d| {
-                d.child(
-                    div()
-                        .w(crate::zoom::ui(3.0))
-                        .self_stretch()
-                        .flex_none()
-                        .when(selected, |b| b.bg(t.accent)),
-                )
-            })
+            .when(selected, |d| d.bg(t.panel))
+            // The selected line's edge, in a slot every line has (selecting moves nothing).
             .child(
-                // Label and description, then the control group: beside them when it fits,
-                // else on its own line below (right-aligned). Nothing squeezes the label.
+                div()
+                    .w(crate::zoom::ui(2.0))
+                    .self_stretch()
+                    .flex_none()
+                    .when(selected, |b| b.bg(t.accent)),
+            )
+            .child(
+                // Label (and description), then the controls: beside them when they fit, else
+                // on their own line below (right-aligned). Nothing squeezes the label.
                 div()
                     .flex()
                     .flex_row()
@@ -2400,70 +2681,35 @@ impl SettingsWindow {
                     .items_center()
                     .gap_x_2()
                     .gap_y_1()
+                    .when(sub, |d| d.pl(crate::zoom::ui(16.0)))
                     .child(left)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_start()
-                            .gap_2()
-                            .ml_auto()
-                            .min_w_0()
-                            .max_w_full()
-                            .child(self.control(i, &value, cx))
-                            // An account's name can be long: "…" past its share of the row.
-                            .child(
-                                div()
-                                    // Never narrower than its words; "…" only past the cap.
-                                    .flex_none()
-                                    .max_w(crate::zoom::ui(SCOPE_MAX_W))
-                                    .truncate()
-                                    .px_1()
-                                    .text_size(crate::zoom::ui(10.5))
-                                    .rounded_sm()
-                                    .border_1()
-                                    .border_color(t.axis_line)
-                                    .text_color(t.text_dim)
-                                    .child(scope),
-                            )
-                            .child(
-                                div()
-                                    .id(("reset", i))
-                                    // A 20 px hit, the minimum.
-                                    .w(crate::zoom::hit(20.0))
-                                    .flex()
-                                    .justify_center()
-                                    .flex_none()
-                                    .text_color(t.text_dim)
-                                    .when(changed, |d| {
-                                        crate::tooltip::tip_keys(
-                                            d,
-                                            "Reset to default",
-                                            vec!["Ctrl".into(), "R".into()],
-                                            &t,
-                                        )
-                                        .cursor_pointer()
-                                        .child("↺")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(move |v, _, _, cx| {
-                                                v.select(i);
-                                                v.reset(i, cx);
-                                            }),
-                                        )
-                                    }),
-                            ),
-                    ),
+                    .child(right),
             )
-            .on_mouse_down(
-                MouseButton::Left,
+            // ● changed from its default (a shape, on its row and its section's entry), then
+            // ↺: one fixed column at the right, wherever the controls wrap.
+            .child(
+                div()
+                    .w(crate::zoom::ui(DOT_W))
+                    .flex_none()
+                    .flex()
+                    .justify_center()
+                    .text_color(t.accent)
+                    .when(dot, |d| d.child("●")),
+            )
+            .child(reset_slot)
+            .on_mouse_down(MouseButton::Left, {
+                // A press on the line selects it, unless one of its fields already is (a
+                // field's own press chose which).
+                let idx = idx.clone();
                 cx.listener(move |v, _, _, cx| {
-                    v.select(i);
+                    if v.selected().is_none_or(|s| !idx.contains(&s)) {
+                        v.select(first);
+                    }
                     cx.notify();
-                }),
-            )
+                })
+            })
             .into_any_element();
-        if st.key == schema::DATA_FOLDER_KEY
+        if idx.contains(&schema::index_of(schema::DATA_FOLDER_KEY).unwrap_or(usize::MAX))
             && let Some(choice) = self.data_choice_view(cx)
         {
             row = div()
@@ -2473,7 +2719,7 @@ impl SettingsWindow {
                 .child(choice)
                 .into_any_element();
         }
-        if let Some(p) = self.pending.as_ref().filter(|p| p.index == i) {
+        if let Some(p) = self.pending.as_ref().filter(|p| idx.contains(&p.index)) {
             row = div()
                 .flex()
                 .flex_col()
@@ -2623,6 +2869,106 @@ impl SettingsWindow {
         }
     }
 
+    /// A group's title in small capitals; on Order entry › Brackets, the account and product
+    /// the presets are for beside it.
+    fn group_title(&self, title: &str, product: bool, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme;
+        let mut d = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_2()
+            .pt_3()
+            .pb_1()
+            .text_size(crate::zoom::ui(11.0))
+            .text_color(t.text_dim)
+            .child(div().flex_none().child(title.to_owned()));
+        if product {
+            d = d
+                .child(self.account_field(cx))
+                .child(self.product_field(cx))
+                .children(
+                    self.account_kind()
+                        .map(|k| crate::trade_bar::account_badge(k, &self.theme)),
+                );
+        }
+        d.into_any_element()
+    }
+
+    /// The account picker (a click steps to the next account, as Alt+A).
+    fn account_field(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme;
+        div()
+            .id("account-step")
+            .min_w_0()
+            .max_w_full()
+            .truncate()
+            .px_2()
+            .border_1()
+            .border_color(t.axis_line)
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(t.text_main)
+            .child(format!(
+                "{} ▾",
+                self.target.account_name.as_deref().unwrap_or("No account")
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, _, cx| {
+                    v.step_account();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// The product picker (a click steps to the next product, as Alt+P).
+    fn product_field(&self, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme;
+        div()
+            .id("product-step")
+            .flex_none()
+            .px_2()
+            .border_1()
+            .border_color(t.axis_line)
+            .rounded_sm()
+            .cursor_pointer()
+            .text_color(t.text_main)
+            .child(format!(
+                "{} ▾",
+                self.target.product.as_deref().unwrap_or("No product")
+            ))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _, _, cx| {
+                    v.step_product();
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// The chosen account's facts.
+    fn account(&self) -> Option<&AccountFact> {
+        self.facts
+            .accounts
+            .iter()
+            .find(|a| Some(&a.id) == self.target.account.as_ref())
+    }
+
+    /// The chosen account's kind, for its badge beside the picker (PAPER, SIM, LIVE).
+    fn account_kind(&self) -> Option<&'static str> {
+        self.account().map(|a| a.kind)
+    }
+
+    /// The chosen account's size, muted beside its badge: "$50,000 start".
+    fn account_facts(&self) -> Option<String> {
+        let n = self.account()?.account_size?;
+        Some(format!("${} start", schema::grouped(n)))
+    }
+
     fn keys_list(&self) -> AnyElement {
         let t = self.theme;
         let mut list = div().flex().flex_col().mt_1();
@@ -2638,7 +2984,10 @@ impl SettingsWindow {
                     .flex_row()
                     .justify_between()
                     .gap_2()
-                    .px_2()
+                    // Text starts where every line's label does (its 2 px edge slot and gap); the
+                    // keys end where every line's controls do (before the ● and ↺ column).
+                    .pl(crate::zoom::ui(10.0))
+                    .pr(crate::zoom::ui(MARKS_W))
                     .border_b_1()
                     .border_color(t.axis_line)
                     .child(
@@ -2796,16 +3145,26 @@ impl Render for SettingsWindow {
         self.seen_revision = Self::trading_revision(cx);
         self.check_answers(cx);
         let prefs = current_prefs(cx);
+        // Parts hidden while their guardrail is off (↑↓ skip them too).
+        self.dormant = schema::all()
+            .iter()
+            .enumerate()
+            .filter(|(_, st)| schema::dormant(st, &prefs, &self.target) == Some(None))
+            .map(|(i, _)| i)
+            .collect();
         let rows = self.rows();
         if self.row >= rows.len() {
             self.row = rows.len().saturating_sub(1);
         }
+        let sel = rows.get(self.row).copied();
+        // The Connections cards read the keychain off-thread, once they are first shown.
+        if !self.conn.started()
+            && let Some(l) = schema::index_of(schema::CONNECTIONS_LIST)
+            && rows.contains(&l)
+        {
+            self.conn.reload(None);
+        }
         let searching = !self.query.trim().is_empty();
-        let title = if searching {
-            format!("{} results", rows.len())
-        } else {
-            self.section.name().to_owned()
-        };
         let mut main = div()
             .id("settings-main")
             .flex()
@@ -2817,134 +3176,189 @@ impl Render for SettingsWindow {
             .px_3()
             .pt_2()
             // Room under the last row: its controls never sit on the footer's rule.
-            .pb_4()
-            .child(div().font_weight(FontWeight::BOLD).pb_1().child(title));
-        // Per-account settings: which account (and product) they mean.
-        let per_account = rows.iter().any(|&i| {
-            matches!(
-                schema::all()[i].scope,
-                Scope::Account | Scope::AccountProduct
-            )
-        });
-        // Children before the rows (title, account line): the selected row's index for
-        // scrolling it into view.
-        let mut child = 1;
-        if per_account {
-            child += 1;
-            main = main.child(
-                // Wraps in a narrow window; a long account name ends in "…" (the window's width).
+            .pb_4();
+        // The page's title; on Accounts, the one account picker beside it, what the account
+        // is, and the tighter/looser rule once under them.
+        let mut head = div()
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_x_2()
+            .gap_y_1()
+            .pb_1()
+            .child(
                 div()
-                    .flex()
-                    .flex_row()
-                    .flex_wrap()
-                    .gap_x_2()
-                    .gap_y_1()
+                    .flex_none()
+                    .font_weight(FontWeight::BOLD)
+                    .text_size(crate::zoom::ui(15.0))
+                    .child(if searching {
+                        format!("{} results", schema::line_count(&rows))
+                    } else {
+                        self.section.name().to_owned()
+                    }),
+            );
+        // A search with per-account matches: which account (and product) they mean.
+        let per_account = |scopes: &[Scope]| {
+            rows.iter()
+                .any(|&i| scopes.contains(&schema::all()[i].scope))
+        };
+        let accounts_page = !searching && self.section == Section::Accounts;
+        if accounts_page || (searching && per_account(&[Scope::Account, Scope::AccountProduct])) {
+            head = head.child(self.account_field(cx));
+            if searching && per_account(&[Scope::AccountProduct]) {
+                head = head.child(self.product_field(cx));
+            }
+            if let Some(kind) = self.account_kind() {
+                head = head.child(crate::trade_bar::account_badge(kind, &t));
+            }
+            if let Some(facts) = self.account_facts() {
+                head = head.child(
+                    div()
+                        .flex_none()
+                        .text_size(crate::zoom::ui(12.0))
+                        .text_color(t.text_dim)
+                        .child(facts),
+                );
+            }
+        }
+        main = main.child(head);
+        // Children before the rows: the selected line's index, for scrolling it into view.
+        let mut child = 1;
+        if accounts_page {
+            main = main.child(
+                div()
                     .pb_1()
                     .text_size(crate::zoom::ui(12.0))
                     .text_color(t.text_dim)
-                    .child(
-                        div()
-                            .id("account-step")
-                            .min_w_0()
-                            .max_w_full()
-                            .truncate()
-                            .px_1()
-                            .border_1()
-                            .border_color(t.axis_line)
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .child(format!(
-                                "Account: {} ▾",
-                                self.target.account_name.as_deref().unwrap_or("none")
-                            ))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|v, _, _, cx| {
-                                    v.step_account();
-                                    cx.notify();
-                                }),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("product-step")
-                            .px_1()
-                            .border_1()
-                            .border_color(t.axis_line)
-                            .rounded_sm()
-                            .cursor_pointer()
-                            .child(format!(
-                                "Product: {} ▾",
-                                self.target.product.as_deref().unwrap_or("none")
-                            ))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|v, _, _, cx| {
-                                    v.step_product();
-                                    cx.notify();
-                                }),
-                            ),
-                    ),
+                    .child(RULE_NOTE),
             );
-        }
-        if rows.is_empty() {
-            main = main.child(div().text_color(t.text_dim).child("No setting matches"));
+            child += 1;
         }
         let mut selected_child = None;
-        for (r, &i) in rows.iter().enumerate() {
-            if r == self.row {
-                selected_child = Some(child);
-            }
-            main = main.child(self.row_view(i, &prefs, cx));
-            child += 1;
-            if schema::all()[i].key == "trading.brackets"
-                && let Some(e) = self.editor_view()
-            {
-                main = main.child(e);
-                child += 1;
-            }
-            if schema::all()[i].key == display_zone::KEY
-                && let Some(e) = self.zone_view(cx)
-            {
-                main = main.child(e);
-                child += 1;
-            }
-            if schema::all()[i].key == "keys.list" {
-                main = main.child(self.keys_list());
-                child += 1;
-            }
-            if schema::all()[i].key == schema::CONNECTIONS_LIST {
-                if !self.conn.started() {
-                    self.conn.reload(None);
+        // Blocks shown after a line: the preset editor, the time zone's list, the keys.
+        let extras = |v: &Self, keys: &[usize], cx: &mut Context<Self>| -> Vec<AnyElement> {
+            let mut out = Vec::new();
+            for &i in keys {
+                match schema::all()[i].key {
+                    "trading.brackets" => out.extend(v.editor_view()),
+                    k if k == display_zone::KEY => out.extend(v.zone_view(cx)),
+                    "keys.list" => out.push(v.keys_list()),
+                    // Settings › Connections: a card per source (decision 0030).
+                    k if k == schema::CONNECTIONS_LIST => {
+                        out.push(crate::connections_view::list(&v.conn, &v.theme, cx))
+                    }
+                    _ => {}
                 }
-                main = main.child(crate::connections_view::list(&self.conn, &self.theme, cx));
+            }
+            out
+        };
+        if searching {
+            if rows.is_empty() {
+                main = main.child(div().text_color(t.text_dim).child("No setting matches"));
+            }
+            // Each match under its section's header (and its group's), so none is read out
+            // of context.
+            let mut header = String::new();
+            // The line last drawn (its first key): two matches on one line draw it once.
+            let mut last: Option<&'static str> = None;
+            for &i in &rows {
+                let Some(place) = schema::places()[i] else {
+                    continue;
+                };
+                let first = place.line.keys().next();
+                if first == last {
+                    if sel == Some(i) {
+                        selected_child = Some(child - 1);
+                    }
+                    continue;
+                }
+                last = first;
+                let h = schema::search_header(i);
+                if h != header {
+                    main = main.child(self.group_title(&h, false, cx));
+                    child += 1;
+                    header = h;
+                }
+                if sel == Some(i) {
+                    selected_child = Some(child);
+                }
+                let label = schema::line_label(&place.line);
+                main = main.child(self.line_view(label, place.line.parts, false, &prefs, cx));
                 child += 1;
+                for e in extras(self, &[i], cx) {
+                    main = main.child(e);
+                    child += 1;
+                }
+            }
+        } else {
+            for g in schema::page(self.section) {
+                if !g.title.is_empty() {
+                    main = main.child(self.group_title(g.title, g.product, cx));
+                    child += 1;
+                }
+                for line in g.lines {
+                    let keys: Vec<usize> = line
+                        .keys()
+                        .filter_map(schema::index_of)
+                        .filter(|&i| self.on_page(i))
+                        .collect();
+                    if keys.is_empty() {
+                        continue;
+                    }
+                    if sel.is_some_and(|s| keys.contains(&s)) {
+                        selected_child = Some(child);
+                    }
+                    let label = schema::line_label(line);
+                    main = main.child(self.line_view(label, line.parts, line.sub, &prefs, cx));
+                    child += 1;
+                    for e in extras(self, &keys, cx) {
+                        main = main.child(e);
+                        child += 1;
+                    }
+                }
             }
         }
         let at = (self.section, self.row, self.query.clone());
+        // Only once the list has been laid out (a first frame has no viewport yet, and
+        // scrolling against none would jump past the row): the next frame does it then.
         if let Some(c) = selected_child
             && self.scrolled.as_ref() != Some(&at)
+            && self.scroll.bounds().size.height > px(0.0)
         {
-            // The first row: the top (its section's title and account line too).
+            // The first row: the top (its page's title and account line too).
             if self.row == 0 {
                 self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
             } else {
                 self.scroll.scroll_to_item(c);
             }
             self.scrolled = Some(at);
+            self.scroll_wait = None;
+        } else if selected_child.is_some() && self.scrolled.as_ref() != Some(&at) {
+            // Not laid out yet: scroll on a next frame (a row opened below the fold), a few
+            // frames at most.
+            let tries = match &self.scroll_wait {
+                Some((w, n)) if *w == at => *n,
+                _ => 0,
+            };
+            if tries < 4 {
+                self.scroll_wait = Some((at, tries + 1));
+                cx.notify();
+            }
         }
         let search = div()
             .flex_1()
-            .mx_3()
+            .ml_3()
             .px_2()
             .rounded_sm()
             .border_1()
             .border_color(if searching { t.accent } else { t.axis_line })
+            .bg(t.panel)
             .text_color(if searching { t.text_main } else { t.text_dim })
             .child(if searching {
                 format!("{}▏", self.query)
             } else {
-                "Search settings (type to filter)…".to_owned()
+                "Search settings".to_owned()
             });
         div()
             .id("settings")
@@ -2966,8 +3380,7 @@ impl Render for SettingsWindow {
                     .border_b_1()
                     .border_color(t.axis_line)
                     .child(div().font_weight(FontWeight::BOLD).child("Settings"))
-                    .child(search)
-                    .child(div().text_color(t.text_dim).text_size(crate::zoom::ui(12.0)).child("Esc closes")),
+                    .child(search),
             )
             .child(
                 div()
@@ -2975,55 +3388,116 @@ impl Render for SettingsWindow {
                     .flex_row()
                     .flex_1()
                     .min_h_0()
-                    .child(self.nav(cx))
-                    .child(main),
+                    .child(self.nav(&prefs, cx))
+                    .child(
+                        // A page longer than the window fades into the bottom bar, so a row
+                        // cut there reads as more below, not as a broken control.
+                        div().relative().flex().flex_1().min_w_0().child(main).when(
+                            // More below the visible part (the offset is negative, down to
+                            // -max_offset), not merely a page longer than the window.
+                            self.scroll.max_offset().y > px(0.0)
+                                && -self.scroll.offset().y < self.scroll.max_offset().y - px(1.0),
+                            |d| {
+                                d.child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .right_0()
+                                        .bottom_0()
+                                        .h(crate::zoom::ui(FADE_H))
+                                        .bg(gpui::linear_gradient(
+                                            180.0,
+                                            // The background, fully transparent: a
+                                            // scroll cue, not a UI state (no state token).
+                                            gpui::linear_color_stop(
+                                                gpui::Hsla { a: 0.0, ..t.bg },
+                                                0.0,
+                                            ),
+                                            gpui::linear_color_stop(t.bg, 1.0),
+                                        )),
+                                )
+                            },
+                        ),
+                    ),
             )
             .child(
-                // Two whole texts: the second wraps below the first in a narrow window.
+                // Only the two keys a row doesn't show: undo and reset (Esc still closes).
                 div()
                     .flex()
                     .flex_row()
-                    .flex_wrap()
-                    .justify_between()
-                    .gap_x_4()
+                    .justify_end()
                     .px_3()
                     .py_1()
                     .border_t_1()
                     .border_color(t.axis_line)
                     .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_dim)
-                    .child(div().flex_none().whitespace_nowrap().child(
-                        "↑↓ settings · ←→ change · Enter edit · Tab sections · Ctrl+Z undo · Ctrl+R reset",
-                    ))
-                    .child(div().flex_none().whitespace_nowrap().child(
-                        if self.section == Section::Risk && self.query.trim().is_empty() {
-                            "Tighter applies at once · looser waits for the next session"
-                        } else {
-                            "Most changes apply at once · every setting is also a palette command"
-                        },
-                    )),
+                    .child(
+                        div()
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .child("Ctrl+Z undo · Ctrl+R reset"),
+                    ),
             )
     }
+}
+
+/// An Info value short enough to sit on its line's right ("Not locked out"); a longer one
+/// (a path, the accounts list) goes under the label.
+fn inline_text(s: &str) -> bool {
+    !s.contains('\n') && s.chars().count() <= 40
+}
+
+/// Editors whose summary sits beside their button ("8/16, 12/24 ticks  Edit…"); the rest
+/// (the data folder's path, the reset's account, the rollback) go under the label.
+fn summary_beside(key: &str) -> bool {
+    key == display_zone::KEY || key == "trading.brackets" || key == schema::PROP_OVERRIDES_KEY
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// At its smallest the window leaves a row's label column its full width beside the
-    /// widest scope chip and the reset slot (the control may wrap below; the label never
-    /// collapses to letters).
+    /// At its smallest the window leaves a row's label column its full width, and the widest
+    /// line's controls (the news window: two numbers and their words) fit their own line
+    /// below it with the ● and ↺ slots (they wrap there; the label never collapses).
     #[test]
     fn the_smallest_window_keeps_the_label_column() {
-        // The nav and its border, the main column's padding (px_3), the row's (px_2), a trading
-        // row's bar, its gap and the row's border.
-        let body = MIN_SIZE.0 - NAV_W - 1.0 - 2.0 * 12.0 - 2.0 * 8.0 - 3.0 - 8.0 - 2.0;
+        // The nav and its border, the main column's padding (px_3), the line's edge slot, its
+        // gap and right padding (pr_2).
+        let body = MIN_SIZE.0 - NAV_W - 1.0 - 2.0 * 12.0 - 2.0 - 8.0 - 8.0;
         const { assert!(MIN_SIZE.0 <= SIZE.0 && MIN_SIZE.1 <= SIZE.1) };
-        // A number control, the widest scope chip, the reset slot and the gaps.
-        let group = 72.0 + SCOPE_MAX_W + 20.0 + 2.0 * 8.0;
+        // Two number fields, "before," and "after" (about 7 px a letter), the gaps, ● and ↺.
+        let words = 13.0 * 7.0;
+        let group = 2.0 * NUMBER_W + words + 4.0 * 8.0 + DOT_W + RESET_W + 2.0 * 4.0;
         assert!(body >= LABEL_MIN_W, "{body}");
-        assert!(body >= group, "the control group fits its own line: {body}");
+        assert!(
+            body >= group,
+            "the controls fit their own line: {body} < {group}"
+        );
     }
+
+    /// The window's search keeps every match under its own section's header: the headers,
+    /// in order, never repeat, and each match's header is its place's.
+    #[test]
+    fn search_results_keep_their_headers() {
+        let hits = schema::search("loss");
+        assert!(hits.len() > 2);
+        let headers: Vec<String> = hits.iter().map(|&i| schema::search_header(i)).collect();
+        let mut seen: Vec<&String> = Vec::new();
+        for h in &headers {
+            if seen.last() != Some(&h) {
+                assert!(!seen.contains(&h), "{h} shows twice: {headers:?}");
+                seen.push(h);
+            }
+        }
+        assert!(
+            headers.iter().any(|h| h == "Accounts › Limits"),
+            "{headers:?}"
+        );
+        assert!(headers.iter().all(|h| !h.is_empty()));
+    }
+
     use std::collections::BTreeMap;
 
     /// A refused change goes back by the entry it wrote (name or id key), and not over a
