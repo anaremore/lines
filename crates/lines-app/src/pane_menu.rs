@@ -85,6 +85,13 @@ pub enum MenuObject {
     Order { id: u64, title: String, stop: bool },
     /// A drawing (now the selection): what it is.
     Drawing { title: String },
+    /// The temporary measure: which parts its readout shows.
+    Measure {
+        show: crate::chart_draw::MeasureShow,
+        /// The P&L display setting: off hides ticks and P&L whatever the choice, and the
+        /// rows say so (money-relevant: never a checked box that shows nothing).
+        pnl: crate::pnl::PnlDisplay,
+    },
 }
 
 /// A menu a screenshot opens (`--context-menu`, decision 0009): the focused pane's, or the
@@ -92,6 +99,8 @@ pub enum MenuObject {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShotMenu {
     pub order: bool,
+    /// The focused chart's temporary measure's menu (`measure`).
+    pub measure: bool,
     /// The tab's menu (`tab`).
     pub tab: bool,
     pub sub: Option<String>,
@@ -121,14 +130,16 @@ pub fn parse_shot_menu(s: &str) -> Result<ShotMenu, String> {
         Some((w, sub)) => (w, Some(sub.to_owned())),
         None => (rest, None),
     };
-    let (order, tab) = match what {
-        "pane" => (false, false),
-        "order" => (true, false),
-        "tab" => (false, true),
-        other => return Err(format!("{other}: expected pane, order or tab")),
+    let (order, tab, measure) = match what {
+        "pane" => (false, false, false),
+        "order" => (true, false, false),
+        "tab" => (false, true, false),
+        "measure" => (false, false, true),
+        other => return Err(format!("{other}: expected pane, order, tab or measure")),
     };
     Ok(ShotMenu {
         order,
+        measure,
         tab,
         sub,
         at,
@@ -170,6 +181,30 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
             v.push(row("Change size…", Command::Order(OrderCmd::Resize(*id))));
             v.push(MenuItem::sep());
             v.push(row("Cancel order", Command::Order(OrderCmd::Cancel(*id))).destructive());
+            v
+        }
+        MenuObject::Measure { show, pnl } => {
+            use crate::chart_draw::MeasurePart;
+            let mut v = vec![MenuItem::title("Measure"), MenuItem::sep()];
+            for p in MeasurePart::ALL {
+                let hidden = match p {
+                    MeasurePart::Ticks => !pnl.ticks(),
+                    MeasurePart::Pnl => !pnl.money(),
+                    _ => false,
+                };
+                let label = if hidden {
+                    format!("{} (P&L display: {})", p.label(), pnl.label())
+                } else {
+                    p.label().to_owned()
+                };
+                v.push(toggle(
+                    &label,
+                    Command::Draw(DrawCmd::MeasurePart(p)),
+                    show.get(p),
+                ));
+            }
+            v.push(MenuItem::sep());
+            v.push(row("Remove measure", Command::Draw(DrawCmd::RemoveMeasure)).destructive());
             v
         }
         MenuObject::Drawing { title } => vec![
@@ -654,6 +689,56 @@ mod tests {
     }
 
     #[test]
+    fn the_measure_gets_its_own_menu() {
+        use crate::chart_draw::{MeasurePart, MeasureShow};
+        use crate::pnl::PnlDisplay;
+        let mut show = MeasureShow::default();
+        show.toggle(MeasurePart::Time);
+        let v = object_items(&MenuObject::Measure {
+            show,
+            pnl: PnlDisplay::Both,
+        });
+        assert!(v[0].header && v[0].label == "Measure");
+        assert_eq!(
+            labels(&v),
+            [
+                "Measure",
+                "---",
+                "Ticks",
+                "Points",
+                "P&L / contract",
+                "Bars",
+                "Time",
+                "---",
+                "Remove measure"
+            ]
+        );
+        assert!(v[2].checked && !v[6].checked, "Time off, the rest on");
+        assert!(v.last().unwrap().destructive);
+        // P&L display off: the rows it hides say so.
+        let off = object_items(&MenuObject::Measure {
+            show,
+            pnl: PnlDisplay::Off,
+        });
+        assert_eq!(labels(&off)[2], "Ticks (P&L display: off)");
+        assert_eq!(labels(&off)[4], "P&L / contract (P&L display: off)");
+        assert_eq!(labels(&off)[3], "Points");
+        // Ticks only: P&L is the hidden one, and the row names the mode.
+        let ticks = object_items(&MenuObject::Measure {
+            show,
+            pnl: PnlDisplay::Ticks,
+        });
+        assert_eq!(labels(&ticks)[2], "Ticks");
+        assert_eq!(labels(&ticks)[4], "P&L / contract (P&L display: ticks)");
+        let money = object_items(&MenuObject::Measure {
+            show,
+            pnl: PnlDisplay::Currency,
+        });
+        assert_eq!(labels(&money)[2], "Ticks (P&L display: currency)");
+        assert_eq!(labels(&money)[4], "P&L / contract");
+    }
+
+    #[test]
     fn an_order_and_a_drawing_get_their_own_menus() {
         let o = MenuObject::Order {
             id: 7,
@@ -761,10 +846,12 @@ mod tests {
 
     #[test]
     fn screenshot_menus_parse() {
+        assert!(parse_shot_menu("measure@700,300").unwrap().measure);
         assert_eq!(
             parse_shot_menu("pane:Show@1400,300"),
             Ok(ShotMenu {
                 order: false,
+                measure: false,
                 tab: false,
                 sub: Some("Show".into()),
                 at: (1400.0, 300.0)

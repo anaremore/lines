@@ -450,6 +450,14 @@ struct Cli {
     /// px, as --cursor), released: the measure it leaves.
     #[arg(long, requires = "screenshot", value_parser = parse_drag)]
     shift_drag: Option<chart_view::ShiftDrag>,
+    /// Screenshot: then drag inside that measure from X0,Y0 to X1,Y1 (plot-local px), released:
+    /// the measure moved.
+    #[arg(long, requires = "shift_drag", value_parser = parse_drag)]
+    move_measure: Option<chart_view::ShiftDrag>,
+    /// Screenshot: the measure's readout shows only these parts (comma-separated: ticks,
+    /// points, pnl, bars, time), as its right-click menu sets them.
+    #[arg(long, requires = "screenshot")]
+    measure_parts: Option<String>,
     /// Screenshot: zoom the auto-fitted price range by this factor around the plot's center
     /// (as Ctrl+wheel would), which switches the price axis to manual scale.
     #[arg(long, requires = "screenshot", value_parser = parse_zoom)]
@@ -1485,6 +1493,7 @@ where
             cursor: cli.cursor,
             drag_position: cli.drag_position,
             shift_drag: cli.shift_drag,
+            move_measure: cli.move_measure,
             price_zoom: cli.price_zoom,
             picker: cli.picker.clone(),
             indicators: cli
@@ -1588,6 +1597,12 @@ where
                     .transpose()
                     .map_err(|e| anyhow::anyhow!(e))?,
                 pnl: cli.pnl.map(PnlArg::mode),
+                measure_parts: cli
+                    .measure_parts
+                    .as_deref()
+                    .map(chart_draw::MeasureShow::parse)
+                    .transpose()
+                    .map_err(|e| anyhow::anyhow!("--measure-parts: {e}"))?,
                 drawings,
                 bracket_units: cli.bracket_units.map(BracketUnitsArg::units),
                 bracket_editor: cli.bracket_editor,

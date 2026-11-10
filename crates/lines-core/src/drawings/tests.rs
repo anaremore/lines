@@ -302,16 +302,43 @@ fn measure_reads_ticks_points_dollars_bars_and_time() {
     let off = MeasureParts {
         ticks: false,
         money: false,
+        ..MeasureParts::ALL
     };
     assert_eq!(text(&m, off), "+3.00 pts \u{b7} 85 bars \u{b7} 1h 25m");
     let ticks = MeasureParts {
-        ticks: true,
         money: false,
+        ..MeasureParts::ALL
     };
     assert_eq!(
         text(&m, ticks),
         "+12 ticks \u{b7} +3.00 pts \u{b7} 85 bars \u{b7} 1h 25m"
     );
+    // Only ticks and bars; one part; none.
+    let tb = MeasureParts {
+        ticks: true,
+        points: false,
+        money: false,
+        bars: true,
+        time: false,
+    };
+    assert_eq!(text(&m, tb), "+12 ticks \u{b7} 85 bars");
+    let time = MeasureParts {
+        ticks: false,
+        points: false,
+        money: false,
+        bars: false,
+        time: true,
+    };
+    assert_eq!(
+        text(&m, time),
+        "1h 25m",
+        "no separator before the first part"
+    );
+    let none = MeasureParts {
+        time: false,
+        ..time
+    };
+    assert_eq!(text(&m, none), "");
     let big = MeasureStats {
         cents: -123_456_789,
         ..m

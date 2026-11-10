@@ -68,6 +68,8 @@ pub struct Shot {
     pub chain_ticket: Option<crate::chain_ticket::ShotTicket>,
     /// The P&L display (`--pnl`; default: the app's default).
     pub pnl: Option<crate::pnl::PnlDisplay>,
+    /// The measure readout's parts (`--measure-parts`).
+    pub measure_parts: Option<crate::chart_draw::MeasureShow>,
     /// Drawings to show (`--drawings FILE`), in memory only.
     pub drawings: Option<(lines_core::Product, Vec<lines_core::drawings::Drawing>)>,
     /// Bracket distances in ticks or points (`--bracket-units`), for every account.
@@ -189,6 +191,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         account_menu,
         chain_ticket,
         pnl,
+        measure_parts,
         drawings: seed,
         bracket_units,
         bracket_editor,
@@ -335,6 +338,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, shot: Shot) -> Result<i32> {
         }
         if let Some(m) = pnl {
             settings.settings.pnl_display = m;
+        }
+        if let Some(show) = measure_parts {
+            settings.settings.measure = show;
         }
         for a in &account_ids {
             for s in &position_symbols {

@@ -227,6 +227,9 @@ pub struct Fixture {
     /// A Shift+drag from the first plot-local point to the second, released (screenshots:
     /// `--shift-drag X0,Y0:X1,Y1`): the measure it leaves, through the press path's own calls.
     pub shift_drag: Option<ShiftDrag>,
+    /// Then a drag inside that measure from the first point to the second, released
+    /// (`--move-measure X0,Y0:X1,Y1`): the measure moved.
+    pub move_measure: Option<ShiftDrag>,
     /// Zoom the auto-fitted price range by this factor around the plot's centre, as Ctrl+wheel
     /// would (turns auto-scale off).
     pub price_zoom: Option<f64>,
@@ -455,6 +458,8 @@ pub struct ChartView {
     drag_position: Option<f32>,
     /// Screenshot fixture: a Shift+drag, replayed each frame.
     shift_drag: Option<ShiftDrag>,
+    /// Screenshot fixture: a drag moving that measure, replayed each frame.
+    move_measure: Option<ShiftDrag>,
     /// The chart's timeframe (roadmap 9), saved with the pane. Never shared through link
     /// groups: they share the market only.
     timeframe: Timeframe,
@@ -737,6 +742,7 @@ impl ChartView {
             trading_cache: crate::trading::Trading::try_global(cx).map(|t| t.cache.clone()),
             drag_position: fixture.drag_position,
             shift_drag: fixture.shift_drag,
+            move_measure: fixture.move_measure,
             timeframe: Timeframe::ONE_MINUTE,
             derived: None,
             ticks: None,
@@ -1462,6 +1468,17 @@ impl ChartView {
                 return;
             }
             let anchor = self.drawing_anchor(x, y);
+            // A placed measure moves or resizes by a drag on it (an order's tag keeps its
+            // press; Alt and Ctrl keep theirs).
+            if !ctrl
+                && !ev.modifiers.alt
+                && !ev.modifiers.shift
+                && !self.order_under(x, y)
+                && self.drawings.measure_down(x as f32, y as f32, anchor)
+            {
+                cx.notify();
+                return;
+            }
             if self.drawings.on_down(x as f32, y as f32, ctrl, anchor) {
                 cx.notify();
                 return;
@@ -3207,6 +3224,11 @@ impl ChartView {
                 let (from, to) = (at(a), at(b));
                 self.drawings.quick_down(a.0, a.1, from);
                 self.drawings.on_up(b.0, b.1, to);
+                if let Some((m0, m1)) = self.move_measure
+                    && let (Some(f), Some(t)) = (at(m0), at(m1))
+                {
+                    self.drawings.screenshot_move_measure(f, t, &axis, fmt.tick);
+                }
             }
             self.drawings.set_pointer(self.hover);
             self.drawings.prepare(
@@ -5026,7 +5048,15 @@ impl ChartView {
             .try_global::<crate::picker_view::AppSettings>()
             .map(|a| a.settings.pnl_display)
             .unwrap_or_default();
-        let parts = measure_parts(mode);
+        let parts = cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| a.settings.measure)
+            .unwrap_or_default()
+            .parts(mode);
+        // Every part off: no readout at all (never an empty panel).
+        if !(parts.ticks || parts.points || parts.money || parts.bars || parts.time) {
+            return;
+        }
         if self
             .measure_lines
             .get(&key)
@@ -5139,6 +5169,15 @@ impl ChartView {
             .unwrap_or_default();
         if let Some(o) = self.order_object_at(x as f32, y as f32, mode) {
             self.menu_object = Some(o);
+            return;
+        }
+        // The temporary measure, drawn over the drawings: its own menu.
+        if self.drawings.measure_grip_at(x as f32, y as f32).is_some() {
+            let s = crate::picker_view::settings(cx);
+            self.menu_object = Some(crate::pane_menu::MenuObject::Measure {
+                show: s.measure,
+                pnl: s.pnl_display,
+            });
             return;
         }
         let before = self.drawings.selected;
@@ -5365,9 +5404,18 @@ impl ChartView {
                     }
                 }
             },
+            DrawCmd::MeasurePart(p) => {
+                crate::picker_view::update_settings(cx, |s| s.measure.toggle(p));
+            }
             other => d.run(other),
         }
         cx.notify();
+    }
+
+    /// Whether a temporary measure is shown (screenshots' `--context-menu measure`).
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub fn measure_shown(&self) -> bool {
+        self.drawings.measure_shown().is_some()
     }
 
     pub fn drawings_hidden(&self) -> bool {
@@ -6687,15 +6735,6 @@ fn measure_label_at(
     (x, y)
 }
 
-/// The amounts a measure shows for a P&L display setting: exactly the setting's (off: no
-/// ticks or money).
-fn measure_parts(mode: PnlDisplay) -> lines_core::drawings::MeasureParts {
-    lines_core::drawings::MeasureParts {
-        ticks: mode.ticks(),
-        money: mode.money(),
-    }
-}
-
 /// A hovered tick bar: its last trade time, trade count, the chart's count and its state
 /// (`None` on time bars).
 /// A trade-built bar under the crosshair: last trade, trade count, the tick bars' size (none
@@ -7105,9 +7144,28 @@ impl Render for ChartView {
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_exit(cx.listener(Self::on_mouse_exit))
                     .on_scroll(cx.listener(Self::on_scroll))
-                    .when(self.drawings.active(), |d| d.cursor_crosshair())
+                    .when_some(
+                        self.drawings
+                            .measure_grip()
+                            .zip(self.drawings.measure_shown())
+                            .map(|(g, (p, _))| match g {
+                                crate::chart_draw::Grip::Move
+                                    if self.drawings.measure_dragging() =>
+                                {
+                                    gpui::CursorStyle::ClosedHand
+                                }
+                                g => g.cursor(p.p0, p.p1),
+                            }),
+                        |d, c| d.cursor(c),
+                    )
                     .when(
-                        !self.drawings.active() && self.drawings.hover_hit().is_some(),
+                        self.drawings.active() && self.drawings.measure_grip().is_none(),
+                        |d| d.cursor_crosshair(),
+                    )
+                    .when(
+                        !self.drawings.active()
+                            && self.drawings.measure_grip().is_none()
+                            && self.drawings.hover_hit().is_some(),
                         |d| d.cursor_pointer(),
                     )
                     .child(
@@ -7534,15 +7592,27 @@ mod tests {
         );
     }
 
-    /// The measure shows exactly what the P&L display setting allows.
+    /// The measure shows what the user chose and the P&L display setting allows: off hides
+    /// ticks and money whatever the choice.
     #[test]
     fn measure_follows_pnl_display() {
+        use crate::chart_draw::MeasureShow;
         use lines_core::drawings::MeasureParts;
-        let p = |ticks, money| MeasureParts { ticks, money };
-        assert_eq!(measure_parts(PnlDisplay::Off), p(false, false));
-        assert_eq!(measure_parts(PnlDisplay::Ticks), p(true, false));
-        assert_eq!(measure_parts(PnlDisplay::Currency), p(false, true));
-        assert_eq!(measure_parts(PnlDisplay::Both), p(true, true));
+        let p = |ticks, money| MeasureParts {
+            ticks,
+            money,
+            ..MeasureParts::ALL
+        };
+        let all = MeasureShow::default();
+        assert_eq!(all.parts(PnlDisplay::Off), p(false, false));
+        assert_eq!(all.parts(PnlDisplay::Ticks), p(true, false));
+        assert_eq!(all.parts(PnlDisplay::Currency), p(false, true));
+        assert_eq!(all.parts(PnlDisplay::Both), p(true, true));
+        let mut some = all;
+        some.toggle(crate::chart_draw::MeasurePart::Pnl);
+        some.toggle(crate::chart_draw::MeasurePart::Points);
+        let got = some.parts(PnlDisplay::Both);
+        assert!(got.ticks && !got.money && !got.points && got.bars && got.time);
     }
 
     #[test]

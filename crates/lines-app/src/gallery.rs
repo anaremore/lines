@@ -925,6 +925,38 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         end,
         chart("--theme light --shift-drag 700,520:1150,180"),
     ));
+    // A placed measure moved by a drag inside it; a readout with only ticks and bars (light);
+    // the measure's right-click menu; at 150 %.
+    v.push(s(
+        "measure-moved",
+        true,
+        end,
+        chart("--theme dark --shift-drag 700,520:1150,180 --move-measure 900,350:600,420"),
+    ));
+    v.push(s(
+        "measure-ticks-bars-light",
+        false,
+        end,
+        chart("--theme light --shift-drag 700,520:1150,180 --measure-parts ticks,bars"),
+    ));
+    v.push(s(
+        "measure-menu",
+        false,
+        end,
+        chart("--theme dark --shift-drag 700,520:1150,180 --context-menu measure@900,350"),
+    ));
+    v.push(s(
+        "measure-menu-pnl-off-150",
+        false,
+        end,
+        chart("--theme dark --shift-drag 500,520:1000,180 --pnl off --ui-zoom 150 --context-menu measure@700,300"),
+    ));
+    v.push(s(
+        "measure-zoom-150",
+        false,
+        end,
+        chart("--theme dark --shift-drag 500,520:1000,180 --ui-zoom 150"),
+    ));
     v.push(s(
         "chart-shift-measure-narrow",
         false,

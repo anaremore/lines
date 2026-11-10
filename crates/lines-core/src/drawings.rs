@@ -628,19 +628,24 @@ pub fn measure(
     }
 }
 
-/// Which amounts a measure shows. The app maps its P&L display setting onto this exactly:
-/// off = neither, ticks = ticks, currency = money, both = both (points, bars and duration
-/// always show).
+/// Which parts a measure's readout shows. The app combines the user's choice (the measure's
+/// menu) with its P&L display setting: off hides ticks and money whatever the choice.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct MeasureParts {
     pub ticks: bool,
+    pub points: bool,
     pub money: bool,
+    pub bars: bool,
+    pub time: bool,
 }
 
 impl MeasureParts {
     pub const ALL: MeasureParts = MeasureParts {
         ticks: true,
+        points: true,
         money: true,
+        bars: true,
+        time: true,
     };
 }
 
@@ -659,24 +664,45 @@ pub fn write_measure<W: std::fmt::Write>(
         -1 => "-",
         _ => "",
     };
+    // Each shown part, a separator before all but the first.
+    let mut first = true;
+    let mut sep = |out: &mut W| -> std::fmt::Result {
+        if std::mem::take(&mut first) {
+            Ok(())
+        } else {
+            out.write_str(SEP)
+        }
+    };
     if parts.ticks {
-        write!(out, "{}{} ticks{SEP}", sign(s.ticks.into()), s.ticks.abs())?;
+        sep(out)?;
+        write!(out, "{}{} ticks", sign(s.ticks.into()), s.ticks.abs())?;
     }
-    out.write_str(sign(s.units.into()))?;
-    fmt.write(Price(s.units.abs()), out)?;
-    out.write_str(" pts")?;
+    if parts.points {
+        sep(out)?;
+        out.write_str(sign(s.units.into()))?;
+        fmt.write(Price(s.units.abs()), out)?;
+        out.write_str(" pts")?;
+    }
     if parts.money {
-        write!(out, "{SEP}{}$", sign(s.cents))?;
+        sep(out)?;
+        write!(out, "{}$", sign(s.cents))?;
         write_thousands(s.cents.unsigned_abs() / 100, out)?;
         write!(out, ".{:02}/contract", s.cents.unsigned_abs() % 100)?;
     }
-    write!(out, "{SEP}{} bars{SEP}", s.bars.abs())?;
-    let mins = s.duration_ms.abs() / 60_000;
-    match (mins / 1_440, (mins / 60) % 24, mins % 60) {
-        (0, 0, m) => write!(out, "{m}m"),
-        (0, h, m) => write!(out, "{h}h {m:02}m"),
-        (d, h, _) => write!(out, "{d}d {h}h"),
+    if parts.bars {
+        sep(out)?;
+        write!(out, "{} bars", s.bars.abs())?;
     }
+    if parts.time {
+        sep(out)?;
+        let mins = s.duration_ms.abs() / 60_000;
+        match (mins / 1_440, (mins / 60) % 24, mins % 60) {
+            (0, 0, m) => write!(out, "{m}m")?,
+            (0, h, m) => write!(out, "{h}h {m:02}m")?,
+            (d, h, _) => write!(out, "{d}d {h}h")?,
+        }
+    }
+    Ok(())
 }
 
 /// `n` with US thousands separators (`1,500`), without allocating.
