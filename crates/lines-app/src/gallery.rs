@@ -390,6 +390,21 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         "strategy 3; buy 10 mkt; ack; sell 10 stop 6018.75; ack; print 6018.75; ack; manual".into(),
     );
     v.push(s("strategy-marks", false, end, mk));
+    // Unlinked market panes: each header's hollow swatch and "–", wide and narrow (the DOM
+    // and T&S headers at their narrowest).
+    for (name, size) in [("unlinked", "1400x800"), ("unlinked-narrow", "560x600")] {
+        v.push(s(
+            name,
+            false,
+            end,
+            vec![
+                "--workspace".into(),
+                ws("unlinked.json"),
+                "--size".into(),
+                size.into(),
+            ],
+        ));
+    }
     if let Some(p) = v.iter_mut().find(|s| s.name == "popout") {
         p.windows = 2;
     }
@@ -1161,6 +1176,14 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         pane("dom", ""),
         pane("strategies", "")
     );
+    // Unlinked panes (a new tab with every link group in use): their headers say so.
+    let unlinked = format!(
+        r#"{{ "split": {{ "axis": "row", "ratio": 0.6, "first": {}, "second": {{ "split": {{ "axis": "column", "ratio": 0.6, "first": {}, "second": {} }} }} }} }}"#,
+        pane("chart", ""),
+        pane("dom", ""),
+        pane("tape", "")
+    )
+    .replace(r#""link": 0"#, r#""link": null"#);
     let strategy_marks = format!(
         r#"{{ "split": {{ "axis": "row", "ratio": 0.6, "first": {}, "second": {} }} }}"#,
         pane("chart", r#", "chart": { "bar_px": 14.0 }"#),
@@ -1357,6 +1380,7 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ("journal.json", journal),
         ("strategies.json", strategies),
         ("strategy-marks.json", strategy_marks),
+        ("unlinked.json", unlinked),
     ] {
         std::fs::write(dir.join(f), doc(layout)).with_context(|| f.to_owned())?;
     }
