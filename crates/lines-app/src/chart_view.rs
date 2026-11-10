@@ -147,8 +147,6 @@ pub(crate) fn corner_layout(
 /// Colours in signatures (theme tokens only).
 type Colour = gpui::Hsla;
 
-/// Gap between a chart tag and the plot's right edge.
-const TAG_GAP_PX: f32 = lines_core::geometry::order_tags::TAG_GAP;
 /// Height of the last-price and crosshair price tags on the price axis.
 const TAG_H_100: f32 = LABEL_PX_100 * 1.5;
 /// [`TAG_H_100`] at the UI zoom (`crate::zoom`).
@@ -604,7 +602,7 @@ impl crate::trade_bar::TradePane for ChartView {
         self.ct.group_of(order.0).is_none()
             && self.ct.tags[..self.ct.n_tags]
                 .iter()
-                .any(|b| b.id == order.0 && b.left >= crate::chart_trade::RESIZE_W)
+                .any(|b| b.id == order.0 && b.left >= crate::chart_trade::resize_w(b))
     }
     fn send_resize(
         &mut self,
@@ -790,8 +788,8 @@ impl ChartView {
             hud_at: None,
             hud_compact: false,
             trade,
-            // Order and position tags don't zoom: their boxes are lines-core's.
-            pos_glyphs: crate::text::Glyphs::fixed(LABEL_PX_100),
+            // Order and position tags zoom with their boxes (`order_tags::Metrics`).
+            pos_glyphs: crate::text::Glyphs::new(LABEL_PX_100),
             ct: crate::chart_trade::ChartTradeState {
                 strip_pick: fixture.strip_pick,
                 ..Default::default()
@@ -2709,11 +2707,11 @@ impl ChartView {
         match h {
             // A group tag lists its orders (no one order to drag, no × for many at one press).
             TagHit::Body(id) | TagHit::Close(id) if self.ct.group_of(id).is_some() => {
-                let top = self.ct.tags[..n]
+                let bottom = self.ct.tags[..n]
                     .iter()
                     .find(|b| b.id == id)
-                    .map_or(y as f32, |b| b.top);
-                self.open_order_group(id, top, cx);
+                    .map_or(y as f32, |b| b.top + b.h);
+                self.open_order_group(id, bottom, cx);
             }
             // Moving and cancelling need no arming, as on the DOM.
             TagHit::Body(id) => {
@@ -2769,7 +2767,7 @@ impl ChartView {
     }
 
     /// Open the list of a group tag's orders (`crate::order_group_view`).
-    fn open_order_group(&mut self, id: u64, top: f32, cx: &mut Context<Self>) {
+    fn open_order_group(&mut self, id: u64, tag_bottom: f32, cx: &mut Context<Self>) {
         let Some(g) = self.ct.group_of(id).copied() else {
             return;
         };
@@ -2796,7 +2794,7 @@ impl ChartView {
             rows,
             account: self.trade.account.clone(),
             title,
-            top,
+            tag_bottom,
             confirm: None,
         });
         popover::opened(cx, Kind::OrderGroup, |v: &mut Self, cx| {
@@ -3096,11 +3094,11 @@ impl ChartView {
                 .copied()
             {
                 self.pending_group_menu = false;
-                let top = self.ct.tags[..self.ct.n_tags]
+                let bottom = self.ct.tags[..self.ct.n_tags]
                     .iter()
                     .find(|b| b.id == g.id)
-                    .map_or(0.0, |b| b.top);
-                self.open_order_group(g.id, top, cx);
+                    .map_or(0.0, |b| b.top + b.h);
+                self.open_order_group(g.id, bottom, cx);
             }
             cx.notify();
         }
@@ -3423,6 +3421,7 @@ impl ChartView {
         y: f32,
         (ox, oy): (f32, f32),
         hair: f32,
+        tm: &lines_core::geometry::order_tags::Metrics,
         window: &mut Window,
         cx: &mut App,
     ) -> lines_core::geometry::order_tags::TagBox {
@@ -3448,15 +3447,16 @@ impl ChartView {
         let w_head = self
             .pos_glyphs
             .width(head.as_str(), t.text_main, true, window);
+        let s = tm.scale;
         let w_money = if shown {
-            8.0 + self.pos_glyphs.width(money.as_str(), tone, true, window)
+            8.0 * s + self.pos_glyphs.width(money.as_str(), tone, true, window)
         } else {
             0.0
         };
-        // The position tag doesn't zoom: its handles are lines-core's (`order_tags::handles`).
-        let (x, h) = (ox + 4.0, TAG_H_100);
+        // Sized like the order tags (`tm`), so its handles (`order_tags::handles`) fit it.
+        let (x, h) = (ox + 4.0 * s, tm.tag_h);
         let top = oy + y - h * 0.5;
-        let w = w_head + w_money + 12.0;
+        let w = w_head + w_money + tm.text_pad;
         window.paint_quad(fill(
             Bounds::new(point(px(x), px(top)), size(px(w), px(h))),
             t.label_bg,
@@ -3475,7 +3475,7 @@ impl ChartView {
         }
         self.pos_glyphs.paint(
             head.as_str(),
-            x + 6.0,
+            x + 6.0 * s,
             top,
             h,
             t.text_main,
@@ -3486,7 +3486,7 @@ impl ChartView {
         if shown {
             self.pos_glyphs.paint(
                 money.as_str(),
-                x + 6.0 + w_head + 8.0,
+                x + 6.0 * s + w_head + 8.0 * s,
                 top,
                 h,
                 tone,
@@ -3502,6 +3502,7 @@ impl ChartView {
             left: x - ox,
             top: top - oy,
             w,
+            h,
             close_left: x - ox + w,
         }
     }
@@ -3570,6 +3571,7 @@ impl ChartView {
         (pw, ph): (f32, f32),
         hair: f32,
         scale: f32,
+        tm: &lines_core::geometry::order_tags::Metrics,
         mode: PnlDisplay,
         window: &mut Window,
         cx: &mut App,
@@ -3580,11 +3582,13 @@ impl ChartView {
         use crate::dom_trade::group_key;
         use crate::dom_trade::{MarkRole, MarkStyle};
         use lines_core::geometry::order_tags::{
-            CLOSE_W, GroupIn, HANDLE_H, HANDLE_W, LineIn, MIXED_KEY, edge_markers, group_orders,
-            handles, layout_tags, tag_band, tags_fit, wanted_handles,
+            GroupIn, LineIn, MIXED_KEY, edge_markers, group_orders, handles, layout_tags, tag_band,
+            tags_fit, wanted_handles,
         };
-        // The order tags' own height (their layout's), not the price labels'.
-        const ORDER_TAG_H: f32 = lines_core::geometry::order_tags::TAG_H;
+        // The order tags' own height and padding (their layout's, at the UI zoom), not the
+        // price labels'.
+        let order_tag_h = tm.tag_h;
+        let s = tm.scale;
         use lines_core::Qty;
         let t = self.theme;
         let fmt = self.instrument.price;
@@ -3610,7 +3614,7 @@ impl ChartView {
             });
         }
         // Edge markers (measured from their text), then the tags between them.
-        let first = edge_markers(&self.vp, &self.ct.lines, pw, ph, [0.0, 0.0]);
+        let first = edge_markers(&self.vp, &self.ct.lines, pw, ph, [0.0, 0.0], tm);
         let mut edge_text = [FixedStr::<64>::new(), FixedStr::<64>::new()];
         let mut edge_w = [0.0f32; 2];
         for k in 0..2 {
@@ -3633,8 +3637,8 @@ impl ChartView {
                     .width(edge_text[k].as_str(), t.text_main, true, window);
             }
         }
-        self.ct.markers = edge_markers(&self.vp, &self.ct.lines, pw, ph, edge_w);
-        let band = tag_band(&self.ct.markers, ph);
+        self.ct.markers = edge_markers(&self.vp, &self.ct.lines, pw, ph, edge_w, tm);
+        let band = tag_band(&self.ct.markers, ph, tm);
         // The tags: orders of one kind that can't sit at their own levels share one (zooming in
         // splits them back), and every order on the plot is in exactly one.
         self.ct.on_plot.clear();
@@ -3654,7 +3658,8 @@ impl ChartView {
             &self.vp,
             &mut self.ct.on_plot,
             ph,
-            tags_fit(band),
+            tags_fit(band, tm),
+            tm,
             &mut self.ct.groups,
         );
         // Texts and widths, one per tag.
@@ -3681,7 +3686,7 @@ impl ChartView {
                 .pos_glyphs
                 .width(text.as_str(), t.text_main, true, window);
             if money.is_some() {
-                w += 8.0
+                w += 8.0 * s
                     + self
                         .pos_glyphs
                         .width(pnl.as_str(), t.text_main, true, window);
@@ -3706,6 +3711,7 @@ impl ChartView {
             ph,
             band,
             scale,
+            tm,
             &mut self.ct.tags,
         );
         // Lines across the plot: solid working, dashed held or pending. A group of one kind:
@@ -3798,22 +3804,23 @@ impl ChartView {
                     .pos_glyphs
                     .width(text.as_str(), t.text_main, true, window);
                 let pnl_w = if money.is_some() {
-                    8.0 + self
-                        .pos_glyphs
-                        .width(pnl.as_str(), t.text_main, true, window)
+                    8.0 * s
+                        + self
+                            .pos_glyphs
+                            .width(pnl.as_str(), t.text_main, true, window)
                 } else {
                     0.0
                 };
-                let w = head_w + pnl_w + 12.0;
-                let left = (pw - TAG_GAP_PX - w).max(0.0);
-                let top = (y - ORDER_TAG_H * 0.5).clamp(0.0, (ph - ORDER_TAG_H).max(0.0));
-                window.paint_quad(fill(rect(left, top, w, ORDER_TAG_H), t.label_bg));
-                self.outline(rect(left, top, w, ORDER_TAG_H), c, hair, window);
+                let w = head_w + pnl_w + tm.text_pad;
+                let left = (pw - tm.tag_gap - w).max(0.0);
+                let top = (y - order_tag_h * 0.5).clamp(0.0, (ph - order_tag_h).max(0.0));
+                window.paint_quad(fill(rect(left, top, w, order_tag_h), t.label_bg));
+                self.outline(rect(left, top, w, order_tag_h), c, hair, window);
                 self.pos_glyphs.paint(
                     text.as_str(),
-                    ox + left + 6.0,
+                    ox + left + 6.0 * s,
                     oy + top,
-                    ORDER_TAG_H,
+                    order_tag_h,
                     t.text_main,
                     true,
                     window,
@@ -3827,9 +3834,9 @@ impl ChartView {
                     };
                     self.pos_glyphs.paint(
                         pnl.as_str(),
-                        ox + left + 6.0 + head_w + 8.0,
+                        ox + left + 6.0 * s + head_w + 8.0 * s,
                         oy + top,
-                        ORDER_TAG_H,
+                        order_tag_h,
                         tone,
                         true,
                         window,
@@ -3855,31 +3862,33 @@ impl ChartView {
             let pending = !mixed && m.style == MarkStyle::Pending;
             // Always on the label background (readable over candles); pending reads by its dim
             // text and outline only (no role bar), held by a dashed outline.
-            window.paint_quad(fill(rect(b.left, b.top, b.w, ORDER_TAG_H), t.label_bg));
+            window.paint_quad(fill(rect(b.left, b.top, b.w, order_tag_h), t.label_bg));
             if !mixed && m.style == MarkStyle::Held {
-                self.dashed_outline(rect(b.left, b.top, b.w, ORDER_TAG_H), c, hair, window);
+                self.dashed_outline(rect(b.left, b.top, b.w, order_tag_h), c, hair, window);
             } else {
-                self.outline(rect(b.left, b.top, b.w, ORDER_TAG_H), c, hair, window);
+                self.outline(rect(b.left, b.top, b.w, order_tag_h), c, hair, window);
             }
             // The role's shape, as on the DOM: a notch on the top edge for a target, on the
             // bottom edge for a stop; entries plain. Never colour alone.
-            window.paint_quad(fill(rect(b.left, b.top, 2.0, ORDER_TAG_H), c));
+            window.paint_quad(fill(rect(b.left, b.top, 2.0, order_tag_h), c));
             match MarkRole::of(&m) {
                 _ if mixed => {}
-                MarkRole::Target => window.paint_quad(fill(rect(b.left, b.top - 2.0, 8.0, 2.0), c)),
+                MarkRole::Target => {
+                    window.paint_quad(fill(rect(b.left, b.top - 2.0, 8.0 * s, 2.0), c))
+                }
                 MarkRole::Stop => {
-                    window.paint_quad(fill(rect(b.left, b.top + ORDER_TAG_H, 8.0, 2.0), c))
+                    window.paint_quad(fill(rect(b.left, b.top + order_tag_h, 8.0 * s, 2.0), c))
                 }
                 MarkRole::Entry => {}
             }
-            window.paint_quad(fill(rect(b.close_left, b.top, hair, ORDER_TAG_H), c));
+            window.paint_quad(fill(rect(b.close_left, b.top, hair, order_tag_h), c));
             let fg = if pending { t.text_dim } else { t.text_main };
             let head_w = self.pos_glyphs.width(tt.text.as_str(), fg, true, window);
             self.pos_glyphs.paint(
                 tt.text.as_str(),
-                ox + b.left + 6.0,
+                ox + b.left + 6.0 * s,
                 oy + b.top,
-                ORDER_TAG_H,
+                order_tag_h,
                 fg,
                 true,
                 window,
@@ -3894,9 +3903,9 @@ impl ChartView {
                 };
                 self.pos_glyphs.paint(
                     tt.pnl.as_str(),
-                    ox + b.left + 6.0 + head_w + 8.0,
+                    ox + b.left + 6.0 * s + head_w + 8.0 * s,
                     oy + b.top,
-                    ORDER_TAG_H,
+                    order_tag_h,
                     tone,
                     true,
                     window,
@@ -3906,9 +3915,9 @@ impl ChartView {
             // × cancels; a group's ▾ lists its orders.
             self.pos_glyphs.paint(
                 if group.is_some() { "▾" } else { "×" },
-                ox + b.close_left + CLOSE_W * 0.5 - 3.5,
+                ox + b.close_left + tm.close_w * 0.5 - 3.5 * s,
                 oy + b.top,
-                ORDER_TAG_H,
+                order_tag_h,
                 t.text_main,
                 true,
                 window,
@@ -3938,11 +3947,11 @@ impl ChartView {
         if let Some(b) = shown
             .and_then(|h| self.ct.tags[..self.ct.n_tags].iter().find(|b| b.id == h))
             .copied()
-            .filter(|b| b.left >= crate::chart_trade::RESIZE_W)
+            .filter(|b| b.left >= crate::chart_trade::resize_w(b))
             && let Some(m) = self.ct.mark(b.id).copied()
         {
-            use crate::chart_trade::{RESIZE_BTN_W, RESIZE_VALUE_W, RESIZE_W};
-            let left = b.left - RESIZE_W;
+            let (btn_w, value_w) = crate::chart_trade::resize_parts(&b);
+            let left = b.left - crate::chart_trade::resize_w(&b);
             let mut value = lines_core::FixedStr::<16>::new();
             match &self.trade.resize_edit {
                 Some((id, digits)) if id.0 == b.id => {
@@ -3958,29 +3967,19 @@ impl ChartView {
                 t.text_dim
             };
             let parts = [
-                (left, RESIZE_BTN_W, "−", t.text_main),
-                (
-                    left + RESIZE_BTN_W,
-                    RESIZE_VALUE_W,
-                    value.as_str(),
-                    t.text_main,
-                ),
-                (
-                    left + RESIZE_BTN_W + RESIZE_VALUE_W,
-                    RESIZE_BTN_W,
-                    "+",
-                    plus,
-                ),
+                (left, btn_w, "−", t.text_main),
+                (left + btn_w, value_w, value.as_str(), t.text_main),
+                (left + btn_w + value_w, btn_w, "+", plus),
             ];
             for (x, w, text, colour) in parts {
-                let r = rect(x, b.top, w, ORDER_TAG_H);
+                let r = rect(x, b.top, w, order_tag_h);
                 window.paint_quad(fill(r, t.panel));
                 self.outline(r, t.control_edge, hair, window);
                 self.pos_glyphs.paint(
                     text,
-                    ox + x + 6.0,
+                    ox + x + 6.0 * s,
                     oy + b.top,
-                    ORDER_TAG_H,
+                    order_tag_h,
                     colour,
                     true,
                     window,
@@ -3997,13 +3996,13 @@ impl ChartView {
                 .ct
                 .mark(e.id)
                 .map_or(t.text_main, |m| self.mark_colour(m));
-            window.paint_quad(fill(rect(e.left, e.top, e.w, ORDER_TAG_H), t.label_bg));
-            self.outline(rect(e.left, e.top, e.w, ORDER_TAG_H), c, hair, window);
+            window.paint_quad(fill(rect(e.left, e.top, e.w, order_tag_h), t.label_bg));
+            self.outline(rect(e.left, e.top, e.w, order_tag_h), c, hair, window);
             self.pos_glyphs.paint(
                 text.as_str(),
-                ox + e.left + 6.0,
+                ox + e.left + 6.0 * s,
                 oy + e.top,
-                ORDER_TAG_H,
+                order_tag_h,
                 t.text_main,
                 true,
                 window,
@@ -4016,20 +4015,20 @@ impl ChartView {
         self.ct.pos_tag = pos_tag;
         if let (Some(tag), Some((qty, _))) = (pos_tag, self.ct.position) {
             let (has_t, has_s) = self.ct.exits();
-            self.ct.handles = handles(&tag, wanted_handles(qty, has_t, has_s));
+            self.ct.handles = handles(&tag, wanted_handles(qty, has_t, has_s), tm);
             for h in self.ct.handles.iter().flatten() {
                 let target = lines_core::geometry::order_tags::handle_is_target(qty, h.above);
                 let c = if target { t.order_target } else { t.order_stop };
-                let r = rect(h.left, h.top, HANDLE_W, HANDLE_H);
+                let r = rect(h.left, h.top, h.w, h.h);
                 window.paint_quad(fill(r, t.label_bg));
                 self.outline(r, c, hair, window);
                 let label = if target { "+T" } else { "+S" };
                 let lw = self.pos_glyphs.width(label, c, true, window);
                 self.pos_glyphs.paint(
                     label,
-                    ox + h.left + (HANDLE_W - lw) * 0.5,
+                    ox + h.left + (h.w - lw) * 0.5,
                     oy + h.top,
-                    HANDLE_H,
+                    h.h,
                     c,
                     true,
                     window,
@@ -4040,13 +4039,13 @@ impl ChartView {
         // The newest refusal from this chart (a move, an exit, trading off), at the plot's
         // top left: inline and brief, never a dialog.
         if let Some(why) = self.trade.local_flash() {
-            let w = self.pos_glyphs.width(why, t.on_warn, true, window) + 12.0;
-            window.paint_quad(fill(rect(4.0, 4.0, w, ORDER_TAG_H), t.warn));
+            let w = self.pos_glyphs.width(why, t.on_warn, true, window) + tm.text_pad;
+            window.paint_quad(fill(rect(4.0 * s, 4.0 * s, w, order_tag_h), t.warn));
             self.pos_glyphs.paint(
                 why,
-                ox + 10.0,
-                oy + 4.0,
-                ORDER_TAG_H,
+                ox + 10.0 * s,
+                oy + 4.0 * s,
+                order_tag_h,
                 t.on_warn,
                 true,
                 window,
@@ -4498,11 +4497,14 @@ impl ChartView {
                 },
             );
         }
+        // Order and position tags at the UI zoom, one size for layout, paint and (through the
+        // boxes they store) hit tests. Hit targets: never under their 100 % size.
+        let tm = lines_core::geometry::order_tags::Metrics::at(crate::zoom::get().max(1.0));
         let mut pos_tag = None;
         if let Some(pos) = position {
             let y = self.vp.price_to_y(pos.1) as f32;
             if (0.0..=ph).contains(&y) {
-                pos_tag = Some(self.draw_position_tag(pos, y, (ox, oy), hair, window, cx));
+                pos_tag = Some(self.draw_position_tag(pos, y, (ox, oy), hair, &tm, window, cx));
             }
         }
         let mode = position.map_or_else(
@@ -4513,7 +4515,17 @@ impl ChartView {
             },
             |p| p.3,
         );
-        self.draw_orders(pos_tag, (ox, oy), (pw, ph), hair, scale, mode, window, cx);
+        self.draw_orders(
+            pos_tag,
+            (ox, oy),
+            (pw, ph),
+            hair,
+            scale,
+            &tm,
+            mode,
+            window,
+            cx,
+        );
         if !self.vp.auto_price {
             self.draw_manual_scale_indicator(bounds, window, cx);
         }
