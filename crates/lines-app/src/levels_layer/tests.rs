@@ -96,7 +96,6 @@ fn legend_and_levels_describe_the_same_frame() {
         &d,
         BarsView::fixed(d.series.bars(), d.series.period_ms()),
         &vp(),
-        None,
     );
     assert_eq!(
         rows[i].text, "as of 13:00 UTC",
@@ -111,7 +110,6 @@ fn legend_and_levels_describe_the_same_frame() {
         &d,
         BarsView::fixed(d.series.bars(), d.series.period_ms()),
         &vp(),
-        None,
     );
     assert_eq!(layer.legend()[i].text, "missing");
     assert_eq!(layer.placed_per_source()[i], 0, "missing: nothing drawn");
@@ -121,7 +119,6 @@ fn legend_and_levels_describe_the_same_frame() {
         &d,
         BarsView::fixed(d.series.bars(), d.series.period_ms()),
         &vp(),
-        None,
     );
     assert_eq!(layer.legend()[i].text, "as of 13:00 UTC");
     assert!(layer.placed_per_source()[i] > 0);
@@ -145,11 +142,11 @@ fn layer_places_filters_and_reports_freshness() {
         .position(|(id, ..)| id == "demo")
         .expect("demo serves ES");
     // One frame: snapshot (render), then prepare (paint).
-    let prepare = |layer: &mut LevelsLayer, last_y: Option<f32>| {
+    let prepare = |layer: &mut LevelsLayer, _: Option<f32>| {
         let d = store.read();
         layer.snapshot(d.market_time);
         let bars = BarsView::fixed(d.series.bars(), d.series.period_ms());
-        layer.prepare(&d, bars, &vp(), last_y);
+        layer.prepare(&d, bars, &vp());
     };
     prepare(&mut layer, None);
     // 3 lines + 2 zones + the anchored line (the chart has the 14:30 bar): all on screen.
@@ -164,17 +161,17 @@ fn layer_places_filters_and_reports_freshness() {
     assert_eq!(rows[i].text, "as of 13:00 UTC");
     assert!(!rows[i].warn);
 
-    // Kinds and sources hide; labels move off the last-price row.
+    // Kinds and sources hide; labels stay on their levels.
     layer.config.toggle_kind("demo", "zone");
     prepare(&mut layer, None);
     assert_eq!(layer.placed_per_source()[i], 4);
     layer.config.toggle_kind("demo", "zone");
-    // The pivot (6010.00) sits at (604000 - 601000) / 15 = 200 px; a last price there pushes
-    // its label one label height (17.6 px) above.
-    prepare(&mut layer, Some(200.0));
+    // The pivot (6010.00) sits at (604000 - 601000) / 15 = 200 px; its label stays there
+    // (a last price on that row draws over it, never moves it).
+    prepare(&mut layer, None);
     let pivot = layer.placed(i).iter().find(|p| p.index == 0).unwrap();
     assert_eq!(pivot.top, 200.0);
-    assert!((pivot.label_y.unwrap() - (200.0 - LABEL_PX * 1.6)).abs() < 1e-3);
+    assert_eq!(pivot.label_y, Some(200.0));
     layer.config.toggle_source("demo");
     prepare(&mut layer, None);
     assert_eq!(layer.placed_per_source()[i], 0);
@@ -415,4 +412,603 @@ fn option_charts_get_no_level_sources() {
     layer.attach(&store_for(ContractKey::equity(catalog::SPY)));
     layer.snapshot(None);
     assert!(layer.sources().iter().any(|(id, ..)| id == "late-serving"));
+}
+
+/// Per-type styles on the chart (decision 0026): each kind the source declares resolves to
+/// its type's look (the demo's: its levels' own colors), a type the chart hides isn't
+/// placed, a restyle re-resolves without a new map, and the label mode switches the texts to
+/// `name : price` (in the product's format) and back.
+#[test]
+fn types_resolve_hide_and_label_with_the_price() {
+    use lines_core::levels::LabelMode;
+    use lines_core::style::Color;
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    let frame = |layer: &mut LevelsLayer| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+        );
+    };
+    frame(&mut layer);
+    let pivot = layer.kind_look(i, "pivot").expect("declared");
+    assert_eq!((pivot.line.color, pivot.line.width), (Color::Own, 2));
+    assert_eq!(
+        layer.kind_look(i, "zone").unwrap().fill.color,
+        Color::Own,
+        "the demo's zones keep their own colors"
+    );
+    // The demo's own mode is the name; its labels say so.
+    assert!(
+        layer
+            .label_texts(i)
+            .iter()
+            .flatten()
+            .any(|t| t == "Pivot 6010")
+    );
+    let placed = layer.placed_per_source()[i];
+    // Hide the pivot type and ask for prices in the labels.
+    let (types, default) = layer.source_types("demo").unwrap();
+    assert_eq!(default, LabelMode::Name);
+    let mut set = study_style::StudyStyles::default();
+    let mut looks = Look::defaults(&study_style::LEVELS).to_vec();
+    for t in types {
+        let mut l = study_style::read_type(&PartStyles::new(), t);
+        l.shown = t.id != "pivot";
+        looks.push(l);
+    }
+    study_style::set_level_style(
+        &mut set.levels,
+        "demo",
+        &study_style::LevelEdit {
+            looks,
+            types,
+            label: LabelMode::NamePrice,
+            label_default: default,
+        },
+    );
+    layer.set_styles(&set.levels);
+    frame(&mut layer);
+    assert_eq!(layer.placed_per_source()[i], placed - 1, "the pivot hidden");
+    assert!(!layer.kind_look(i, "pivot").unwrap().shown);
+    let texts: Vec<&str> = layer
+        .label_texts(i)
+        .iter()
+        .flatten()
+        .map(String::as_str)
+        .collect();
+    assert!(texts.contains(&"Pivot 6010 : 6010.00"), "{texts:?}");
+    assert!(
+        texts.contains(&"Supply : 6022.50"),
+        "a zone: its upper edge"
+    );
+    assert!(
+        texts.contains(&"VWAP ±7.50"),
+        "VWAP-relative: the name only"
+    );
+    // Back to the defaults: nothing saved, the name only again.
+    layer.set_styles(&Default::default());
+    frame(&mut layer);
+    assert_eq!(layer.placed_per_source()[i], placed);
+    assert!(
+        layer
+            .label_texts(i)
+            .iter()
+            .flatten()
+            .all(|t| !t.contains(" : "))
+    );
+}
+
+/// Labels stay on their levels whatever the price does: trades walk the last price across
+/// every labeled demo level (levels and viewport fixed), and every label's y is the same in
+/// every frame (it used to step off the last price's row, so labels near it bounced).
+#[test]
+fn a_last_price_sweeping_the_levels_never_moves_a_label() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    let frame = |layer: &mut LevelsLayer| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+        );
+        layer
+            .placed(i)
+            .iter()
+            .map(|p| (p.index, p.label_y))
+            .collect::<Vec<_>>()
+    };
+    let first = frame(&mut layer);
+    assert!(first.iter().filter(|(_, y)| y.is_some()).count() >= 3);
+    let t0 = UtcMillis::parse_iso("2026-11-05T14:30:01").unwrap();
+    // 5990.00 to 6030.00 a tick at a time: through the support, the pivot, the zones and
+    // the resistance.
+    for (k, p) in (599_000..=603_000).step_by(25).enumerate() {
+        store.update(|d| {
+            d.apply(&[MarketEvent::Trade {
+                time: UtcMillis(t0.0 + k as i64),
+                price: Price(p),
+                qty: Qty(1),
+                aggressor: Some(Aggressor::Buy),
+            }])
+        });
+        assert_eq!(frame(&mut layer), first, "last price {p}");
+    }
+}
+
+/// A kind a source split from another (`LevelType::parent`): a chart that hid the parent
+/// keeps all its children hidden; showing one child from the menu shows only it (its
+/// siblings and the parent stay hidden).
+#[test]
+fn a_hidden_parent_kind_hides_its_children() {
+    let mut c: LevelsConfig =
+        serde_json::from_str(r#"{"hidden-kinds": ["src/session", "src/band"]}"#).unwrap();
+    for child in ["open", "close", "mid"] {
+        assert!(
+            !c.kind_shown_under("src", child, Some("session")),
+            "{child}"
+        );
+    }
+    assert!(!c.kind_shown_under("src", "upper-band", Some("band")));
+    assert!(c.kind_shown_under("src", "pivot", None));
+    assert!(c.kind_shown_under("other", "open", Some("session")));
+    // Show "mid" alone: the parent and its other children stay hidden.
+    c.show_under("src", "mid");
+    assert!(c.kind_shown_under("src", "mid", Some("session")));
+    assert!(!c.kind_shown_under("src", "open", Some("session")));
+    assert!(!c.kind_shown_under("src", "close", Some("session")));
+    assert!(!c.kind_shown("src", "session"), "the parent stays hidden");
+    // A parent that is still a kind of its own (listed in the menu): showing a child keeps the
+    // parent hidden and the child shown, on every frame (it isn't re-hidden).
+    c.show_under("src", "upper-band");
+    assert!(c.kind_shown_under("src", "upper-band", Some("band")));
+    assert!(!c.kind_shown("src", "band"));
+    assert!(c.kind_shown_under("src", "upper-band", Some("band")));
+    // Hiding the child again ends its own showing.
+    c.toggle_kind("src", "upper-band");
+    assert!(!c.kind_shown_under("src", "upper-band", Some("band")));
+    c.toggle_kind("src", "upper-band");
+    assert!(
+        !c.kind_shown_under("src", "upper-band", Some("band")),
+        "the parent hides it again"
+    );
+}
+
+/// The labels' gutter needs the widest label of the whole level set (not only those in view),
+/// with its chip; nothing while no label would show (labels off for the chart or the source,
+/// or the source hidden). The view doesn't change it.
+#[test]
+fn the_gutter_follows_the_level_set_not_the_view() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let frame = |layer: &mut LevelsLayer, v: Viewport| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &v,
+        );
+    };
+    frame(&mut layer, vp());
+    let (need, cut) = layer.gutter_need();
+    assert!(need > LABEL_CHROME + GUTTER_PAD && need < 200.0, "{need}");
+    assert!(
+        cut > LABEL_CHROME + GUTTER_PAD && cut <= need,
+        "{cut} {need}"
+    );
+    // A view with no level in it: the same need.
+    let mut far = vp();
+    (far.price_lo, far.price_hi) = (500_000.0, 501_000.0);
+    frame(&mut layer, far);
+    assert_eq!(layer.gutter_need(), (need, cut));
+    layer.config.hide_labels = true;
+    assert_eq!(layer.gutter_need(), (0.0, 0.0), "labels off");
+    layer.config.hide_labels = false;
+    layer.config.toggle_labels("demo");
+    assert_eq!(layer.gutter_need(), (0.0, 0.0), "this source's labels off");
+    layer.config.toggle_labels("demo");
+    layer.config.toggle_source("demo");
+    assert_eq!(layer.gutter_need(), (0.0, 0.0), "source hidden");
+}
+
+/// A plot too narrow for even the shortest cut: the chart's path (`gutter_plan`,
+/// `settle_gutter`, `set_gutter`) gives no gutter and no labels at all (never full labels over
+/// the bars at the plot's edge). A wide one gives both.
+#[test]
+fn too_narrow_for_labels_no_labels_at_all() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    let mono = |t: &str| t.chars().count() as f32 * 6.0;
+    // One frame as the chart draws it, for a plot `plot_w` wide.
+    let frame = |layer: &mut LevelsLayer, plot_w: f32| -> f32 {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.measure_labels(mono);
+        let (need, min_cut) = layer.gutter_need();
+        let plan = lines_core::levels::gutter_plan(need, min_cut, plot_w, 130.0);
+        let mut v = vp();
+        v.set_size(f64::from(plot_w), 400.0);
+        let len = d.series.bars().len();
+        let g = lines_core::levels::settle_gutter(
+            &mut v,
+            len,
+            0.0,
+            if plan.fits { need } else { 0.0 },
+            plan.cap,
+        );
+        layer.set_gutter(g, plot_w, plan.fits);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &v,
+        );
+        g
+    };
+    let g = frame(&mut layer, 800.0);
+    assert!(g > 0.0);
+    assert!(layer.placed(i).iter().any(|p| p.label_y.is_some()));
+    // 40 % of 100 px (40) is under the shortest cut ("X…" and its chip, 48 in steps).
+    let g = frame(&mut layer, 100.0);
+    assert_eq!(g, 0.0, "no gutter");
+    assert!(
+        layer.placed(i).iter().all(|p| p.label_y.is_none()),
+        "no labels"
+    );
+}
+
+/// A new batch of the same levels (a new `Arc`, as each refresh is) measures nothing again and
+/// keeps the gutter exactly, frame after frame.
+#[test]
+fn an_identical_batch_keeps_the_gutter() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+    }
+    let calls = std::cell::Cell::new(0);
+    let mono = |t: &str| {
+        calls.set(calls.get() + 1);
+        t.chars().count() as f32 * 6.0
+    };
+    layer.measure_labels(mono);
+    assert!(calls.get() > 0);
+    let first = layer.gutter_need();
+    for _ in 0..3 {
+        layer.renew_map(i);
+        // Before this frame's measuring and after it: the same need, nothing measured.
+        assert_eq!(layer.gutter_need(), first);
+        calls.set(0);
+        layer.measure_labels(mono);
+        assert_eq!(calls.get(), 0, "an identical batch measures nothing");
+        assert_eq!(layer.gutter_need(), first);
+    }
+}
+
+/// The label that sized the gutter fits it whole: for any width, its text fits the room of the
+/// stepped gutter its need makes (the room isn't stepped down again).
+#[test]
+fn the_widest_label_fits_its_own_gutter() {
+    let mut w = 1.0f32;
+    while w < 300.0 {
+        let need = w + LABEL_CHROME + GUTTER_PAD;
+        let g = lines_core::levels::step_gutter(0.0, need);
+        let room = gutter_room(g, 1600.0);
+        assert!(w <= room, "{w} px in a {g} px gutter: room {room}");
+        w += 0.75;
+    }
+}
+
+/// At the boundary: a label that fits whole shows; one that doesn't fit whole shows cut (its
+/// cut for this room is not empty), or until it was cut; one that doesn't fit even cut (an
+/// empty cut for this room) doesn't; a cut made for another room doesn't decide.
+#[test]
+fn whether_a_label_can_show_at_the_boundary() {
+    let room = 64.0;
+    assert!(label_can_show(64.0, None, room), "exactly fits");
+    assert!(
+        label_can_show(70.0, None, room),
+        "not cut yet: the paint decides"
+    );
+    let cut = (room, "Mid… : 7517.25".to_owned());
+    assert!(label_can_show(90.0, Some(&cut), room), "fits cut");
+    let none = (room, String::new());
+    assert!(
+        !label_can_show(90.0, Some(&none), room),
+        "doesn't fit even cut"
+    );
+    let other = (72.0, String::new());
+    assert!(
+        label_can_show(90.0, Some(&other), room),
+        "a cut for another room"
+    );
+    // The room in a gutter is its width less the chip and margins; without one, the plot's
+    // in whole steps.
+    assert_eq!(gutter_room(96.0, 800.0), 96.0 - LABEL_CHROME - GUTTER_PAD);
+    let r = gutter_room(0.0, 803.0);
+    assert_eq!(r % lines_core::levels::GUTTER_STEP, 0.0);
+    assert!(r <= 803.0 - LABEL_CHROME - GUTTER_PAD);
+}
+
+/// One app-wide style per source: the same styles given to an ES chart and an MES chart (the
+/// app's `level_styles`, after an edit on either) restyle both, so a second chart and another
+/// product look the same.
+#[test]
+fn one_style_restyles_every_chart_of_the_source() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let mes = {
+        let p = catalog::get(catalog::MES).unwrap();
+        let c = ContractKey::monthly(p.id, 2026, Month::new(12).unwrap());
+        let store = Arc::new(ChartStore::new(
+            p,
+            Some(c),
+            Capabilities::default(),
+            "test-mes",
+            60_000,
+            1000,
+        ));
+        store.update(|d| {
+            d.apply(&[MarketEvent::Trade {
+                time: UtcMillis::parse_iso("2026-11-05T14:30:00").unwrap(),
+                price: Price(600_100),
+                qty: Qty(1),
+                aggressor: Some(Aggressor::Buy),
+            }])
+        });
+        store
+    };
+    let stores = [es_store(), es_store(), mes];
+    let mut layers: Vec<LevelsLayer> = stores
+        .iter()
+        .map(|s| {
+            let mut l = LevelsLayer::new(LevelsConfig::default());
+            l.attach(s);
+            l
+        })
+        .collect();
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let frame = |l: &mut LevelsLayer, s: &Arc<ChartStore>| {
+        let d = s.read();
+        l.snapshot(d.market_time);
+        l.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+        );
+    };
+    // The edit (made on the first chart): the pivot 3 px wide.
+    let (types, label) = layers[0].source_types("demo").unwrap();
+    let mut looks = Look::defaults(&study_style::LEVELS).to_vec();
+    for t in types {
+        let mut l = study_style::read_type(&PartStyles::new(), t);
+        if t.id == "pivot"
+            && let crate::style_editor::PartStyle::Line(ls) = &mut l.style
+        {
+            ls.width = 3;
+        }
+        looks.push(l);
+    }
+    let mut app = BTreeMap::new();
+    study_style::set_level_style(
+        &mut app,
+        "demo",
+        &study_style::LevelEdit {
+            looks,
+            types,
+            label,
+            label_default: label,
+        },
+    );
+    for (l, s) in layers.iter_mut().zip(&stores) {
+        l.set_styles(&app);
+        frame(l, s);
+        let i = l
+            .sources()
+            .iter()
+            .position(|(id, ..)| id == "demo")
+            .expect("demo serves ES and MES");
+        assert_eq!(l.kind_look(i, "pivot").unwrap().line.width, 3);
+    }
+}
+
+/// A demo layer attached to an ES store, its first snapshot taken; the demo's index.
+fn demo_layer() -> (LevelsLayer, Arc<ChartStore>, usize) {
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+    }
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    (layer, store, i)
+}
+
+/// The text caches drop past their bound only texts no current map uses: the current map's
+/// stay, so nothing is measured again and the gutter doesn't move.
+#[test]
+fn eviction_keeps_the_current_texts() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut layer, _store, _) = demo_layer();
+    let mono = |t: &str| t.chars().count() as f32 * 6.0;
+    layer.measure_labels(mono);
+    let need = layer.gutter_need();
+    layer.stuff_caches(3 * lines_core::levels::MAX_LEVELS);
+    let calls = std::cell::Cell::new(0);
+    layer.measure_labels(|t| {
+        calls.set(calls.get() + 1);
+        mono(t)
+    });
+    assert_eq!(calls.get(), 0, "nothing measured again");
+    assert!(
+        layer.cached_widths() < lines_core::levels::MAX_LEVELS,
+        "the unused went"
+    );
+    assert_eq!(layer.gutter_need(), need);
+}
+
+/// The shortest cut follows the shown filter: hiding the type whose label has a long price
+/// lowers it.
+#[test]
+fn a_hidden_types_long_price_doesnt_set_the_shortest_cut() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut layer, _store, _) = demo_layer();
+    let styles: BTreeMap<String, PartStyles> =
+        serde_json::from_str(r#"{"demo": {"label": "name-price"}}"#).unwrap();
+    layer.set_styles(&styles);
+    // The resistance's price measures long.
+    let measure = |t: &str| {
+        if t.contains("6025") {
+            300.0
+        } else {
+            t.chars().count() as f32 * 6.0
+        }
+    };
+    layer.measure_labels(measure);
+    let (_, cut_all) = layer.gutter_need();
+    let hidden: BTreeMap<String, PartStyles> = serde_json::from_str(
+        r#"{"demo": {"label": "name-price", "types": {"resist": {"shown": false}}}}"#,
+    )
+    .unwrap();
+    layer.set_styles(&hidden);
+    layer.measure_labels(measure);
+    let (_, cut_shown) = layer.gutter_need();
+    assert!(cut_shown < cut_all, "{cut_shown} < {cut_all}");
+}
+
+/// Cuts are kept by text and room: a new identical batch keeps them (no measuring), a new room
+/// cuts again.
+#[test]
+fn cuts_survive_an_identical_batch_and_follow_the_room() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut layer, _store, i) = demo_layer();
+    let calls = std::cell::Cell::new(0);
+    let mono = |t: &str| {
+        calls.set(calls.get() + 1);
+        t.chars().count() as f32 * 6.0
+    };
+    // The pivot ("Pivot 6010") in a 40 px room: cut.
+    let cut = layer.cut_for(i, 0, 40.0, mono).expect("a cut fits");
+    assert!(cut.ends_with('…'), "{cut}");
+    assert!(calls.get() > 0);
+    layer.renew_map(i);
+    calls.set(0);
+    assert_eq!(
+        layer.cut_for(i, 0, 40.0, mono).as_deref(),
+        Some(cut.as_str())
+    );
+    assert_eq!(calls.get(), 0, "kept across the batch");
+    let wider = layer.cut_for(i, 0, 48.0, mono).expect("fits");
+    assert!(calls.get() > 0, "a new room cuts again");
+    assert!(wider.chars().count() > cut.chars().count());
+}
+
+/// A one-letter name can't be cut: its shortest text is the full label, as `cut_label` can
+/// cut it to (nothing shorter), so the gutter's fit and the paint agree.
+#[test]
+fn a_one_letter_name_is_its_own_shortest() {
+    assert_eq!(super::shortest_cut("A", "A : 6010.00"), None);
+    assert_eq!(
+        lines_core::levels::cut_label("A", Some("6010.00"), 1000.0, |t| t.len() as f32),
+        None
+    );
+    assert_eq!(
+        super::shortest_cut("AB", "AB : 6010.00").as_deref(),
+        Some("A… : 6010.00")
+    );
+    assert_eq!(super::shortest_cut("Mid", "Mid").as_deref(), Some("M…"));
+}
+
+/// A series-only push (its levels are the previous map's) keeps each label's hysteresis; a new
+/// map with levels, or a series push whose level count differs, starts them over.
+#[test]
+fn a_series_only_push_keeps_label_state() {
+    use lines_core::levels::{LevelStyle, LevelValue};
+    let build = |series_update: bool| {
+        let b = LevelMap::builder("demo", lines_core::ProductId(1), lines_core::UtcMillis(0)).line(
+            "pivot",
+            LevelValue::Tick(Price(600_000)),
+            Some("P"),
+            LevelStyle::default(),
+        );
+        let b = if series_update { b.series_update() } else { b };
+        b.build(25).unwrap()
+    };
+    let mut seen = vec![LabelSeen::Hidden];
+    reset_seen(Some(&build(true)), &mut seen);
+    assert_eq!(seen, vec![LabelSeen::Hidden], "a push keeps it");
+    reset_seen(Some(&build(false)), &mut seen);
+    assert_eq!(seen, vec![LabelSeen::New], "a whole refresh starts over");
+    let mut two = vec![LabelSeen::Hidden, LabelSeen::Shown];
+    reset_seen(Some(&build(true)), &mut two);
+    assert_eq!(two, vec![LabelSeen::New], "a different count starts over");
+    reset_seen(None, &mut two);
+    assert!(two.is_empty());
 }

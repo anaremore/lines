@@ -209,6 +209,12 @@ pub struct Settings {
     /// (and tools this build doesn't have).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub drawing_styles: std::collections::BTreeMap<String, crate::style_doc::SavedStyle>,
+    /// Level sources' styles, by source id (decision 0026: the style editor's Lines, Zones,
+    /// level types and label mode, `study_style::set_level_style`): app-wide, so every chart
+    /// of a source looks the same. Optional; fields and sources this build doesn't know are
+    /// kept.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub level_styles: std::collections::BTreeMap<String, lines_indicators::PartStyles>,
     /// Prop rules per trading account, keyed by the account's name (the Settings window's
     /// Risk section). Optional: an account without an entry keeps its rules.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]

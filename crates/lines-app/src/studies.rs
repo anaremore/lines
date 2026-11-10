@@ -749,7 +749,7 @@ impl Studies {
                         &s.looks,
                         origin,
                         scale,
-                        vp.width as f32,
+                        vp.edge() as f32,
                         theme,
                         window,
                     );

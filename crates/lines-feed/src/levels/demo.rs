@@ -12,11 +12,13 @@ use anyhow::Result;
 use lines_core::{Price, Product, UtcMillis};
 use serde::Deserialize;
 
+use lines_core::style::{LineStyle, LineType};
+
 use super::{
     BoxFuture, ChartPrices, LevelContext, LevelFrame, LevelMap, LevelMeta, LevelSource, LevelStyle,
-    LevelTransport, LevelValue, RefreshMode, Series, SeriesColor, SeriesLineDef, SeriesStudyDef,
+    LevelTransport, LevelType, LevelValue, RefreshMode, Series, SeriesColor, SeriesLineDef,
+    SeriesStudyDef, TypeStyle,
 };
-use lines_core::style::LineType;
 
 /// Two synthetic lower-pane studies (decision 0010: synthetic): three lines around 50 to 65 and one
 /// line swinging around zero, a value a minute over the synthetic sessions, with a gap.
@@ -137,6 +139,30 @@ struct Anchor {
     color: String,
 }
 
+/// Its own colors with the strokes its map gives each kind (pivot 2 px; support, the VWAP band
+/// and the anchor dashed).
+const fn own(line: LineType, width: u8) -> TypeStyle {
+    TypeStyle {
+        line: LineStyle {
+            line,
+            width,
+            ..TypeStyle::OWN.line
+        },
+        ..TypeStyle::OWN
+    }
+}
+
+/// The demo's level types (`LevelSource::types`): every kind its map uses, in the levels'
+/// own colors.
+pub static TYPES: [LevelType; 6] = [
+    LevelType::line("pivot", "Pivot", "Lines", own(LineType::Solid, 2)),
+    LevelType::line("resist", "Resistance", "Lines", own(LineType::Solid, 1)),
+    LevelType::line("support", "Support", "Lines", own(LineType::Dashed, 1)),
+    LevelType::line("anchor", "Anchored", "Lines", own(LineType::Dashed, 1)),
+    LevelType::zone("zone", "Zone", "Zones", own(LineType::Solid, 1)),
+    LevelType::zone("band", "VWAP band", "Zones", own(LineType::Dashed, 1)),
+];
+
 pub struct DemoLevels;
 
 struct DemoTransport;
@@ -176,6 +202,9 @@ impl LevelSource for DemoLevels {
     }
     fn series_studies(&self) -> &'static [SeriesStudyDef] {
         SERIES_STUDIES
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &TYPES
     }
     fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
         Box::pin(async { Ok(Box::new(DemoTransport) as Box<dyn LevelTransport>) })

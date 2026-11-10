@@ -18,7 +18,8 @@ use std::fmt;
 
 use crate::bars::Bar;
 use crate::instrument::{ContractKey, ProductId};
-use crate::price::Price;
+use crate::price::{Price, PriceFormat};
+use crate::style::{Color, FillStyle, LineStyle, LineType};
 use crate::time::UtcMillis;
 use crate::viewport::Viewport;
 
@@ -564,6 +565,162 @@ impl LevelMapBuilder {
     }
 }
 
+// ---- level types (declared by a source; styled per chart) --------------------------------
+
+/// How a type's levels look unless the chart restyles them (decision 0026). A color is a
+/// [`Color`]: [`Color::Own`] is each level's own color (its [`LevelStyle`], decision 0022), a
+/// theme token ([`Color::Palette`]: the theme's n-th study color; [`Color::Text`]: its main text
+/// color) follows dark/light and the palette, [`Color::Custom`] is the same in every theme.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TypeStyle {
+    /// Drawn at all.
+    pub shown: bool,
+    /// Lines of the type, and a zone's edges. Width in logical px; opacity scales the level's
+    /// own alpha.
+    pub line: LineStyle,
+    /// A zone's fill: opacity scales a zone's own translucency (40 %: the default 25 % is the
+    /// 10 % zones always had).
+    pub fill: FillStyle,
+    /// The line's recommended color on the light themes, where it differs (a fixed color that
+    /// reads only on dark, given a light-theme counterpart; `None`: `line.color` everywhere).
+    pub light: Option<Color>,
+}
+
+impl TypeStyle {
+    /// Each level as its source drew it before types: its own color, solid, 1 px, a zone's fill
+    /// at 10 %.
+    pub const OWN: TypeStyle = TypeStyle {
+        shown: true,
+        line: LineStyle {
+            color: Color::Own,
+            line: LineType::Solid,
+            width: 1,
+            opacity: 100,
+        },
+        fill: FillStyle {
+            color: Color::Own,
+            opacity: 25,
+        },
+        light: None,
+    };
+
+    /// Whether this is [`TypeStyle::OWN`]'s line: drawn as each level's own style says (its
+    /// weight in device pixels, its dashes, a zone's edges at 60 %).
+    pub fn own_line(&self) -> bool {
+        self.line.color == Color::Own
+            && self.line.line == LineType::Solid
+            && self.line.width == 1
+            && self.line.opacity == 100
+    }
+}
+
+/// A kind of level a source declares (`LevelSource::types`): the kind slug its levels carry
+/// ([`LevelMap::kinds`]), how the style editor lists it, and its recommended look.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LevelType {
+    /// The kind slug (`hp`, `demand`).
+    pub id: &'static str,
+    /// The editor's name for it ("Upper band").
+    pub label: &'static str,
+    /// The heading it's listed under ("Zones", "Lines").
+    pub group: &'static str,
+    /// Its levels include zones: the editor offers a fill.
+    pub zone: bool,
+    pub style: TypeStyle,
+    /// A kind it was split from (`None`: none): a chart that hid the parent kind hides this one
+    /// too, so splitting a kind never shows what a chart had hidden.
+    pub parent: Option<&'static str>,
+}
+
+impl LevelType {
+    pub const fn line(
+        id: &'static str,
+        label: &'static str,
+        group: &'static str,
+        style: TypeStyle,
+    ) -> LevelType {
+        LevelType {
+            id,
+            label,
+            group,
+            zone: false,
+            style,
+            parent: None,
+        }
+    }
+
+    pub const fn zone(
+        id: &'static str,
+        label: &'static str,
+        group: &'static str,
+        style: TypeStyle,
+    ) -> LevelType {
+        LevelType {
+            id,
+            label,
+            group,
+            zone: true,
+            style,
+            parent: None,
+        }
+    }
+
+    /// This type, split from kind `parent` (see [`LevelType::parent`]).
+    pub const fn child_of(self, parent: &'static str) -> LevelType {
+        LevelType {
+            parent: Some(parent),
+            ..self
+        }
+    }
+}
+
+/// What a level's label says.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LabelMode {
+    /// Its name ("Demand zone").
+    #[default]
+    Name,
+    /// Its name and price, `Demand zone : 7556.25`, in the product's price format. A level that
+    /// moves with the VWAP keeps its name only (its price changes every bar).
+    NamePrice,
+}
+
+impl LabelMode {
+    /// The saved name.
+    pub fn key(self) -> &'static str {
+        match self {
+            LabelMode::Name => "name",
+            LabelMode::NamePrice => "name-price",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<LabelMode> {
+        [LabelMode::Name, LabelMode::NamePrice]
+            .into_iter()
+            .find(|m| m.key() == s)
+    }
+}
+
+/// The label drawn for level `l` in `mode` (`None`: it has none). Built when the map or the mode
+/// changes, never per frame: the price is the line's (a zone's upper edge, where its label
+/// sits), a raw value at the nearest price unit, printed with `fmt`.
+pub fn label_text(l: &Level, mode: LabelMode, fmt: &PriceFormat) -> Option<String> {
+    let name = l.label.as_deref()?;
+    let value = match l.shape {
+        LevelShape::Line(v) => v,
+        LevelShape::Zone { upper, .. } => upper,
+    };
+    let price = match (mode, value) {
+        (LabelMode::Name, _) | (_, LevelValue::VwapOffset(_)) => None,
+        (LabelMode::NamePrice, LevelValue::Tick(p)) => Some(p),
+        (LabelMode::NamePrice, LevelValue::Raw(v)) => Some(Price(v.round() as i64)),
+    };
+    Some(match price {
+        Some(p) => format!("{name} : {}", fmt.format::<32>(p).as_str()),
+        None => name.to_owned(),
+    })
+}
+
 // ---- placement (paint path: no allocation) -----------------------------------------------
 
 /// A level placed in plot coordinates (logical px from the plot's top).
@@ -616,38 +773,177 @@ pub fn place(
     }
 }
 
-/// Choose label positions: a line's label sits on its line, a zone's on its top edge,
-/// clamped into the plot. A label that would cover the last-price row (`avoid`, ± one label
-/// height) is moved just above or below it; a label overlapping one already placed is
-/// dropped (the level is still drawn). In place, no allocation.
+/// The extra separation (a fraction of a label's height) a label hidden last frame needs
+/// before it shows again: labels near the clash distance keep one layout instead of
+/// flickering.
+pub const LABEL_HYSTERESIS: f32 = 0.25;
+
+/// What a level's label did last frame ([`place_labels`]' hysteresis).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum LabelSeen {
+    /// Not placed yet (a new map, a level that just came on screen).
+    #[default]
+    New,
+    Shown,
+    Hidden,
+}
+
+/// Choose label positions: a label is anchored to its own level (a line's on its line, a
+/// zone's on its top edge), clamped into the plot, and never moved for anything else: the
+/// last price and the tags on the axis paint over it. Labels only give way to each other: a
+/// label overlapping one already placed is dropped (the level is still drawn). Levels at
+/// fixed prices are placed first, in map order, then those moving with the VWAP, so a moving
+/// band never reshuffles the others. The layout depends only on the levels and the viewport,
+/// never the price, and keeps last frame's decision near the threshold: `seen` (by level
+/// index, updated in place) says what each label did last frame; one hidden then shows again
+/// only once it is clear of every shown label by [`LABEL_HYSTERESIS`] more (a new one needs
+/// only to be clear). `has_label(index)`: whether the level's label can be drawn at all (it
+/// has one, and it fits the plot's width): one that can't claims no room. A plot shorter
+/// than a label shows none. In place, no allocation.
 pub fn place_labels(
     placed: &mut [Placed],
-    map: &LevelMap,
     label_h: f32,
     plot_h: f32,
-    avoid: Option<f32>,
+    seen: &mut [LabelSeen],
+    has_label: impl Fn(u32) -> bool,
 ) {
     let half = label_h * 0.5;
-    for i in 0..placed.len() {
-        let p = placed[i];
-        if map.levels[p.index as usize].label.is_none() {
-            placed[i].label_y = None;
-            continue;
-        }
-        let mut y = p.top.clamp(half, (plot_h - half).max(half));
-        if let Some(a) = avoid
-            && (y - a).abs() < label_h
-        {
-            y = if y <= a { a - label_h } else { a + label_h };
-            if y < half || y > plot_h - half {
-                y = if y < half { a + label_h } else { a - label_h };
+    for p in placed.iter_mut() {
+        p.label_y = None;
+    }
+    if plot_h < label_h {
+        return;
+    }
+    for moving in [false, true] {
+        for i in 0..placed.len() {
+            let p = placed[i];
+            if p.vwap_relative != moving || !has_label(p.index) {
+                continue;
             }
+            let was = seen.get(p.index as usize).copied().unwrap_or_default();
+            let y = p.top.clamp(half, plot_h - half);
+            let need = if was == LabelSeen::Hidden {
+                label_h * (1.0 + LABEL_HYSTERESIS)
+            } else {
+                label_h
+            };
+            let clash = placed
+                .iter()
+                .filter_map(|q| q.label_y)
+                .any(|q| (q - y).abs() < need);
+            placed[i].label_y = (!clash).then_some(y);
         }
-        let clash = placed[..i]
-            .iter()
-            .filter_map(|q| q.label_y)
-            .any(|q| (q - y).abs() < label_h);
-        placed[i].label_y = (!clash && y >= half - 0.5 && y <= plot_h - half + 0.5).then_some(y);
+    }
+    for p in placed.iter() {
+        if let Some(s) = seen.get_mut(p.index as usize)
+            && has_label(p.index)
+        {
+            *s = if p.label_y.is_some() {
+                LabelSeen::Shown
+            } else {
+                LabelSeen::Hidden
+            };
+        }
+    }
+}
+
+// ---- the labels' gutter (paint path: no allocation) ------------------------------------
+
+/// A label cut to fit `room` px (as `width` measures text): the name shortened with "…"
+/// before ` : price` (the price is never cut), or the name alone cut with "…" when there is
+/// no price. `None`: not even one letter of the name with its price fits. Allocates: call it
+/// when the text or the room changes, not per frame.
+pub fn cut_label(
+    name: &str,
+    price: Option<&str>,
+    room: f32,
+    mut width: impl FnMut(&str) -> f32,
+) -> Option<String> {
+    let n = name.chars().count();
+    for k in (1..n).rev() {
+        let head: String = name.chars().take(k).collect();
+        let head = head.trim_end();
+        let t = match price {
+            Some(p) => format!("{head}… : {p}"),
+            None => format!("{head}…"),
+        };
+        if width(&t) <= room {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Plot px the level labels' gutter (`gutter` px wide, at the plot's right) takes from the
+/// bars: only what the empty space already right of the newest bar (the view's right margin,
+/// or a scroll past the end) doesn't cover. `vp` without any inset; `len` bars. While the
+/// newest bar is scrolled off to the right, the whole gutter.
+pub fn gutter_inset(gutter: f64, vp: &Viewport, len: usize) -> f64 {
+    if gutter <= 0.0 {
+        return 0.0;
+    }
+    let free = if len == 0 {
+        vp.width
+    } else {
+        ((vp.right_index - (len - 1) as f64 - 0.5) * vp.bar_px).max(0.0)
+    };
+    (gutter - free).max(0.0)
+}
+
+/// One frame's gutter: the stepped width from `prev` for what the labels need (`need`, from
+/// the whole level set, never the view), no wider than `cap`, and the inset it sets on `vp`
+/// for `len` bars (the bars end exactly at the gutter). Returns the width.
+pub fn settle_gutter(vp: &mut Viewport, len: usize, prev: f32, need: f32, cap: f32) -> f32 {
+    let g = step_gutter(prev, need.min(cap)).min(cap.max(0.0));
+    vp.right_inset = 0.0;
+    vp.right_inset = gutter_inset(f64::from(g), vp, len);
+    g
+}
+
+/// What a frame's gutter may be: its cap (in whole steps) and whether labels show at all.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct GutterPlan {
+    /// The widest the gutter may be, in whole [`GUTTER_STEP`]s.
+    pub cap: f32,
+    /// Labels show: some label would (`need` > 0) and the shortest useful cut fits the cap.
+    /// Otherwise no labels and no gutter.
+    pub fits: bool,
+}
+
+/// The gutter's plan for a plot `plot_w` px wide: the cap is `wide_cap` (130 px at 100 %
+/// zoom); on a narrow plot a quarter of it, or what the shortest useful cut needs
+/// (`min_cut`, with its chip, stepped up), but never more than 40 % of it; in whole steps.
+/// Labels show only when something would (`need` > 0) and the shortest cut fits the cap.
+pub fn gutter_plan(need: f32, min_cut: f32, plot_w: f32, wide_cap: f32) -> GutterPlan {
+    let down = |v: f32| (v.max(0.0) / GUTTER_STEP).floor() * GUTTER_STEP;
+    // The shortest cut rounded up (a cap stepped down below it would never fit it).
+    let cut = (min_cut.max(0.0) / GUTTER_STEP).ceil() * GUTTER_STEP;
+    let cap = down(wide_cap)
+        .min(down(plot_w * 0.25).max(cut))
+        .min(down(plot_w * 0.4));
+    GutterPlan {
+        cap,
+        fits: need > 0.0 && cut <= cap,
+    }
+}
+
+/// The gutter's width step (px): widths are whole steps, so a label a few px wider or
+/// narrower doesn't move the bars.
+pub const GUTTER_STEP: f32 = 8.0;
+
+/// The gutter's width this frame from last frame's (`current`) and what the visible labels
+/// need now (`target`, 0: no label shows): it grows at once to the next whole step, shrinks
+/// only once the labels need two steps less (labels scrolling in and out at a step's edge
+/// don't make it flicker), and goes as soon as no label shows.
+pub fn step_gutter(current: f32, target: f32) -> f32 {
+    if target <= 0.0 {
+        return 0.0;
+    }
+    let want = (target / GUTTER_STEP).ceil() * GUTTER_STEP;
+    if want > current || want <= current - 2.0 * GUTTER_STEP {
+        want
+    } else {
+        current
     }
 }
 

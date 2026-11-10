@@ -386,6 +386,15 @@ pub struct ChartView {
     /// Study styles a newer build saved for studies this one doesn't have (kept, written
     /// back).
     styles_extra: serde_json::Map<String, serde_json::Value>,
+    /// Level styles this chart (or a template, the chart defaults) saved per source before
+    /// they were app-wide: promoted to settings `level_styles` at the next render
+    /// (`study_style::promote_level_styles`), then dropped.
+    pending_levels: crate::study_style::PendingLevels,
+    /// `study_style::level_styles_generation()` this chart last read the app-wide styles at.
+    level_styles_gen: u64,
+    /// The level labels' gutter (plot px at the right, `lines_core::levels::step_gutter`): 0
+    /// while no level label shows.
+    gutter: f32,
     /// A press on the plot while a strip limit's pick is armed: where (window px), and the
     /// price there (the crosshair's, computed at the press). Sent on release if still a click.
     pick_press: Option<(Point<Pixels>, PickPrice)>,
@@ -707,6 +716,9 @@ impl ChartView {
             study_menu: None,
             study_style: None,
             styles_extra: serde_json::Map::new(),
+            pending_levels: Default::default(),
+            level_styles_gen: 0,
+            gutter: 0.0,
             study_draft: None,
             anchoring: None,
             pick_press: None,
@@ -875,7 +887,9 @@ impl ChartView {
         StudyStyles {
             profile: self.profile.style().clone(),
             footprint: self.footprint.style().clone(),
-            levels: self.levels.styles().clone(),
+            // App-wide (settings `level_styles`): a chart no longer saves its own, except an
+            // older one not promoted yet (kept, never lost).
+            levels: self.pending_levels.saved(),
             extra: self.styles_extra.clone(),
         }
     }
@@ -883,7 +897,9 @@ impl ChartView {
     fn set_study_styles(&mut self, s: &StudyStyles) {
         self.profile.set_style(&s.profile);
         self.footprint.set_style(&s.footprint);
-        self.levels.set_styles(&s.levels);
+        // A chart's own level styles (an older file, a template): promoted app-wide once
+        // (`promote_levels`, on restore; else at the next render).
+        self.pending_levels.restore(&s.levels);
         self.styles_extra = s.extra.clone();
     }
 
@@ -915,6 +931,7 @@ impl ChartView {
         if let Some(set) = set {
             self.set_study_set(set);
         }
+        self.promote_levels(cx);
         if let Some(tf) = tf {
             self.set_timeframe(tf, cx);
         }
@@ -937,6 +954,14 @@ impl ChartView {
                             .collect()
                     })
                     .unwrap_or_default(),
+                parents: kinds
+                    .iter()
+                    .map(|k| self.levels.kind_parent(&id, k))
+                    .collect(),
+                styled_off: kinds
+                    .iter()
+                    .map(|k| !self.levels.kind_styled_shown(&id, k))
+                    .collect(),
                 id,
                 label: label.to_owned(),
                 kinds,
@@ -1141,16 +1166,16 @@ impl ChartView {
             ),
             StudyRef::Levels(id) => {
                 let (_, label, _) = self.levels.sources().into_iter().find(|s| s.0 == *id)?;
-                let looks = set.styles.levels.get(id).map_or_else(
-                    || ss::Look::defaults(&ss::LEVELS),
-                    |m| ss::read(m, &ss::LEVELS),
-                );
-                (
-                    format!("Levels · {label}"),
-                    &ss::LEVELS,
-                    looks.to_vec(),
+                let (types, label_default) = self.levels.source_types(id)?;
+                let empty = lines_indicators::PartStyles::new();
+                return Some(ss::level_editor(
+                    format!("Levels · {label} style"),
+                    self.levels.styles().get(id).unwrap_or(&empty),
+                    types,
+                    label_default,
                     self.levels.source_color(id),
-                )
+                    |kind| self.levels.kind_color(id, kind),
+                ));
             }
         };
         Some(ss::editor(format!("{title} style"), defs, &looks, source))
@@ -3181,6 +3206,30 @@ impl ChartView {
             self.last_trade = d.last_trade;
             let fmt = self.instrument.price;
             let bars = view.bars;
+            // The level labels' gutter, right of the newest bar: from the whole level set (never
+            // the view), so it changes only with the levels, the label settings or the zoom,
+            // never on a pan, a zoom of the time axis or a price move. The view settles and
+            // the prices fit with it applied.
+            let labels_on = self.visibility.draws_studies() && self.visibility.draws_labels();
+            let (need, min_cut) = if labels_on {
+                // Label widths were measured in render (`measure_labels`).
+                self.levels.gutter_need()
+            } else {
+                (0.0, 0.0)
+            };
+            // 130 px at 100 % zoom; on a narrow plot a quarter of it, or what the shortest
+            // useful cut needs, but never more than 40 % of it. Not even that: no labels at
+            // all (`gutter_plan`).
+            let plan =
+                lines_core::levels::gutter_plan(need, min_cut, plot_w, crate::zoom::f(GUTTER_CAP));
+            self.gutter = lines_core::levels::settle_gutter(
+                &mut self.vp,
+                bars.len(),
+                self.gutter,
+                if plan.fits { need } else { 0.0 },
+                plan.cap,
+            );
+            self.levels.set_gutter(self.gutter, plot_w, plan.fits);
             keep_view(
                 &mut self.vp,
                 &mut self.series_trimmed,
@@ -3209,6 +3258,12 @@ impl ChartView {
                 && let Some(f) = self.pending_price_zoom.take()
             {
                 self.vp.zoom_price_at(self.vp.height * 0.5, f, fmt.tick);
+            }
+            // The inset again for the settled view (a new bar while following moves it).
+            self.vp.right_inset =
+                lines_core::levels::gutter_inset(f64::from(self.gutter), &self.vp, bars.len());
+            if self.visibility.draws_studies() {
+                self.levels.place(&d, &self.vp);
             }
             if display_tz::epoch() != self.zone_epoch {
                 // Times read in the new zone: cached time labels and the readout go.
@@ -4124,7 +4179,8 @@ impl ChartView {
             // Paint order inside the plot: grid, volume profile, the levels' zones and VWAP
             // band fills (behind the candles: a heavy fill never covers a bar), candles,
             // `layers`, indicator studies (VWAP lines and band edges), opaque footprint cells
-            // over them, the levels' front lines, the profile's label, drawings, then the
+            // over them, the levels' lines, the levels' labels (in their gutter right of the
+            // newest bar), drawings, strategy markers, the profile's label, then the
             // last-price line (above every study fill and line), crosshair.
             let (studies, labels) = (
                 self.visibility.draws_studies(),
@@ -4231,6 +4287,11 @@ impl ChartView {
                 self.studies.paint((ox, oy), &self.vp, &t, window);
                 self.footprint.paint(plot, &self.vp, &t, window, cx);
                 self.levels.paint_front(plot, &t, window);
+                // In the gutter right of the newest bar (no bar under a label), under the
+                // drawings and the strategy markers as study labels always were.
+                if labels {
+                    self.levels.paint_labels(plot, &t, window, cx);
+                }
             }
             // Drawings: the trader's own marks, above the studies (shown unless hidden on
             // this chart; hiding studies or a clean chart leaves them).
@@ -4241,7 +4302,6 @@ impl ChartView {
             // Strategy markers: above studies and drawings, under the crosshair.
             self.marks.paint(plot, &t, window, cx);
             if labels {
-                self.levels.paint_labels(plot, &t, window, cx);
                 self.profile.paint_label(plot, &t, window, cx);
             }
             if let Some((from, x)) = self.tick_from {
@@ -5542,10 +5602,45 @@ impl ChartView {
                     self.toggle_studies_menu(cx);
                 }
                 crate::style_editor::Outcome::Changed => {
-                    let looks = crate::study_style::looks_of(&e);
-                    let mut s = self.study_set();
-                    s.apply(&StudyAction::SetStyle(r.clone(), looks));
-                    self.set_study_set(s);
+                    if let StudyRef::Levels(id) = &r {
+                        // App-wide, by source: every chart of it (any product) takes it.
+                        let edit = match self.levels.source_types(id) {
+                            Some((types, label)) => {
+                                crate::study_style::LevelEdit::of(&e, types, label)
+                            }
+                            None => crate::study_style::LevelEdit {
+                                looks: crate::study_style::looks_of(&e),
+                                types: &[],
+                                label: lines_core::levels::LabelMode::Name,
+                                label_default: lines_core::levels::LabelMode::Name,
+                            },
+                        };
+                        // Only this source's entry changes, in the settings themselves (another
+                        // chart's edit of another source stays).
+                        if cx.has_global::<crate::picker_view::AppSettings>() {
+                            crate::picker_view::update_settings(cx, |s| {
+                                crate::study_style::set_level_style(&mut s.level_styles, id, &edit)
+                            });
+                            let app = crate::picker_view::settings(cx).level_styles.clone();
+                            self.levels.set_styles(&app);
+                        } else {
+                            let levels = crate::study_style::with_level_style(
+                                self.levels.styles(),
+                                id,
+                                &edit,
+                            );
+                            self.levels.set_styles(&levels);
+                        }
+                        crate::study_style::level_styles_changed();
+                        self.seen_levels = u64::MAX;
+                    } else {
+                        let mut s = self.study_set();
+                        s.apply(&StudyAction::SetStyle(
+                            r.clone(),
+                            crate::study_style::looks_of(&e),
+                        ));
+                        self.set_study_set(s);
+                    }
                     self.study_style = Some((r, e));
                 }
                 _ => self.study_style = Some((r, e)),
@@ -5893,6 +5988,56 @@ impl ChartView {
             popover::floating(popover::Panel::StyleEditor, title, t, editor, dismiss)
                 .into_any_element(),
         )
+    }
+
+    /// The app-wide level styles (settings `level_styles`, decision 0026): promote what this
+    /// chart saved per source before they were app-wide (once, where a source has none), and
+    /// take the current ones when they moved (another chart's style editor, a promotion).
+    fn sync_level_styles(&mut self, cx: &mut Context<Self>) {
+        self.promote_levels(cx);
+        if !cx.has_global::<crate::picker_view::AppSettings>() {
+            return;
+        }
+        let generation = crate::study_style::level_styles_generation();
+        if generation != self.level_styles_gen {
+            self.level_styles_gen = generation;
+            let app = crate::picker_view::settings(cx).level_styles.clone();
+            self.levels.set_styles(&app);
+            self.seen_levels = u64::MAX;
+        }
+    }
+
+    /// Promote this chart's own per-source level styles (from before they were app-wide) to
+    /// the app-wide ones: on restore (so a chart in a background tab, never shown, loses
+    /// nothing), when a template or the defaults apply, else at the next render. Writes the
+    /// settings only when a source has no app-wide entry yet. Without the settings (tests),
+    /// the chart draws them itself and keeps saving them.
+    pub fn promote_levels(&mut self, cx: &mut App) {
+        if self.pending_levels.is_empty() {
+            return;
+        }
+        if !cx.has_global::<crate::picker_view::AppSettings>() {
+            let mut levels = self.levels.styles().clone();
+            if self.pending_levels.clone().promote(&mut levels) {
+                self.levels.set_styles(&levels);
+            }
+            return;
+        }
+        // Settings that are never saved (screenshots, a file that couldn't be backed up):
+        // promoted for this run, and still saved with the chart (`promote_into`). Settings are
+        // written only when a source has no app-wide entry yet.
+        let writable = cx.global::<crate::picker_view::AppSettings>().writable();
+        let mut pending = std::mem::take(&mut self.pending_levels);
+        if pending.adds_to(&crate::picker_view::settings(cx).level_styles) {
+            crate::picker_view::update_settings(cx, |s| {
+                pending.promote_into(&mut s.level_styles, writable);
+            });
+            crate::study_style::level_styles_changed();
+        } else if writable {
+            // Every source already has an app-wide style: the chart's own are dropped.
+            pending = Default::default();
+        }
+        self.pending_levels = pending;
     }
 
     /// Pick up per-tool defaults saved since this chart last looked (on any chart).
@@ -7246,9 +7391,13 @@ fn prepare_studies(
         l.prepare(d, bars, vp);
     }
     studies.prepare(bars, d.profiles.footprint(), &*levels, vp, max_columns);
-    let last_y = d.last_trade.map(|p| vp.price_to_y(p.0 as f64) as f32);
-    levels.prepare(d, bars, vp, last_y);
+    // Placed by price before the scene (the labels' gutter needs them); its VWAP-relative
+    // columns now, on the final time axis.
+    levels.columns(bars, vp);
 }
+
+/// The level labels' gutter's widest (logical px at 100 % zoom).
+const GUTTER_CAP: f32 = 130.0;
 
 /// Where a measure's readout goes (plot-local top-left): on the far side of the measured
 /// range from the live edge (left-aligned at the range's older end), above the box, or below
@@ -7639,6 +7788,7 @@ pub const HINTS_SHORT: &str = "Chart: drag pan  ·  wheel zoom  ·  Ctrl+wheel o
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_level_styles(cx);
         // Text shaped at another UI zoom is the wrong size: shaped again on demand.
         let zoom = crate::zoom::generation();
         if zoom != self.zoom_generation {
@@ -7679,6 +7829,13 @@ impl Render for ChartView {
         // in this frame both describe it.
         let market_time = self.store.try_read().and_then(|d| d.market_time);
         self.levels.snapshot(market_time);
+        // The shown sources' label texts, measured once each (kept by text) for the labels'
+        // gutter, here in render rather than in paint (a hidden pane isn't rendered).
+        if self.visibility.draws_studies() && self.visibility.draws_labels() {
+            let theme = self.theme;
+            self.levels
+                .measure_labels(|t| crate::levels_layer::measure(t, &theme, window));
+        }
         let today = pane::today(self.frozen, &self.store);
         let overlay = self.picker.overlay(
             &t,

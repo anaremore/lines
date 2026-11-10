@@ -58,6 +58,9 @@ pub struct Viewport {
     /// The auto-fit's smallest price range (scaled units; 0: only the tick's own minimum). Lets
     /// something aligned to the scale keep room: the option chart's chain needs several strikes.
     pub min_price_span: f64,
+    /// Plot px at the right kept free of bars (the level labels' gutter): the time axis ends
+    /// `right_inset` left of the plot's right edge ([`Viewport::edge`]). 0: none.
+    pub right_inset: f64,
 }
 
 impl Default for Viewport {
@@ -76,6 +79,7 @@ impl Default for Viewport {
             price_held: false,
             price_fitted: false,
             min_price_span: 0.0,
+            right_inset: 0.0,
         }
     }
 }
@@ -86,14 +90,21 @@ impl Viewport {
         self.height = height.max(1.0);
     }
 
+    /// Where the time axis ends: the plot's right edge less [`Viewport::right_inset`]
+    /// (`right_index` is drawn here).
+    #[inline]
+    pub fn edge(&self) -> f64 {
+        self.width - self.right_inset
+    }
+
     #[inline]
     pub fn index_to_x(&self, index: f64) -> f64 {
-        self.width - (self.right_index - index) * self.bar_px
+        self.edge() - (self.right_index - index) * self.bar_px
     }
 
     #[inline]
     pub fn x_to_index(&self, x: f64) -> f64 {
-        self.right_index - (self.width - x) / self.bar_px
+        self.right_index - (self.edge() - x) / self.bar_px
     }
 
     #[inline]
@@ -111,9 +122,15 @@ impl Viewport {
         if len == 0 {
             return 0..0;
         }
-        // A bar counts as visible when its centre lies within half a bar of the plot edges.
+        // A bar counts as visible when its centre lies within half a bar of the plot edges;
+        // with a right inset (the level labels' gutter) only bars wholly left of it, so none
+        // is ever under the gutter.
         let first = (self.x_to_index(0.0) - 0.5).ceil().max(0.0);
-        let last = (self.right_index + 0.5).floor();
+        let last = if self.right_inset > 0.0 {
+            (self.right_index - 0.5).floor()
+        } else {
+            (self.right_index + 0.5).floor()
+        };
         if last < 0.0 {
             return 0..0;
         }
@@ -142,7 +159,7 @@ impl Viewport {
         }
         let anchor_index = self.x_to_index(anchor_x);
         self.bar_px = (self.bar_px * factor).clamp(MIN_BAR_PX, MAX_BAR_PX);
-        self.right_index = anchor_index + (self.width - anchor_x) / self.bar_px;
+        self.right_index = anchor_index + (self.edge() - anchor_x) / self.bar_px;
         self.clamp(len);
         self.update_follow(len);
     }
@@ -174,9 +191,16 @@ impl Viewport {
         self.price_lo = anchor - (anchor - from.price_lo) * ratio;
     }
 
-    /// Whether the newest bar's centre is on screen.
+    /// Whether the newest bar's centre is on screen (with a right inset: whether it is drawn,
+    /// the same rule as [`Viewport::visible_range`]).
     pub fn newest_visible(&self, len: usize) -> bool {
-        len > 0 && (0.0..=self.width).contains(&self.index_to_x((len - 1) as f64))
+        if len == 0 {
+            return false;
+        }
+        if self.right_inset > 0.0 {
+            return self.visible_range(len).contains(&(len - 1));
+        }
+        (0.0..=self.edge()).contains(&self.index_to_x((len - 1) as f64))
     }
 
     /// Anchor for a wheel time-zoom with the pointer at `cursor_x`: the right edge while the
@@ -184,7 +208,7 @@ impl Viewport {
     /// otherwise the pointer.
     pub fn time_zoom_anchor(&self, cursor_x: f64, len: usize) -> f64 {
         if self.newest_visible(len) {
-            self.width
+            self.edge()
         } else {
             cursor_x
         }
@@ -380,7 +404,8 @@ impl ScaleDrag {
             ScaleAxis::Time => {
                 let anchor = s.x_to_index(self.x);
                 vp.bar_px = (s.bar_px * (dx * SCALE_PER_PX).exp()).clamp(MIN_BAR_PX, MAX_BAR_PX);
-                vp.right_index = anchor + (vp.width - self.x) / vp.bar_px;
+                // The start view's axis end: the anchor stays under the pointer.
+                vp.right_index = anchor + (s.edge() - self.x) / vp.bar_px;
                 vp.clamp(len);
                 vp.update_follow(len);
             }
@@ -416,6 +441,7 @@ mod tests {
             price_held: false,
             price_fitted: false,
             min_price_span: 0.0,
+            right_inset: 0.0,
         }
     }
 
@@ -823,6 +849,46 @@ mod tests {
         );
         v.zoom_price_at(250.0, 0.5, 500);
         assert!(close(v.price_hi - v.price_lo, 2000.0), "can zoom out");
+    }
+
+    /// With an inset, the newest bar is visible exactly when it is drawn (the rule of
+    /// `visible_range`): a bar partly under the gutter is neither drawn nor counted visible.
+    #[test]
+    fn newest_visible_matches_what_is_drawn_with_an_inset() {
+        let len = 100;
+        let mut v = vp();
+        v.right_inset = 96.0;
+        for ri in [98.6, 99.0, 99.4, 99.5, 99.6, 100.0, 105.0] {
+            v.right_index = ri;
+            assert_eq!(
+                v.newest_visible(len),
+                v.visible_range(len).contains(&(len - 1)),
+                "right_index {ri}"
+            );
+        }
+        v.right_index = 99.4;
+        assert!(
+            !v.newest_visible(len),
+            "half under the gutter: not drawn, not visible"
+        );
+    }
+
+    /// A time-axis drag with the labels' gutter keeps the bar under the pointer (the axis ends
+    /// at the gutter's edge, not the plot's).
+    #[test]
+    fn time_drag_with_a_right_inset() {
+        let len = 200;
+        let mut v = vp();
+        v.right_index = 150.0;
+        v.follow_live = false;
+        v.right_inset = 96.0;
+        let x = v.index_to_x(120.0);
+        let mut d = ScaleDrag::new(&v, ScaleMode::Time, x, 520.0);
+        d.update(&mut v, x + 40.0, 520.0, len, 25);
+        assert!(
+            close(v.index_to_x(120.0), x),
+            "the bar stays under the pointer"
+        );
     }
 
     #[test]

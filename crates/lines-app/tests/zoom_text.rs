@@ -32,7 +32,11 @@ const NOT_YET: &[(&str, &str, usize)] = &[
         1,
     ),
     ("econ_layer.rs", "the economic calendar's chart tags", 1),
-    ("levels_layer.rs", "the levels' chart labels", 1),
+    (
+        "levels_layer.rs",
+        "the levels' chart labels (measured in render and drawn in paint, at one size)",
+        2,
+    ),
     ("profile.rs", "the volume profile's chart labels", 1),
 ];
 
