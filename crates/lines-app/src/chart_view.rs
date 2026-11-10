@@ -5117,7 +5117,8 @@ impl ChartView {
                 (e, Some(self.drawings.extent(id)), warnings)
             }
         };
-        // Inside the plot area: never over the time axis, the status bar or a pane below.
+        // Inside the plot area: never over the time axis, the status bar or a pane below (until
+        // it is dragged: then where it was dragged, `popover::floating`).
         let area = (f32::from(self.chart.size.width), self.above_axis);
         self.editor_pane = area;
         let w = crate::style_editor_view::width(area.0);

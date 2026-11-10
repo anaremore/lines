@@ -62,6 +62,8 @@ pub enum Command {
     Palette,
     SaveAs,
     Open,
+    /// Every pop-up panel opens where it did before it was dragged.
+    ResetPanels,
     /// The focused chart: hide (or show) its study legends and tags; studies stay drawn.
     ToggleStudyLabels,
     /// The focused chart: hide (or show) all its studies, keeping their configuration.
@@ -713,6 +715,7 @@ pub fn label(c: Command) -> String {
         Command::Palette => "Command palette".into(),
         Command::SaveAs => "Save workspace as…".into(),
         Command::Open => "Open workspace…".into(),
+        Command::ResetPanels => "Reset pop-up panel positions".into(),
         Command::ExportDiagnostics => "Export diagnostics…".into(),
         Command::ToggleStudyLabels => "Chart: hide/show study labels".into(),
         Command::ToggleStudies => "Chart: hide/show studies".into(),
@@ -894,6 +897,7 @@ pub fn palette() -> Vec<Command> {
         Command::TickBarsContinuous,
         Command::SaveAs,
         Command::Open,
+        Command::ResetPanels,
         Command::Menu,
     ]);
     // Columns of the focused DOM or time & sales.

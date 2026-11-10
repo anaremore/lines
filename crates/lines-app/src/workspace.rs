@@ -1565,6 +1565,9 @@ impl WindowView {
                     error: None,
                 });
             }
+            Command::ResetPanels => {
+                crate::picker_view::update_settings(cx, |s| s.panel_places.clear());
+            }
             Command::Open => {
                 let ws = cx.global::<Workspace>();
                 let mut items = ws
@@ -2881,10 +2884,8 @@ impl WindowView {
             )
     }
 
-    /// Screenshot: open this menu once its pane can show it (an order's: once the chart has
-    /// one).
-    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
     /// Screenshots: open a prompt (`--prompt palette[:QUERY]|open|save`).
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
     pub(crate) fn screenshot_prompt(
         &mut self,
         which: &str,
@@ -2914,6 +2915,9 @@ impl WindowView {
         Ok(())
     }
 
+    /// Screenshot: open this menu once its pane can show it (an order's: once the chart has
+    /// one).
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
     pub(crate) fn screenshot_menu(
         &mut self,
         m: crate::pane_menu::ShotMenu,

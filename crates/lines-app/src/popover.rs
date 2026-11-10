@@ -469,6 +469,8 @@ pub enum Panel {
 }
 
 impl Panel {
+    /// Every kind (screenshots' `--panel-at`, tests).
+    #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
     pub const ALL: [Panel; 7] = [
         Panel::Palette,
         Panel::Picker,
@@ -509,8 +511,24 @@ thread_local! {
     static WHEEL_CARRY: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
 }
 
-/// [`wheel_steps`] for a wheel event over a panel's list.
+/// A line-based wheel event (`lines` > 0: up) as rows: one per event.
+pub fn notch_rows(lines: f32) -> isize {
+    if lines > 0.0 {
+        -1
+    } else if lines < 0.0 {
+        1
+    } else {
+        0
+    }
+}
+
+/// [`wheel_steps`] for a wheel event over a panel's list (a line-based one: [`notch_rows`]).
 pub fn wheel_rows(ev: &gpui::ScrollEvent, window: &Window) -> isize {
+    // A mouse wheel's notch is one row, however many lines the system scrolls per notch.
+    if let gpui::ScrollDelta::Lines(l) = ev.delta {
+        WHEEL_CARRY.with(|c| c.set(0.0));
+        return notch_rows(l.y);
+    }
     let line = window.line_height();
     let dy = f32::from(ev.delta.pixel_delta(line).y);
     WHEEL_CARRY.with(|c| {
@@ -556,6 +574,58 @@ struct PanelDrag {
     panel: Panel,
     grab: (f32, f32),
     at: (f32, f32),
+    /// Where the press was, and whether the pointer has since gone further than a click's slop.
+    press: (f32, f32),
+    moved: bool,
+}
+
+/// How far a press may wander and stay a click (logical px): a click on the title bar keeps
+/// no place.
+const DRAG_SLOP: f32 = 3.0;
+
+impl PanelDrag {
+    fn start(panel: Panel, pointer: (f32, f32), at: (f32, f32)) -> PanelDrag {
+        PanelDrag {
+            panel,
+            grab: (pointer.0 - at.0, pointer.1 - at.1),
+            at,
+            press: pointer,
+            moved: false,
+        }
+    }
+
+    /// The pointer moved with the left button held: the panel follows it.
+    fn follow(self, pointer: (f32, f32)) -> PanelDrag {
+        let far = (pointer.0 - self.press.0)
+            .abs()
+            .max((pointer.1 - self.press.1).abs())
+            > DRAG_SLOP;
+        PanelDrag {
+            at: (pointer.0 - self.grab.0, pointer.1 - self.grab.1),
+            moved: self.moved || far,
+            ..self
+        }
+    }
+
+    /// The drag ended (a release, or a move with no button held: a release the window
+    /// missed): the place to keep, only if it moved.
+    fn end(self) -> Option<(i32, i32)> {
+        self.moved
+            .then(|| (self.at.0.round() as i32, self.at.1.round() as i32))
+    }
+}
+
+/// End `panel`'s drag, keeping its place if it moved.
+fn end_drag(panel: Panel, cx: &mut App) {
+    let Some(d) = dragged(panel) else {
+        return;
+    };
+    PANEL_DRAG.with(|c| c.set(None));
+    if let Some(at) = d.end() {
+        crate::picker_view::update_settings(cx, |s| {
+            s.panel_places.insert(panel.key().to_owned(), at);
+        });
+    }
 }
 
 thread_local! {
@@ -649,13 +719,12 @@ impl Floating {
             .cursor_grab()
             .on_mouse_down(MouseButton::Left, move |ev: &MouseDownEvent, window, _| {
                 let p = (f32::from(ev.position.x), f32::from(ev.position.y));
-                PANEL_DRAG.with(|d| {
-                    d.set(Some(PanelDrag {
-                        panel,
-                        grab: (p.0 - at.0, p.1 - at.1),
-                        at,
-                    }))
-                });
+                PANEL_DRAG.with(|d| d.set(Some(PanelDrag::start(panel, p, at))));
+                window.refresh();
+            })
+            // A click released before the frame that listens for the drag: nothing to keep.
+            .on_mouse_up(MouseButton::Left, move |_, window, cx| {
+                end_drag(panel, cx);
                 window.refresh();
             })
             .child(div().flex_none().text_color(t.text_dim).child("⠿"))
@@ -679,6 +748,7 @@ impl Floating {
                 .on_mouse_down(MouseButton::Left, move |ev, window, cx| {
                     cx.stop_propagation();
                     mark_dismissing();
+                    PANEL_DRAG.with(|d| d.set(None));
                     dismiss(ev, window, cx);
                 }),
             )
@@ -737,12 +807,19 @@ impl Element for Floating {
         }
         let rect = Rect::new(at.0, at.1, w, h + title_h());
         let close = dismiss.clone();
+        let panel = self.panel;
+        let close: OnDismiss = Box::new(move |ev, window, cx| {
+            if dragged(panel).is_some() {
+                PANEL_DRAG.with(|d| d.set(None));
+            }
+            close(ev, window, cx)
+        });
         defer_backdrop(
             window,
             cx,
             crate::dropdown::BACKDROP_PRIORITY,
             &[rect],
-            Box::new(move |ev, window, cx| close(ev, window, cx)),
+            close,
         );
         let priority = self.priority;
         let mut bar = self.title_bar(bounds.size.width, at, dismiss);
@@ -777,29 +854,28 @@ impl Element for Floating {
         if dragged(panel).is_none() {
             return;
         }
-        window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, window, _| {
+        window.on_mouse_event(move |ev: &gpui::MouseMoveEvent, phase, window, cx| {
             if phase != gpui::DispatchPhase::Capture {
                 return;
             }
-            let p = (f32::from(ev.position.x), f32::from(ev.position.y));
-            if let Some(mut g) = dragged(panel) {
-                g.at = (p.0 - g.grab.0, p.1 - g.grab.1);
-                PANEL_DRAG.with(|d| d.set(Some(g)));
-                window.refresh();
+            let Some(g) = dragged(panel) else {
+                return;
+            };
+            if ev.pressed_button != Some(gpui::MouseButton::Left) {
+                // The release never reached the window (it closed mid-drag, focus left).
+                end_drag(panel, cx);
+            } else {
+                let p = (f32::from(ev.position.x), f32::from(ev.position.y));
+                PANEL_DRAG.with(|d| d.set(Some(g.follow(p))));
             }
+            window.refresh();
         });
         window.on_mouse_event(move |_: &gpui::MouseUpEvent, phase, window, cx| {
-            if phase != gpui::DispatchPhase::Capture {
+            if phase != gpui::DispatchPhase::Capture || dragged(panel).is_none() {
                 return;
             }
-            if let Some(g) = dragged(panel) {
-                PANEL_DRAG.with(|d| d.set(None));
-                let at = (g.at.0.round() as i32, g.at.1.round() as i32);
-                crate::picker_view::update_settings(cx, |s| {
-                    s.panel_places.insert(panel.key().to_owned(), at);
-                });
-                window.refresh();
-            }
+            end_drag(panel, cx);
+            window.refresh();
         });
     }
 }
@@ -860,6 +936,29 @@ mod panel_tests {
             "small deltas add up"
         );
         assert_eq!(wheel_steps(&mut carry, -7.0, 0.0), 0);
+    }
+
+    /// A notch is one row whatever the system's lines per notch.
+    #[test]
+    fn a_notch_is_one_row() {
+        assert_eq!(notch_rows(3.0), -1);
+        assert_eq!(notch_rows(-3.0), 1);
+        assert_eq!(notch_rows(0.0), 0);
+    }
+
+    /// A drag follows the pointer by where it was grabbed; only one that moved keeps a place
+    /// (a click on the title bar keeps none).
+    #[test]
+    fn a_drag_keeps_a_place_only_when_it_moved() {
+        let d = PanelDrag::start(Panel::Palette, (110.0, 60.0), (100.0, 50.0));
+        assert_eq!(d.end(), None, "a click");
+        let d = d.follow((112.0, 61.0));
+        assert_eq!(d.end(), None, "within the slop");
+        let d = d.follow((310.0, 260.0));
+        assert_eq!(d.at, (300.0, 250.0), "the grab offset is kept");
+        assert_eq!(d.end(), Some((300, 250)));
+        // Back where it started: still a move.
+        assert_eq!(d.follow((110.0, 60.0)).end(), Some((100, 50)));
     }
 
     #[test]

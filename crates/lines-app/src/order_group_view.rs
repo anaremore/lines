@@ -180,7 +180,10 @@ pub fn layer(
         .collect::<Vec<_>>();
     let n = menu.open_count();
     let armed = menu.confirm == Some(n);
-    let avail = f32::from(window.viewport_size().height) - f32::from(plot.origin.y);
+    // The panel's title bar sits above the list (`popover::floating`).
+    let avail = f32::from(window.viewport_size().height)
+        - f32::from(plot.origin.y)
+        - crate::popover::title_h();
     let (list_h, top) = list_place(menu.rows.len(), menu.top, avail);
     let shown = (list_h / ROW_H).floor() as usize;
     let scroll = (menu.rows.len() > shown).then(|| {
