@@ -110,6 +110,39 @@ fn label_px() -> f32 {
     crate::zoom::f(LABEL_PX_100)
 }
 const MAX_CACHED_LABELS: usize = 4096;
+
+/// The space between the corner's two words, and their margin from its edges (at 100 %).
+const CORNER_GAP_100: f32 = 6.0;
+const CORNER_MARGIN_100: f32 = 4.0;
+
+/// The corner under the price axis holds two words: "manual" (the price scale is frozen) and
+/// the display zone ("ET"). Where each goes, as offsets from the corner's left edge (`None`: not
+/// drawn): side by side, "manual" first, when both fit inside its margins; else "manual" alone
+/// (the frozen scale matters more; the crosshair's tag still names the zone). Never overlapping
+/// at any width, zoom or DPI.
+pub(crate) fn corner_layout(
+    corner_w: f32,
+    manual_w: Option<f32>,
+    zone_w: Option<f32>,
+    gap: f32,
+    margin: f32,
+) -> (Option<f32>, Option<f32>) {
+    let centred = |w: f32| ((corner_w - w) * 0.5).max(margin);
+    match (manual_w, zone_w) {
+        (None, None) => (None, None),
+        (Some(m), None) => (Some(centred(m)), None),
+        (None, Some(z)) => (None, Some(centred(z))),
+        (Some(m), Some(z)) => {
+            let both = m + gap + z;
+            if both + 2.0 * margin <= corner_w {
+                let left = (corner_w - both) * 0.5;
+                (Some(left), Some(left + m + gap))
+            } else {
+                (Some(centred(m)), None)
+            }
+        }
+    }
+}
 /// Colours in signatures (theme tokens only).
 type Colour = gpui::Hsla;
 
@@ -423,6 +456,9 @@ pub struct ChartView {
     /// shaped once per distinct value.
     readout: Option<(Bar, bool, TickInfo, ShapedLine)>,
     labels: HashMap<(LabelKind, i64), ShapedLine>,
+    /// The zone label's width this frame, when the corner has it (`corner_layout`: "manual"
+    /// is placed beside it, or it yields).
+    corner_zone_w: Option<f32>,
     /// The display time zone the axis, the time tag and the readout are written in, and its
     /// epoch (`lines_core::display_tz`): a change clears the cached labels.
     zone: DisplayTz,
@@ -707,6 +743,7 @@ impl ChartView {
             period_ms: 60_000,
             readout: None,
             labels: HashMap::with_capacity(MAX_CACHED_LABELS),
+            corner_zone_w: None,
             zone: display_tz::current(),
             zone_epoch: display_tz::epoch(),
             font: None,
@@ -4314,6 +4351,7 @@ impl ChartView {
                 let y = self.scene.price_lines[i].y;
                 y < 0.0 || y > ph || !Span::around(y, label_px() * 0.65).overlaps(zone_span)
             });
+        self.corner_zone_w = None;
         if let Some(at) = self.scene.time_lines.last().map(|l| l.time)
             && !tf.is_daily()
             && corner_clear
@@ -4327,20 +4365,30 @@ impl ChartView {
                 self.label(LabelKind::Zone, key, t.text_dim, window, text)
                     .width,
             );
-            let origin = point(
-                px(ox + pw + hair + (axis_w() - w) * 0.5),
-                px(oy + self.above_axis + 4.0),
+            // Beside "manual" when the price scale is frozen, or not at all when both don't
+            // fit (`corner_layout`; "manual" is drawn later from the same layout).
+            let manual_w = (!self.vp.auto_price).then(|| self.manual_label_w(window));
+            let (_, zone_x) = corner_layout(
+                f32::from(bounds.size.width) - pw,
+                manual_w,
+                Some(w),
+                crate::zoom::f(CORNER_GAP_100),
+                crate::zoom::f(CORNER_MARGIN_100),
             );
-            self.paint_label(
-                LabelKind::Zone,
-                key,
-                origin,
-                line_h,
-                t.text_dim,
-                window,
-                cx,
-                text,
-            );
+            if let Some(zone_x) = zone_x {
+                self.corner_zone_w = Some(w);
+                let origin = point(px(ox + pw + zone_x), px(oy + self.above_axis + 4.0));
+                self.paint_label(
+                    LabelKind::Zone,
+                    key,
+                    origin,
+                    line_h,
+                    t.text_dim,
+                    window,
+                    cx,
+                    text,
+                );
+            }
         }
         self.draw_drawing_tags(bounds, window, cx);
         if let (Some(p), Some(y)) = (self.last_trade, last_y) {
@@ -4401,6 +4449,17 @@ impl ChartView {
         }
     }
 
+    /// "manual"'s width as drawn (shaped once, cached).
+    fn manual_label_w(&mut self, window: &mut Window) -> f32 {
+        let accent = self.theme.accent;
+        f32::from(
+            self.label(LabelKind::Indicator, 0, accent, window, |s| {
+                let _ = s.write_str(MANUAL_LABEL);
+            })
+            .width,
+        )
+    }
+
     /// Price auto-scale is off: a small accent word in the empty corner under the price axis,
     /// where it never covers a label or moves anything. Double-click the price axis or press
     /// Home to restore auto-scale.
@@ -4413,15 +4472,17 @@ impl ChartView {
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         let pw = f32::from(self.plot.size.width);
         let accent = self.theme.accent;
-        let w = f32::from(
-            self.label(LabelKind::Indicator, 0, accent, window, |s| {
-                let _ = s.write_str(MANUAL_LABEL);
-            })
-            .width,
+        let w = self.manual_label_w(window);
+        // The same layout the zone label took (`corner_layout`): beside it, or alone.
+        let (x, _) = corner_layout(
+            f32::from(bounds.size.width) - pw,
+            Some(w),
+            self.corner_zone_w,
+            crate::zoom::f(CORNER_GAP_100),
+            crate::zoom::f(CORNER_MARGIN_100),
         );
-        let corner_w = f32::from(bounds.size.width) - pw;
         let origin = point(
-            px(ox + pw + ((corner_w - w) * 0.5).max(4.0)),
+            px(ox + pw + x.unwrap_or(0.0)),
             px(oy + self.above_axis + 4.0),
         );
         self.paint_label(
@@ -6942,6 +7003,55 @@ fn dashed_box(window: &mut Window, r: Bounds<Pixels>, hair: f32, color: Hsla) {
         window.paint_quad(fill(q(x0 + w - hair, y0 + y, hair, d), color));
         y += ON + OFF;
     }
+}
+
+/// "manual" and the zone never overlap in the corner: at the narrowest axis (80 % zoom) with
+/// the widest zone label ("+0545") the zone yields and "manual" stays; where both fit they sit
+/// side by side, inside the corner.
+#[cfg(test)]
+#[test]
+fn the_corner_never_overlaps_manual_and_the_zone() {
+    // Text widths at 100 % (about 6.2 px a character at the axis font), scaled with the zoom.
+    let (manual, et, wide) = (38.0_f32, 13.0_f32, 31.0_f32);
+    for zoom in [0.8_f32, 0.9, 1.0, 1.1, 1.25, 1.5] {
+        let corner = AXIS_W_100 * zoom;
+        let (gap, margin) = (CORNER_GAP_100 * zoom, CORNER_MARGIN_100 * zoom);
+        for zone in [et, wide] {
+            let (m, z) = (manual * zoom, zone * zoom);
+            let (mx, zx) = corner_layout(corner, Some(m), Some(z), gap, margin);
+            let mx = mx.expect("manual always shows");
+            assert!(
+                mx >= 0.0 && mx + m <= corner,
+                "manual inside the corner at {zoom}"
+            );
+            if let Some(zx) = zx {
+                assert!(mx + m + gap <= zx, "no overlap at {zoom}: {mx}+{m} vs {zx}");
+                assert!(zx + z <= corner - margin + 0.01, "zone inside at {zoom}");
+            }
+        }
+        // The usual zone ("ET") fits beside "manual" at every zoom.
+        let (_, zx) = corner_layout(corner, Some(manual * zoom), Some(et * zoom), gap, margin);
+        assert!(zx.is_some(), "ET beside manual at {zoom}");
+    }
+    // The narrowest axis and the widest zone: the zone yields, "manual" stays.
+    let zoom = 0.8;
+    let (mx, zx) = corner_layout(
+        AXIS_W_100 * zoom,
+        Some(manual * zoom),
+        Some(wide * zoom + 20.0),
+        CORNER_GAP_100 * zoom,
+        CORNER_MARGIN_100 * zoom,
+    );
+    assert!(mx.is_some() && zx.is_none());
+    // Alone, each is centred.
+    assert_eq!(
+        corner_layout(78.0, None, Some(14.0), 6.0, 4.0),
+        (None, Some(32.0))
+    );
+    assert_eq!(
+        corner_layout(78.0, Some(38.0), None, 6.0, 4.0),
+        (Some(20.0), None)
+    );
 }
 
 #[cfg(test)]
