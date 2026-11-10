@@ -1809,8 +1809,9 @@ impl ChartView {
         }
         // A staged order: Enter places it, Esc discards it (the pane's own keys, never in
         // `commands::BINDINGS`: they act on what this chart shows). After the size fields
-        // above, and never while a note or a timeframe is typed: their Enter is their own.
-        let typing = self.drawings.typing()
+        // above, and never while a note or a timeframe is typed or a drawing gesture (a tool,
+        // a placement, a measure) has a use for the key: those are the trader's latest act.
+        let typing = self.drawings.wants(&k.key)
             || self.tf_entry.is_some()
             || self.trade.qty_edit.is_some()
             || self.trade.resize_edit.is_some();

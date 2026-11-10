@@ -629,7 +629,7 @@ pub const MARKET_MOVED: &str = "The market moved: right-click again";
 pub const CHART_CHANGED: &str = "The chart changed: right-click again";
 /// Place pressed on a staged entry that would now fill or trigger at once, whether the market
 /// moved or the trader dragged it there: it stays staged, to drag back.
-pub const STAGED_CROSSES: &str = "The entry would fill now: drag it back";
+pub const STAGED_CROSSES: &str = "The entry would fill or trigger now: drag it back";
 
 /// The two orders a right click at `at` offers, never one that fills at once. The market is
 /// the inside (bid and ask, either falling back to the last trade, as the trade panel does).

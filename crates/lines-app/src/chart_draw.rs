@@ -183,6 +183,25 @@ impl ChartDrawings {
         self.note.is_some() || self.confirm_clear
     }
 
+    /// Whether Enter or Esc has a drawing gesture to act on, so it goes there before a staged
+    /// order (`chart_trade::staged_takes_key`): Esc backs out of a tool, a placement, a measure
+    /// or a drag; Enter pins a measure. A selection alone doesn't hold Esc: it stays on screen
+    /// after the gesture, and the staged order is the more recent thing to back out of.
+    pub fn wants(&self, key: &str) -> bool {
+        self.typing()
+            || match key {
+                "escape" => {
+                    self.tool.is_some()
+                        || self.pending.is_some()
+                        || self.measure_drag.is_some()
+                        || self.measure.is_some()
+                        || self.drag.is_some()
+                }
+                "enter" => self.measure.is_some(),
+                _ => false,
+            }
+    }
+
     /// Choose a tool (again: leave drawing mode).
     pub fn set_tool(&mut self, tool: Tool) {
         self.end_quick();

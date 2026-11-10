@@ -196,7 +196,11 @@ fn notes_measures_delete_and_clear() {
     r.frame(0.0, 0.0);
     let (_, stats) = r.d.measure_shown().unwrap();
     assert!(stats.ticks > 0 && stats.bars > 0);
+    // A measure holds Enter and Esc ahead of a staged order (`wants`).
+    assert!(r.d.wants("enter") && r.d.wants("escape"));
     assert_eq!(r.d.key("enter", None), Key::Handled);
+    // Pinned and selected: neither key is held from a staged order.
+    assert!(!r.d.wants("enter") && !r.d.wants("escape"));
     assert_eq!(r.items().len(), 2);
     assert_eq!(r.items()[1].tool, Tool::Measure);
 
@@ -204,8 +208,11 @@ fn notes_measures_delete_and_clear() {
     assert_eq!(r.d.key("delete", None), Key::Handled);
     assert_eq!(r.items().len(), 1);
     r.d.set_tool(Tool::Trend);
+    // An armed tool holds Esc ahead of a staged order, not Enter.
+    assert!(r.d.wants("escape") && !r.d.wants("enter"));
     assert_eq!(r.d.key("escape", None), Key::Handled);
     assert_eq!(r.d.tool(), None);
+    assert!(!r.d.wants("escape"));
     assert_eq!(r.d.key("escape", None), Key::Ignored);
 
     // Delete all waits for Enter (Esc keeps them), and undo brings them back.
