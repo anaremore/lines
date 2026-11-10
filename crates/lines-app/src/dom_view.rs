@@ -1253,14 +1253,16 @@ impl DomView {
         }
     }
 
-    fn header(&self) -> impl IntoElement {
+    fn header(&self, cx: &App) -> impl IntoElement {
         let t = self.theme;
         let mut left = String::with_capacity(64);
         let mut right = String::with_capacity(64);
         if let Some(title) = pane::unavailable_title(&self.feed) {
             let _ = write!(left, "{title}  DOM");
         } else if let Some(d) = self.store.try_read() {
-            let _ = write!(left, "{}  DOM", pane::contract_text(&d));
+            left.push_str(&pane::contract_text(&d));
+            crate::sources::write_header_tag(&mut left, &self.feed, cx);
+            left.push_str("  DOM");
         }
         let ticks = if self.grouping == 1 { "tick" } else { "ticks" };
         if let Some(n) = pane::adopted_note(&self.feed) {
@@ -1479,7 +1481,7 @@ impl Render for DomView {
         let today = pane::today(self.frozen, &self.store);
         let overlay = self.picker.overlay(
             &t,
-            &crate::sources::pick(&self.feed, cx),
+            &crate::sources::pick_if(self.picker.is_open(), &self.feed, cx),
             today,
             Self::picker_click,
             cx,
@@ -1522,7 +1524,7 @@ impl Render for DomView {
                 .absolute()
                 .size_full(),
             )
-            .child(self.header())
+            .child(self.header(cx))
             .children(trade)
             .child(
                 div()

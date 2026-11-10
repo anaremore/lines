@@ -212,6 +212,7 @@ impl Cli {
             && self.headless.is_none()
             && self.backtest.is_none()
             && self.run_strategy.is_none()
+            && self.strategy.is_none()
             && self.replay.is_none()
     }
 }
@@ -228,7 +229,10 @@ impl SourceChoice {
     fn name(&self) -> String {
         match self {
             SourceChoice::Extension(e) => e.name().to_owned(),
-            SourceChoice::Builtin(k) => format!("{k:?}").to_lowercase(),
+            // Its command-line name (stable: saved workspaces and settings hold it).
+            SourceChoice::Builtin(k) => k
+                .to_possible_value()
+                .map_or_else(String::new, |v| v.get_name().to_owned()),
         }
     }
 
@@ -331,7 +335,7 @@ struct Cli {
     /// Another recording as its own source beside `--replay` (repeatable; screenshots and
     /// checks of several sources at once, decision 0030): each pane shows the recording that
     /// serves its symbol.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", requires = "screenshot")]
     also_replay: Vec<PathBuf>,
     /// Show this product (followed to its front month: ES, NQ, MES, MNQ, ZN, BTC/USD,
     /// ETH/USD, BTC/USD.KR, ETH/USD.KR, BTC-PERP.KR, ETH-PERP.KR) or contract (ESZ26, MNQH2027) in every pane, for this run only (the saved
@@ -2149,7 +2153,22 @@ mod tests {
         let err = parse(&["lines", "--source", "example-feed"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
         assert!(!help().contains("example-feed"));
-        // The default is still the mock.
+        // Runs that take one source (screenshots, headless, strategies) default to the mock;
+        // a plain run has several (decision 0030).
+        let cli = parse(&["lines"]).unwrap();
+        assert!(cli.several_sources());
+        let cli = parse(&[
+            "lines",
+            "--strategy",
+            "level-touch",
+            "--backtest-config",
+            "x.json",
+        ])
+        .unwrap();
+        assert!(!cli.several_sources(), "a strategy run keeps the mock");
+        // `--also-replay` is for screenshots only (a run that autosaves mustn't save its
+        // run-only source names).
+        assert!(parse(&["lines", "--also-replay", "x.lfr"]).is_err());
         let cli = parse(&["lines"]).unwrap();
         assert!(matches!(
             SourceChoice::parse(cli.source_name(), &Extensions::new()),

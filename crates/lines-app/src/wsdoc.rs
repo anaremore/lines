@@ -764,8 +764,10 @@ impl WorkspaceDoc {
     pub fn retarget_all(&mut self, target: Option<TargetDoc>) {
         for w in &mut self.windows {
             for t in &mut w.tabs {
+                // The saved source goes too: the new symbol's is worked out again (decision 0030).
                 t.layout = t.layout.map(&mut |p: &PaneDoc| PaneDoc {
                     target: target.clone(),
+                    source: None,
                     ..p.clone()
                 });
             }

@@ -17,7 +17,7 @@ use lines_core::ContractKey;
 use lines_feed::store::ChartStore;
 use lines_trading::{AccountId, CommandId, OrderId, Role, Source};
 
-use crate::feeds::{Feeds, PaneFeed};
+use crate::feeds::PaneFeed;
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::pnl;
 use crate::positions::{self as model, Col, Row};
@@ -318,7 +318,7 @@ impl PositionsView {
     /// The link group goes to the row: a future's contract, an option's underlying.
     fn switch_to(&mut self, row: &Row, cx: &mut Context<Self>) {
         let target = model::target_of(row.contract);
-        match self.feed.retarget(&Feeds::registry(cx), target) {
+        match crate::sources::retarget(&self.feed, target, cx) {
             Ok(feed) => {
                 self.set_feed(feed.clone(), cx);
                 cx.emit(FeedChanged(feed));

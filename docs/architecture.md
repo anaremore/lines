@@ -59,7 +59,7 @@ LINES_FUZZ_SMOKE_ITERS=20000 cargo test -p lines-fuzz --test smoke   # stable, m
 cargo run -p lines-app                                          # every enabled source (decision 0030): extensions, Coinbase, Kraken;
 # each starts only when a pane shows one of its symbols; Settings › Data turns Coinbase or Kraken off (next start)
 cargo run -p lines-app -- --source mock                          # this source only: CQG-protocol mock (ES only), 5k updates/s
-lines --replay es.lfr --also-replay spy.lfr --at <ISO time> ...  # a second recording as its own source (mixed-source screenshots)
+lines --replay es.lfr --also-replay spy.lfr --at <ISO time> --screenshot out.png  # 2nd recording as its own source
 # The app restores the autosaved workspace (<config dir>/workspace.json); first run: `pair`
 # (NQ | ES, each chart + DOM + T&S; on the mock NQ shows greyed "mock serves ES only").
 cargo run -p lines-app -- --workspace 2x2                        # built-ins: pair trading chart 1x2 2x2 1+2 6c2d, or a saved name

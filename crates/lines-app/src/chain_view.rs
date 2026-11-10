@@ -4176,6 +4176,9 @@ impl ChainView {
             left.push_str(&title);
         } else if let Some(d) = self.store.try_read() {
             left.push_str(self.product.symbol);
+            if !narrow {
+                crate::sources::write_header_tag(&mut left, &self.feed, cx);
+            }
             if let Some(l) = d.last_trade.filter(|_| !narrow) {
                 left.push(' ');
                 let mut s = FixedStr::<24>::new();
@@ -5532,7 +5535,7 @@ impl Render for ChainView {
         let today = pane::today(self.frozen, &self.store);
         let overlay = self.picker.overlay(
             &t,
-            &crate::sources::pick(&self.feed, cx),
+            &crate::sources::pick_if(self.picker.is_open(), &self.feed, cx),
             today,
             Self::picker_click,
             cx,

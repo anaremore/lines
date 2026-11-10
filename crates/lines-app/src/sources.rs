@@ -75,13 +75,6 @@ impl Sources {
         self.limited
     }
 
-    /// The sources that can serve `target`, in preference order.
-    pub fn serving<'a>(&'a self, target: &'a Target) -> impl Iterator<Item = &'a SourceEntry> {
-        self.entries
-            .iter()
-            .filter(move |e| e.availability.check(target).is_ok())
-    }
-
     /// The source a pane opens on: the one it saved (if the run has it); else, limited, the
     /// run's; else the first that serves its target; a pane with no target takes the primary.
     /// `Err`: a saved source the run doesn't have, or no source serving the target, with why.
@@ -94,9 +87,12 @@ impl Sources {
             return Ok(self.primary());
         }
         if let Some(name) = saved {
-            return self
-                .get(name)
-                .ok_or_else(|| NoSource(format!("{name} is off or not in this build")));
+            return self.get(name).ok_or_else(|| {
+                NoSource(format!(
+                    "{} is off or not in this build",
+                    source_label(name)
+                ))
+            });
         }
         let Some(t) = target.map(TargetDoc::to_target) else {
             return Ok(self.primary());
@@ -120,11 +116,47 @@ impl Sources {
 
     /// The source a pick goes to: the pane's own if it serves the target, else the first that
     /// does (`None`: none).
-    pub fn for_pick<'a>(&'a self, current: &str, target: &'a Target) -> Option<&'a SourceEntry> {
+    pub fn for_pick(&self, current: &str, target: &Target) -> Option<&SourceEntry> {
         self.get(current)
             .filter(|e| e.availability.check(target).is_ok())
-            .or_else(|| self.serving(target).next())
+            .or_else(|| {
+                self.entries
+                    .iter()
+                    .find(|e| e.availability.check(target).is_ok())
+            })
     }
+
+    /// The pane's own source in this run: its saved one if the run has it, else the primary.
+    pub fn own<'a>(&'a self, saved: Option<&'a str>) -> &'a str {
+        saved
+            .filter(|n| !self.limited && self.get(n).is_some())
+            .unwrap_or(&self.primary().name)
+    }
+
+    /// Where a pane's switch to `target` goes (decision 0030), given the source it saves.
+    pub fn plan_move(&self, saved: Option<&str>, target: &Target) -> Move<'_> {
+        if self.limited {
+            // The run's one source shows it; the saved source is worked out again next time
+            // (a pane saved on Coinbase switched to ES under `--source mock` mustn't keep it).
+            return Move::Same { forget: true };
+        }
+        let own = self.own(saved);
+        match self.for_pick(own, target) {
+            // Another source serves it, or the pane's saved source isn't in this run (off):
+            // it moves to the serving source and saves that one.
+            Some(e) if e.name != own || saved != Some(own) => Move::On(e),
+            _ => Move::Same { forget: false },
+        }
+    }
+}
+
+/// Where a pane's switch goes (`Sources::plan_move`).
+#[derive(Debug)]
+pub enum Move<'a> {
+    /// On the source the pane's feed already uses; `forget`: save no source (a limited run).
+    Same { forget: bool },
+    /// Onto this source, which the pane then saves.
+    On(&'a SourceEntry),
 }
 
 /// Settings for the public sources (an optional settings field: absent is on).
@@ -163,15 +195,18 @@ impl Pick {
         }
     }
 
-    /// `Ok` if some source can show `target`; else the pane's own source's reason.
+    /// `Ok` if some source can show `target`; else why not: the pane's own source's reason
+    /// when it is the only one, else that no source has it.
     pub fn check(&self, target: &Target) -> Result<(), String> {
         match self.own.check(target) {
             Ok(()) => Ok(()),
             Err(why) => {
-                if self.others.iter().any(|(_, a)| a.check(target).is_ok()) {
+                if self.others.is_empty() {
+                    Err(why)
+                } else if self.others.iter().any(|(_, a)| a.check(target).is_ok()) {
                     Ok(())
                 } else {
-                    Err(why)
+                    Err("in no source".to_owned())
                 }
             }
         }
@@ -202,10 +237,7 @@ pub fn source_label(name: &str) -> String {
 
 /// The pane's own source's name in this run (its saved one, else the primary's).
 fn current<'a>(sources: &'a Sources, feed: &'a crate::feeds::PaneFeed) -> &'a str {
-    feed.source_doc
-        .as_deref()
-        .filter(|n| sources.get(n).is_some() && !sources.limited())
-        .unwrap_or(&sources.primary().name)
+    sources.own(feed.source_doc.as_deref())
 }
 
 /// The picker's sources for a pane.
@@ -241,15 +273,38 @@ pub fn retarget(
     let Some(env) = crate::workspace::try_env(cx) else {
         return feed.retarget(&registry, target);
     };
-    let sources = &env.sources;
-    if sources.limited() || feed.availability.check(&target).is_ok() {
-        return feed.retarget(&registry, target);
+    match env.sources.plan_move(feed.source_doc.as_deref(), &target) {
+        Move::On(entry) => feed.retarget_on(&registry, entry, target),
+        Move::Same { forget } => {
+            let mut f = feed.retarget(&registry, target)?;
+            if forget {
+                f.source_doc = None;
+            }
+            Ok(f)
+        }
     }
-    let own = current(sources, feed);
-    let wanted = target.clone();
-    match sources.for_pick(own, &wanted) {
-        Some(entry) if entry.name != own => feed.retarget_on(&registry, entry, target),
-        _ => feed.retarget(&registry, target),
+}
+
+/// The one-click switch on an unavailable pane to its source's own symbol, through
+/// [`retarget`] (so a pane whose saved source is off moves to, and saves, the one serving it).
+pub fn to_suggested(
+    feed: &crate::feeds::PaneFeed,
+    cx: &gpui::App,
+) -> anyhow::Result<crate::feeds::PaneFeed> {
+    let s = feed
+        .suggest
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("this source offers no symbol"))?;
+    retarget(feed, s.target.clone(), cx)
+}
+
+/// [`pick`] while the picker is open; its own source only otherwise (the overlay draws
+/// nothing then, so no list is built on every frame).
+pub fn pick_if(open: bool, feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> Pick {
+    if open {
+        pick(feed, cx)
+    } else {
+        Pick::one(&feed.availability)
     }
 }
 
@@ -291,6 +346,55 @@ mod tests {
         TargetDoc::from_target(&Target::Product(product))
     }
 
+    fn on(m: Move<'_>) -> Option<String> {
+        match m {
+            Move::On(e) => Some(e.name.clone()),
+            Move::Same { .. } => None,
+        }
+    }
+
+    #[test]
+    fn a_switch_moves_the_pane_to_the_source_serving_it_and_saves_that_one() {
+        let s = two(false);
+        let es = Target::Product(catalog::ES);
+        let btc = Target::Product(catalog::BTC_USD);
+        // Its own source serves it: it stays.
+        assert!(matches!(
+            s.plan_move(Some("mock"), &es),
+            Move::Same { forget: false }
+        ));
+        // Another serves it: it moves there.
+        assert_eq!(
+            on(s.plan_move(Some("mock"), &btc)).as_deref(),
+            Some("coinbase")
+        );
+        // Its saved source is off (not in the run): its feed is on the primary, and even a
+        // pick the primary serves moves it onto (and saves) the primary, so it can't stay
+        // stuck on the source that's off.
+        assert_eq!(
+            on(s.plan_move(Some("kraken"), &es)).as_deref(),
+            Some("mock")
+        );
+        assert_eq!(on(s.plan_move(None, &es)).as_deref(), Some("mock"));
+        // A run `--source` limits never moves a pane, and the saved source is worked out
+        // again next time (a pane saved on Coinbase switched to ES there mustn't keep it).
+        let limited = two(true);
+        assert!(matches!(
+            limited.plan_move(Some("coinbase"), &es),
+            Move::Same { forget: true }
+        ));
+        // `--instrument` replaces every pane's symbol, and its saved source with it.
+        let mut w = crate::wsdoc::builtin("pair").unwrap();
+        w.windows[0].tabs[0].layout = w.windows[0].tabs[0].layout.map(&mut |p| {
+            let mut p = p.clone();
+            p.source = Some("kraken".into());
+            p
+        });
+        w.retarget_all(Some(doc(catalog::BTC_USD)));
+        let leaves = w.windows[0].tabs[0].layout.leaves();
+        assert!(!leaves.is_empty() && leaves.iter().all(|p| p.source.is_none()));
+    }
+
     #[test]
     fn a_pane_opens_on_its_saved_source_else_the_one_serving_its_symbol() {
         let s = two(false);
@@ -312,7 +416,7 @@ mod tests {
         let err = s
             .for_pane(Some("kraken"), Some(&doc(catalog::BTC_USD)))
             .unwrap_err();
-        assert_eq!(err.0, "kraken is off or not in this build");
+        assert_eq!(err.0, "Kraken is off or not in this build");
         // Nothing serves NQ here (the mock is ES only).
         let err = s.for_pane(None, Some(&doc(catalog::NQ))).unwrap_err();
         assert!(
@@ -350,7 +454,11 @@ mod tests {
         assert!(p.check(&btc).is_ok(), "another source serves it");
         assert_eq!(p.tag(&btc).as_deref(), Some("Coinbase"));
         assert_eq!(p.tag(&es).as_deref(), Some("Mock"));
-        assert!(p.check(&Target::Product(catalog::NQ)).is_err());
+        assert_eq!(
+            p.check(&Target::Product(catalog::NQ)),
+            Err("in no source".to_owned()),
+            "with several, why names no one source"
+        );
         assert_eq!(s.for_pick("mock", &btc).unwrap().name, "coinbase");
         assert_eq!(s.for_pick("mock", &es).unwrap().name, "mock");
         // One source: no tags, its own rules only.
@@ -385,5 +493,25 @@ mod tests {
             "{json}"
         );
         assert!(!s.sources["kraken"].on());
+    }
+}
+
+/// The pane's source as its header names it after the contract ("ESZ26 (Replay)"), in a run
+/// with several sources (decision 0030); nothing when one source serves the run.
+pub fn header_tag(feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> Option<String> {
+    let env = crate::workspace::try_env(cx)?;
+    let sources = &env.sources;
+    if sources.limited() || sources.all().len() < 2 {
+        return None;
+    }
+    Some(source_label(current(sources, feed)))
+}
+
+/// Append the header tag to a header's contract text.
+pub fn write_header_tag(out: &mut String, feed: &crate::feeds::PaneFeed, cx: &gpui::App) {
+    if let Some(tag) = header_tag(feed, cx) {
+        out.push_str(" (");
+        out.push_str(&tag);
+        out.push(')');
     }
 }

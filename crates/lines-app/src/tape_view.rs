@@ -474,13 +474,15 @@ impl TapeView {
         self.cols.paint_rules(&t, body, window);
     }
 
-    fn header(&self) -> impl IntoElement {
+    fn header(&self, cx: &App) -> impl IntoElement {
         let t = self.theme;
         let mut left = String::with_capacity(48);
         if let Some(title) = pane::unavailable_title(&self.feed) {
             let _ = write!(left, "{title}  Time & sales");
         } else if let Some(d) = self.store.try_read() {
-            let _ = write!(left, "{}  Time & sales", pane::contract_text(&d));
+            left.push_str(&pane::contract_text(&d));
+            crate::sources::write_header_tag(&mut left, &self.feed, cx);
+            left.push_str("  Time & sales");
         }
         let mut right = String::with_capacity(32);
         let mut q = FixedStr::<32>::new();
@@ -550,7 +552,7 @@ impl Render for TapeView {
         let today = pane::today(self.frozen, &self.store);
         let overlay = self.picker.overlay(
             &t,
-            &crate::sources::pick(&self.feed, cx),
+            &crate::sources::pick_if(self.picker.is_open(), &self.feed, cx),
             today,
             Self::picker_click,
             cx,
@@ -577,7 +579,7 @@ impl Render for TapeView {
             .flex()
             .flex_col()
             .bg(t.bg)
-            .child(self.header())
+            .child(self.header(cx))
             .child(
                 div()
                     .relative()
