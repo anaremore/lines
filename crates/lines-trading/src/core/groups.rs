@@ -180,7 +180,7 @@ impl TradingCore {
                         std::time::Instant::now()
                     },
                     command: member(account.clone()),
-                    pane: env.pane.clone(),
+                    pane: env.pane,
                 },
             );
             if let Ok(o) = &result {
