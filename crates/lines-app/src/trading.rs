@@ -706,11 +706,18 @@ pub struct TradingSetup {
 
 impl TradingSetup {
     /// Live sources keep paper state per source; replays, the mock with `--record`, and
-    /// screenshots don't persist.
-    pub fn for_source(config_dir: Option<&Path>, source: &str, replay: bool) -> TradingSetup {
+    /// screenshots don't persist. `dirs`: where paper accounts and the journal live
+    /// (`crate::data_dir::Locations`; `None`: nothing is saved).
+    pub fn for_source(
+        dirs: Option<&crate::data_dir::Locations>,
+        source: &str,
+        replay: bool,
+    ) -> TradingSetup {
+        let paper = dirs.and_then(|d| d.paper.clone());
+        let journal = dirs.and_then(|d| d.journal.clone());
         TradingSetup {
             file: (!replay)
-                .then(|| config_dir.map(|d| d.join("paper").join(format!("{source}.json"))))
+                .then(|| paper.as_ref().map(|d| d.join(format!("{source}.json"))))
                 .flatten(),
             clock: if replay { Clock::Market } else { Clock::Wall },
             paper: PaperConfig::default(),
@@ -722,23 +729,19 @@ impl TradingSetup {
             prop_rules: BTreeMap::new(),
             brokers: Vec::new(),
             venue_marks_always: false,
-            venue_dir: config_dir.map(|d| d.join("paper")),
+            venue_dir: paper,
             source: source.to_owned(),
             journal: (!replay)
-                .then(|| {
-                    config_dir.map(|d| {
-                        (
-                            d.join("journal").join(format!("{source}.jsonl")),
-                            source.to_owned(),
-                        )
-                    })
-                })
+                .then(|| journal.map(|d| (d.join(format!("{source}.jsonl")), source.to_owned())))
                 .flatten(),
         }
     }
 
     /// The app's setup for its data source.
-    pub fn for_live(config_dir: Option<&Path>, source: &lines_feed::Source) -> TradingSetup {
+    pub fn for_live(
+        dirs: Option<&crate::data_dir::Locations>,
+        source: &lines_feed::Source,
+    ) -> TradingSetup {
         use lines_feed::Source as S;
         let (label, replay) = match source {
             S::CqgMock(_) => ("mock".to_owned(), false),
@@ -762,7 +765,7 @@ impl TradingSetup {
             #[allow(unreachable_patterns)]
             _ => ("cqg".to_owned(), false),
         };
-        let mut setup = TradingSetup::for_source(config_dir, &label, replay);
+        let mut setup = TradingSetup::for_source(dirs, &label, replay);
         // The mock is synthetic and never closes: CME's hours don't apply to it. Real sources
         // keep the check (wall clock), replays too (market clock: the recorded session).
         setup.check_sessions = !matches!(source, S::CqgMock(_));

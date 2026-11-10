@@ -689,6 +689,12 @@ pub fn source_colour(rgba: u32, alpha: f32) -> Hsla {
     .into()
 }
 
+/// Settings: the fill of a value in force under a flag (a dimmed "On", a chosen depth chip):
+/// the accent faded, always under `text_main` (AA on `bg` and `panel`, tested).
+pub fn locked_fill(t: &Theme) -> Hsla {
+    t.accent.opacity(0.22)
+}
+
 /// `top` (possibly translucent) composited over opaque `bottom`, as drawn.
 #[cfg(test)]
 pub fn over(top: Hsla, bottom: Hsla) -> Hsla {
@@ -821,6 +827,25 @@ mod tests {
                 over(t.accent.opacity(0.16), t.panel),
             ),
             ("destructive", t.destructive, "panel", t.panel),
+            // Settings › Data: a failure or refusal line (with "Failed:" / "Refused:") on a row
+            // and on the selected row (`panel`); pending, progress and flag lines in `warn`.
+            ("destructive", t.destructive, "bg", t.bg),
+            ("warn", t.warn, "bg", t.bg),
+            ("warn", t.warn, "panel", t.panel),
+            // A Settings value in force under a flag: main text on the faded fill, on a row
+            // and on the selected row.
+            (
+                "text_main",
+                t.text_main,
+                "locked fill on bg",
+                over(locked_fill(t), t.bg),
+            ),
+            (
+                "text_main",
+                t.text_main,
+                "locked fill on panel",
+                over(locked_fill(t), t.panel),
+            ),
             (
                 "destructive",
                 t.destructive,

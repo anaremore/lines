@@ -134,7 +134,7 @@ pub fn size_partner(entries: &[Entry], id: ProductId) -> Option<ProductId> {
 
 /// Recents and favourites, persisted as JSON in the OS config dir. Product ids are permanent
 /// (catalog), so the file survives symbol renames.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub recents: Vec<u32>,
@@ -239,6 +239,18 @@ pub struct Settings {
     /// account without one has no limit. `--max-order-qty` wins for its run.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub max_order_qty: std::collections::BTreeMap<String, i64>,
+    /// Settings › Data: keep the local market-data store (`crate::data_dir::store_run`).
+    /// Optional: absent is on. `--no-store` wins for its run; applies at the next start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store: Option<bool>,
+    /// Settings › Data: the store's size budget in GiB. Optional: absent is 4.
+    /// `--store-budget-gb` wins for its run; applies at the next start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_budget_gb: Option<f64>,
+    /// Settings › Data: catalog symbols whose order-book depth is stored. Optional: absent is
+    /// none. A symbol this build doesn't know is kept. `--store-depth` wins for its run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_depth: Option<Vec<String>>,
     /// Keys this version doesn't know (a newer version's), kept as they were so saving
     /// never drops them (decision 0021).
     #[serde(flatten)]

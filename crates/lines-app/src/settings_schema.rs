@@ -108,6 +108,9 @@ pub enum Value {
     Number(Option<i64>),
     /// Read-only text, or an editor's summary.
     Text(String),
+    /// The products chosen in a [`Kind::Products`] setting (catalog symbols, and any saved
+    /// symbol this build doesn't know).
+    List(Vec<String>),
 }
 
 /// What kind of control a setting has, and so how it validates.
@@ -126,6 +129,9 @@ pub enum Kind {
     },
     /// An inline editor opens (bracket presets).
     Editor,
+    /// Any number of catalog products, one check per product (`settings_view` renders a chip
+    /// per product; Left/Right move between them, Space toggles).
+    Products,
     /// Text only.
     Info,
 }
@@ -133,10 +139,11 @@ pub enum Kind {
 /// Facts the window shows but doesn't own, gathered when it opens.
 #[derive(Clone, Debug, Default)]
 pub struct Facts {
-    pub store_path: String,
-    /// `None`: this source keeps no store.
-    pub store_budget_gb: Option<f64>,
-    pub depth_products: Vec<String>,
+    /// Settings › Data's folder (`crate::data_dir::facts`).
+    pub folder: crate::data_dir::FolderFacts,
+    /// The store settings this run started with, and the store flags given.
+    pub store_start: crate::data_dir::StorePrefs,
+    pub store_flags: crate::data_dir::StoreFlags,
     pub accounts: Vec<AccountFact>,
     pub config_dir: String,
     /// This build's version.
@@ -1623,48 +1630,84 @@ fn table() -> Vec<Setting> {
             Value::Bool(true),
         ),
         s(
-            "data.store",
+            DATA_FOLDER_KEY,
             Sec::Data,
-            "Store location",
-            "Where recorded market data lives. Set with --store for now.",
-            Scope::ReadOnly,
+            "Data folder",
+            "Where the store, recordings, paper accounts, journal, logs and backups live. A new folder is used after restart; moving copies and checks everything, then removes the old copy. Not while a position or order is open.",
+            Scope::App,
             Normal,
-            Info,
-            |_, _, f| Value::Text(f.store_path.clone()),
+            Editor,
+            |_, _, f| Value::Text(f.folder.text()),
             None,
         ),
-        s(
-            "data.budget",
-            Sec::Data,
-            "Store budget",
-            "The oldest trade dates are removed beyond it. Set with --store-budget-gb for now.",
-            Scope::ReadOnly,
-            Normal,
-            Info,
-            |_, _, f| {
-                Value::Text(
-                    f.store_budget_gb
-                        .map_or_else(|| "None (no store)".to_owned(), |g| format!("{g} GiB")),
-                )
-            },
-            None,
+        with_default(
+            s(
+                "data.store",
+                Sec::Data,
+                "Local store",
+                "Keeps live feeds' trades and best bid/ask per contract in the data folder, for the bars at startup and replays.",
+                Scope::App,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(p.app.store != Some(false)),
+                Some(|p, _, v| {
+                    p.app.store = (!want_bool(v)?).then_some(false);
+                    Ok(())
+                }),
+            ),
+            Value::Bool(true),
         ),
-        s(
-            "data.depth",
-            Sec::Data,
-            "Depth recorded for",
-            "Products whose order book is stored. Set with --store-depth for now.",
-            Scope::ReadOnly,
-            Normal,
-            Info,
-            |_, _, f| {
-                Value::Text(if f.depth_products.is_empty() {
-                    "None".to_owned()
-                } else {
-                    f.depth_products.join(", ")
-                })
-            },
-            None,
+        with_default(
+            s(
+                "data.budget",
+                Sec::Data,
+                "Store budget",
+                "Beyond it, the oldest trade dates are removed (after lowering it, at the next start).",
+                Scope::App,
+                Normal,
+                Number {
+                    min: 1,
+                    max: 100_000,
+                    optional: false,
+                    unit: "GiB",
+                },
+                |p, _, _| Value::Number(Some(budget_shown(p.app.store_budget_gb))),
+                Some(|p, _, v| {
+                    let Value::Number(Some(n)) = v else {
+                        return Err("a value is needed");
+                    };
+                    let default = crate::data_dir::DEFAULT_BUDGET_GB as i64;
+                    p.app.store_budget_gb = (n != default).then_some(n as f64);
+                    Ok(())
+                }),
+            ),
+            Value::Number(Some(crate::data_dir::DEFAULT_BUDGET_GB as i64)),
+        ),
+        with_default(
+            s(
+                "data.depth",
+                Sec::Data,
+                "Depth recorded for",
+                "Products whose order book is stored too (large).",
+                Scope::App,
+                Normal,
+                Products,
+                |p, _, _| Value::List(p.app.store_depth.clone().unwrap_or_default()),
+                Some(|p, _, v| {
+                    let Value::List(l) = v else {
+                        return Err("expected products");
+                    };
+                    let mut kept: Vec<String> = Vec::new();
+                    for sym in l {
+                        if !kept.iter().any(|k| k.eq_ignore_ascii_case(&sym)) {
+                            kept.push(sym);
+                        }
+                    }
+                    p.app.store_depth = (!kept.is_empty()).then_some(kept);
+                    Ok(())
+                }),
+            ),
+            Value::List(Vec::new()),
         ),
         // Keys.
         s(
@@ -1790,6 +1833,8 @@ impl Setting {
             }
             (_, Value::Number(None)) => "None".to_owned(),
             (_, Value::Text(t)) => t.clone(),
+            (_, Value::List(l)) if l.is_empty() => "None".to_owned(),
+            (_, Value::List(l)) => l.join(", "),
             _ => String::new(),
         }
     }
@@ -1927,6 +1972,9 @@ fn prop_field(key: &str, r: Option<&lines_trading::rules::RulePreset>) -> Option
 /// shown: "In force $1,000 now · $1,500 from the next session" (a looser value waiting), or
 /// "In force 1 now" (set elsewhere, e.g. a script, or not sent yet). Nothing when they agree.
 pub fn status(st: &Setting, p: &Prefs, t: &Target, f: &Facts) -> Option<String> {
+    if st.section == Section::Data {
+        return data_status(st, p, f);
+    }
     let a = fact(f, t)?;
     let (now, next) = if st.key.starts_with("guard.") {
         (
@@ -1982,6 +2030,135 @@ fn set_source(p: &mut Prefs, name: &str, on: bool) -> Result<(), &'static str> {
         );
     }
     Ok(())
+}
+
+/// Settings › Data › Data folder (its buttons are the window's own).
+pub const DATA_FOLDER_KEY: &str = "data.folder";
+
+/// The budget a row shows: whole GiB (a hand-edited fraction rounds; one that can't be used
+/// shows the default, as the store uses it).
+fn budget_shown(saved: Option<f64>) -> i64 {
+    saved
+        .filter(|g| g.is_finite() && *g > 0.0)
+        .map_or(crate::data_dir::DEFAULT_BUDGET_GB as i64, |g| {
+            (g.round() as i64).max(1)
+        })
+}
+
+/// The products a depth row offers: every catalog symbol, then saved ones this build doesn't
+/// know (`false`: shown as unavailable).
+pub fn depth_choices(saved: &[String]) -> Vec<(String, bool)> {
+    let mut v: Vec<(String, bool)> = lines_feed::catalog::all()
+        .iter()
+        .map(|p| (p.symbol.to_owned(), true))
+        .collect();
+    for s in saved {
+        if !v.iter().any(|(k, _)| k.eq_ignore_ascii_case(s)) {
+            v.push((s.clone(), false));
+        }
+    }
+    v
+}
+
+/// `list` with `sym` added, or removed if there (case ignored).
+pub fn toggled(list: &[String], sym: &str) -> Vec<String> {
+    if list.iter().any(|s| s.eq_ignore_ascii_case(sym)) {
+        list.iter()
+            .filter(|s| !s.eq_ignore_ascii_case(sym))
+            .cloned()
+            .collect()
+    } else {
+        let mut v = list.to_vec();
+        v.push(sym.to_owned());
+        v
+    }
+}
+
+/// "2.5 GiB", "4 GiB".
+fn gib(g: f64) -> String {
+    if g.fract() == 0.0 {
+        format!("{g:.0} GiB")
+    } else {
+        format!("{g} GiB")
+    }
+}
+
+fn list_text(l: &[String]) -> String {
+    if l.is_empty() {
+        "None".to_owned()
+    } else {
+        l.join(", ")
+    }
+}
+
+/// The flag ruling a Data row this run, and the value it gives.
+fn data_flag(st: &Setting, f: &Facts) -> Option<(&'static str, Value)> {
+    let flags = &f.store_flags;
+    match st.key {
+        "data.store" if flags.no_store => Some(("--no-store", Value::Bool(false))),
+        "data.store" if flags.store_dir => Some(("--store-dir", Value::Bool(true))),
+        "data.budget" => flags
+            .budget_gb
+            .map(|g| ("--store-budget-gb", Value::Number(Some(g.round() as i64)))),
+        "data.depth" => flags
+            .depth
+            .clone()
+            .map(|d| ("--store-depth", Value::List(d))),
+        _ => None,
+    }
+}
+
+/// The value a Data row shows while a flag rules it this run (its control is dimmed and can't
+/// be changed); `None`: the saved value, editable.
+pub fn flag_value(st: &Setting, f: &Facts) -> Option<Value> {
+    data_flag(st, f).map(|(_, v)| v)
+}
+
+/// A flag-ruled row's value as words: "Off", "2.5 GiB", "ES, NQ".
+pub fn flag_text(st: &Setting, f: &Facts) -> Option<String> {
+    let (_, v) = data_flag(st, f)?;
+    Some(match (st.key, v) {
+        ("data.budget", _) => gib(f.store_flags.budget_gb.unwrap_or_default()),
+        (_, Value::Bool(b)) => if b { "On" } else { "Off" }.to_owned(),
+        (_, Value::List(l)) => list_text(&l),
+        (_, v) => st.value_text(&v),
+    })
+}
+
+/// A Data row's line: the flag in force this run ("Off for this run (--no-store) · saved: On"),
+/// else "Applies after restart" when the saved value isn't the one this run started with.
+fn data_status(st: &Setting, p: &Prefs, f: &Facts) -> Option<String> {
+    use crate::data_dir::StorePrefs;
+    if st.key == DATA_FOLDER_KEY {
+        return f.folder.status();
+    }
+    if let Some((flag, _)) = data_flag(st, f) {
+        let saved = match (st.get)(p, &Target::default(), f) {
+            Value::Bool(b) => if b { "On" } else { "Off" }.to_owned(),
+            Value::Number(Some(n)) => gib(n as f64),
+            Value::List(l) => list_text(&l),
+            v => st.value_text(&v),
+        };
+        let now = flag_text(st, f).unwrap_or_default();
+        return Some(format!("{now} for this run ({flag}) · saved: {saved}"));
+    }
+    let now = StorePrefs::of(&p.app);
+    let start = &f.store_start;
+    let differs = match st.key {
+        "data.store" => (now.store != Some(false)) != (start.store != Some(false)),
+        "data.budget" => budget_shown(now.budget_gb) != budget_shown(start.budget_gb),
+        "data.depth" => {
+            let norm = |d: &Option<Vec<String>>| {
+                let mut v: Vec<String> =
+                    d.iter().flatten().map(|s| s.to_ascii_uppercase()).collect();
+                v.sort();
+                v
+            };
+            norm(&now.depth) != norm(&start.depth)
+        }
+        _ => false,
+    };
+    differs.then(|| "Applies after restart".to_owned())
 }
 
 /// Settings › Accounts › Reset paper account (its buttons are the window's own).
@@ -2898,5 +3075,112 @@ mod tests {
         let again = String::from_utf8(back.encode()).unwrap();
         assert!(again.contains("from_the_future"), "{again}");
         assert_eq!(back.appearance.palette, Some(PaletteName::Colorblind));
+    }
+
+    /// Settings › Data's store fields: absent by default, written only when changed, a depth
+    /// symbol this build doesn't know kept through a load and a save.
+    #[test]
+    fn data_rows_save_optional_fields() {
+        let mut p = Prefs::default();
+        let t = acct();
+        let json = String::from_utf8(p.app.encode()).unwrap();
+        for k in ["\"store\"", "store_budget_gb", "store_depth"] {
+            assert!(!json.contains(k), "absent by default: {json}");
+        }
+        by_key("data.store")
+            .unwrap()
+            .apply(&mut p, &t, Value::Bool(false))
+            .unwrap();
+        by_key("data.budget")
+            .unwrap()
+            .apply(&mut p, &t, Value::Number(Some(20)))
+            .unwrap();
+        assert!(
+            by_key("data.budget")
+                .unwrap()
+                .apply(&mut p, &t, Value::Number(Some(0)))
+                .is_err(),
+            "at least 1 GiB"
+        );
+        let depth = by_key("data.depth").unwrap();
+        depth
+            .apply(&mut p, &t, Value::List(vec!["ES".into(), "ZZZ".into()]))
+            .unwrap();
+        let json = String::from_utf8(p.app.encode()).unwrap();
+        assert!(json.contains("\"store\": false"), "{json}");
+        assert!(json.contains("\"store_budget_gb\": 20.0"), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.store_depth, Some(vec!["ES".into(), "ZZZ".into()]));
+        let q = Prefs {
+            app: back,
+            ..Prefs::default()
+        };
+        assert_eq!(
+            (depth.get)(&q, &t, &Facts::default()),
+            Value::List(vec!["ES".into(), "ZZZ".into()])
+        );
+        // The unknown one is offered (to remove), marked unavailable.
+        let choices = depth_choices(&["ES".into(), "ZZZ".into()]);
+        assert_eq!(choices.last(), Some(&("ZZZ".to_owned(), false)));
+        assert!(choices.contains(&("ES".to_owned(), true)));
+        assert_eq!(
+            toggled(&["ES".into(), "ZZZ".into()], "zzz"),
+            vec!["ES".to_owned()]
+        );
+        assert_eq!(toggled(&[], "NQ"), vec!["NQ".to_owned()]);
+        // Back to the defaults: nothing written.
+        for key in ["data.store", "data.budget", "data.depth"] {
+            let st = by_key(key).unwrap();
+            st.apply(&mut p, &t, st.default.clone().unwrap()).unwrap();
+        }
+        assert_eq!(p, Prefs::default());
+    }
+
+    /// A changed Data value says it applies after restart; a flag says it rules this run.
+    #[test]
+    fn data_rows_say_restart_or_flag() {
+        let t = acct();
+        let mut f = Facts::default();
+        let mut p = Prefs::default();
+        let budget = by_key("data.budget").unwrap();
+        assert_eq!(status(budget, &p, &t, &f), None);
+        budget.apply(&mut p, &t, Value::Number(Some(8))).unwrap();
+        assert_eq!(
+            status(budget, &p, &t, &f).as_deref(),
+            Some("Applies after restart")
+        );
+        // The run started with 8: nothing waits.
+        f.store_start.budget_gb = Some(8.0);
+        assert_eq!(status(budget, &p, &t, &f), None);
+        f.store_flags.budget_gb = Some(2.0);
+        assert_eq!(
+            status(budget, &p, &t, &f).as_deref(),
+            Some("2 GiB for this run (--store-budget-gb) · saved: 8 GiB")
+        );
+        f.store_flags.budget_gb = Some(2.5);
+        assert_eq!(
+            status(budget, &p, &t, &f).as_deref(),
+            Some("2.5 GiB for this run (--store-budget-gb) · saved: 8 GiB")
+        );
+        f.store_flags.no_store = true;
+        let store = by_key("data.store").unwrap();
+        assert_eq!(
+            status(store, &p, &t, &f).as_deref(),
+            Some("Off for this run (--no-store) · saved: On")
+        );
+        // The control shows the value in force, not the saved one.
+        assert_eq!(flag_value(store, &f), Some(Value::Bool(false)));
+        assert_eq!(flag_text(budget, &f).as_deref(), Some("2.5 GiB"));
+        assert_eq!(flag_value(by_key("data.depth").unwrap(), &f), None);
+        let depth = by_key("data.depth").unwrap();
+        depth
+            .apply(&mut p, &t, Value::List(vec!["nq".into()]))
+            .unwrap();
+        f.store_start.depth = Some(vec!["NQ".into()]);
+        assert_eq!(
+            status(depth, &p, &t, &f),
+            None,
+            "case and order don't matter"
+        );
     }
 }
