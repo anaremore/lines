@@ -970,6 +970,64 @@ fn an_aged_out_replay_moves_the_next_start_forward() {
     assert_eq!(out[2], trades_line(now().floor_to(MIN).0));
 }
 
+/// The owner's live failure (2026-11-10): a pane whose stored bars ended more than a day ago
+/// asked for the replay window's edge, and Databento refused it as a subscription, "Invalid
+/// start time. Must be <time> or later, or 0", which stopped the feed ("failed", no last
+/// price). Now it is like an aged-out replay: a gap to the time named, a retryable error, and
+/// the next connection starts there.
+#[test]
+fn a_refused_start_reconnects_from_the_earliest_named() {
+    let floors = Floors::default();
+    let earliest = UtcMillis(window_start() + 9 * MIN);
+    let (y, mo, d, h, mi, s) = earliest.to_civil();
+    let text = format!(
+        "Invalid start time. Must be {y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z or later, or 0"
+    );
+    let refused = dbn(|e| {
+        e.encode_record(&ErrorMsg::new(
+            T0,
+            Some(ErrorCode::InvalidSubscription),
+            &text,
+            true,
+        ))
+        .unwrap();
+    });
+    let (events, _, err) = run_conn(
+        &mut session(&floors, ReplayLimit::default()),
+        &connection(refused),
+    );
+    assert!(
+        err.as_ref().is_some_and(|e| e.is_retryable()),
+        "the feed reconnects, never stops: {err:?}"
+    );
+    assert!(events.contains(&MarketEvent::HistoryGap {
+        from: UtcMillis(window_start()),
+        to: earliest,
+    }));
+    assert_eq!(floors.lock().unwrap()[&z6()], earliest.0 as u64 * 1_000_000);
+    let (_, out, _) = run(
+        &mut session(&floors, ReplayLimit::default()),
+        &[GREETING, SUCCESS],
+    );
+    assert_eq!(
+        out[2],
+        trades_line(earliest.0),
+        "the next start is the one named"
+    );
+    // Another invalid subscription (a symbol) still stops the feed.
+    let other = dbn(|e| {
+        e.encode_record(&ErrorMsg::new(
+            T0,
+            Some(ErrorCode::InvalidSubscription),
+            "Invalid symbol",
+            true,
+        ))
+        .unwrap();
+    });
+    let (_, _, err) = run_conn(&mut cold(), &connection(other));
+    assert!(err.is_some_and(|e| !e.is_retryable()));
+}
+
 /// A recording spanning a reconnect: each connection starts with the transport's marker, so
 /// one replay session decodes both.
 #[test]

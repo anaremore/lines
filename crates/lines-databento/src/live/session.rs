@@ -75,8 +75,11 @@ pub const SENT_PREFIX: &[u8] = b"\0lines-databento: sent ";
 pub const DATASET: &str = "GLBX.MDP3";
 /// The only DBN version this build decodes.
 pub const DBN_VERSION: u8 = 3;
-/// Intraday replay reaches 24 hours back (less over weekends); ask for a little less.
-pub const REPLAY_WINDOW_MS: i64 = 23 * 3_600_000 + 55 * 60_000;
+/// Intraday replay reaches 24 hours back (less over weekends), from the next 10-minute
+/// boundary (at 17:01 the gateway took 17:10 the day before at the earliest); ask for less, so
+/// the first try is accepted. A start refused anyway names the earliest, and the next connection
+/// starts there ([`invalid_start_floor`]).
+pub const REPLAY_WINDOW_MS: i64 = 23 * 3_600_000 + 40 * 60_000;
 /// Market events held while the contract's definition hasn't arrived.
 pub const MAX_HELD: usize = 200_000;
 /// Gateway heartbeats are requested this often.
@@ -240,6 +243,16 @@ pub struct DatabentoSession {
 }
 
 /// The largest integer in `text` that looks like a nanosecond timestamp.
+/// The earliest start a refused replay names: Databento's "Invalid start time. Must be
+/// 2026-11-09T17:10:00Z or later, or 0" (ns). `None` for any other text.
+fn invalid_start_floor(text: &str) -> Option<u64> {
+    let rest = text.split_once("Invalid start time")?.1;
+    let after = rest.split_once("Must be ")?.1;
+    let iso = after.split_whitespace().next()?.trim_end_matches(',');
+    let t = UtcMillis::parse_iso(iso)?;
+    u64::try_from(t.0).ok()?.checked_mul(1_000_000)
+}
+
 fn ns_in(text: &str) -> Option<u64> {
     text.split(|c: char| !c.is_ascii_digit())
         .filter(|s| s.len() >= 18)
@@ -779,6 +792,30 @@ impl DatabentoSession {
         self.emit(MarketEvent::HistoryComplete, events);
     }
 
+    /// Databento no longer holds the replay start asked for: the next connection starts no
+    /// earlier than `floor_ns` (shared by feeds of the contract); what lies before it is a gap.
+    /// A retryable error (the feed reconnects).
+    fn replay_floor(
+        &mut self,
+        floor_ns: u64,
+        text: &str,
+        events: &mut Vec<MarketEvent>,
+    ) -> SessionError {
+        if let Some(k) = self.contract {
+            let mut f = self.floors.lock().expect("floors");
+            let v = f.entry(k).or_insert(floor_ns);
+            *v = (*v).max(floor_ns);
+        }
+        let from = UtcMillis(self.replay_start.unwrap_or(self.now.0));
+        let to = UtcMillis((floor_ns / 1_000_000) as i64).min(self.now);
+        if to > from {
+            events.push(MarketEvent::HistoryGap { from, to });
+        }
+        SessionError::Protocol(format!(
+            "Databento replay start refused ({text}); reconnecting from the earliest data it holds"
+        ))
+    }
+
     fn on_error(
         &mut self,
         e: &ErrorMsg,
@@ -787,6 +824,11 @@ impl DatabentoSession {
         let text = e.err().unwrap_or("").to_string();
         if let Ok(ErrorCode::AuthFailed | ErrorCode::ApiKeyDeactivated) = e.code() {
             return Err(SessionError::LogonRejected { code: 0, text });
+        }
+        // A replay start Databento no longer holds, refused as a subscription (not as an aged-out
+        // replay): the next connection starts at the earliest it names.
+        if let Some(floor_ns) = invalid_start_floor(&text) {
+            return Err(self.replay_floor(floor_ns, &text, events));
         }
         match not_authorized_schema(&text) {
             Some(schema @ ("mbp-10" | "mbp-1")) => {
@@ -836,25 +878,11 @@ impl DatabentoSession {
                 Ok(())
             }
             Ok(ErrorCode::ReplayDataAgedOut) => {
-                // The next connection starts no earlier than what Databento still holds (the
-                // start it names; else now). What lies before it is a gap.
                 // Without a named start, the floor is now: asking again for the same start
                 // would only fail again (this contract replays nothing more until restart).
                 let now_ns = (self.now.0.max(0) as u64) * 1_000_000;
                 let floor_ns = ns_in(&text).unwrap_or(now_ns);
-                if let Some(k) = self.contract {
-                    let mut f = self.floors.lock().expect("floors");
-                    let v = f.entry(k).or_insert(floor_ns);
-                    *v = (*v).max(floor_ns);
-                }
-                let from = UtcMillis(self.replay_start.unwrap_or(self.now.0));
-                let to = UtcMillis((floor_ns / 1_000_000) as i64).min(self.now);
-                if to > from {
-                    events.push(MarketEvent::HistoryGap { from, to });
-                }
-                Err(SessionError::Protocol(format!(
-                    "Databento replay aged out ({text}); reconnecting from the earliest data it holds"
-                )))
+                Err(self.replay_floor(floor_ns, &text, events))
             }
             _ => Err(SessionError::Protocol(format!("Databento: {text}"))),
         }
