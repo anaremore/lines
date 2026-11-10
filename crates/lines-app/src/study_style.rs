@@ -1090,7 +1090,7 @@ pub fn resolve_type(t: &LevelType, source: &[Look; 2], ty: &Look) -> TypeLook {
 pub struct LevelEdit {
     pub looks: Vec<Look>,
     pub types: &'static [LevelType],
-    /// Each type's label options, in `types` order.
+    /// Each type's label options, in `types` order (empty, or shorter: the rest as saved).
     pub labels: Vec<TypeLabel>,
     pub label: LabelMode,
     /// The source's own label mode (saved only when the chart's differs).

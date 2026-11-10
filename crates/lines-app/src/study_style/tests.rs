@@ -965,6 +965,7 @@ fn a_saved_per_source_style_migrates() {
         &LevelEdit {
             looks,
             types: &TYPES,
+            labels: Vec::new(),
             label: LabelMode::NamePrice,
             label_default: LabelMode::Name,
         },
@@ -1441,6 +1442,7 @@ fn level_styles_are_app_wide_and_keep_unknown_fields() {
         &LevelEdit {
             looks,
             types: &[],
+            labels: Vec::new(),
             label: LabelMode::Name,
             label_default: LabelMode::Name,
         },
@@ -1516,6 +1518,7 @@ fn an_edit_changes_only_its_source() {
         &LevelEdit {
             looks,
             types: &[],
+            labels: Vec::new(),
             label: LabelMode::Name,
             label_default: LabelMode::Name,
         },

@@ -37,7 +37,7 @@ use lines_core::levels::{
     LabelAt, LabelColor, LabelMode, LabelSeen, LegendStat, Level, LevelMap, LevelShape, LevelType,
     MAX_KINDS, MAX_LEVELS, Placed, label_text, place, place_labels,
 };
-use lines_core::style::{DashPattern, LineType};
+use lines_core::style::DashPattern;
 use lines_core::{BarsView, PriceFormat, Product, UtcMillis, Viewport};
 use lines_feed::ChartData;
 use lines_feed::indicators::{FeedInfo, IndicatorHandle, engine};

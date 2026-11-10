@@ -6588,6 +6588,7 @@ impl ChartView {
                             None => crate::study_style::LevelEdit {
                                 looks: crate::study_style::looks_of(&e),
                                 types: &[],
+                                labels: Vec::new(),
                                 label: lines_core::levels::LabelMode::Name,
                                 label_default: lines_core::levels::LabelMode::Name,
                             },

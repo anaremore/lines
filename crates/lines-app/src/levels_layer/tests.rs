@@ -498,6 +498,7 @@ fn types_resolve_hide_and_label_with_the_price() {
         &study_style::LevelEdit {
             looks,
             types,
+            labels: Vec::new(),
             label: LabelMode::NamePrice,
             label_default: default,
         },
@@ -876,6 +877,7 @@ fn one_style_restyles_every_chart_of_the_source() {
         &study_style::LevelEdit {
             looks,
             types,
+            labels: Vec::new(),
             label,
             label_default: label,
         },
