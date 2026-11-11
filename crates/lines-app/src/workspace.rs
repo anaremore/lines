@@ -96,8 +96,6 @@ fn tab_x0() -> f32 {
 const GRAB: f32 = 6.0;
 /// A tab drag starts after this much movement.
 const DRAG_START: f32 = 6.0;
-/// The top of a pane that is its header: dragging there pulls the pane out of the window.
-const HEADER_H: f32 = 22.0;
 /// Closed tabs kept for "Reopen closed tab".
 const CLOSED_TABS: usize = 10;
 /// A docked pane's neighbour keeps this share.
@@ -3981,6 +3979,10 @@ impl WindowView {
         let min_h = |id: &PaneId| tab.min_h(id);
         let min_w = |id: &PaneId| tab.min_w(id);
         let placed = tab.layout.place_where(area, &shown, &min_h, &min_w);
+        let dividers = tab.layout.dividers_where(area, &shown, &min_h, &min_w);
+        // Every divider's grab band: a press there resizes, even over a pane header (which a
+        // band reaches a few px into); a header drag never starts in one.
+        let grabs: std::rc::Rc<[Rect]> = dividers.iter().map(|d| d.handle(GRAB)).collect();
         let hovered = self.hover_pane;
         let bar = self.bar_h();
         for p in &placed {
@@ -4017,14 +4019,20 @@ impl WindowView {
                     .w(px(r.w))
                     .h(px(r.h))
                     .overflow_hidden()
-                    .capture_any_mouse_down(cx.listener(
+                    .capture_any_mouse_down(cx.listener({
+                        let grabs = grabs.clone();
+                        // The header's own row at the zoom (`pane::header_height`).
+                        let header_h = crate::zoom::f(crate::pane::header_height(kind));
                         move |this, ev: &MouseDownEvent, window, cx| {
                             // An open menu's backdrop (`crate::popover`) takes presses while
                             // it is open: this pane sees none of them.
                             this.focus_pane(id, window, cx);
-                            // The header is a handle: drag it out of the window to pop out.
-                            let y = f32::from(ev.position.y) - bar - r.y;
-                            if ev.button == MouseButton::Left && (0.0..HEADER_H).contains(&y) {
+                            // The header is a handle: drag it out of the window to pop out
+                            // (not from a divider's grab band over it: that press resizes).
+                            let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y) - bar);
+                            if ev.button == MouseButton::Left
+                                && crate::layout::header_drag_starts(r, header_h, x, y, &grabs)
+                            {
                                 this.pane_drag = Some(PaneDrag {
                                     id,
                                     start: ev.position,
@@ -4032,8 +4040,8 @@ impl WindowView {
                                     active: false,
                                 });
                             }
-                        },
-                    ))
+                        }
+                    }))
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
@@ -4048,12 +4056,7 @@ impl WindowView {
             );
         }
         // Separators and their grab handles (on top of the panes).
-        for (i, d) in tab
-            .layout
-            .dividers_where(area, &shown, &min_h, &min_w)
-            .into_iter()
-            .enumerate()
-        {
+        for (i, d) in dividers.into_iter().enumerate() {
             let line = match d.axis {
                 Axis::Row => Rect::new(d.at, d.area.y, 1.0, d.area.h),
                 Axis::Column => Rect::new(d.area.x, d.at, d.area.w, 1.0),
@@ -4084,6 +4087,8 @@ impl WindowView {
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                             cx.stop_propagation();
+                            // The divider wins the press: no pane drag-out from it, ever.
+                            this.pane_drag = None;
                             this.split_drag = Some(d.clone());
                         }),
                     )
