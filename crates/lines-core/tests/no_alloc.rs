@@ -841,6 +841,7 @@ fn chart_order_tags_do_not_allocate() {
                     side: TagSide::Left,
                     top_clear: 60.0,
                     taken: Some((180.0, 202.0)),
+                    taken_right: 200.0,
                 }
             };
             let m = edge_markers(&vp, &lines, 800.0, 400.0, [80.0, 80.0], &col, &z);

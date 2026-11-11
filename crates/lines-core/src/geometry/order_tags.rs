@@ -126,6 +126,9 @@ pub struct Column {
     /// A span `(top, bottom)` of the column already taken (the position tag with its handles):
     /// tags step around it.
     pub taken: Option<(f32, f32)>,
+    /// The taken box's right edge (plot-local): an edge marker or the add-exit preview that
+    /// can't step around it vertically sits right of it instead.
+    pub taken_right: f32,
 }
 
 impl Column {
@@ -133,6 +136,7 @@ impl Column {
         side: TagSide::Right,
         top_clear: 0.0,
         taken: None,
+        taken_right: 0.0,
     };
 
     fn left(&self) -> bool {
@@ -142,6 +146,22 @@ impl Column {
     /// The left column's x: the position tag's (`chart_view::draw_position_tag`).
     pub fn left_x(m: &Metrics) -> f32 {
         (4.0 * m.scale).round()
+    }
+
+    /// Where a box `top`..`top + h` goes on the left: the column's x, or right of the taken
+    /// box when it would meet it (a gap kept), so it never covers the position tag.
+    pub fn left_x_at(&self, top: f32, h: f32, m: &Metrics) -> f32 {
+        match self.taken {
+            Some((a, b)) if top < b + m.tag_gap && top + h + m.tag_gap > a => {
+                self.taken_right + m.tag_gap
+            }
+            _ => Column::left_x(m),
+        }
+    }
+
+    /// The highest a box goes in the column: below the left column's top-left block.
+    pub fn top_floor(&self) -> f32 {
+        if self.left() { self.top_clear } else { 0.0 }
     }
 }
 
@@ -321,15 +341,16 @@ pub fn edge_markers(
         if let Some(e) = e {
             e.w = (text_w[k] + m.text_pad).min(plot_w);
             e.h = m.tag_h;
-            e.left = if col.left() {
-                Column::left_x(m).min((plot_w - e.w).max(0.0))
-            } else {
-                plot_w - m.tag_gap - e.w
-            };
             e.top = if k == 0 {
                 top_floor(col, m)
             } else {
                 plot_h - m.tag_gap - m.tag_h
+            };
+            // On the left, never over the position tag: beside it instead.
+            e.left = if col.left() {
+                col.left_x_at(e.top, e.h, m).min((plot_w - e.w).max(0.0))
+            } else {
+                plot_w - m.tag_gap - e.w
             };
         }
     }
@@ -467,7 +488,7 @@ pub fn layout_tags(
             if meets(t.top)
                 && let Some((a, _)) = taken
             {
-                t.top = (a - gap - tag_h).max(0.0);
+                t.top = (a - gap - tag_h).max(lo);
             }
         }
         ceiling = t.top - gap;
@@ -637,10 +658,11 @@ pub fn tags_fit(band: (f32, f32), m: &Metrics) -> usize {
 pub fn tags_fit_in(band: (f32, f32), col: &Column, m: &Metrics) -> usize {
     let fit = tags_fit(band, m);
     match col.taken.filter(|_| col.left()) {
+        // The room above the taken span and below it, each counted whole.
         Some((a, b)) if b > band.0 && a < band.1 => {
-            let span = b.min(band.1) - a.max(band.0) + 2.0 * m.tag_gap;
-            let slots = (span / (m.tag_h + m.tag_gap)).ceil() as usize;
-            fit.saturating_sub(slots).max(1)
+            let slot = m.tag_h + m.tag_gap;
+            let room = |from: f32, to: f32| ((to - from).max(0.0) / slot).floor() as usize;
+            (room(band.0, a) + room(b, band.1)).clamp(1, fit)
         }
         _ => fit,
     }
@@ -1242,6 +1264,7 @@ mod tests {
             side: TagSide::Left,
             top_clear,
             taken,
+            taken_right: 120.0,
         }
     }
 
@@ -1417,5 +1440,24 @@ mod tests {
         assert_eq!(top.top, 20.0 + TAG_GAP, "below the legend");
         assert_eq!(bottom.top, 100.0 - TAG_GAP - TAG_H);
         assert_eq!(tag_band(&m, 100.0, &col, &M).0, top.top + TAG_H + TAG_GAP);
+        // A marker that would cover the position tag sits right of it instead.
+        let busy = left(20.0, Some((15.0, 40.0)));
+        let m = edge_markers(&v, &[line(5, 612_000)], 400.0, 100.0, [60.0; 2], &busy, &M);
+        assert_eq!(m[0].unwrap().left, 120.0 + TAG_GAP);
+        assert_eq!(
+            busy.left_x_at(60.0, TAG_H, &M),
+            Column::left_x(&M),
+            "clear of it"
+        );
+    }
+
+    #[test]
+    fn the_left_column_counts_the_room_around_the_position_tag() {
+        // 22 px slots: above 22..65 holds 1, below 131..152 holds none.
+        let col = left(20.0, Some((65.0, 131.0)));
+        assert_eq!(tags_fit_in((22.0, 152.0), &col, &M), 1);
+        // Never none: one tag, at worst, on a crowded plot.
+        let full = left(0.0, Some((0.0, 100.0)));
+        assert_eq!(tags_fit_in(FULL, &full, &M), 1);
     }
 }

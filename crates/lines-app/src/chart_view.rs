@@ -4756,6 +4756,7 @@ impl ChartView {
                 side: TagSide::Left,
                 top_clear: self.legend_band.get().1,
                 taken: pos_tag.map(|p| (p.top - reach(want[0]), p.top + p.h + reach(want[1]))),
+                taken_right: pos_tag.map_or(0.0, |p| p.left + p.w.max(tm.handle_w)),
             }
         } else {
             Column::RIGHT
@@ -5046,12 +5047,16 @@ impl ChartView {
                     0.0
                 };
                 let w = head_w + pnl_w + tm.text_pad;
+                // On the left: below the legend, and beside the position tag, never over it.
+                let top = (y - order_tag_h * 0.5).clamp(
+                    col.top_floor().min((ph - order_tag_h).max(0.0)),
+                    (ph - order_tag_h).max(0.0),
+                );
                 let left = if col.side == TagSide::Left {
-                    Column::left_x(tm).min((pw - w).max(0.0))
+                    col.left_x_at(top, order_tag_h, tm).min((pw - w).max(0.0))
                 } else {
                     (pw - tm.tag_gap - w).max(0.0)
                 };
-                let top = (y - order_tag_h * 0.5).clamp(0.0, (ph - order_tag_h).max(0.0));
                 window.paint_quad(fill(rect(left, top, w, order_tag_h), t.label_bg));
                 self.outline(rect(left, top, w, order_tag_h), c, hair, window);
                 self.pos_glyphs.paint(
