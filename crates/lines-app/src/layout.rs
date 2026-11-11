@@ -201,6 +201,20 @@ impl Divider {
     }
 }
 
+/// Width of a divider's grab band (logical px; the visible line is one pixel), centred on the
+/// line: it reaches half of this into the panes on both sides.
+pub const DIVIDER_GRAB: f32 = 6.0;
+
+/// Whether a left press at (`x`, `y`) starts dragging the pane at `pane` out by its header:
+/// inside the header's own row (`header_h` px tall from the pane's top) and outside every
+/// divider's grab band (`grabs`, `Divider::handle`), which always takes the press first. A
+/// band reaches a few px into the panes on both sides of its line, over a header right under
+/// it; a press there is a resize, never a pop-out.
+pub fn header_drag_starts(pane: Rect, header_h: f32, x: f32, y: f32, grabs: &[Rect]) -> bool {
+    Rect::new(pane.x, pane.y, pane.w, header_h).contains(x, y)
+        && !grabs.iter().any(|g| g.contains(x, y))
+}
+
 /// Focus movement.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -802,6 +816,66 @@ pub fn trading_group<T>(
 
 #[cfg(test)]
 mod tests {
+    /// The owner's bug: dragging the divider between a DOM and the time & sales under it
+    /// popped the T&S out. A press in a divider's grab band, right over the pane header
+    /// under (or beside) it, is the divider's; only the header row past the band drags the
+    /// pane out. Column and row splits, at 100 % and 150 % header heights.
+    #[test]
+    fn a_divider_takes_the_press_over_the_header_under_it() {
+        use super::*;
+        const GRAB: f32 = DIVIDER_GRAB;
+        let area = Rect::new(0.0, 0.0, 400.0, 600.0);
+        for header_h in [27.0f32, 27.0 * 1.5] {
+            // DOM above, T&S below: the T&S header sits right under the line.
+            let l = Layout::split(Axis::Column, 0.5, Layout::Pane(0u32), Layout::Pane(1u32));
+            let placed = l.place(area);
+            let grabs: Vec<Rect> = l.dividers(area).iter().map(|d| d.handle(GRAB)).collect();
+            let below = placed[1].rect;
+            let (x, top) = (below.x + below.w * 0.5, below.y);
+            for dy in [0.0, 1.0, 2.0, 2.9] {
+                assert!(
+                    !header_drag_starts(below, header_h, x, top + dy, &grabs),
+                    "{dy} px under the line, header {header_h}: the divider's"
+                );
+            }
+            assert!(header_drag_starts(below, header_h, x, top + 10.0, &grabs));
+            assert!(header_drag_starts(
+                below,
+                header_h,
+                x,
+                top + header_h - 1.0,
+                &grabs
+            ));
+            assert!(!header_drag_starts(
+                below,
+                header_h,
+                x,
+                top + header_h + 1.0,
+                &grabs
+            ));
+            // Side by side: the band beside the line wins over the right pane's header.
+            let l = Layout::split(Axis::Row, 0.5, Layout::Pane(0u32), Layout::Pane(1u32));
+            let placed = l.place(area);
+            let grabs: Vec<Rect> = l.dividers(area).iter().map(|d| d.handle(GRAB)).collect();
+            let right = placed[1].rect;
+            let y = right.y + header_h * 0.5;
+            assert!(!header_drag_starts(
+                right,
+                header_h,
+                right.x + 1.0,
+                y,
+                &grabs
+            ));
+            assert!(header_drag_starts(
+                right,
+                header_h,
+                right.x + 20.0,
+                y,
+                &grabs
+            ));
+        }
+    }
+
     /// A row split holds each side's least width, as a column split holds heights (a DOM
     /// above 100 % UI zoom).
     #[test]
