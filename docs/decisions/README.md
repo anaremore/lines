@@ -43,3 +43,4 @@ Format: Status · Context · Decision · Consequences.
 | 0035 | A saved key is never shown again (Accepted; supersedes the Show clause of 0030 §4) |
 | 0037 | Level labels may use the level's color when it meets AA (Accepted; supersedes 0022's theme-text label clause) |
 | 0038 | Lucide icons, from its releases, at a thinner stroke (Accepted) |
+| 0039 | Studies belong to the symbol, shared by every chart showing it (Accepted) |
