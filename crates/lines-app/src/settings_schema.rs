@@ -3317,9 +3317,10 @@ mod tests {
         for (k, sec) in want {
             assert_eq!(by_key(k).map(|s| s.section), Some(*sec), "{k}");
         }
-        // Keys added since, in window order: the UI font (decision 0036, on Appearance), trade
-        // history on new charts (Charts), and the only key the regrouping adds, the prop values
-        // line the overrides fold behind (a button, nothing saved).
+        // Keys added since, in window order: the light palette (Appearance), the UI font
+        // (decision 0036, on Appearance), trade history on new charts (Charts), and the only key
+        // the regrouping adds, the prop values line the overrides fold behind (a button, nothing
+        // saved).
         let new: Vec<&str> = all()
             .iter()
             .map(|s| s.key)
@@ -3327,9 +3328,18 @@ mod tests {
             .collect();
         assert_eq!(
             new,
-            ["appearance.ui_font", "charts.trades", PROP_OVERRIDES_KEY]
+            [
+                "appearance.light_palette",
+                "appearance.ui_font",
+                "charts.trades",
+                PROP_OVERRIDES_KEY
+            ]
         );
         assert_eq!(by_key("charts.trades").map(|s| s.section), Some(S::Charts));
+        assert_eq!(
+            by_key("appearance.light_palette").map(|s| s.section),
+            Some(S::Appearance)
+        );
         assert_eq!(
             by_key("appearance.ui_font").map(|s| s.section),
             Some(S::Appearance)
