@@ -675,6 +675,19 @@ pub fn chart_header_fit(
     }
 }
 
+/// The STALE badge's widest likely text, for the header fits: a feed quiet for a quarter hour
+/// and more (the badge counts seconds).
+const STALE_SAMPLE: &str = "STALE · no data 9999 s";
+
+/// Whether a DOM or T&S header shows its pane's word (`name_px` wide): only when it fits whole
+/// beside everything that never gives way (`keep`, [`side_header_keep_px`]), with the row's left
+/// padding (px_2), the gap before the right group (there even when its text isn't), the word's
+/// own gap and its basis' slack ([`whole_or_none_at`]); all in 100 % units. `room` 0 or less
+/// is "not laid out yet": it shows.
+pub fn side_header_shows_name(keep: f32, name_px: f32, room: f32) -> bool {
+    room <= 0.0 || keep + 8.0 + HEADER_GAP + HEADER_GAP + 2.0 + name_px <= room
+}
+
 /// What a DOM or T&S header's left group never gives up, in 100 % units: the link chip, the
 /// contract (or the unavailable title), the source tag when it shows, the feed's status word,
 /// the DOM's book state (bold: "crossed") and the STALE badge while stale. Only the pane's word ("DOM") may go from it, so it is the left
@@ -694,7 +707,7 @@ pub fn side_header_keep_px(
         + status.map_or(0.0, |s| HEADER_GAP + tw(s))
         + book.map_or(0.0, |b| HEADER_GAP + tw(b) * BOLD)
         + if stale {
-            HEADER_GAP + tw("STALE · no data 99 s") * BOLD + 8.0
+            HEADER_GAP + tw(STALE_SAMPLE) * BOLD + 8.0
         } else {
             0.0
         }
@@ -720,8 +733,8 @@ pub fn side_header_px(
         + tw(pane_word)
         + status.map_or(0.0, |s| HEADER_GAP + tw(s))
         + if stale {
-            // "STALE · no data 99 s", bold, px_1 each side.
-            HEADER_GAP + tw("STALE · no data 99 s") * BOLD + 8.0
+            // STALE_SAMPLE, bold, px_1 each side.
+            HEADER_GAP + tw(STALE_SAMPLE) * BOLD + 8.0
         } else {
             0.0
         }
@@ -1025,8 +1038,17 @@ mod tests {
             + (HEADER_GAP + tw7("CQG"))
             + (HEADER_GAP + tw7("ended"))
             + (HEADER_GAP + tw7("crossed") * BOLD)
-            + (HEADER_GAP + tw7("STALE · no data 99 s") * BOLD + 8.0);
+            + (HEADER_GAP + tw7(STALE_SAMPLE) * BOLD + 8.0);
         assert!((all - want).abs() < 0.01, "{all} vs {want}");
+    }
+
+    /// The pane's word shows only when it fits whole beside what never gives way.
+    #[test]
+    fn a_side_header_shows_its_name_only_when_it_fits() {
+        // keep 100, the word 30: 100 + 8 + 8 + 8 + 2 + 30 = 156.
+        assert!(side_header_shows_name(100.0, 30.0, 156.0));
+        assert!(!side_header_shows_name(100.0, 30.0, 155.0));
+        assert!(side_header_shows_name(100.0, 30.0, 0.0), "not laid out yet");
     }
 
     /// A narrow pane's header shows only ⋯ (every other control is in the pane menu), and keeps

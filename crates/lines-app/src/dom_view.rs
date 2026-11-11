@@ -1305,7 +1305,12 @@ impl DomView {
         // A narrow header drops the source tag first; the contract and words never.
         let tw = pane::text_px(window, crate::zoom::ui(12.0));
         // A narrow pane shows only ⋯, so its header keeps only that gutter free.
-        let gutter = pane::controls_gutter_at(crate::layout::PaneKind::Dom, self.pane_w);
+        // An unavailable pane paints no canvas, so its last width may be stale: the full gutter.
+        let gutter = if pane::unavailable_title(&self.feed).is_some() {
+            pane::controls_gutter(crate::layout::PaneKind::Dom)
+        } else {
+            pane::controls_gutter_at(crate::layout::PaneKind::Dom, self.pane_w)
+        };
         // In 100 % units, as `text_px` and the fit's gaps are (the gutter doesn't zoom); 0 or
         // less until the pane is laid out.
         let room = (self.pane_w - gutter) / crate::zoom::get();
@@ -1328,16 +1333,10 @@ impl DomView {
         let stale = self.store.stale_for().is_some();
         // The pane's word only when it fits whole beside everything that never gives way (the
         // right-hand text goes first); else left out, with its gap.
-        let shows_name = has_contract
-            && (room <= 0.0
-                || pane::side_header_keep_px(true, &left, tag.as_deref(), word, state, stale, &tw)
-                    + 8.0 // the row's left padding (px_2) is inside the room
-                    + 8.0 // the gap before the right group, there even when its text isn't
-                    + 8.0 + 2.0 // the name's own gap, and its basis' slack (`whole_or_none_at`)
-                    + tw("DOM")
-                    <= room);
         // The left group's least width: all of it but the pane's word, which gives way first.
         let keep = pane::side_header_keep_px(true, &left, tag.as_deref(), word, state, stale, &tw);
+        // The pane's word only when it fits whole beside all that; else left out, with its gap.
+        let shows_name = has_contract && pane::side_header_shows_name(keep, tw("DOM"), room);
         div()
             .flex()
             .flex_row()
