@@ -1530,6 +1530,17 @@ mod tests {
         );
     }
 
+    /// Settings › Order entry › Order tags on the chart: one palette entry per side.
+    #[test]
+    fn order_tag_sides_are_palette_entries() {
+        let p = palette();
+        for side in ["left", "right"] {
+            let found = filter(&format!("order tags on the chart {side}"), &p);
+            assert_eq!(found.len(), 1, "{side}: {found:?}");
+            assert!(matches!(found[0], Command::Setting(_)), "{side}");
+        }
+    }
+
     #[test]
     fn header_order_buttons_have_ctrl_alt_keys() {
         let ca = |k: &str| cmd(&format!("{}-alt-{k}", ctrl()));

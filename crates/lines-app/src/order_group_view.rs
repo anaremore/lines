@@ -53,18 +53,22 @@ pub fn cancel_all_label(n: usize, armed: bool) -> String {
     }
 }
 
-/// The list's width and its left edge from the plot's: right-aligned in the plot where it fits
-/// (a narrow plot's list may cover the axis, as the style editor does), and always inside the
-/// window. `plot_x` and `viewport_w` are in window coordinates.
-pub fn list_x(plot_x: f32, plot_w: f32, viewport_w: f32) -> (f32, f32) {
+/// The list's width and its left edge from the plot's: on the tags' side of the plot where it
+/// fits (right-aligned, or left-aligned when `left`: Settings › Order entry › Order tags on the
+/// chart; a narrow plot's list may cover the axis, as the style editor does), and always inside
+/// the window. `plot_x` and `viewport_w` are in window coordinates.
+pub fn list_x(plot_x: f32, plot_w: f32, viewport_w: f32, left: bool) -> (f32, f32) {
     let width = WIDTH
         .min(plot_w - 2.0 * MARGIN)
         .max(MIN_WIDTH)
         .min(viewport_w - 2.0 * MARGIN)
         .max(0.0);
-    let x = (plot_x + plot_w - width - MARGIN)
-        .min(viewport_w - width - MARGIN)
-        .max(MARGIN);
+    let x = if left {
+        plot_x + MARGIN
+    } else {
+        plot_x + plot_w - width - MARGIN
+    };
+    let x = x.min(viewport_w - width - MARGIN).max(MARGIN);
     (width, x - plot_x)
 }
 
@@ -89,16 +93,18 @@ pub fn layer(
     let menu = v.ct.group_menu.as_ref()?;
     let fmt = v.instrument().price;
     let mpu = money_per_unit(v.instrument());
-    let mode = cx
+    let app = cx
         .try_global::<crate::picker_view::AppSettings>()
-        .map(|a| a.settings.pnl_display)
-        .unwrap_or_default();
+        .map(|a| (a.settings.pnl_display, a.settings.order_tags_left));
+    let mode = app.map(|a| a.0).unwrap_or_default();
+    let tags_left = app.is_some_and(|a| a.1);
     let position = v.ct.position;
     let plot = v.plot_bounds();
     let (width, left) = list_x(
         f32::from(plot.origin.x),
         f32::from(plot.size.width),
         f32::from(window.viewport_size().width),
+        tags_left,
     );
     let rows = menu
         .rows
@@ -301,7 +307,7 @@ mod tests {
     #[test]
     fn the_list_stays_inside_the_window_sideways() {
         let inside = |plot_x: f32, plot_w: f32, viewport: f32| {
-            let (w, left) = list_x(plot_x, plot_w, viewport);
+            let (w, left) = list_x(plot_x, plot_w, viewport, false);
             let x = plot_x + left;
             assert!(x >= MARGIN && x + w <= viewport - MARGIN + 0.01, "{x} {w}");
             (w, left)

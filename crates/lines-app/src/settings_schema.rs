@@ -1070,6 +1070,7 @@ const PALETTES: &[&str] = &["Standard", "Colorblind"];
 const LIGHT_PALETTES: &[&str] = &["Same as dark", "Standard", "Colorblind"];
 const HOLLOWS: &[&str] = &["Up candles", "Down candles"];
 const PNL: &[&str] = &["Off", "Ticks", "Currency", "Both"];
+const TAG_SIDES: &[&str] = &["Right", "Left"];
 const UNITS: &[&str] = &["Ticks", "Points"];
 
 fn pnl_modes() -> [crate::pnl::PnlDisplay; 4] {
@@ -1450,6 +1451,24 @@ fn table() -> Vec<Setting> {
                 }),
             ),
             Value::Choice(3),
+        ),
+        with_default(
+            s(
+                "trading.order_tags",
+                Sec::OrderEntry,
+                "Order tags on the chart",
+                "Where working orders' tags sit: beside the price axis, or at the plot's left \
+                 edge with the position's.",
+                Scope::App,
+                Normal,
+                Choice(TAG_SIDES),
+                |p, _, _| Value::Choice(usize::from(p.app.order_tags_left)),
+                Some(|p, _, v| {
+                    p.app.order_tags_left = want_choice(v, 2)? == 1;
+                    Ok(())
+                }),
+            ),
+            Value::Choice(0),
         ),
         with_default(
             s(
@@ -2890,7 +2909,11 @@ const DOM: &[Group] = &[group(
 const ORDER_ENTRY: &[Group] = &[
     group(
         "DEFAULTS",
-        &[line!("trading.default_qty"), line!("trading.pnl")],
+        &[
+            line!("trading.default_qty"),
+            line!("trading.pnl"),
+            line!("trading.order_tags"),
+        ],
     ),
     Group {
         title: "BRACKETS",
@@ -3322,6 +3345,7 @@ mod tests {
             ("dom.columns", S::Dom),
             ("trading.default_qty", S::OrderEntry),
             ("trading.pnl", S::OrderEntry),
+            ("trading.order_tags", S::OrderEntry),
             ("trading.brackets", S::OrderEntry),
             ("trading.bracket_units", S::OrderEntry),
             ("trading.disable_on_focus_loss", S::OrderEntry),

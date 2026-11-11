@@ -74,6 +74,8 @@ pub struct Shot {
     pub chain_ticket: Option<crate::chain_ticket::ShotTicket>,
     /// The P&L display (`--pnl`; default: the app's default).
     pub pnl: Option<crate::pnl::PnlDisplay>,
+    /// Order tags at the plot's left edge (`--order-tags left`).
+    pub order_tags_left: bool,
     /// The measure readout's parts (`--measure-parts`).
     pub measure_parts: Option<crate::chart_draw::MeasureShow>,
     /// Drawings to show (`--drawings FILE`), in memory only.
@@ -231,6 +233,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         panel_menu,
         chain_ticket,
         pnl,
+        order_tags_left,
         measure_parts,
         drawings: seed,
         bracket_units,
@@ -408,6 +411,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
             if let Some(m) = pnl {
                 settings.settings.pnl_display = m;
             }
+            settings.settings.order_tags_left = order_tags_left;
             if let Some(show) = measure_parts {
                 settings.settings.measure = show;
             }

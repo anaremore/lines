@@ -733,9 +733,9 @@ impl crate::trade_bar::TradePane for ChartView {
     }
     fn resize_drawn(&self, order: lines_trading::OrderId) -> bool {
         self.ct.group_of(order.0).is_none()
-            && self.ct.tags[..self.ct.n_tags]
-                .iter()
-                .any(|b| b.id == order.0 && b.left >= crate::chart_trade::resize_w(b))
+            && self.ct.tags[..self.ct.n_tags].iter().any(|b| {
+                b.id == order.0 && crate::chart_trade::resize_left(b, self.ct.plot_w).is_some()
+            })
     }
     fn send_resize(
         &mut self,
@@ -4597,6 +4597,8 @@ impl ChartView {
             w,
             h,
             close_left: x - ox + w,
+            close_w: 0.0,
+            mirrored: false,
         }
     }
 
@@ -4705,8 +4707,8 @@ impl ChartView {
         use crate::dom_trade::group_key;
         use crate::dom_trade::{MarkRole, MarkStyle};
         use lines_core::geometry::order_tags::{
-            GroupIn, LineIn, MIXED_KEY, edge_markers, group_orders, handles, layout_tags, tag_band,
-            tags_fit, wanted_handles,
+            Column, GroupIn, LineIn, MIXED_KEY, TagSide, edge_markers, group_orders, handles,
+            layout_tags, tag_band, tags_fit_in, wanted_handles,
         };
         // The order tags' own height and padding (their layout's, at the UI zoom), not the
         // price labels'.
@@ -4736,8 +4738,34 @@ impl ChartView {
                 text_w: 0.0,
             });
         }
+        // The tags' column (Settings › Order entry › Order tags on the chart): on the left it
+        // stays below the legend block and off the position tag and the handles it shows.
+        self.ct.plot_w = pw;
+        let col = if cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .is_some_and(|a| a.settings.order_tags_left)
+        {
+            let want = match (pos_tag, self.ct.position) {
+                (Some(_), Some((qty, _))) => {
+                    let (has_t, has_s) = self.ct.exits();
+                    wanted_handles(qty, has_t, has_s)
+                }
+                _ => [false, false],
+            };
+            let reach = |on: bool| {
+                if on { tm.handle_gap + tm.handle_h } else { 0.0 }
+            };
+            Column {
+                side: TagSide::Left,
+                top_clear: self.legend_band.get().1,
+                taken: pos_tag.map(|p| (p.top - reach(want[0]), p.top + p.h + reach(want[1]))),
+                taken_right: pos_tag.map_or(0.0, |p| p.left + p.w.max(tm.handle_w)),
+            }
+        } else {
+            Column::RIGHT
+        };
         // Edge markers (measured from their text), then the tags between them.
-        let first = edge_markers(&self.vp, &self.ct.lines, pw, ph, [0.0, 0.0], tm);
+        let first = edge_markers(&self.vp, &self.ct.lines, pw, ph, [0.0, 0.0], &col, tm);
         let mut edge_text = [FixedStr::<64>::new(), FixedStr::<64>::new()];
         let mut edge_w = [0.0f32; 2];
         for k in 0..2 {
@@ -4760,8 +4788,8 @@ impl ChartView {
                     .width(edge_text[k].as_str(), t.text_main, true, window);
             }
         }
-        self.ct.markers = edge_markers(&self.vp, &self.ct.lines, pw, ph, edge_w, tm);
-        let band = tag_band(&self.ct.markers, ph, tm);
+        self.ct.markers = edge_markers(&self.vp, &self.ct.lines, pw, ph, edge_w, &col, tm);
+        let band = tag_band(&self.ct.markers, ph, &col, tm);
         // The tags: orders of one kind that can't sit at their own levels share one (zooming in
         // splits them back), and every order on the plot is in exactly one.
         self.ct.on_plot.clear();
@@ -4792,7 +4820,9 @@ impl ChartView {
             &self.vp,
             &mut self.ct.on_plot,
             ph,
-            tags_fit(band, tm).saturating_sub(staged_on_plot).max(1),
+            tags_fit_in(band, &col, tm)
+                .saturating_sub(staged_on_plot)
+                .max(1),
             tm,
             &mut self.ct.groups,
         );
@@ -4908,6 +4938,7 @@ impl ChartView {
             ph,
             band,
             scale,
+            &col,
             tm,
             &mut self.ct.tags,
         );
@@ -5019,8 +5050,16 @@ impl ChartView {
                     0.0
                 };
                 let w = head_w + pnl_w + tm.text_pad;
-                let left = (pw - tm.tag_gap - w).max(0.0);
-                let top = (y - order_tag_h * 0.5).clamp(0.0, (ph - order_tag_h).max(0.0));
+                // On the left: below the legend, and beside the position tag, never over it.
+                let top = (y - order_tag_h * 0.5).clamp(
+                    col.top_floor().min((ph - order_tag_h).max(0.0)),
+                    (ph - order_tag_h).max(0.0),
+                );
+                let left = if col.side == TagSide::Left {
+                    col.left_x_at(top, order_tag_h, tm).min((pw - w).max(0.0))
+                } else {
+                    (pw - tm.tag_gap - w).max(0.0)
+                };
                 window.paint_quad(fill(rect(left, top, w, order_tag_h), t.label_bg));
                 self.outline(rect(left, top, w, order_tag_h), c, hair, window);
                 self.pos_glyphs.paint(
@@ -5091,25 +5130,27 @@ impl ChartView {
                 self.outline(rect(b.left, b.top, b.w, order_tag_h), c, hair, window);
             }
             // The role's shape, as on the DOM: a notch on the top edge for a target, on the
-            // bottom edge for a stop; entries plain. Never colour alone.
-            window.paint_quad(fill(rect(b.left, b.top, 2.0, order_tag_h), c));
+            // bottom edge for a stop; entries plain. Never colour alone. At the tag's inner
+            // end (its right end when mirrored).
+            let notch = (8.0 * s).round();
+            let inner = |w: f32| if b.mirrored { b.left + b.w - w } else { b.left };
+            window.paint_quad(fill(rect(inner(2.0), b.top, 2.0, order_tag_h), c));
             match MarkRole::of(&m) {
                 _ if mixed => {}
                 MarkRole::Target => {
-                    window.paint_quad(fill(rect(b.left, b.top - 2.0, (8.0 * s).round(), 2.0), c))
+                    window.paint_quad(fill(rect(inner(notch), b.top - 2.0, notch, 2.0), c))
                 }
-                MarkRole::Stop => window.paint_quad(fill(
-                    rect(b.left, b.top + order_tag_h, (8.0 * s).round(), 2.0),
-                    c,
-                )),
+                MarkRole::Stop => {
+                    window.paint_quad(fill(rect(inner(notch), b.top + order_tag_h, notch, 2.0), c))
+                }
                 MarkRole::Entry => {}
             }
-            window.paint_quad(fill(rect(b.close_left, b.top, hair, order_tag_h), c));
+            window.paint_quad(fill(rect(b.divider_x(), b.top, hair, order_tag_h), c));
             let fg = if pending { t.text_dim } else { t.text_main };
             let head_w = self.pos_glyphs.width(tt.text.as_str(), fg, true, window);
             self.pos_glyphs.paint(
                 tt.text.as_str(),
-                ox + b.left + 6.0 * s,
+                ox + b.body_left() + 6.0 * s,
                 oy + b.top,
                 order_tag_h,
                 fg,
@@ -5126,7 +5167,7 @@ impl ChartView {
                 };
                 self.pos_glyphs.paint(
                     tt.pnl.as_str(),
-                    ox + b.left + 6.0 * s + head_w + 8.0 * s,
+                    ox + b.body_left() + 6.0 * s + head_w + 8.0 * s,
                     oy + b.top,
                     order_tag_h,
                     tone,
@@ -5170,11 +5211,11 @@ impl ChartView {
         if let Some(b) = shown
             .and_then(|h| self.ct.tags[..self.ct.n_tags].iter().find(|b| b.id == h))
             .copied()
-            .filter(|b| b.left >= crate::chart_trade::resize_w(b))
+            && let Some(left) = crate::chart_trade::resize_left(&b, pw)
             && let Some(m) = self.ct.mark(b.id).copied()
         {
+            // On the tag's inner side: left of it, or right of a mirrored one.
             let (btn_w, value_w) = crate::chart_trade::resize_parts(&b);
-            let left = b.left - crate::chart_trade::resize_w(&b);
             let mut value = lines_core::FixedStr::<16>::new();
             match &self.trade.resize_edit {
                 Some((id, digits)) if id.0 == b.id => {
@@ -5355,14 +5396,28 @@ impl ChartView {
         };
         window.paint_quad(fill(rect(b.left, b.top, b.w, h), t.label_bg));
         self.dashed_outline(rect(b.left, b.top, b.w, h), c, hair, window);
-        window.paint_quad(fill(rect(b.left, b.top, 2.0, h), c));
+        // The role's shape at the inner end (the right end when mirrored).
         let notch = (8.0 * s).round();
+        let inner = |w: f32| if b.mirrored { b.left + b.w - w } else { b.left };
+        window.paint_quad(fill(rect(inner(2.0), b.top, 2.0, h), c));
         match part {
-            StagedPart::Target => window.paint_quad(fill(rect(b.left, b.top - 2.0, notch, 2.0), c)),
-            StagedPart::Stop => window.paint_quad(fill(rect(b.left, b.top + h, notch, 2.0), c)),
+            StagedPart::Target => {
+                window.paint_quad(fill(rect(inner(notch), b.top - 2.0, notch, 2.0), c))
+            }
+            StagedPart::Stop => {
+                window.paint_quad(fill(rect(inner(notch), b.top + h, notch, 2.0), c))
+            }
             StagedPart::Entry => {}
         }
-        let text_x = ox + b.left + 6.0 * s;
+        // The text after the outer-end controls when mirrored: × Esc and Place (the entry),
+        // × (a leg).
+        let (place_w, esc_w) = self.ct.staged_buttons;
+        let text_x = ox
+            + 6.0 * s
+            + match part {
+                StagedPart::Entry if b.mirrored => b.left + esc_w + place_w,
+                _ => b.body_left(),
+            };
         let head_end =
             self.pos_glyphs
                 .paint(text, text_x, oy + b.top, h, t.text_main, true, window, cx);
@@ -5383,11 +5438,9 @@ impl ChartView {
                 cx,
             );
         }
-        let right = b.left + b.w;
         if part == StagedPart::Entry {
-            let (place_w, esc_w) = self.ct.staged_buttons;
-            let esc_left = right - esc_w;
-            let place_left = esc_left - place_w;
+            let (esc_left, place_left) =
+                crate::chart_trade::staged_button_lefts(b, (place_w, esc_w));
             // Place: filled in the side's color, its text in `bg` (AA: `up`/`down` on `bg`).
             window.paint_quad(fill(
                 rect(place_left, b.top + hair, place_w, h - 2.0 * hair),
@@ -5403,7 +5456,13 @@ impl ChartView {
                 window,
                 cx,
             );
-            window.paint_quad(fill(rect(esc_left, b.top, hair, h), c));
+            // The divider between × Esc and the rest (its inner edge).
+            let divider = if b.mirrored {
+                esc_left + esc_w
+            } else {
+                esc_left
+            };
+            window.paint_quad(fill(rect(divider, b.top, hair, h), c));
             self.pos_glyphs.paint(
                 DISCARD_LABEL,
                 ox + esc_left + 6.0 * s,
@@ -5415,7 +5474,7 @@ impl ChartView {
                 cx,
             );
         } else {
-            window.paint_quad(fill(rect(b.close_left, b.top, hair, h), c));
+            window.paint_quad(fill(rect(b.divider_x(), b.top, hair, h), c));
             self.pos_glyphs.paint(
                 "×",
                 ox + b.close_left + tm.close_w * 0.5 - 3.5 * s,

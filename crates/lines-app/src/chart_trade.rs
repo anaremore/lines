@@ -442,6 +442,8 @@ pub struct ChartTradeState {
     pub staged_handles: [Option<Handle>; 2],
     /// The staged entry's Place and × Esc widths as last drawn.
     pub staged_buttons: (f32, f32),
+    /// The plot's width as last drawn: a mirrored tag's resize control needs room right of it.
+    pub plot_w: f32,
     /// A discard notice for a chart that was hidden: shown once it is visible again.
     pub notice: Option<&'static str>,
 }
@@ -459,12 +461,26 @@ pub fn resize_w(b: &TagBox) -> f32 {
     2.0 * btn + value
 }
 
-/// The piece of the resize control of tag `b` at plot-local (`x`, `y`); `None` off it, or when
-/// the tag sits too near the plot's left edge to have one.
-pub fn resize_hit(b: &TagBox, x: f32, y: f32) -> Option<ResizeHit> {
+/// Where tag `b`'s resize control starts: on its inner side, left of a right-aligned tag or
+/// right of a mirrored (left-column) one, in a plot `plot_w` wide. `None`: no room there.
+pub fn resize_left(b: &TagBox, plot_w: f32) -> Option<f32> {
+    let w = resize_w(b);
+    if b.mirrored {
+        let left = b.left + b.w;
+        (left + w <= plot_w).then_some(left)
+    } else {
+        let left = b.left - w;
+        (left >= 0.0).then_some(left)
+    }
+}
+
+/// The piece of the resize control of tag `b` at plot-local (`x`, `y`) in a plot `plot_w` wide;
+/// `None` off it, or when the tag has no room for one ([`resize_left`]). The control reads
+/// −, size, + left to right on either side.
+pub fn resize_hit(b: &TagBox, x: f32, y: f32, plot_w: f32) -> Option<ResizeHit> {
     let (btn, value) = resize_parts(b);
-    let left = b.left - resize_w(b);
-    if left < 0.0 || y < b.top || y >= b.top + b.h || x < left || x >= b.left {
+    let left = resize_left(b, plot_w)?;
+    if y < b.top || y >= b.top + b.h || x < left || x >= left + resize_w(b) {
         return None;
     }
     Some(if x < left + btn {
@@ -1183,25 +1199,36 @@ pub enum StagedHit {
     Body(StagedPart),
 }
 
+/// Where a staged entry's × Esc and Place start (plot-local), for its `(place, esc)` widths: at
+/// the tag's outer end, `… Place ⏎ × Esc` on the right, mirrored `× Esc Place ⏎ …` on the left.
+pub fn staged_button_lefts(b: &TagBox, (place, esc): (f32, f32)) -> (f32, f32) {
+    if b.mirrored {
+        (b.left, b.left + esc)
+    } else {
+        let esc_left = b.left + b.w - esc;
+        (esc_left, esc_left - place)
+    }
+}
+
 /// The staged tag under plot-local (`x`, `y`) among this frame's tags, if any.
 pub fn staged_hit(tags: &[TagBox], buttons: (f32, f32), x: f32, y: f32) -> Option<StagedHit> {
     let b = tags
         .iter()
         .find(|b| StagedPart::of_id(b.id).is_some() && b.contains(x, y))?;
     let part = StagedPart::of_id(b.id)?;
-    let right = b.left + b.w;
     Some(match part {
         StagedPart::Entry => {
             let (place, esc) = buttons;
-            if x >= right - esc {
+            let (esc_left, place_left) = staged_button_lefts(b, buttons);
+            if (esc_left..esc_left + esc).contains(&x) {
                 StagedHit::Close(part)
-            } else if x >= right - esc - place {
+            } else if (place_left..place_left + place).contains(&x) {
                 StagedHit::Place
             } else {
                 StagedHit::Body(part)
             }
         }
-        _ if x >= b.close_left => StagedHit::Close(part),
+        _ if b.on_close(x) => StagedHit::Close(part),
         _ => StagedHit::Body(part),
     })
 }
@@ -1384,6 +1411,7 @@ impl Default for ChartTradeState {
             placing: None,
             staged_handles: [None, None],
             staged_buttons: (0.0, 0.0),
+            plot_w: 0.0,
             notice: None,
         }
     }
@@ -1535,7 +1563,7 @@ impl ChartTradeState {
             .or(self.resize_hover)
             .filter(|h| self.group_of(*h).is_none())
             .and_then(|h| tags.iter().find(|b| b.id == h))
-            && let Some(hit) = resize_hit(b, x, y)
+            && let Some(hit) = resize_hit(b, x, y, self.plot_w)
         {
             return Some((b.id, Some(hit)));
         }
@@ -2413,23 +2441,48 @@ mod tests {
             w: 150.0,
             h: lines_core::geometry::order_tags::TAG_H,
             close_left: 330.0,
+            close_w: 20.0,
+            mirrored: false,
         };
-        assert_eq!(resize_hit(&b, 121.0, 105.0), Some(ResizeHit::Down));
-        assert_eq!(resize_hit(&b, 160.0, 105.0), Some(ResizeHit::Value));
-        assert_eq!(resize_hit(&b, 199.0, 105.0), Some(ResizeHit::Up));
-        assert_eq!(resize_hit(&b, 119.0, 105.0), None, "left of it");
-        assert_eq!(resize_hit(&b, 200.0, 105.0), None, "the tag's own");
-        assert_eq!(resize_hit(&b, 160.0, 99.0), None, "above it");
+        assert_eq!(resize_hit(&b, 121.0, 105.0, 1000.0), Some(ResizeHit::Down));
+        assert_eq!(resize_hit(&b, 160.0, 105.0, 1000.0), Some(ResizeHit::Value));
+        assert_eq!(resize_hit(&b, 199.0, 105.0, 1000.0), Some(ResizeHit::Up));
+        assert_eq!(resize_hit(&b, 119.0, 105.0, 1000.0), None, "left of it");
+        assert_eq!(resize_hit(&b, 200.0, 105.0, 1000.0), None, "the tag's own");
+        assert_eq!(resize_hit(&b, 160.0, 99.0, 1000.0), None, "above it");
         let edge = TagBox { left: 60.0, ..b };
-        assert_eq!(resize_hit(&edge, 30.0, 105.0), None, "no room: none");
+        assert_eq!(
+            resize_hit(&edge, 30.0, 105.0, 1000.0),
+            None,
+            "no room: none"
+        );
         // At 150 % UI zoom (a 30 px tag): 30, 60 and 30 px, hit the full height.
         let z = TagBox { h: 30.0, ..b };
         assert_eq!(resize_w(&z), 120.0);
-        assert_eq!(resize_hit(&z, 81.0, 128.0), Some(ResizeHit::Down));
-        assert_eq!(resize_hit(&z, 111.0, 105.0), Some(ResizeHit::Value));
-        assert_eq!(resize_hit(&z, 171.0, 105.0), Some(ResizeHit::Up));
-        assert_eq!(resize_hit(&z, 79.0, 105.0), None, "left of it");
-        assert_eq!(resize_hit(&z, 160.0, 130.0), None, "below it");
+        assert_eq!(resize_hit(&z, 81.0, 128.0, 1000.0), Some(ResizeHit::Down));
+        assert_eq!(resize_hit(&z, 111.0, 105.0, 1000.0), Some(ResizeHit::Value));
+        assert_eq!(resize_hit(&z, 171.0, 105.0, 1000.0), Some(ResizeHit::Up));
+        assert_eq!(resize_hit(&z, 79.0, 105.0, 1000.0), None, "left of it");
+        assert_eq!(resize_hit(&z, 160.0, 130.0, 1000.0), None, "below it");
+        // Mirrored (tags at the plot's left edge): right of the tag, − size + left to right.
+        let m = TagBox {
+            left: 4.0,
+            close_left: 4.0,
+            mirrored: true,
+            ..b
+        };
+        assert_eq!(resize_left(&m, 1000.0), Some(154.0));
+        assert_eq!(resize_hit(&m, 155.0, 105.0, 1000.0), Some(ResizeHit::Down));
+        assert_eq!(resize_hit(&m, 200.0, 105.0, 1000.0), Some(ResizeHit::Value));
+        assert_eq!(resize_hit(&m, 233.0, 105.0, 1000.0), Some(ResizeHit::Up));
+        assert_eq!(resize_hit(&m, 153.0, 105.0, 1000.0), None, "the tag's own");
+        assert_eq!(resize_hit(&m, 234.0, 105.0, 1000.0), None, "right of it");
+        assert_eq!(
+            resize_left(&m, 200.0),
+            None,
+            "no room on a narrow plot: none"
+        );
+        assert_eq!(resize_hit(&m, 160.0, 105.0, 200.0), None);
     }
 
     #[test]
@@ -2756,6 +2809,8 @@ mod tests {
             w: 200.0,
             h: 20.0,
             close_left: 278.0,
+            close_w: 22.0,
+            mirrored: false,
         };
         let tags = [
             tag(STAGED_ENTRY_ID, 100.0),
@@ -2786,6 +2841,35 @@ mod tests {
             "a working order's tag"
         );
         assert_eq!(staged_hit(&tags, b, 50.0, 105.0), None);
+        // Mirrored (the left column): × Esc, then Place, at the left (outer) end; a leg's × too.
+        let mirror = |id, top: f32| TagBox {
+            close_left: 100.0,
+            mirrored: true,
+            ..tag(id, top)
+        };
+        let left = [
+            mirror(STAGED_ENTRY_ID, 100.0),
+            mirror(STAGED_TARGET_ID, 50.0),
+        ];
+        assert_eq!(staged_button_lefts(&left[0], b), (100.0, 140.0));
+        assert_eq!(
+            staged_hit(&left, b, 110.0, 105.0),
+            Some(StagedHit::Close(StagedPart::Entry))
+        );
+        assert_eq!(staged_hit(&left, b, 150.0, 105.0), Some(StagedHit::Place));
+        assert_eq!(
+            staged_hit(&left, b, 210.0, 105.0),
+            Some(StagedHit::Body(StagedPart::Entry))
+        );
+        assert_eq!(
+            staged_hit(&left, b, 110.0, 55.0),
+            Some(StagedHit::Close(StagedPart::Target))
+        );
+        assert_eq!(
+            staged_hit(&left, b, 290.0, 55.0),
+            Some(StagedHit::Body(StagedPart::Target)),
+            "the right end drags"
+        );
     }
 
     /// Nothing reaches the broker before Place: staging, dragging and discarding build no
