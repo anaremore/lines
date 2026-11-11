@@ -280,8 +280,6 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             )),
         ));
     }
-    // The trading panel's Qty and Bracket lists: anchored under their field, as wide as their
-    // content (never the window's width).
     // Settings › Charts at the narrowest window: Bar period's 21 chips wrap on their own line
     // under the label, and the row grows to hold them (never over its description or the next
     // row). Dark at 100 %, light at 150 % (tall enough that the page needs no scrolling, so
@@ -306,6 +304,26 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     );
     set.windows = 2;
     v.push(set);
+    // The other pages with long choices: Appearance (Light palette's long names, UI zoom) and
+    // Accounts (the prop preset), at the narrowest window and 150 %.
+    for (page, h) in [("appearance", 900), ("accounts", 900)] {
+        let mut set = s(
+            if page == "appearance" {
+                "settings-appearance-narrow-light-150"
+            } else {
+                "settings-accounts-narrow-light-150"
+            },
+            false,
+            end,
+            args(&format!(
+                "--layout chart --size 1000x700 --theme light --ui-zoom 150 --settings {page} --settings-size 640x{h}"
+            )),
+        );
+        set.windows = 2;
+        v.push(set);
+    }
+    // The trading panel's Qty and Bracket lists: anchored under their field, as wide as their
+    // content (never the window's width).
     v.push(s(
         "panel-qty-list",
         true,

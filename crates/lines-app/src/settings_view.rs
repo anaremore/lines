@@ -2127,8 +2127,6 @@ impl SettingsWindow {
                             .id(("choice", i * 64 + j))
                             .flex_none()
                             .whitespace_nowrap()
-                            .relative()
-                            .children(crate::layout_rec::text_marker(name))
                             .px_2()
                             .cursor_pointer()
                             .when(on && !idle, |d| {
@@ -2147,6 +2145,12 @@ impl SettingsWindow {
                                             .border_1()
                                             .border_color(t.accent),
                                     )
+                            })
+                            .relative()
+                            .children({
+                                // What the chip draws, for the layout lint.
+                                let shown = schema::choice_label(st.key, j, name, a);
+                                crate::layout_rec::text_marker(&shown)
                             })
                             .child(schema::choice_label(st.key, j, name, a))
                             .on_mouse_down(
@@ -2539,6 +2543,8 @@ impl SettingsWindow {
                             .flex_none()
                             .text_size(crate::zoom::ui(11.0))
                             .text_color(t.text_dim)
+                            .relative()
+                            .children(crate::layout_rec::text_marker(w))
                             .child(w)
                     })),
             );
@@ -2548,6 +2554,8 @@ impl SettingsWindow {
                 div()
                     .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_dim)
+                    .relative()
+                    .children(crate::layout_rec::text_marker(schema::all()[s].description))
                     .child(schema::all()[s].description),
             );
         }
@@ -2561,18 +2569,21 @@ impl SettingsWindow {
                 div()
                     .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_main)
+                    .relative()
+                    .children(crate::layout_rec::text_marker(&now))
                     .child(now),
             );
         }
-        // A long choice (Bar period's 21 chips) takes its own full-width line under the label,
-        // in a column: its chips wrap at a width the column gives them, so the row's height is
+        // A choice too wide to sit beside its label at the narrowest window (Bar period's 23
+        // chips, Light palette's long names) takes its own full-width line under the label, in
+        // a column: its chips wrap at a width the column gives them, so the row's height is
         // measured with them wrapped. A wrapping chip group as an item of the wrapping row (and
         // of a wrapping control group) could be measured on one line and then shrunk, painting
         // its wrapped chips over the description and the next row.
-        let long_choice = idx
+        let own_line = idx
             .iter()
             .any(|&k| matches!(schema::all()[k].kind, Kind::Choice(c) if long_choice(c)));
-        let mut right = if long_choice {
+        let mut right = if own_line {
             div().flex().flex_col().items_end().w_full().min_w_0()
         } else {
             div()
@@ -3669,13 +3680,36 @@ fn inline_text(s: &str) -> bool {
     !s.contains('\n') && s.chars().count() <= 40
 }
 
-/// Chips past which a choice is "long": it always takes its own line under its label
-/// (`row`), never beside it.
-const LONG_CHOICE: usize = 6;
+/// The widest chip group (100 % logical px) that sits beside its label: the content width
+/// beside a label at the narrowest window (`MIN_SIZE`) and the largest zoom, in 100 % units.
+const BESIDE_MAX_W: f32 = 230.0;
 
-/// Whether a choice's chips take their own line (more than [`LONG_CHOICE`] of them).
+/// A chip group's width estimated from its labels (100 % px): a wide glyph (7 px) a
+/// character, each chip's padding (px_2) and the group's border. Wide on purpose: a group
+/// counted too wide only moves under its label, one counted too narrow could wrap beside it.
+fn choice_w(chips: &[&str]) -> f32 {
+    chips
+        .iter()
+        .map(|c| c.chars().count() as f32 * 7.0 + 16.0)
+        .sum::<f32>()
+        + 2.0
+}
+
+/// Whether a choice takes its own line under its label: wider than [`BESIDE_MAX_W`]. (Light
+/// palette's first chip names the dark palette, "Same as dark (Standard)": the longest it
+/// can read is counted.)
 fn long_choice(chips: &[&str]) -> bool {
-    chips.len() > LONG_CHOICE
+    let shown: Vec<&str> = chips
+        .iter()
+        .map(|c| {
+            if *c == "Same as dark" {
+                "Same as dark (Colorblind)"
+            } else {
+                c
+            }
+        })
+        .collect();
+    choice_w(&shown) > BESIDE_MAX_W
 }
 
 /// Editors whose summary sits beside their button ("8/16, 12/24 ticks  Edit…"); the rest
@@ -3710,7 +3744,17 @@ mod tests {
             .filter(|s| matches!(s.kind, Kind::Choice(c) if long_choice(c)))
             .map(|s| s.key)
             .collect();
-        assert_eq!(long, ["charts.timeframe"]);
+        assert_eq!(
+            long,
+            [
+                "appearance.light_palette",
+                "appearance.ui_zoom",
+                "charts.timeframe",
+                "prop.preset"
+            ]
+        );
+        // A short group stays beside its label.
+        assert!(!long_choice(&["Dark", "Light", "System"]));
     }
 
     /// At its smallest the window leaves a row's label column its full width, and the widest
