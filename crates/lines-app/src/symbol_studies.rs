@@ -4,8 +4,8 @@
 //!
 //! - The sets live app-wide in `settings.json` (`Settings::symbol_studies`, keyed by the
 //!   catalog product id, so a roll keeps them; optional, no format bump). A product without one
-//!   starts from what the chart shows: a new chart's defaults (`chart_defaults`), else a switch
-//!   to it starts from `chart_defaults`.
+//!   starts from the defaults for new charts (`chart_defaults`); studies given on the command
+//!   line (`--vwap`) give it its set instead.
 //! - A chart joins its product's set when restored or switched, and at render compares what it
 //!   shows with what it last synced: a change made on it is published to the product's set
 //!   (every chart of the product picks it up: [`generation`] moves, each chart's poll sees it),
@@ -13,8 +13,8 @@
 //!   spec) nodes, so two charts of one product with the same VWAP still use one node.
 //! - **Separate studies** (`ChartState::separate_studies`): one chart keeps its own set, copied
 //!   from the product's when turned on, saved on the chart pane; turned off, the chart takes its
-//!   product's set again. A switch to another symbol ends it (the chart shows the new symbol's
-//!   set, decision 0039 §3).
+//!   product's set again. Switched to another symbol the chart shows that symbol's set (§3) and
+//!   keeps its separate set for the old one, which comes back with a switch back (§5).
 //! - Visibility (hide studies, hide study labels, Clean chart) stays the chart's own.
 //! - Migration (workspace format 9, [`adopt_legacy`]): charts saved before carried their own
 //!   sets; the first chart of each product (window, tab and layout order) gives the product its

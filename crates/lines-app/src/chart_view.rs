@@ -1081,13 +1081,27 @@ impl ChartView {
             return;
         }
         let product = self.instrument.id.0;
-        // Studies from the command line on a product that has a set: kept, as this chart's own.
-        if !switched && self.cli_studies && crate::symbol_studies::get(cx, product).is_some() {
+        // Studies from the command line (honored once, at the first join).
+        let cli = std::mem::take(&mut self.cli_studies);
+        let product_set = crate::symbol_studies::get(cx, product);
+        // On a product that has a set: the chart keeps them as its own, on top of the
+        // product's set (its other studies stay), never overwriting the product's.
+        if cli && let Some(mut own) = product_set.clone() {
+            own.indicators = merge_indicators(own.indicators, self.studies.configs());
+            let profile = self.profile.config();
+            if !profile.is_default() {
+                own.profile = profile;
+            }
+            self.set_study_set(own);
             self.separate_studies = true;
+            cx.notify();
             return;
         }
-        let set = crate::symbol_studies::get(cx, product).or_else(|| {
-            switched.then(|| {
+        // A product without a set: a switch to it, or a restored chart that keeps none of its
+        // own (decision 0039 §4), starts from the defaults for new charts; command-line
+        // studies stay (and give the product its set).
+        let set = product_set.or_else(|| {
+            (switched || !cli).then(|| {
                 crate::picker_view::settings(cx)
                     .chart_defaults
                     .clone()
@@ -1121,12 +1135,9 @@ impl ChartView {
         let now = crate::symbol_studies::generation(product);
         let mine = self.study_set();
         match &self.synced_studies {
-            // Changed here since the last sync: every chart of the product follows (an
-            // option chain's view-only chart takes the product's set, never gives it one).
+            // Changed here since the last sync: every chart of the product follows.
             Some(last) if **last != mine => {
-                if !self.view_only {
-                    crate::symbol_studies::publish(cx, product, mine.clone());
-                }
+                crate::symbol_studies::publish(cx, product, mine.clone());
                 self.synced_studies = Some(Box::new(mine));
             }
             Some(_) if now == self.studies_gen => {}
@@ -1141,6 +1152,7 @@ impl ChartView {
                     // for a change made here.
                     self.synced_studies = Some(Box::new(self.study_set()));
                 }
+                // (An option chain's view-only chart never gives its product a first set.)
                 None => {
                     if !self.view_only {
                         crate::symbol_studies::publish(cx, product, mine.clone());
@@ -10540,6 +10552,50 @@ mod symbol_studies_tests {
             s.indicators.push(add);
             c.set_study_set(s);
         });
+    }
+
+    /// Studies from the command line on a product that has a set: that chart keeps them as
+    /// its own, on top of the product's, and can take the product's set again.
+    #[gpui::test]
+    fn command_line_studies_never_overwrite_a_symbols_set(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::picker_view::AppSettings::ephemeral());
+            crate::symbol_studies::publish(
+                cx,
+                catalog::MES.0,
+                StudySet {
+                    indicators: vec![vwap("rth")],
+                    ..Default::default()
+                },
+            );
+        });
+        let c = cx.new(|cx| {
+            let fixture = Fixture {
+                indicators: vec![vwap("eth")],
+                ..Default::default()
+            };
+            let mut c = ChartView::new(
+                feed(catalog::MES),
+                Theme::dark(Default::default()),
+                true,
+                fixture,
+                cx,
+            );
+            c.join_symbol_studies(false, cx);
+            c
+        });
+        sync(&c, cx);
+        assert!(c.read_with(cx, |c, _| c.separate_studies));
+        assert_eq!(indicators(&c, cx), vec![vwap("rth"), vwap("eth")]);
+        let set = cx
+            .update(|cx| crate::symbol_studies::get(cx, catalog::MES.0))
+            .unwrap();
+        assert_eq!(set.indicators, vec![vwap("rth")], "MES's untouched");
+        // Off: MES's set.
+        c.update(cx, |c, cx| c.set_separate_studies(false, cx));
+        sync(&c, cx);
+        assert!(!c.read_with(cx, |c, _| c.separate_studies));
+        assert_eq!(indicators(&c, cx), vec![vwap("rth")]);
     }
 
     #[gpui::test]
