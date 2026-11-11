@@ -360,15 +360,19 @@ pub(crate) fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
     }
 }
 
-/// The warnings slot a picker drag holds (logical px at 100 %, whole, rounded up): `drawn`,
-/// the box's painted height, is what is drawn (clipped); `room`, the layout's estimate at the
-/// press (`style_editor_view::warnings_height`), is what the editor's height and place count,
-/// so neither the editor nor anything in it moves when the press starts.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The warnings slot a picker drag holds (logical px at 100 %): `drawn`, the box's painted
+/// height, is what is drawn (clipped); `room`, the layout's estimate at the press
+/// (`style_editor_view::warnings_height`, whole px), is what the editor's height and place
+/// count, as they did before the press, so neither the editor nor anything in it moves when
+/// the press starts.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WarnSlot {
-    pub drawn: u32,
-    pub room: u32,
+    pub drawn: f32,
+    pub room: f32,
 }
+
+/// Painted sizes, never NaN: equality is total.
+impl Eq for WarnSlot {}
 
 impl StyleEditor {
     pub fn new(title: String, parts: Vec<Part>, palette: u8) -> StyleEditor {

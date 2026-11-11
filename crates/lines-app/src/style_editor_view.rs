@@ -357,10 +357,7 @@ impl EditorScroll {
     /// The warnings slot as last drawn: what a picker drag fixes (`StyleEditor::warn_slot`).
     pub fn warn_slot(&self) -> WarnSlot {
         let (drawn, room) = self.warnings.get();
-        WarnSlot {
-            drawn: drawn.ceil() as u32,
-            room: room.max(drawn).ceil() as u32,
-        }
+        WarnSlot { drawn, room }
     }
 
     /// Scroll the editor's focus into view if a key moved it (row or column) since the last
@@ -482,7 +479,7 @@ fn color_row_layout(
     }
     let warnings_top = h;
     let warnings_h = match fixed_slot(e, r.label) {
-        Some(slot) => slot.room as f32,
+        Some(slot) => slot.room,
         None if warnings_in(e, r.label) => warnings_height(warnings, w),
         None => 0.0,
     };
@@ -1336,7 +1333,7 @@ pub fn render(
                         group = group.child(
                             div()
                                 .flex_none()
-                                .h(crate::zoom::ui(slot.drawn as f32))
+                                .h(crate::zoom::ui(slot.drawn))
                                 .overflow_hidden()
                                 .children(b),
                         );
@@ -1485,15 +1482,19 @@ mod tests {
         // draws that, while the layout keeps counting the estimate it counted at the press.
         let room = warnings_height(&one, w);
         let before = content_height(&e, &one, w, names);
-        e.warn_slot = Some(WarnSlot {
-            drawn: (room * 0.7).ceil() as u32,
-            room: room.ceil() as u32,
-        });
-        let during = content_height(&e, &one, w, names);
-        assert!(
-            (during - before).abs() < 1.0,
-            "the editor's height, so its place (`place`), holds at the press: {before} {during}"
-        );
+        // Taller, too (a UI zoom wraps the text more than counted): the layout still counts
+        // what it did. The slot comes from what the editor last drew (`EditorScroll`).
+        for drawn in [room * 0.7, room + 30.0] {
+            let es = EditorScroll::default();
+            es.warnings.set((drawn, room));
+            e.warn_slot = Some(es.warn_slot());
+            assert_eq!(e.warn_slot.unwrap().drawn, drawn);
+            let during = content_height(&e, &one, w, names);
+            assert_eq!(
+                during, before,
+                "the editor's height, so its place (`place`), holds at the press"
+            );
+        }
         let held: Vec<_> = [&none, &one, &two]
             .iter()
             .map(|ws| (layout(&e, ws), content_height(&e, ws, w, names)))
@@ -1505,10 +1506,7 @@ mod tests {
         // Render draws the fixed slot in the warnings' row only, the same height the layout
         // counts, with no warnings left too.
         assert_eq!(fixed_slot(&e, "Color"), e.warn_slot);
-        assert_eq!(
-            layout(&e, &none).warnings_h,
-            e.warn_slot.unwrap().room as f32
-        );
+        assert_eq!(layout(&e, &none).warnings_h, e.warn_slot.unwrap().room);
         assert_eq!(fixed_slot(&e, "Line"), None);
         // Released: the slot settles to what is shown.
         e.warn_slot = None;
