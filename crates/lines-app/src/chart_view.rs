@@ -182,8 +182,8 @@ enum LabelKind {
     SubNote,
     /// The crosshair's value tag on the sub-pane's axis.
     SubCross,
-    /// An external series line's last-value tag on its pane's axis (by line: the text color
-    /// is the line's chip's), keyed by its value.
+    /// An external series line's last-value tag on its pane's axis, by pane and line
+    /// (`k * MAX_LINES + i`: each has its own text color), keyed by its value.
     SeriesTag(u8),
     /// A part of Volume's title readout (`VOL_*`), keyed by its value.
     Volume(u8),
@@ -6239,7 +6239,7 @@ impl ChartView {
                 ));
                 let origin = point(px(ox + ax + 8.0), px(oy + y - label_px() * 0.65));
                 self.paint_label(
-                    LabelKind::SeriesTag(i as u8),
+                    LabelKind::SeriesTag((k * crate::series_pane::MAX_LINES + i) as u8),
                     key(v),
                     origin,
                     line_h,

@@ -285,6 +285,9 @@ pub fn stack_tags(
 ) -> [Option<f32>; MAX_LINES] {
     let mut out = [None; MAX_LINES];
     let rows = ((bottom - top) / h).floor().max(0.0) as usize;
+    if rows == 0 {
+        return out; // an axis shorter than one tag: none fits
+    }
     // Ordered by wanted height (clamped into the axis; ties by how far out, then by line).
     let mut order: [(f32, f32, usize); MAX_LINES] = [(0.0, 0.0, 0); MAX_LINES];
     let mut n = 0;
@@ -295,7 +298,8 @@ pub fn stack_tags(
         }
     }
     let order = &mut order[..n];
-    order.sort_by(|a, b| {
+    // Unstable: never allocates (the key ends in the line, so the order is still fixed).
+    order.sort_unstable_by(|a, b| {
         a.0.total_cmp(&b.0)
             .then(a.1.total_cmp(&b.1))
             .then(a.2.cmp(&b.2))
@@ -567,6 +571,8 @@ mod tests {
         let o = stack_tags(want(&[10.0, 20.0, 30.0]), h, 0.0, 40.0);
         assert_eq!(o[..3], [Some(10.0), Some(28.0), None]);
         assert_eq!(stack_tags(none, h, 0.0, 200.0), none);
+        // An axis shorter than a tag: none (never a panic).
+        assert_eq!(stack_tags(want(&[5.0]), h, 0.0, 10.0), none);
     }
 
     /// Tag values: live, the title's own (the line's value now); stale, the last reports (the
