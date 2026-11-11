@@ -453,8 +453,16 @@ pub struct ChartView {
     /// The studies as last synced with the product's set (render): a change from them was made
     /// on this chart and is published; `None`: not synced yet (the next render does).
     synced_studies: Option<Box<StudySet>>,
-    /// `symbol_studies::generation()` at the last sync.
+    /// `symbol_studies::generation(product)` at the last sync.
     studies_gen: u64,
+    /// Its separate studies for the other products it has shown (decision 0039 §5: kept until
+    /// turned off, so a switch away and back restores them); the current product's are what
+    /// it shows. Saved on the pane.
+    other_separate: std::collections::BTreeMap<u32, StudySet>,
+    /// Started with studies from the command line (`--vwap`, `--profile`, `--label-place`,
+    /// `--study-set`): a product that already has a set doesn't take them, so the chart keeps
+    /// them as separate studies instead (never overwriting the product's).
+    cli_studies: bool,
     /// This frame's price axis width (it grows to the widest level tag while study labels are
     /// tags in the axis) and label column width (0 unless they are in a column), px.
     axis_now: f32,
@@ -815,6 +823,10 @@ impl ChartView {
         let mut studies = crate::studies::Studies::new(fixture.indicators.clone());
         studies.attach(feed_info(&store));
         let separate_fixture = fixture.separate_studies;
+        let cli_studies = !fixture.indicators.is_empty()
+            || !fixture.profile.is_default()
+            || fixture.labels.is_some()
+            || fixture.studies.is_some();
         let mut levels = LevelsLayer::new(LevelsConfig::default());
         if let Some((place, column)) = fixture.labels {
             levels.config.label_place = place;
@@ -850,6 +862,8 @@ impl ChartView {
             separate_studies: separate_fixture,
             synced_studies: None,
             studies_gen: 0,
+            other_separate: Default::default(),
+            cli_studies,
             axis_now: axis_w(),
             label_col: 0.0,
             column_drag: None,
@@ -1067,6 +1081,11 @@ impl ChartView {
             return;
         }
         let product = self.instrument.id.0;
+        // Studies from the command line on a product that has a set: kept, as this chart's own.
+        if !switched && self.cli_studies && crate::symbol_studies::get(cx, product).is_some() {
+            self.separate_studies = true;
+            return;
+        }
         let set = crate::symbol_studies::get(cx, product).or_else(|| {
             switched.then(|| {
                 crate::picker_view::settings(cx)
@@ -1094,16 +1113,20 @@ impl ChartView {
     /// Render: a change made on this chart goes to its product's set; a change published from
     /// another chart of the product is taken. Separate studies do neither.
     fn sync_symbol_studies(&mut self, cx: &mut Context<Self>) {
-        if self.separate_studies {
+        // While the label column's edge is dragged: once, on release (not every move).
+        if self.separate_studies || self.column_drag.is_some() {
             return;
         }
         let product = self.instrument.id.0;
-        let now = crate::symbol_studies::generation();
+        let now = crate::symbol_studies::generation(product);
         let mine = self.study_set();
         match &self.synced_studies {
-            // Changed here since the last sync: every chart of the product follows.
+            // Changed here since the last sync: every chart of the product follows (an
+            // option chain's view-only chart takes the product's set, never gives it one).
             Some(last) if **last != mine => {
-                crate::symbol_studies::publish(cx, product, mine.clone());
+                if !self.view_only {
+                    crate::symbol_studies::publish(cx, product, mine.clone());
+                }
                 self.synced_studies = Some(Box::new(mine));
             }
             Some(_) if now == self.studies_gen => {}
@@ -1119,12 +1142,14 @@ impl ChartView {
                     self.synced_studies = Some(Box::new(self.study_set()));
                 }
                 None => {
-                    crate::symbol_studies::publish(cx, product, mine.clone());
+                    if !self.view_only {
+                        crate::symbol_studies::publish(cx, product, mine.clone());
+                    }
                     self.synced_studies = Some(Box::new(mine));
                 }
             },
         }
-        self.studies_gen = crate::symbol_studies::generation();
+        self.studies_gen = crate::symbol_studies::generation(product);
     }
 
     /// "Use separate studies on this chart" (decision 0039 §5): on, the chart keeps a copy of
@@ -2723,7 +2748,9 @@ impl ChartView {
 
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
-        self.separate_studies = state.separate_studies || state.legacy_studies;
+        // (`--separate-studies` on the first chart holds too.)
+        self.separate_studies |= state.separate_studies || state.legacy_studies;
+        self.other_separate = state.other_separate.clone();
         self.drawings.hidden = state.hide_drawings;
         self.drawing_tools = state.drawing_tools;
         self.marks.set_hidden(state.hide_strategy_marks);
@@ -8957,6 +8984,7 @@ impl Pane for ChartView {
             subpanes: crate::subpane::saved(&self.subpane_ratios).1,
             separate_studies: self.separate_studies,
             legacy_studies: false,
+            other_separate: self.other_separate.clone(),
         });
         // A chart sharing its product's set saves none of it (the app's settings hold it).
         if !self.separate_studies
@@ -8976,10 +9004,23 @@ impl Pane for ChartView {
         let follow = feed.sub.is_some();
         let was = self.instrument.id;
         self.apply_feed(feed);
-        // Another symbol: its studies (decision 0039 §3; separate studies end with the switch).
+        // Another symbol: its studies (decision 0039 §3). This chart's separate studies for the
+        // old one are kept (§5: until turned off) and come back with it.
         if self.instrument.id != was {
-            self.separate_studies = false;
-            self.join_symbol_studies(true, cx);
+            if self.separate_studies {
+                self.other_separate.insert(was.0, self.study_set());
+            }
+            match self.other_separate.remove(&self.instrument.id.0) {
+                Some(own) => {
+                    self.separate_studies = true;
+                    self.set_study_set(own);
+                    self.synced_studies = None;
+                }
+                None => {
+                    self.separate_studies = false;
+                    self.join_symbol_studies(true, cx);
+                }
+            }
         }
         self.drawings
             .set_data(crate::drawings_store::for_product(&self.instrument, cx));
@@ -9028,8 +9069,8 @@ impl Pane for ChartView {
     /// performance stats while shown (once a second). Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
         // Another chart of this product changed its studies: render (which syncs).
-        let studies =
-            !self.separate_studies && crate::symbol_studies::generation() != self.studies_gen;
+        let studies = !self.separate_studies
+            && crate::symbol_studies::generation(self.instrument.id.0) != self.studies_gen;
         if studies {
             return true;
         }
@@ -10482,7 +10523,8 @@ mod symbol_studies_tests {
     /// A render's sync (and whether the 8 ms poll asked for one first).
     fn sync(c: &Entity<ChartView>, cx: &mut TestAppContext) -> bool {
         c.update(cx, |c, cx| {
-            let asked = !c.separate_studies && crate::symbol_studies::generation() != c.studies_gen;
+            let asked = !c.separate_studies
+                && crate::symbol_studies::generation(c.instrument.id.0) != c.studies_gen;
             c.sync_symbol_studies(cx);
             asked
         })
@@ -10554,6 +10596,19 @@ mod symbol_studies_tests {
         let (sa, sb) = (saved(&a, cx), saved(&b, cx));
         assert!(sa.separate_studies && sa.indicators.len() == 2);
         assert!(!sb.separate_studies && sb.indicators.is_empty());
+        // Separate studies are kept per symbol: A to NQ shows NQ's, back to ES its own again.
+        a.update(cx, |c, cx| c.set_feed(feed(catalog::NQ), cx));
+        sync(&a, cx);
+        assert!(!a.read_with(cx, |c, _| c.separate_studies));
+        assert_eq!(indicators(&a, cx), vec![vwap("rth")], "NQ's set");
+        a.update(cx, |c, cx| c.set_feed(feed(catalog::ES), cx));
+        sync(&a, cx);
+        assert!(a.read_with(cx, |c, _| c.separate_studies));
+        assert_eq!(
+            indicators(&a, cx),
+            vec![vwap("eth"), vwap("weekly")],
+            "its own, kept"
+        );
         // Off: ES's again.
         a.update(cx, |c, cx| c.set_separate_studies(false, cx));
         sync(&a, cx);

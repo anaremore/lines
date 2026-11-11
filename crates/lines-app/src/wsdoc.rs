@@ -466,6 +466,11 @@ pub struct ChartState {
     /// written.
     #[serde(default, skip_serializing)]
     pub legacy_studies: bool,
+    /// This chart's separate studies for the other products it has shown, by catalog product
+    /// id (decision 0039 §5: kept until turned off, back with a switch to that product).
+    /// Optional.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub other_separate: std::collections::BTreeMap<u32, crate::study_menu::StudySet>,
 }
 
 /// A chart timeframe in the workspace file, as its label (`"5m"`).
@@ -1141,6 +1146,7 @@ mod tests {
             subpanes: Vec::new(),
             separate_studies: false,
             legacy_studies: false,
+            other_separate: Default::default(),
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""indicators""#), "{json}");
@@ -1166,6 +1172,7 @@ mod tests {
             trades: Default::default(),
             separate_studies: false,
             legacy_studies: false,
+            other_separate: Default::default(),
         })
         .unwrap();
         assert!(!none.contains("indicators"), "{none}");
@@ -1312,6 +1319,7 @@ mod tests {
                             trades: Default::default(),
                             separate_studies: false,
                             legacy_studies: false,
+                            other_separate: Default::default(),
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
@@ -1413,6 +1421,7 @@ mod tests {
             subpanes: Vec::new(),
             separate_studies: false,
             legacy_studies: false,
+            other_separate: Default::default(),
         };
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(
@@ -1570,6 +1579,7 @@ mod tests {
                 trades: Default::default(),
                 separate_studies: false,
                 legacy_studies: false,
+                other_separate: Default::default(),
             }),
             ..PaneDoc::new(PaneKind::Chart, None, None)
         };
@@ -1615,6 +1625,7 @@ mod tests {
             trades: Default::default(),
             separate_studies: false,
             legacy_studies: false,
+            other_separate: Default::default(),
         };
         let json = serde_json::to_string(&both).unwrap();
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), both);
@@ -1697,6 +1708,7 @@ mod tests {
                 trades: Default::default(),
                 separate_studies: false,
                 legacy_studies: true,
+                other_separate: Default::default(),
             })
         );
         assert_eq!(

@@ -22,6 +22,7 @@
 //!   lost.
 
 use std::collections::BTreeMap;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use gpui::App;
@@ -30,16 +31,23 @@ use crate::layout::{Layout, PaneKind};
 use crate::study_menu::StudySet;
 use crate::wsdoc::{ChartState, PaneDoc, WorkspaceDoc};
 
-static GENERATION: AtomicU64 = AtomicU64::new(1);
+/// Moves for every product at once (a migration changed the sets).
+static EPOCH: AtomicU64 = AtomicU64::new(1);
+/// Each product's publish count: only its own charts look again when it moves.
+static PRODUCTS: Mutex<BTreeMap<u32, u64>> = Mutex::new(BTreeMap::new());
 
-/// Moves whenever any product's set is published: every shared chart compares its own then.
-pub fn generation() -> u64 {
-    GENERATION.load(Ordering::Acquire)
+/// Moves whenever `product`'s set is published (or every set changed): its shared charts
+/// compare theirs then. A chart of another product never sees it move.
+pub fn generation(product: u32) -> u64 {
+    let n = PRODUCTS
+        .lock()
+        .map_or(0, |m| m.get(&product).copied().unwrap_or(0));
+    (EPOCH.load(Ordering::Acquire) << 32) | (n & 0xffff_ffff)
 }
 
 /// Sets changed outside a chart (a migration): every shared chart syncs again.
 pub fn bump() {
-    GENERATION.fetch_add(1, Ordering::AcqRel);
+    EPOCH.fetch_add(1, Ordering::AcqRel);
 }
 
 /// The product's set, if it has one.
@@ -60,8 +68,8 @@ pub fn publish(cx: &mut App, product: u32, set: StudySet) {
         }
     });
     // Screenshots and tests keep their settings in memory, unsaved: the charts follow too.
-    if changed {
-        GENERATION.fetch_add(1, Ordering::AcqRel);
+    if changed && let Ok(mut m) = PRODUCTS.lock() {
+        *m.entry(product).or_insert(0) += 1;
     }
 }
 
