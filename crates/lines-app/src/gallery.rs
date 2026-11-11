@@ -280,6 +280,62 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             )),
         ));
     }
+    // Settings › Charts at the narrowest window: Bar period's 23 chips wrap on their own line
+    // under the label, and the row grows to hold them (never over its description or the next
+    // row). Dark at 100 %, light at 150 % (tall enough that the page needs no scrolling, so
+    // nothing is cut at its edge).
+    let mut set = s(
+        "settings-charts-narrow",
+        false,
+        end,
+        args(
+            "--layout chart --size 1000x700 --theme dark --settings charts --settings-size 640x420",
+        ),
+    );
+    set.windows = 2;
+    v.push(set);
+    let mut set = s(
+        "settings-charts-narrow-light-150",
+        true,
+        end,
+        args(
+            "--layout chart --size 1000x700 --theme light --ui-zoom 150 --settings charts --settings-size 640x900",
+        ),
+    );
+    set.windows = 2;
+    v.push(set);
+    // Every other page with a chip group that wraps at the narrowest window and 150 %: General
+    // (updates), Appearance (Light palette's long names, UI zoom), Order entry (P&L display)
+    // and Accounts (the news blackout, the prop preset).
+    for (page, name, h) in [
+        ("general", "settings-general-narrow-light-150", 700),
+        ("appearance", "settings-appearance-narrow-light-150", 900),
+        ("order-entry", "settings-order-entry-narrow-light-150", 1100),
+        ("accounts", "settings-accounts-narrow-light-150", 900),
+    ] {
+        let mut set = s(
+            name,
+            false,
+            end,
+            args(&format!(
+                "--layout chart --size 1000x700 --theme light --ui-zoom 150 --settings {page} --settings-size 640x{h}"
+            )),
+        );
+        set.windows = 2;
+        v.push(set);
+    }
+    // Near the threshold: Appearance at 760 px and 150 %, where UI zoom's chips just fit (or just
+    // don't fit) a line of their own; either way the row holds them.
+    let mut set = s(
+        "settings-appearance-760-150",
+        false,
+        end,
+        args(
+            "--layout chart --size 1000x700 --theme dark --ui-zoom 150 --settings appearance --settings-size 760x900",
+        ),
+    );
+    set.windows = 2;
+    v.push(set);
     // The trading panel's Qty and Bracket lists: anchored under their field, as wide as their
     // content (never the window's width).
     v.push(s(
@@ -1637,6 +1693,11 @@ pub fn run(dir: &Path, full: bool) -> Result<i32> {
 /// The lint reports a scene wrote: its main window and any popped-out panes.
 fn reports(dir: &Path, name: &str) -> Vec<PathBuf> {
     let mut v = vec![dir.join(format!("{name}.lint.txt"))];
+    // The Settings window (`--settings`) reports beside the main one.
+    let settings = dir.join(format!("{name}-settings.lint.txt"));
+    if settings.exists() {
+        v.push(settings);
+    }
     for n in 1.. {
         let p = dir.join(format!("{name}-pane-{n}.lint.txt"));
         if !p.exists() {
