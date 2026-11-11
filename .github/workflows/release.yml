@@ -98,15 +98,17 @@ jobs:
         with:
           submodules: true
 
+      - name: Cache the GPUI system packages (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/apt-cache
+          key: apt-${{ runner.os }}-${{ env.ImageOS }}-${{ hashFiles('.github/scripts/install-linux-deps.sh') }}
+
       - name: Install GPUI system libraries (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config \
-            libfontconfig-dev libfreetype-dev \
-            libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev \
-            libvulkan1 libglib2.0-dev libzstd-dev libasound2-dev
+        # Retries, and installs from the cached packages when Ubuntu's mirrors are unreachable.
+        run: bash .github/scripts/install-linux-deps.sh
 
       - name: Install pinned toolchain
         shell: bash
