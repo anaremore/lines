@@ -237,17 +237,17 @@ pub struct StyleEditor {
     pub study: bool,
 }
 
-/// A tool's name in the editor: its title ("Zone style") and the plural of "Save as default
-/// for zones".
+/// A tool's name in the editor: its title ("Rectangle style") and the plural of "Save as
+/// default for rectangles": `Tool::label`, the tool's one name (tested).
 pub fn tool_names(tool: Tool) -> (&'static str, &'static str) {
     match tool {
         Tool::HLine => ("Horizontal line", "horizontal lines"),
         Tool::HRay => ("Horizontal ray", "horizontal rays"),
         Tool::Trend => ("Trend line", "trend lines"),
         Tool::Ray => ("Ray", "rays"),
-        Tool::Rect => ("Zone", "zones"),
+        Tool::Rect => ("Rectangle", "rectangles"),
         Tool::VLine => ("Vertical line", "vertical lines"),
-        Tool::Note => ("Note", "notes"),
+        Tool::Note => ("Text", "text"),
         Tool::Measure => ("Measure", "measures"),
     }
 }
@@ -1201,7 +1201,7 @@ impl StyleEditor {
                 let mut words =
                     format!("Low contrast{against} in {}; {what}.", themes.join(" and "));
                 if text && !boxed {
-                    words.push_str(" The note shows its box there.");
+                    words.push_str(" The text shows its box there.");
                 }
                 out.push(Warning {
                     text: words,

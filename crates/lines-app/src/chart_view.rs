@@ -329,6 +329,12 @@ pub struct Fixture {
     pub magnet: bool,
     /// Start with the order strip shown (screenshots: `--order-strip`).
     pub order_strip: bool,
+    /// Start with the drawing toolbar shown (screenshots: `--drawing-tools`).
+    pub drawing_tools: bool,
+    /// Start in drawing mode with this tool (screenshots: `--draw-tool`).
+    pub draw_tool: Option<lines_core::drawings::Tool>,
+    /// Start with this drawing selected (screenshots: `--select-drawing`).
+    pub select_drawing: Option<lines_core::drawings::DrawingId>,
     /// Start with a strip limit's price pick armed (screenshots: `--strip-pick buy|sell`).
     pub strip_pick: Option<crate::chart_trade::StripOrder>,
     /// Start with an order staged from the menu's "…with bracket" (screenshots: `--stage-order
@@ -517,6 +523,12 @@ pub struct ChartView {
     crosshair_mode: CrosshairMode,
     /// The order strip (phase 2b) is shown (saved).
     order_strip: bool,
+    /// The drawing toolbar is shown (`crate::drawing_toolbar`; the `ToggleDrawingTools`
+    /// command, saved as `ChartState::drawing_tools`).
+    drawing_tools: bool,
+    /// Where the toolbar was placed at the last render, `None` while it isn't shown: the
+    /// pane's width is the chart's plus the column while it is docked left (`pane_width`).
+    toolbar_dock: Option<crate::drawing_toolbar::Dock>,
     /// Shows no orders and sends none (`set_view_only`).
     view_only: bool,
     /// Axis label spacing has been measured with this window's font.
@@ -811,6 +823,7 @@ impl ChartView {
         let saved_styles = saved_tool_styles(cx);
         drawings.defaults = saved_styles;
         let fixture_style_editor = fixture.style_editor;
+        let (fixture_draw_tool, fixture_select) = (fixture.draw_tool, fixture.select_drawing);
         let fixture_picker = fixture.color_picker.clone();
         let fixture_recent = fixture.recent_colors.clone();
         let fixture_dropper = fixture.dropper;
@@ -877,6 +890,8 @@ impl ChartView {
                 CrosshairMode::Normal
             },
             order_strip: fixture.order_strip || fixture.strip_pick.is_some(),
+            drawing_tools: fixture.drawing_tools,
+            toolbar_dock: None,
             view_only: false,
             space_measured: false,
             reported: (None, None),
@@ -977,6 +992,12 @@ impl ChartView {
         }
         if let Some(spec) = fixture_menu {
             view.open_menu_at(&spec, cx);
+        }
+        if let Some(tool) = fixture_draw_tool {
+            view.drawings.set_tool(tool);
+        }
+        if let Some(id) = fixture_select {
+            view.drawings.selected = Some(id);
         }
         if let Some((id, tab, focus)) = fixture_style_editor
             && view.open_style_editor(id, cx)
@@ -1091,6 +1112,8 @@ impl ChartView {
         if let Some(tf) = tf {
             self.set_timeframe(tf, cx);
         }
+        // Settings › Charts: the drawing toolbar on new charts (off by default).
+        self.drawing_tools |= crate::picker_view::settings(cx).new_panes.drawing_tools;
     }
 
     fn menu_items(&self, menu: &StudyMenu, cx: &App) -> Vec<Item> {
@@ -2547,6 +2570,30 @@ impl ChartView {
         Some(strip.into_any_element())
     }
 
+    /// The pane's width (window logical px): the chart's, plus the drawing toolbar's column
+    /// while it is docked left. The header and the workspace's pane controls size by it.
+    fn pane_width(&self, chart: f32) -> f32 {
+        crate::drawing_toolbar::pane_width(chart, self.toolbar_dock, crate::zoom::get())
+    }
+
+    /// Whether the drawing toolbar is shown.
+    pub fn drawing_tools(&self) -> bool {
+        self.drawing_tools
+    }
+
+    /// The `ToggleDrawingTools` command.
+    pub fn toggle_drawing_tools(&mut self, cx: &mut Context<Self>) {
+        self.drawing_tools = !self.drawing_tools;
+        cx.notify();
+    }
+
+    /// A press on the drawing toolbar: the chart takes the focus (so Esc and the tools' keys
+    /// reach it) and runs the command as its key would.
+    pub fn toolbar_command(&mut self, cmd: DrawCmd, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        self.drawing_command(cmd, cx);
+    }
+
     /// The `ToggleOrderStrip` command.
     pub fn toggle_order_strip(&mut self, cx: &mut Context<Self>) {
         self.order_strip = !self.order_strip;
@@ -2558,6 +2605,7 @@ impl ChartView {
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
         self.drawings.hidden = state.hide_drawings;
+        self.drawing_tools = state.drawing_tools;
         self.marks.set_hidden(state.hide_strategy_marks);
         self.trade_marks.set_config(state.trades);
         if state.magnet {
@@ -3921,7 +3969,15 @@ impl ChartView {
         // The header's gutter (only ⋯ on a narrow pane) follows this width, as the workspace's
         // controls do: render again when it crosses over, or the two disagree until then.
         let narrow = |w: f32| w > 0.0 && w < pane::NARROW_CONTROLS_W;
-        if narrow(f32::from(bounds.size.width)) != narrow(f32::from(self.chart.size.width)) {
+        if narrow(self.pane_width(f32::from(bounds.size.width)))
+            != narrow(self.pane_width(f32::from(self.chart.size.width)))
+        {
+            cx.notify();
+        }
+        // With the drawing toolbar shown, any change of width renders again: the dock (a row
+        // that no longer fits becomes the column) and the header's room follow the pane's
+        // width, and a cached view renders only when notified (a paused replay never would).
+        if self.drawing_tools && bounds.size.width != self.chart.size.width {
             cx.notify();
         }
         self.chart = bounds;
@@ -7801,7 +7857,7 @@ impl ChartView {
             };
             format!("Drawing: {}  ·  {how}  ·  Esc cancels", tool.label())
         } else if d.typing() {
-            "Note: type, Enter to keep, Esc to cancel".to_owned()
+            "Text: type, Enter to keep, Esc to cancel".to_owned()
         } else if d.measure_shown().is_some() {
             "Measure: Enter pins it  ·  Esc or a click clears it".to_owned()
         } else {
@@ -8120,7 +8176,7 @@ impl ChartView {
         } else {
             pane::controls_gutter_at(
                 crate::layout::PaneKind::Chart,
-                f32::from(self.chart.size.width),
+                self.pane_width(f32::from(self.chart.size.width)),
             )
         };
         let bar = || {
@@ -8303,7 +8359,7 @@ impl ChartView {
         // the text does); the controls' gutter doesn't. So the fit runs in 100 % units: room
         // and text widths over the zoom.
         let z = crate::zoom::get();
-        let width = f32::from(self.chart.size.width);
+        let width = self.pane_width(f32::from(self.chart.size.width));
         let room = (width - pane::controls_gutter_at(crate::layout::PaneKind::Chart, width)) / z;
         let acct = crate::trade_bar::chart_account(self, cx);
         // Header text widths as the UI font shapes them (text_sm; `fonts::ui`, as drawn).
@@ -8768,6 +8824,7 @@ impl Pane for ChartView {
             magnet: self.magnet(),
             order_strip: self.order_strip,
             hide_drawings: self.drawings.hidden,
+            drawing_tools: self.drawing_tools,
             hide_strategy_marks: self.marks.hidden,
             trades: self.trade_marks.config,
             // Saved on tick charts, and on any chart set to run them continuously.
@@ -9576,6 +9633,7 @@ impl Render for ChartView {
         );
         let offer = self.common.offer_switch;
         if let Some(body) = pane::unavailable_body(&self.feed, &t, offer, cx) {
+            self.toolbar_dock = None; // no toolbar on an unavailable pane
             return div()
                 .size_full()
                 .flex()
@@ -9594,121 +9652,155 @@ impl Render for ChartView {
                 );
         }
         let _ = window;
-        div()
+        // The drawing toolbar (`crate::drawing_toolbar`): beside the plot's body or above it,
+        // never inside it, so the plot's coordinates and overlays are the body's as before.
+        // The pane's width (`pane_width`). Before the first layout there is no width yet: the
+        // choice stands. A pane too narrow for it shows none (`drawing_toolbar::MIN_PANE`).
+        let dock = if self.drawing_tools {
+            let w = self.pane_width(f32::from(self.chart.size.width));
+            crate::drawing_toolbar::dock_now((w > 0.0).then_some(w), self.toolbar_dock, cx)
+        } else {
+            None
+        };
+        self.toolbar_dock = dock;
+        let toolbar = dock.map(|dock| {
+            let bar = crate::drawing_toolbar::render(
+                dock,
+                self.drawings.tool(),
+                self.drawings.can_delete(),
+                &t,
+                cx,
+            );
+            (dock, bar)
+        });
+        let header = self.header(window, cx);
+        let body = div()
+            .relative()
+            .flex_1()
             .size_full()
-            .flex()
-            .flex_col()
-            .bg(t.bg)
-            .child(self.header(window, cx))
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .size_full()
-                    .track_focus(&self.focus)
-                    .on_key_down(cx.listener(Self::on_key_down))
-                    .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-                    .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
-                    .on_mouse_move(cx.listener(Self::on_mouse_move))
-                    .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-                    .on_mouse_exit(cx.listener(Self::on_mouse_exit))
-                    .on_scroll(cx.listener(Self::on_scroll))
-                    .when_some(
-                        self.drawings
-                            .measure_grip()
-                            .zip(self.drawings.measure_shown())
-                            .map(|(g, (p, _))| match g {
-                                crate::chart_draw::Grip::Move
-                                    if self.drawings.measure_dragging() =>
-                                {
-                                    gpui::CursorStyle::ClosedHand
-                                }
-                                g => g.cursor(p.p0, p.p1),
-                            }),
-                        |d, c| d.cursor(c),
-                    )
-                    .when(
-                        self.drawings.active() && self.drawings.measure_grip().is_none(),
-                        |d| d.cursor_crosshair(),
-                    )
-                    .when(self.column_edge_hover || self.column_drag.is_some(), |d| {
-                        d.cursor(gpui::CursorStyle::ResizeLeftRight)
-                    })
-                    .when(
-                        !self.drawings.active()
-                            && self.drawings.measure_grip().is_none()
-                            && self.drawings.hover_hit().is_some(),
-                        |d| d.cursor_pointer(),
-                    )
-                    // A lower pane's × (painted, so it says it is a button itself).
-                    .when(
-                        self.hover
-                            .is_some_and(|(x, y)| self.close_hit(x, y).is_some()),
-                        |d| d.cursor_pointer(),
-                    )
-                    .child(
-                        canvas(
-                            |_, _, _| (),
-                            move |bounds, (), window, cx| {
-                                entity.update(cx, |view, cx| view.paint_chart(bounds, window, cx));
-                            },
-                        )
-                        .size_full(),
-                    )
-                    .when_some(self.legend(&t, window), |d, l| d.child(l))
-                    .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
-                    .when_some(
-                        crate::order_group_view::layer(self, window, &t, cx),
-                        |d, m| d.child(m),
-                    )
-                    .when_some(
-                        self.study_menu.as_ref().map(|m| {
-                            let items = self.menu_items(m, cx);
-                            let menu = crate::study_menu_view::render(
-                                m,
-                                &items,
-                                &t,
-                                &self.study_menu_scroll,
-                                cx,
-                            );
-                            // Over the window with a backdrop under it (`crate::popover`).
-                            let dismiss: popover::OnDismiss =
-                                Box::new(cx.listener(|v, _: &MouseDownEvent, _, cx| {
-                                    v.close_popover(Kind::Studies, cx)
-                                }));
-                            popover::floating(popover::Panel::Studies, "Studies", &t, menu, dismiss)
-                        }),
-                        |d, m| d.child(m),
-                    )
-                    .when(self.anchoring.is_some(), |d| {
-                        d.child(crate::study_menu_view::anchor_banner(&t))
-                    })
-                    .when_some(self.ct.strip_pick, |d, o| {
-                        d.child(crate::study_menu_view::pick_banner(
-                            &t,
-                            if o == crate::chart_trade::StripOrder::BuyLimit {
-                                "Click a price for the buy limit · Esc cancels"
-                            } else {
-                                "Click a price for the sell limit · Esc cancels"
-                            },
-                        ))
-                    })
-                    .when_some(
-                        {
-                            let e = self.style_editor_layer(&t, cx);
-                            self.editor_open.set(e.is_some());
-                            e
-                        },
-                        |d, e| d.child(e),
-                    )
-                    .when_some(self.dropper_layer(&t), |d, e| d.child(e))
-                    .when_some(overlay, |d, overlay| d.child(overlay))
-                    .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
-                    .when_some(self.drawing_banner(&t), |d, b| d.child(b))
-                    .when_some(self.strategy_mark_tip(&t), |d, b| d.child(b))
-                    .when_some(self.trade_mark_tip(&t), |d, b| d.child(b)),
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key_down))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_exit(cx.listener(Self::on_mouse_exit))
+            .on_scroll(cx.listener(Self::on_scroll))
+            .when_some(
+                self.drawings
+                    .measure_grip()
+                    .zip(self.drawings.measure_shown())
+                    .map(|(g, (p, _))| match g {
+                        crate::chart_draw::Grip::Move if self.drawings.measure_dragging() => {
+                            gpui::CursorStyle::ClosedHand
+                        }
+                        g => g.cursor(p.p0, p.p1),
+                    }),
+                |d, c| d.cursor(c),
             )
+            .when(
+                self.drawings.active() && self.drawings.measure_grip().is_none(),
+                |d| d.cursor_crosshair(),
+            )
+            .when(self.column_edge_hover || self.column_drag.is_some(), |d| {
+                d.cursor(gpui::CursorStyle::ResizeLeftRight)
+            })
+            .when(
+                !self.drawings.active()
+                    && self.drawings.measure_grip().is_none()
+                    && self.drawings.hover_hit().is_some(),
+                |d| d.cursor_pointer(),
+            )
+            // A lower pane's × (painted, so it says it is a button itself).
+            .when(
+                self.hover
+                    .is_some_and(|(x, y)| self.close_hit(x, y).is_some()),
+                |d| d.cursor_pointer(),
+            )
+            .child(
+                canvas(
+                    |_, _, _| (),
+                    move |bounds, (), window, cx| {
+                        entity.update(cx, |view, cx| view.paint_chart(bounds, window, cx));
+                    },
+                )
+                .size_full(),
+            )
+            .when_some(self.legend(&t, window), |d, l| d.child(l))
+            .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
+            .when_some(
+                crate::order_group_view::layer(self, window, &t, cx),
+                |d, m| d.child(m),
+            )
+            .when_some(
+                self.study_menu.as_ref().map(|m| {
+                    let items = self.menu_items(m, cx);
+                    let menu =
+                        crate::study_menu_view::render(m, &items, &t, &self.study_menu_scroll, cx);
+                    // Over the window with a backdrop under it (`crate::popover`).
+                    let dismiss: popover::OnDismiss =
+                        Box::new(cx.listener(|v, _: &MouseDownEvent, _, cx| {
+                            v.close_popover(Kind::Studies, cx)
+                        }));
+                    popover::floating(popover::Panel::Studies, "Studies", &t, menu, dismiss)
+                }),
+                |d, m| d.child(m),
+            )
+            .when(self.anchoring.is_some(), |d| {
+                d.child(crate::study_menu_view::anchor_banner(&t))
+            })
+            .when_some(self.ct.strip_pick, |d, o| {
+                d.child(crate::study_menu_view::pick_banner(
+                    &t,
+                    if o == crate::chart_trade::StripOrder::BuyLimit {
+                        "Click a price for the buy limit · Esc cancels"
+                    } else {
+                        "Click a price for the sell limit · Esc cancels"
+                    },
+                ))
+            })
+            .when_some(
+                {
+                    let e = self.style_editor_layer(&t, cx);
+                    self.editor_open.set(e.is_some());
+                    e
+                },
+                |d, e| d.child(e),
+            )
+            .when_some(self.dropper_layer(&t), |d, e| d.child(e))
+            .when_some(overlay, |d, overlay| d.child(overlay))
+            .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
+            .when_some(self.drawing_banner(&t), |d, b| d.child(b))
+            .when_some(self.strategy_mark_tip(&t), |d, b| d.child(b))
+            .when_some(self.trade_mark_tip(&t), |d, b| d.child(b));
+        let root = div().size_full().flex().flex_col().bg(t.bg).child(header);
+        // The bar is the body's sibling after it (reversed order puts it first on screen), so
+        // it paints over anything of the body's that overflows its edge (a centered banner
+        // on a narrow pane).
+        match toolbar {
+            Some((crate::drawing_toolbar::Dock::Left, bar)) => root.child(
+                div()
+                    .flex()
+                    .flex_row_reverse()
+                    .flex_1()
+                    .min_h_0()
+                    .size_full()
+                    .child(body.min_w_0())
+                    .child(bar),
+            ),
+            Some((crate::drawing_toolbar::Dock::Top, bar)) => root.child(
+                div()
+                    .flex()
+                    .flex_col_reverse()
+                    .flex_1()
+                    .min_h_0()
+                    .size_full()
+                    .child(body.min_h_0())
+                    .child(bar),
+            ),
+            None => root.child(body),
+        }
     }
 }
 

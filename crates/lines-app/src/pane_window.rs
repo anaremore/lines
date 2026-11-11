@@ -74,6 +74,8 @@ fn command(cmd: Command) -> Option<Command> {
         Command::TradesOnAllCharts(_) => Some(cmd),
         // A popped-out chart's Volume, on the chart or in a pane (its menu's rows).
         Command::VolumeOverlay(_) => Some(cmd),
+        // A popped-out chart's drawing toolbar (its menu's switch).
+        Command::ToggleDrawingTools => Some(cmd),
         // An order tag's menu (no key reaches here with one).
         Command::Order(_) => Some(cmd),
         // The UI zoom is app-wide: its keys work from every window.
@@ -170,6 +172,11 @@ impl PaneWindow {
             Some(Command::VolumeOverlay(overlay)) => {
                 if let PaneHandle::Chart(chart) = &self.handle {
                     chart.update(cx, |ch, cx| ch.place_volume(overlay, cx));
+                }
+            }
+            Some(Command::ToggleDrawingTools) => {
+                if let PaneHandle::Chart(chart) = &self.handle {
+                    chart.update(cx, |ch, cx| ch.toggle_drawing_tools(cx));
                 }
             }
             Some(Command::TradesOnAllCharts(show)) => {
@@ -338,6 +345,14 @@ impl PaneWindow {
                     .switch(),
                 );
             }
+            items.push(
+                MenuItem::named(
+                    "Drawing tools",
+                    Command::ToggleDrawingTools,
+                    c.drawing_tools(),
+                )
+                .switch(),
+            );
             items.push(
                 MenuItem::named(
                     "Show trades",
@@ -579,6 +594,9 @@ mod tests {
         // A popped-out chart's menu toggles its markers.
         let marks = Command::Strategy(StrategyCmd::ToggleMarks);
         assert_eq!(command(marks), Some(marks));
+        // A popped-out chart's drawing toolbar.
+        let tools = Command::ToggleDrawingTools;
+        assert_eq!(command(tools), Some(tools));
         // Every open chart's trade history, from a popped-out window too.
         for show in [false, true] {
             let c = Command::TradesOnAllCharts(show);

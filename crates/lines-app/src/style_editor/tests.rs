@@ -339,20 +339,17 @@ fn where_a_finding_holds_is_worded() {
     );
 }
 
-/// Titles and "save as default" name the tool, in the plural.
+/// Titles and "save as default" name the tool by its one name (`Tool::label`), in the plural.
 #[test]
 fn labels_name_the_tool() {
     let z = StyleEditor::for_drawing(Tool::Rect, &Style::DEFAULT);
-    assert_eq!(z.title, "Zone style");
+    assert_eq!(z.title, "Rectangle style");
     assert_eq!(
         z.default_label.as_deref(),
-        Some("Save as default for zones")
+        Some("Save as default for rectangles")
     );
     let n = StyleEditor::for_drawing(Tool::Note, &Style::DEFAULT);
-    assert_eq!(
-        n.default_label.as_deref(),
-        Some("Save as default for notes")
-    );
+    assert_eq!(n.default_label.as_deref(), Some("Save as default for text"));
 }
 
 /// Swatches have names (never color alone); text offers the theme's text color once.

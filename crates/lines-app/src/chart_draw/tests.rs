@@ -1038,3 +1038,25 @@ fn a_previewed_color_is_kept_by_every_way_out_but_esc() {
     assert!(r.d.undo());
     assert!(r.items().is_empty(), "no step for a revert");
 }
+
+/// Delete (the key and the toolbar's button) has a drawing to delete exactly when one is
+/// selected and drawings are shown: hidden, neither deletes it (`can_delete` agrees with
+/// `delete_selected`).
+#[test]
+fn delete_acts_only_on_a_shown_selection() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Trend);
+    assert!(r.down(100.0, 100.0));
+    assert!(r.down(300.0, 200.0));
+    assert_eq!(r.items().len(), 1);
+    assert!(r.d.can_delete());
+    r.d.hidden = true;
+    assert!(!r.d.can_delete());
+    assert!(!r.d.delete_selected(), "a hidden drawing is never deleted");
+    assert_eq!(r.items().len(), 1);
+    r.d.hidden = false;
+    assert!(r.d.can_delete());
+    assert!(r.d.delete_selected());
+    assert!(r.items().is_empty());
+    assert!(!r.d.can_delete(), "nothing selected now");
+}

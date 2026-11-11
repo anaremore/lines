@@ -692,6 +692,9 @@ pub struct NewPanes {
     /// A new DOM starts with the price trail on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub dom_trail: bool,
+    /// A new chart starts with the drawing toolbar shown (`crate::drawing_toolbar`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drawing_tools: bool,
     /// The order size of a product with no size of its own (`Settings::order_sizes`), in every
     /// pane; absent: 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1290,6 +1293,48 @@ fn table() -> Vec<Setting> {
                 }),
             ),
             Value::Bool(true),
+        ),
+        with_default(
+            s(
+                "charts.drawing_tools",
+                Sec::Charts,
+                "Drawing tools on new charts",
+                "When on, a new chart shows the drawing toolbar (each chart: its menu's Show).",
+                Scope::NewPanes,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(p.app.new_panes.drawing_tools),
+                Some(|p, _, v| {
+                    p.app.new_panes.drawing_tools = want_bool(v)?;
+                    Ok(())
+                }),
+            ),
+            Value::Bool(false),
+        ),
+        with_default(
+            s(
+                "charts.drawing_tools_dock",
+                Sec::Charts,
+                "Drawing tools position",
+                "Where the drawing toolbar sits on every chart: a column at the left or a row on top.",
+                Scope::App,
+                Normal,
+                Choice(&crate::drawing_toolbar::Dock::LABELS),
+                |p, _, _| {
+                    Value::Choice(
+                        crate::drawing_toolbar::Dock::ALL
+                            .iter()
+                            .position(|d| *d == p.app.drawing_tools_dock)
+                            .unwrap_or(0),
+                    )
+                },
+                Some(|p, _, v| {
+                    let i = want_choice(v, crate::drawing_toolbar::Dock::ALL.len())?;
+                    p.app.drawing_tools_dock = crate::drawing_toolbar::Dock::ALL[i];
+                    Ok(())
+                }),
+            ),
+            Value::Choice(0),
         ),
         s(
             "charts.studies",
@@ -2827,6 +2872,8 @@ const CHARTS: &[Group] = &[group(
     &[
         line!("charts.timeframe"),
         line!("charts.trades"),
+        line!("charts.drawing_tools"),
+        line!("charts.drawing_tools_dock"),
         line!("charts.studies"),
         line!("appearance.hollow"),
     ],
@@ -3318,9 +3365,9 @@ mod tests {
             assert_eq!(by_key(k).map(|s| s.section), Some(*sec), "{k}");
         }
         // Keys added since, in window order: the light palette (Appearance), the UI font
-        // (decision 0036, on Appearance), trade history on new charts (Charts), and the only key
-        // the regrouping adds, the prop values line the overrides fold behind (a button, nothing
-        // saved).
+        // (decision 0036, on Appearance), trade history on new charts and the drawing
+        // toolbar's two (Charts), and the only key the regrouping adds, the prop values line
+        // the overrides fold behind (a button, nothing saved).
         let new: Vec<&str> = all()
             .iter()
             .map(|s| s.key)
@@ -3332,6 +3379,8 @@ mod tests {
                 "appearance.light_palette",
                 "appearance.ui_font",
                 "charts.trades",
+                "charts.drawing_tools",
+                "charts.drawing_tools_dock",
                 PROP_OVERRIDES_KEY
             ]
         );

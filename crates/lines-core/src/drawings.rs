@@ -73,16 +73,17 @@ impl Tool {
         }
     }
 
-    /// What menus and the palette call it.
+    /// Its one name, lowercase (owner, 2026-11-11: one name per tool everywhere): the
+    /// toolbar, the drawing-mode banner, the palette, menus and the style editor all say this.
     pub fn label(self) -> &'static str {
         match self {
             Tool::HLine => "horizontal line",
             Tool::HRay => "horizontal ray",
             Tool::Trend => "trend line",
             Tool::Ray => "ray",
-            Tool::Rect => "rectangle (zone)",
+            Tool::Rect => "rectangle",
             Tool::VLine => "vertical line",
-            Tool::Note => "text note",
+            Tool::Note => "text",
             Tool::Measure => "measure",
         }
     }

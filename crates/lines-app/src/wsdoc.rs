@@ -424,6 +424,10 @@ pub struct ChartState {
     /// in `drawings/<PRODUCT>.json`, never here). Optional: written only when set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_drawings: bool,
+    /// The drawing toolbar shown on this chart (`crate::drawing_toolbar`). Optional: written
+    /// only when shown.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drawing_tools: bool,
     /// Strategy markers (entries, exits, skipped signals; decision 0025) hidden on this chart.
     /// Optional: written only when set.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -991,6 +995,15 @@ mod tests {
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(json.contains(r#""hide_drawings":true"#), "{json}");
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), hidden);
+        // The drawing toolbar shown on a chart: the same.
+        assert!(!json_has(&old, "drawing_tools"));
+        let shown = ChartState {
+            drawing_tools: true,
+            ..old.clone()
+        };
+        let json = serde_json::to_string(&shown).unwrap();
+        assert!(json.contains(r#""drawing_tools":true"#), "{json}");
+        assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), shown);
         // Strategy markers hidden on a chart (decision 0025): the same.
         assert!(!json_has(&old, "hide_strategy_marks"));
         let hidden = ChartState {
@@ -1082,6 +1095,7 @@ mod tests {
             trades: Default::default(),
             timeframe: Default::default(),
             hide_drawings: false,
+            drawing_tools: false,
             hide_strategy_marks: false,
             tick_continuous: None,
             bar_px: 7.0,
@@ -1111,6 +1125,7 @@ mod tests {
         let none = serde_json::to_string(&ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            drawing_tools: false,
             hide_strategy_marks: false,
             tick_continuous: None,
             bar_px: 7.0,
@@ -1254,6 +1269,7 @@ mod tests {
                         chart: Some(ChartState {
                             timeframe: Default::default(),
                             hide_drawings: false,
+                            drawing_tools: false,
                             hide_strategy_marks: false,
                             tick_continuous: None,
                             bar_px: 9.5,
@@ -1337,6 +1353,7 @@ mod tests {
             trades: Default::default(),
             timeframe: Default::default(),
             hide_drawings: false,
+            drawing_tools: false,
             hide_strategy_marks: false,
             tick_continuous: None,
             bar_px: 7.0,
@@ -1506,6 +1523,7 @@ mod tests {
             chart: Some(ChartState {
                 timeframe: Default::default(),
                 hide_drawings: false,
+                drawing_tools: false,
                 hide_strategy_marks: false,
                 tick_continuous: None,
                 bar_px: 7.0,
@@ -1543,6 +1561,7 @@ mod tests {
         let both = ChartState {
             timeframe: Default::default(),
             hide_drawings: false,
+            drawing_tools: false,
             hide_strategy_marks: false,
             tick_continuous: None,
             bar_px: 7.0,
@@ -1627,6 +1646,7 @@ mod tests {
             Some(ChartState {
                 timeframe: Default::default(),
                 hide_drawings: false,
+                drawing_tools: false,
                 hide_strategy_marks: false,
                 tick_continuous: None,
                 bar_px: 6.0,
