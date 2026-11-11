@@ -486,9 +486,10 @@ impl TradeMarksLayer {
         }
     }
 
+    /// Hidden: nothing kept to show (or hit) the moment it's shown again; the first poll once
+    /// shown builds the marks afresh, never one frame of marks from before.
     fn forget_positions(&mut self) {
-        self.shown.clear();
-        self.lines.clear();
+        self.clear();
         self.hovered = None;
     }
 

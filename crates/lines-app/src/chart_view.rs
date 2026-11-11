@@ -930,6 +930,9 @@ impl ChartView {
         if fixture.tick_continuous {
             view.tick_reset = TickReset::Continuous;
         }
+        // Trade marks follow the visibility it starts with (`--hide-studies`, `--clean-chart`).
+        view.trade_marks
+            .set_suppressed(!view.visibility.draws_trades());
         view.apply_timeframe(timeframe);
         if let Some(set) = fixture_studies {
             view.set_study_set(set);
@@ -1038,13 +1041,13 @@ impl ChartView {
         if let Some(set) = set {
             // Settings › Charts: trade history on new charts (on unless saved off).
             if set.trades_off {
-                self.trade_marks
-                    .set_config(crate::trade_marks::TradesConfig {
-                        hidden: true,
-                        ..self.trade_marks.config
-                    });
+                let t = self.trade_marks.config.with_shown(false);
+                self.trade_marks.set_config(t);
             }
-            self.set_study_set(set);
+            // Defaults holding only the trade switch leave the chart's studies (`--vwap`).
+            if set.has_studies() {
+                self.set_study_set(set);
+            }
         }
         self.promote_levels(cx);
         if let Some(tf) = tf {
@@ -2463,8 +2466,6 @@ impl ChartView {
         self.drawings.hidden = state.hide_drawings;
         self.marks.set_hidden(state.hide_strategy_marks);
         self.trade_marks.set_config(state.trades);
-        self.trade_marks
-            .set_suppressed(!state.visibility.draws_trades());
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
         }
@@ -2503,6 +2504,9 @@ impl ChartView {
         // Saved indicators, then any given on the command line (`--vwap`) not among them.
         let configs = merge_indicators(state.indicators.clone(), self.studies.configs());
         self.set_indicator_configs(configs);
+        // Trade marks follow the visibility in force: the saved one, else the initial one.
+        self.trade_marks
+            .set_suppressed(!self.visibility.draws_trades());
     }
 
     /// Study legends (VWAP …) and level-source rows, top left under the readout, unless the

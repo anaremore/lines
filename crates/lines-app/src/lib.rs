@@ -690,9 +690,12 @@ struct Cli {
     /// Screenshot: the chart without study legends and tags (Ctrl+Shift+L in the app).
     #[arg(long, requires = "screenshot")]
     hide_study_labels: bool,
-    /// Screenshot: the chart with its studies hidden (Ctrl+Shift+H in the app).
+    /// Screenshot: the chart with its studies hidden (Ctrl+Shift+I in the app).
     #[arg(long, requires = "screenshot")]
     hide_studies: bool,
+    /// Screenshot: Clean chart: no study legends, tags or trade marks (Ctrl+Shift+M in the app).
+    #[arg(long, requires = "screenshot")]
+    clean_chart: bool,
     /// Magnet crosshair on the first chart: the price snaps to the hovered bar's
     /// open/high/low/close (Ctrl+Shift+G in the app).
     #[arg(long)]
@@ -2002,7 +2005,7 @@ where
             visibility: wsdoc::StudyVisibility {
                 hide_study_labels: cli.hide_study_labels,
                 hide_studies: cli.hide_studies,
-                clean: false,
+                clean: cli.clean_chart,
             },
         })),
         default_size: cli.size,
