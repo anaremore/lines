@@ -17,10 +17,18 @@
 //!   state. Labels are shaped once per distinct text and color (a cache miss allocates).
 //! - Freshness (docs/design.md §7): a **stale** map is drawn dimmed and says so in the legend;
 //!   a **missing** one draws nothing and says "missing". Never shown as current.
-//! - Labels stay on their own levels (`place_labels`): the price never moves them, the
-//!   last-price line and tag are drawn over them (after every layer), and only labels that
-//!   overlap each other give way (stacked a row away, else dropped), with hysteresis so the
-//!   layout doesn't flicker.
+//! - Labels stay on their own levels (`place_labels`): the price never moves them, and only
+//!   labels that overlap each other give way (stacked a row away, else dropped), with
+//!   hysteresis so the layout doesn't flicker.
+//! - Where labels go is the chart's choice ([`LabelPlace`], `LevelsConfig::label_place`; the
+//!   profile's tag follows it too): **tags in the price axis** (the default: each a tag at its
+//!   price, outlined in its color; a zone's at its labelled edge; the axis grows to its widest
+//!   tag; one that clashes stacks a row away with a short leader to its price, and none covers
+//!   the last-price tag), **a column** of their own between the plot and the axis (a fixed
+//!   width the trader drags; long names end in "…"), or **on the chart** (just right of the
+//!   newest bar and moving with it; pinned to the plot's right edge when it is off screen;
+//!   one under the pointer fades). No room is ever reserved inside the plot: the bars run to
+//!   its edge.
 //! - Per pane ([`LevelsConfig`], saved with the workspace): all levels, per source, per kind,
 //!   and labels. The chart's study visibility applies on top: "hide studies" hides levels,
 //!   "hide study labels" and Clean chart hide their labels and legend rows.
@@ -58,10 +66,102 @@ const LABEL_PX: f32 = 11.0;
 pub(crate) const LABEL_CHROME: f32 = 12.0;
 /// A label's text inset from its box's left edge.
 const LABEL_PAD: f32 = 6.0;
-/// The labels' gutter beyond its widest chip: a margin left of the chips and right of them.
+/// A label's room on the chart beyond its widest chip: a margin left of the chips and right
+/// of them.
 pub(crate) const GUTTER_PAD: f32 = 8.0;
-/// A chip's margin from the plot's right edge.
+/// A chip's margin from the plot's right edge (labels on the chart, pinned there).
 const GUTTER_RIGHT: f32 = 6.0;
+/// A label on the chart sits this far right of the newest bar.
+const NEWEST_GAP: f32 = 6.0;
+/// A tag in the price axis: the room left of it for its leader, and its margin from the
+/// axis's right edge.
+pub(crate) const AXIS_LEADER: f32 = 6.0;
+pub(crate) const AXIS_EDGE: f32 = 2.0;
+/// The widest the price axis grows for level tags (logical px at 100 % zoom).
+pub(crate) const AXIS_TAG_CAP: f32 = 168.0;
+/// The label column's margin each side of its labels.
+pub(crate) const COLUMN_PAD: f32 = 4.0;
+/// The label column's width (logical px at 100 % zoom): new, and the most and least a drag
+/// makes it.
+pub const COLUMN_W_DEFAULT: u16 = 120;
+pub const COLUMN_W_MIN: u16 = 48;
+pub const COLUMN_W_MAX: u16 = 320;
+/// A label on the chart under the pointer fades to this opacity, so the bars under it show.
+const HOVER_FADE: f32 = 0.25;
+
+/// Where a chart's study labels go (owner request; the level labels and the volume
+/// profile's tag). Saved per chart (`LevelsConfig::label_place`), leniently: a value this
+/// build doesn't know reads as the default, never a corrupt workspace.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(from = "serde_json::Value", into = "String")]
+pub enum LabelPlace {
+    /// A tag per label in the price axis, at its price (no room taken from the bars).
+    #[default]
+    Axis,
+    /// A column of their own between the plot and the price axis.
+    Column,
+    /// On the chart, just right of the newest bar (over bars when it is off screen).
+    Chart,
+}
+
+impl LabelPlace {
+    pub const ALL: [LabelPlace; 3] = [LabelPlace::Axis, LabelPlace::Column, LabelPlace::Chart];
+
+    /// Its menu and editor name.
+    pub fn label(self) -> &'static str {
+        match self {
+            LabelPlace::Axis => "Axis",
+            LabelPlace::Column => "Column",
+            LabelPlace::Chart => "Chart",
+        }
+    }
+
+    /// Where it puts them, in words (the palette).
+    pub fn words(self) -> &'static str {
+        match self {
+            LabelPlace::Axis => "on the price axis",
+            LabelPlace::Column => "in a column",
+            LabelPlace::Chart => "on the chart",
+        }
+    }
+
+    fn is_axis(&self) -> bool {
+        *self == LabelPlace::Axis
+    }
+}
+
+impl From<serde_json::Value> for LabelPlace {
+    fn from(v: serde_json::Value) -> LabelPlace {
+        match v.as_str() {
+            Some("column") => LabelPlace::Column,
+            Some("chart") => LabelPlace::Chart,
+            _ => LabelPlace::Axis,
+        }
+    }
+}
+
+impl From<LabelPlace> for String {
+    fn from(p: LabelPlace) -> String {
+        match p {
+            LabelPlace::Axis => "axis",
+            LabelPlace::Column => "column",
+            LabelPlace::Chart => "chart",
+        }
+        .to_owned()
+    }
+}
+
+/// Where this frame's labels are drawn ([`LevelsLayer::paint_labels`]), in plot px.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct LabelStrip {
+    /// The price axis's or the label column's left edge (unused on the chart).
+    pub left: f32,
+    /// The newest bar's right edge, when it is on the plot: labels on the chart go just
+    /// right of it.
+    pub newest_right: Option<f32>,
+    /// The pointer, for the fade of a label on the chart under it.
+    pub hover: Option<(f32, f32)>,
+}
 /// Most labels shaped and kept, by (text, color) (cleared when exceeded).
 const MAX_SHAPED: usize = 512;
 
@@ -90,11 +190,27 @@ pub struct LevelsConfig {
     /// (`LevelType::parent`).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shown_kinds: Vec<String>,
+    /// Where this chart's study labels go (default: tags in the price axis).
+    #[serde(skip_serializing_if = "LabelPlace::is_axis")]
+    pub label_place: LabelPlace,
+    /// The label column's width (logical px at 100 % zoom) as last dragged or fitted;
+    /// `None`: [`COLUMN_W_DEFAULT`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_column: Option<u16>,
 }
 
 impl LevelsConfig {
     pub fn is_default(&self) -> bool {
         *self == LevelsConfig::default()
+    }
+
+    /// The label column's width at 100 % zoom, within its limits.
+    pub fn column_w(&self) -> f32 {
+        f32::from(
+            self.label_column
+                .unwrap_or(COLUMN_W_DEFAULT)
+                .clamp(COLUMN_W_MIN, COLUMN_W_MAX),
+        )
     }
 
     pub fn source_shown(&self, source: &str) -> bool {
@@ -573,13 +689,14 @@ pub struct LevelsLayer {
     styles: BTreeMap<String, PartStyles>,
     slots: Vec<Slot>,
     shaped: Shaped,
-    /// The labels' gutter this frame (plot px at the right, the chart's: 0 when none).
-    gutter: f32,
-    /// Where labels go this frame: the plot's edge (no gutter set: tests), a gutter's room, or
-    /// nowhere (not even a short cut fits: no labels at all).
+    /// Each label's room this frame: the plot's (on the chart), a tag's or the column's, or
+    /// none (not even a short cut fits: no labels at all).
     room: LabelRoom,
+    /// A span no label may cover this frame (centre y, height): the last-price tag, while
+    /// labels are tags in the price axis ([`Self::set_blocked`]).
+    blocked: Option<(f32, f32)>,
     /// Label text widths as measured, by text (`measure_labels`, at render): kept across
-    /// maps, so an identical batch keeps an identical gutter.
+    /// maps, so an identical batch keeps an identical axis and column fit.
     widths: HashMap<String, f32>,
     /// Each label text's shortest useful cut's width (one letter, "…" and its price, or "X…"
     /// without one), by text, measured with its width.
@@ -654,8 +771,8 @@ impl LevelsLayer {
             slots: Vec::new(),
             shaped: ColorCache::new(),
             price: None,
-            gutter: 0.0,
             room: LabelRoom::Plot,
+            blocked: None,
             widths: HashMap::new(),
             shortest: HashMap::new(),
             cuts: HashMap::new(),
@@ -976,6 +1093,7 @@ impl LevelsLayer {
             if !self.config.source_shown(source) || s.status == LevelStatus::Missing {
                 continue;
             }
+            let on_edge = self.config.label_place == LabelPlace::Axis;
             let mut mask = 0u64;
             for (i, k) in map.kinds.iter().enumerate().take(64) {
                 // Shown on this pane (its parent kind too), and its type (if declared) drawn.
@@ -989,6 +1107,7 @@ impl LevelsLayer {
             place(map, vp, vwap_now, |k| mask & (1 << k) != 0, &mut s.placed);
             // Each label at its type's edge (kept through collisions: one that clashes stacks
             // a row further from its zone, or is dropped; never moved to the other edge).
+            // A tag in the price axis marks its edge's price itself.
             for p in &mut s.placed {
                 p.anchor = s
                     .kind_looks
@@ -996,24 +1115,33 @@ impl LevelsLayer {
                     .copied()
                     .flatten()
                     .map_or(LabelAt::Own, |t| t.label.at);
+                p.on_edge = on_edge;
             }
             // A label that can't be drawn in its room (its full text measured, else its cut for
             // this room: an empty cut means none fits) claims no room. No room at all (labels
             // can't show): none placed.
             let room = self.room.at(plot_w);
             let (texts, widths, cuts) = (&s.texts, &self.widths, &self.cuts);
-            place_labels(&mut s.placed, LABEL_PX * 1.6, plot_h, &mut s.seen, |i| {
-                let i = i as usize;
-                let Some(name) = map.levels[i].label.as_deref() else {
-                    return false;
-                };
-                let Some(room) = room else {
-                    return false;
-                };
-                let full = texts.get(i).and_then(|t| t.as_deref()).unwrap_or(name);
-                let w = widths.get(full).copied().unwrap_or_else(|| estimate(full));
-                label_can_show(w, cuts.get(full), room)
-            });
+            let blocked = self.blocked.filter(|_| on_edge);
+            place_labels(
+                &mut s.placed,
+                LABEL_PX * 1.6,
+                plot_h,
+                blocked,
+                &mut s.seen,
+                |i| {
+                    let i = i as usize;
+                    let Some(name) = map.levels[i].label.as_deref() else {
+                        return false;
+                    };
+                    let Some(room) = room else {
+                        return false;
+                    };
+                    let full = texts.get(i).and_then(|t| t.as_deref()).unwrap_or(name);
+                    let w = widths.get(full).copied().unwrap_or_else(|| estimate(full));
+                    label_can_show(w, cuts.get(full), room)
+                },
+            );
         }
     }
 
@@ -1032,12 +1160,13 @@ impl LevelsLayer {
         }
     }
 
-    /// What the labels' gutter needs, from the whole level set (every labeled level of every
-    /// source shown with its labels on, kinds and types shown; never only those in view, so it
-    /// changes only with the levels, the label settings or the zoom): (the widest label with
-    /// its chip and margins, the widest shortest cut likewise). (0, 0) when no label would
-    /// show. Measured at render (`measure_labels`), else estimated. No allocation.
-    pub fn gutter_need(&self) -> (f32, f32) {
+    /// What the labels need, from the whole level set (every labeled level of every source
+    /// shown with its labels on, kinds and types shown; never only those in view, so the
+    /// price axis and a fitted column change only with the levels, the label settings or the
+    /// zoom, never on a pan): (the widest label's text, the widest shortest cut's text), with
+    /// no chip. (0, 0) when no label would show. Measured at render (`measure_labels`), else
+    /// estimated. No allocation.
+    pub fn label_need(&self) -> (f32, f32) {
         if self.config.hide_labels {
             return (0.0, 0.0);
         }
@@ -1085,24 +1214,51 @@ impl LevelsLayer {
         if widest <= 0.0 {
             return (0.0, 0.0);
         }
-        let chip = LABEL_CHROME + GUTTER_PAD;
-        (widest + chip, cut + chip)
+        (widest, cut)
     }
 
-    /// The chart's labels' gutter for this frame (0: none; labels then right-aligned at the
-    /// plot's edge, as wide as a plot `plot_w` px wide allows), and whether labels fit at all
-    /// (`fits`: false when not even a short cut fits the cap: no labels).
-    pub fn set_gutter(&mut self, w: f32, plot_w: f32, fits: bool) {
-        self.gutter = w.max(0.0);
-        self.room = if fits {
-            LabelRoom::Room(gutter_room(self.gutter, plot_w))
-        } else {
-            LabelRoom::None
-        };
+    /// Each label's text room this frame (`Some`: a tag's in the axis or the column's; `None`:
+    /// not even a short cut fits, so no labels at all).
+    pub fn set_room(&mut self, room: Option<f32>) {
+        self.room = room.map_or(LabelRoom::None, LabelRoom::Room);
+    }
+
+    /// Labels on the chart: as wide as the plot allows (its own edge's room).
+    pub fn set_room_plot(&mut self) {
+        self.room = LabelRoom::Plot;
+    }
+
+    /// The span no tag in the price axis may cover this frame: the last-price tag (centre y
+    /// and height, plot px), before [`Self::place`].
+    pub fn set_blocked(&mut self, span: Option<(f32, f32)>) {
+        self.blocked = span;
+    }
+
+    /// Each shown label's centre y this frame (after [`Self::place`]): the price axis keeps
+    /// its own prices clear of the tags. No allocation.
+    pub fn tag_rows(&self, mut f: impl FnMut(f32)) {
+        if self.config.hide_labels {
+            return;
+        }
+        for s in &self.slots {
+            if s.map.is_none() || !self.config.labels_shown(s.handle.source()) {
+                continue;
+            }
+            for p in &s.placed {
+                if let Some(y) = p.label_y {
+                    f(y);
+                }
+            }
+        }
+    }
+
+    /// A label's height (a tag's, a row of the column's), plot px.
+    pub fn label_h() -> f32 {
+        LABEL_PX * 1.6
     }
 
     /// Measure the label set of every source shown with its labels on (in render, before
-    /// [`Self::gutter_need`]): each label text's width and its shortest cut's width once, kept
+    /// [`Self::label_need`]): each label text's width and its shortest cut's width once, kept
     /// by text. An identical batch measures nothing.
     pub fn measure_labels(&mut self, mut measure: impl FnMut(&str) -> f32) {
         if self.config.hide_labels {
@@ -1125,7 +1281,7 @@ impl LevelsLayer {
         for s in &mut self.slots {
             let Some(map) = &s.map else { continue };
             let source = s.handle.source();
-            // As placing and the gutter do: a slot with no levels yet (its first map's levels
+            // As placing and the need do: a slot with no levels yet (its first map's levels
             // refused) shows no labels.
             if s.status == LevelStatus::Missing
                 || !self.config.source_shown(source)
@@ -1304,11 +1460,14 @@ impl LevelsLayer {
         });
     }
 
-    /// Labels: on the legend box at the plot's right edge, in the level's color where that is
-    /// AA there, else theme text (`Slot::label_colors`); a stale map's in dim text.
+    /// Labels, where the chart puts them ([`LabelPlace`]; `strip` says where that is this
+    /// frame): on the legend box, in the level's color where that is AA there, else theme
+    /// text (`Slot::label_colors`); a stale map's in dim text. Tags in the price axis are
+    /// outlined in that color and lead back to their price when stacked away from it.
     pub fn paint_labels(
         &mut self,
         plot: Bounds<Pixels>,
+        strip: LabelStrip,
         theme: &Theme,
         window: &mut Window,
         cx: &mut App,
@@ -1317,9 +1476,10 @@ impl LevelsLayer {
         if self.config.hide_labels {
             return;
         }
+        let place = self.config.label_place;
         let scale = window.scale_factor();
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
-        let pw = f32::from(plot.size.width);
+        let (pw, ph) = (f32::from(plot.size.width), f32::from(plot.size.height));
         let box_h = LABEL_PX * 1.6;
         let Some(room) = self.room.at(pw) else {
             return;
@@ -1383,15 +1543,84 @@ impl LevelsLayer {
                         .copied()
                         .unwrap_or(theme.text_main)
                 };
-                let line = shaped_in(&mut self.shaped, text, color, window);
-                let w = f32::from(line.width) + LABEL_CHROME;
-                let x = snap(f64::from((pw - w - GUTTER_RIGHT).max(0.0)), scale);
+                let w = f32::from(shaped_in(&mut self.shaped, text, color, window).width)
+                    + LABEL_CHROME;
                 let top = snap(f64::from(y - box_h * 0.5), scale);
-                self.chips.push([x, x + w, top, top + box_h]);
-                window.paint_quad(fill(
-                    Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
-                    theme.label_bg,
-                ));
+                let (x, mut bg, mut ink) = match place {
+                    // Just right of the newest bar, moving with it; pinned to the plot's edge
+                    // when that doesn't fit (the newest bar off screen, or too near it).
+                    LabelPlace::Chart => {
+                        let x = strip
+                            .newest_right
+                            .map(|r| r + NEWEST_GAP)
+                            .filter(|x| x + w <= pw - GUTTER_RIGHT)
+                            .unwrap_or((pw - w - GUTTER_RIGHT).max(0.0));
+                        (snap(f64::from(x), scale), theme.label_bg, color)
+                    }
+                    LabelPlace::Column => (
+                        snap(f64::from(strip.left + COLUMN_PAD), scale),
+                        theme.label_bg,
+                        color,
+                    ),
+                    LabelPlace::Axis => (
+                        snap(f64::from(strip.left + AXIS_LEADER), scale),
+                        theme.label_bg,
+                        color,
+                    ),
+                };
+                match place {
+                    LabelPlace::Chart => {
+                        // Under the pointer: faded, so the bars under it show (and the last
+                        // price runs through it again).
+                        let hovered = strip.hover.is_some_and(|(hx, hy)| {
+                            hx >= x && hx <= x + w && hy >= top && hy <= top + box_h
+                        });
+                        if hovered {
+                            bg = bg.opacity(bg.a * HOVER_FADE);
+                            ink = ink.opacity(ink.a * HOVER_FADE);
+                        } else {
+                            self.chips.push([x, x + w, top, top + box_h]);
+                        }
+                        window.paint_quad(fill(
+                            Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
+                            bg,
+                        ));
+                    }
+                    LabelPlace::Column => {
+                        window.paint_quad(fill(
+                            Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
+                            bg,
+                        ));
+                    }
+                    LabelPlace::Axis => {
+                        // Stacked off its price: a short leader from the price to the tag.
+                        let at = p.label_anchor(box_h * 0.5).clamp(0.0, ph);
+                        if (at - y).abs() > 0.5 {
+                            let lead = |window: &mut Window, x0: f32, y0: f32, w: f32, h: f32| {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        point(px(ox + x0), px(oy + y0)),
+                                        size(px(w), px(h)),
+                                    ),
+                                    ink,
+                                ));
+                            };
+                            let (lx, a, b) = (strip.left + 2.0, at.min(y), at.max(y));
+                            lead(window, strip.left, at - hair * 0.5, 2.0 + hair, hair);
+                            lead(window, lx, a, hair, b - a);
+                            lead(window, lx, y - hair * 0.5, x - lx, hair);
+                        }
+                        window.paint_quad(gpui::quad(
+                            Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
+                            px(2.0),
+                            bg,
+                            px(1.0),
+                            ink,
+                            gpui::BorderStyle::Solid,
+                        ));
+                    }
+                }
+                let line = shaped_in(&mut self.shaped, text, ink, window);
                 let _ = line.paint(
                     point(
                         px(ox + x + LABEL_PAD),
@@ -1630,16 +1859,25 @@ pub(crate) fn around_last(
     parts.into_iter().flatten()
 }
 
-/// The room for a label's text in a gutter `gutter` px wide (already in whole steps): the
-/// gutter less its chip and margins, exactly, so the label that sized the gutter fits it
-/// whole. No gutter (0): the plot's width less the same, in the gutter's 8 px steps (a pane
-/// resized by a pixel doesn't cut its labels again).
-pub(crate) fn gutter_room(gutter: f32, plot_w: f32) -> f32 {
-    if gutter > 0.0 {
-        return gutter - LABEL_CHROME - GUTTER_PAD;
+/// The price axis's width for level tags: the widest label's text `need` (0: none) with its
+/// tag's frame, no narrower than the axis's own `base` nor wider than `cap`, and each tag's
+/// text room in it (`None`: not even the widest shortest cut `cut` fits, so no tags).
+pub fn axis_fit(need: f32, cut: f32, base: f32, cap: f32) -> (f32, Option<f32>) {
+    if need <= 0.0 {
+        return (base, None);
     }
+    let frame = AXIS_LEADER + LABEL_CHROME + AXIS_EDGE;
+    let axis = (need + frame).clamp(base, cap.max(base)).ceil();
+    let room = axis - frame;
+    (axis, (cut <= room).then_some(room))
+}
+
+/// The room for a label's text on the chart (`plot_w` px wide): the plot's width less its
+/// chip and margins, in 8 px steps (a pane resized by a pixel doesn't cut its labels again).
+pub(crate) fn plot_room(plot_w: f32) -> f32 {
+    const STEP: f32 = 8.0;
     let r = plot_w - LABEL_CHROME - GUTTER_PAD;
-    (r / lines_core::levels::GUTTER_STEP).floor() * lines_core::levels::GUTTER_STEP
+    (r / STEP).floor() * STEP
 }
 
 /// The shortest text a label can show as (what `lines_core::levels::cut_label` can cut it to
@@ -1676,9 +1914,9 @@ fn ensure_cut(
 /// Where labels go this frame.
 #[derive(Copy, Clone, Debug, PartialEq)]
 enum LabelRoom {
-    /// No gutter set (tests): the plot's edge, as wide as the plot allows.
+    /// On the chart: as wide as the plot allows.
     Plot,
-    /// The gutter's room for a label's text.
+    /// A tag's room in the price axis, or the label column's, for a label's text.
     Room(f32),
     /// Not even a short cut fits: no labels at all.
     None,
@@ -1687,7 +1925,7 @@ enum LabelRoom {
 impl LabelRoom {
     fn at(self, plot_w: f32) -> Option<f32> {
         match self {
-            LabelRoom::Plot => Some(gutter_room(0.0, plot_w)),
+            LabelRoom::Plot => Some(plot_room(plot_w)),
             LabelRoom::Room(r) => Some(r),
             LabelRoom::None => None,
         }

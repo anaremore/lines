@@ -625,11 +625,11 @@ fn a_hidden_parent_kind_hides_its_children() {
     );
 }
 
-/// The labels' gutter needs the widest label of the whole level set (not only those in view),
-/// with its chip; nothing while no label would show (labels off for the chart or the source,
-/// or the source hidden). The view doesn't change it.
+/// The labels' need (what the price axis grows to, what a column fits to) is the widest label
+/// of the whole level set (not only those in view); nothing while no label would show (labels
+/// off for the chart or the source, or the source hidden). The view doesn't change it.
 #[test]
-fn the_gutter_follows_the_level_set_not_the_view() {
+fn the_label_need_follows_the_level_set_not_the_view() {
     let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
     lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
     let store = es_store();
@@ -648,32 +648,28 @@ fn the_gutter_follows_the_level_set_not_the_view() {
         );
     };
     frame(&mut layer, vp());
-    let (need, cut) = layer.gutter_need();
-    assert!(need > LABEL_CHROME + GUTTER_PAD && need < 200.0, "{need}");
-    assert!(
-        cut > LABEL_CHROME + GUTTER_PAD && cut <= need,
-        "{cut} {need}"
-    );
+    let (need, cut) = layer.label_need();
+    assert!(need > 0.0 && need < 200.0, "{need}");
+    assert!(cut > 0.0 && cut <= need, "{cut} {need}");
     // A view with no level in it: the same need.
     let mut far = vp();
     (far.price_lo, far.price_hi) = (500_000.0, 501_000.0);
     frame(&mut layer, far);
-    assert_eq!(layer.gutter_need(), (need, cut));
+    assert_eq!(layer.label_need(), (need, cut));
     layer.config.hide_labels = true;
-    assert_eq!(layer.gutter_need(), (0.0, 0.0), "labels off");
+    assert_eq!(layer.label_need(), (0.0, 0.0), "labels off");
     layer.config.hide_labels = false;
     layer.config.toggle_labels("demo");
-    assert_eq!(layer.gutter_need(), (0.0, 0.0), "this source's labels off");
+    assert_eq!(layer.label_need(), (0.0, 0.0), "this source's labels off");
     layer.config.toggle_labels("demo");
     layer.config.toggle_source("demo");
-    assert_eq!(layer.gutter_need(), (0.0, 0.0), "source hidden");
+    assert_eq!(layer.label_need(), (0.0, 0.0), "source hidden");
 }
 
-/// A plot too narrow for even the shortest cut: the chart's path (`gutter_plan`,
-/// `settle_gutter`, `set_gutter`) gives no gutter and no labels at all (never full labels over
-/// the bars at the plot's edge). A wide one gives both.
+/// No room (not even the shortest cut fits the axis or the column): no labels at all, never a
+/// label running past its room. Room: labels, tags in the axis on their own edge's price.
 #[test]
-fn too_narrow_for_labels_no_labels_at_all() {
+fn no_room_no_labels() {
     let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
     lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
     let store = es_store();
@@ -688,48 +684,76 @@ fn too_narrow_for_labels_no_labels_at_all() {
         .position(|(id, ..)| id == "demo")
         .expect("demo serves ES");
     let mono = |t: &str| t.chars().count() as f32 * 6.0;
-    // One frame as the chart draws it, for a plot `plot_w` wide.
-    let frame = |layer: &mut LevelsLayer, plot_w: f32| -> f32 {
+    let frame = |layer: &mut LevelsLayer, room: Option<f32>| {
         let d = store.read();
         layer.snapshot(d.market_time);
         layer.measure_labels(mono);
-        let (need, min_cut) = layer.gutter_need();
-        let plan = lines_core::levels::gutter_plan(need, min_cut, plot_w, 130.0);
-        let mut v = vp();
-        v.set_size(f64::from(plot_w), 400.0);
-        let len = d.series.bars().len();
-        let g = lines_core::levels::settle_gutter(
-            &mut v,
-            len,
-            0.0,
-            if plan.fits { need } else { 0.0 },
-            plan.cap,
-        );
-        layer.set_gutter(g, plot_w, plan.fits);
+        layer.set_room(room);
         layer.prepare(
             &d,
             BarsView::fixed(d.series.bars(), d.series.period_ms()),
-            &v,
+            &vp(),
         );
-        g
     };
-    let g = frame(&mut layer, 800.0);
-    assert!(g > 0.0);
+    frame(&mut layer, Some(400.0));
     assert!(layer.placed(i).iter().any(|p| p.label_y.is_some()));
-    // 40 % of 60 px (24) is under the shortest cut ("X…" and its chip, `LABEL_CHROME` wide,
-    // in whole steps).
-    let g = frame(&mut layer, 60.0);
-    assert_eq!(g, 0.0, "no gutter");
+    assert!(
+        layer.placed(i).iter().all(|p| p.on_edge),
+        "tags in the axis mark their edge's price"
+    );
+    frame(&mut layer, None);
     assert!(
         layer.placed(i).iter().all(|p| p.label_y.is_none()),
         "no labels"
     );
+    // On the chart: beside their levels, as before.
+    layer.config.label_place = LabelPlace::Chart;
+    layer.set_room_plot();
+    frame(&mut layer, Some(400.0));
+    assert!(layer.placed(i).iter().all(|p| !p.on_edge));
+}
+
+/// Tags in the price axis never cover the last-price tag: one on it stacks off it (or goes).
+#[test]
+fn axis_tags_keep_off_the_last_price_tag() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    let d = store.read();
+    layer.snapshot(d.market_time);
+    layer.measure_labels(|t| t.chars().count() as f32 * 6.0);
+    layer.set_room(Some(400.0));
+    let bars = BarsView::fixed(d.series.bars(), d.series.period_ms());
+    layer.prepare(&d, bars, &vp());
+    // The last price where the first tag is.
+    let at = layer
+        .placed(i)
+        .iter()
+        .find_map(|p| p.label_y)
+        .expect("a tag");
+    let tag_h = 18.0;
+    layer.set_blocked(Some((at, tag_h)));
+    layer.prepare(&d, bars, &vp());
+    let h = LevelsLayer::label_h();
+    for y in layer.placed(i).iter().filter_map(|p| p.label_y) {
+        assert!((y - at).abs() >= (h + tag_h) * 0.5 - 1e-3, "{y} on {at}");
+    }
 }
 
 /// A new batch of the same levels (a new `Arc`, as each refresh is) measures nothing again and
-/// keeps the gutter exactly, frame after frame.
+/// keeps the need exactly (the axis doesn't move), frame after frame.
 #[test]
-fn an_identical_batch_keeps_the_gutter() {
+fn an_identical_batch_keeps_the_need() {
     let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
     lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
     let store = es_store();
@@ -754,30 +778,70 @@ fn an_identical_batch_keeps_the_gutter() {
     };
     layer.measure_labels(mono);
     assert!(calls.get() > 0);
-    let first = layer.gutter_need();
+    let first = layer.label_need();
     for _ in 0..3 {
         layer.renew_map(i);
         // Before this frame's measuring and after it: the same need, nothing measured.
-        assert_eq!(layer.gutter_need(), first);
+        assert_eq!(layer.label_need(), first);
         calls.set(0);
         layer.measure_labels(mono);
         assert_eq!(calls.get(), 0, "an identical batch measures nothing");
-        assert_eq!(layer.gutter_need(), first);
+        assert_eq!(layer.label_need(), first);
     }
 }
 
-/// The label that sized the gutter fits it whole: for any width, its text fits the room of the
-/// stepped gutter its need makes (the room isn't stepped down again).
+/// The widest label fits its own tag whole, for any width: the axis grows to it (never below
+/// its own width nor past the cap); past the cap, a label is cut to the room left; with no
+/// labels, the axis keeps its width and there is no room.
 #[test]
-fn the_widest_label_fits_its_own_gutter() {
+fn the_axis_grows_to_its_widest_tag() {
+    let (base, cap) = (78.0, 168.0);
     let mut w = 1.0f32;
     while w < 300.0 {
-        let need = w + LABEL_CHROME + GUTTER_PAD;
-        let g = lines_core::levels::step_gutter(0.0, need);
-        let room = gutter_room(g, 1600.0);
-        assert!(w <= room, "{w} px in a {g} px gutter: room {room}");
+        let (axis, room) = axis_fit(w, w.min(30.0), base, cap);
+        assert!((base..=cap).contains(&axis), "{w}: {axis}");
+        let room = room.expect("a short cut fits");
+        if axis < cap {
+            assert!(w <= room, "{w} px in a {axis} px axis: room {room}");
+        } else {
+            assert!(room < w + 1.0, "{w}: cut to {room}");
+        }
         w += 0.75;
     }
+    assert_eq!(axis_fit(0.0, 0.0, base, cap), (base, None), "no labels");
+    // Not even the shortest cut fits the widest axis: no tags.
+    assert_eq!(axis_fit(400.0, 300.0, base, cap).1, None);
+}
+
+/// The placement saves only when it isn't the default (tags in the axis), reads a value from a
+/// newer build as the default (never a corrupt workspace), and the column's width stays in its
+/// limits.
+#[test]
+fn the_label_placement_is_optional_and_lenient() {
+    let d = LevelsConfig::default();
+    assert_eq!(d.label_place, LabelPlace::Axis);
+    assert_eq!(serde_json::to_string(&d).unwrap(), "{}");
+    let c = LevelsConfig {
+        label_place: LabelPlace::Column,
+        label_column: Some(140),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&c).unwrap();
+    assert_eq!(json, r#"{"label-place":"column","label-column":140}"#);
+    assert_eq!(serde_json::from_str::<LevelsConfig>(&json).unwrap(), c);
+    for odd in [r#""margin""#, "null", "3", "{}"] {
+        let n: LevelsConfig =
+            serde_json::from_str(&format!(r#"{{"label-place": {odd}, "hide-labels": true}}"#))
+                .unwrap();
+        assert_eq!(n.label_place, LabelPlace::Axis, "{odd}");
+        assert!(n.hide_labels);
+    }
+    assert_eq!(d.column_w(), f32::from(COLUMN_W_DEFAULT));
+    let wide = LevelsConfig {
+        label_column: Some(9000),
+        ..Default::default()
+    };
+    assert_eq!(wide.column_w(), f32::from(COLUMN_W_MAX));
 }
 
 /// At the boundary: a label that fits whole shows; one that doesn't fit whole shows cut (its
@@ -803,11 +867,9 @@ fn whether_a_label_can_show_at_the_boundary() {
         label_can_show(90.0, Some(&other), room),
         "a cut for another room"
     );
-    // The room in a gutter is its width less the chip and margins; without one, the plot's
-    // in whole steps.
-    assert_eq!(gutter_room(96.0, 800.0), 96.0 - LABEL_CHROME - GUTTER_PAD);
-    let r = gutter_room(0.0, 803.0);
-    assert_eq!(r % lines_core::levels::GUTTER_STEP, 0.0);
+    // On the chart: the plot's width less the chip and margins, in whole 8 px steps.
+    let r = plot_room(803.0);
+    assert_eq!(r % 8.0, 0.0);
     assert!(r <= 803.0 - LABEL_CHROME - GUTTER_PAD);
 }
 
@@ -925,7 +987,7 @@ fn eviction_keeps_the_current_texts() {
     let (mut layer, _store, _) = demo_layer();
     let mono = |t: &str| t.chars().count() as f32 * 6.0;
     layer.measure_labels(mono);
-    let need = layer.gutter_need();
+    let need = layer.label_need();
     layer.stuff_caches(3 * lines_core::levels::MAX_LEVELS);
     let calls = std::cell::Cell::new(0);
     layer.measure_labels(|t| {
@@ -937,7 +999,7 @@ fn eviction_keeps_the_current_texts() {
         layer.cached_widths() < lines_core::levels::MAX_LEVELS,
         "the unused went"
     );
-    assert_eq!(layer.gutter_need(), need);
+    assert_eq!(layer.label_need(), need);
 }
 
 /// The shortest cut follows the shown filter: hiding the type whose label has a long price
@@ -958,14 +1020,14 @@ fn a_hidden_types_long_price_doesnt_set_the_shortest_cut() {
         }
     };
     layer.measure_labels(measure);
-    let (_, cut_all) = layer.gutter_need();
+    let (_, cut_all) = layer.label_need();
     let hidden: BTreeMap<String, PartStyles> = serde_json::from_str(
         r#"{"demo": {"label": "name-price", "types": {"resist": {"shown": false}}}}"#,
     )
     .unwrap();
     layer.set_styles(&hidden);
     layer.measure_labels(measure);
-    let (_, cut_shown) = layer.gutter_need();
+    let (_, cut_shown) = layer.label_need();
     assert!(cut_shown < cut_all, "{cut_shown} < {cut_all}");
 }
 
@@ -1291,9 +1353,15 @@ fn labels_take_the_level_color_where_it_reads_and_their_types_edge() {
             .find(|p| p.index as usize == zone)
             .unwrap();
         assert_eq!(placed.anchor, at, "{kind}");
+        // On the chart beside its edge; a tag in the price axis on the edge's price itself.
         if let Some(y) = placed.label_y {
-            match at {
-                LabelAt::Low => assert!(y > placed.bottom, "under its low edge: {y}"),
+            let h = LevelsLayer::label_h();
+            match (at, placed.on_edge) {
+                (LabelAt::Low, true) => {
+                    assert!((y - placed.bottom).abs() <= h, "on its low edge: {y}")
+                }
+                (_, true) => assert!((y - placed.top).abs() <= h, "on its high edge: {y}"),
+                (LabelAt::Low, false) => assert!(y > placed.bottom, "under its low edge: {y}"),
                 _ => assert!(y < placed.top, "above its high edge: {y}"),
             }
         }

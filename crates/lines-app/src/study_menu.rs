@@ -108,6 +108,10 @@ pub enum StudyAction {
     /// Show a kind its parent hid, on its own (source, kind: `LevelsConfig::show_under`).
     ShowLevelKindUnder(String, String),
     ToggleLevelLabels(String),
+    /// Where the chart's study labels go.
+    SetLabelPlace(crate::levels_layer::LabelPlace),
+    /// One part of the volume profile's label, on or off.
+    ToggleProfileLabel(crate::profile::ProfileLabelPart),
     /// Restyle a study: every part's look, in its parts' order (`crate::study_style`).
     SetStyle(StudyRef, Vec<Look>),
     /// Replace every study with a template's (boxed: a study set is large).
@@ -336,6 +340,8 @@ impl StudySet {
             StudyAction::ToggleLevelKind(id, kind) => self.levels.toggle_kind(id, kind),
             StudyAction::ShowLevelKindUnder(id, kind) => self.levels.show_under(id, kind),
             StudyAction::ToggleLevelLabels(id) => self.levels.toggle_labels(id),
+            StudyAction::SetLabelPlace(p) => self.levels.label_place = *p,
+            StudyAction::ToggleProfileLabel(p) => self.profile.toggle_label_part(*p),
             StudyAction::SetStyle(r, looks) => match r {
                 StudyRef::Vwap(i) => {
                     if let Some(c @ IndicatorConfig::Vwap { .. }) = self.indicators.get_mut(*i) {
@@ -1022,6 +1028,15 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     set(StudyAction::SetProfileGrouping(Some(g))),
                 );
             }
+            for part in crate::profile::ProfileLabelPart::ALL {
+                c(
+                    "Label",
+                    part.label().into(),
+                    p.label_part(part),
+                    Swatch::None,
+                    set(StudyAction::ToggleProfileLabel(part)),
+                );
+            }
         }
         StudyRef::Levels(id) => {
             let Some(s) = input.sources.iter().find(|s| s.id == *id) else {
@@ -1054,6 +1069,16 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 Swatch::None,
                 set(StudyAction::ToggleLevelLabels(id.clone())),
             );
+            // Where every study label on the chart goes (not only this source's).
+            for p in crate::levels_layer::LabelPlace::ALL {
+                c(
+                    "Level labels",
+                    p.label().into(),
+                    input.set.levels.label_place == p,
+                    Swatch::None,
+                    set(StudyAction::SetLabelPlace(p)),
+                );
+            }
         }
     }
 }

@@ -112,6 +112,10 @@ pub enum Command {
     ToggleLevels,
     /// The focused chart: hide (or show) level labels and level legend rows.
     ToggleLevelLabels,
+    /// Where the focused chart's study labels go: price axis, column or chart.
+    LevelLabelPlace(crate::levels_layer::LabelPlace),
+    /// One part of the focused chart's volume profile label, on or off.
+    ProfileLabel(crate::profile::ProfileLabelPart),
     /// Show or hide the chart headers' performance stats (feed msgs/s, updates/s, paints/s,
     /// paint time): a workspace preference, off by default. No key: palette and menu only.
     TogglePerfStats,
@@ -883,6 +887,8 @@ pub fn label(c: Command) -> String {
         Command::Columns(ColumnCmd::Width(c, w)) => format!("Set {} width to {w} px", c.label()),
         Command::ToggleLevels => "Chart: hide/show levels".into(),
         Command::ToggleLevelLabels => "Chart: hide/show level labels".into(),
+        Command::LevelLabelPlace(p) => format!("Level labels: {}", p.words()),
+        Command::ProfileLabel(p) => format!("Volume profile label: {}", p.words()),
         Command::TogglePerfStats => "Performance stats on/off (chart headers)".into(),
         Command::ToggleLatencyHud => "Latency HUD on/off (chart headers)".into(),
         Command::DomTrail => "DOM: price trail on/off".into(),
@@ -1060,6 +1066,13 @@ pub fn palette() -> Vec<Command> {
         Command::ShowKeys,
         Command::ToggleLevels,
         Command::ToggleLevelLabels,
+        Command::LevelLabelPlace(crate::levels_layer::LabelPlace::Axis),
+        Command::LevelLabelPlace(crate::levels_layer::LabelPlace::Column),
+        Command::LevelLabelPlace(crate::levels_layer::LabelPlace::Chart),
+        Command::ProfileLabel(crate::profile::ProfileLabelPart::Shown),
+        Command::ProfileLabel(crate::profile::ProfileLabelPart::Name),
+        Command::ProfileLabel(crate::profile::ProfileLabelPart::Partial),
+        Command::ProfileLabel(crate::profile::ProfileLabelPart::Gaps),
         Command::TogglePerfStats,
         Command::ToggleLatencyHud,
         Command::DomTrail,

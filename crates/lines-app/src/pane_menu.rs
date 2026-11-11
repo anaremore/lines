@@ -36,8 +36,8 @@ pub struct ChartMenu {
     /// Trade-built bars (ticks, volume, range): their session switch shows.
     pub on_ticks: bool,
     pub tick_continuous: bool,
-    /// The chart has level sources: (levels shown, labels shown).
-    pub levels: Option<(bool, bool)>,
+    /// The chart has level sources: (levels shown, labels shown, where its labels go).
+    pub levels: Option<(bool, bool, crate::levels_layer::LabelPlace)>,
     pub studies_shown: bool,
     pub study_labels_shown: bool,
     pub strategy_marks_shown: bool,
@@ -463,9 +463,14 @@ fn timeframe(c: &ChartMenu) -> MenuItem {
 
 fn chart_show(c: &ChartMenu) -> MenuItem {
     let mut sub = Vec::new();
-    if let Some((on, labels)) = c.levels {
+    if let Some((on, labels, place)) = c.levels {
         sub.push(toggle("Levels", Command::ToggleLevels, on));
         sub.push(toggle("Level labels", Command::ToggleLevelLabels, labels));
+        // Where they go (submenus are one level deep, so these are rows here).
+        sub.push(MenuItem::header("Labels at"));
+        for p in crate::levels_layer::LabelPlace::ALL {
+            sub.push(pick(p.label(), Command::LevelLabelPlace(p), place == p));
+        }
         // TODO(level-styles, workspaces thread 4c0a): open the per-type level style panel once it
         // merges. Until then the studies menu, which lists each source's types with their
         // switches.
@@ -646,7 +651,7 @@ mod tests {
             timeframe: Timeframe::Minutes(5),
             on_ticks: false,
             tick_continuous: false,
-            levels: Some((true, true)),
+            levels: Some((true, true, crate::levels_layer::LabelPlace::Axis)),
             studies_shown: true,
             study_labels_shown: false,
             strategy_marks_shown: true,
@@ -849,6 +854,10 @@ mod tests {
             [
                 "Levels",
                 "Level labels",
+                "Labels at",
+                "Axis",
+                "Column",
+                "Chart",
                 "Level types…",
                 "Studies",
                 "Study labels",
@@ -1072,12 +1081,18 @@ mod tests {
         let link = v.iter().find(|i| i.label == "Link").unwrap();
         assert!(link.sub.iter().all(|i| !i.toggle));
         let show = v.iter().find(|i| i.label == "Show").unwrap();
+        // Switches, and where the labels go: one of a set, a check on the one in force.
+        let at = |i: &&MenuItem| matches!(i.cmd, Some(Command::LevelLabelPlace(_)));
         assert!(
             show.sub
                 .iter()
-                .filter(|i| i.cmd.is_some())
+                .filter(|i| i.cmd.is_some() && !at(i))
                 .all(|i| i.toggle || i.label.ends_with('…'))
         );
+        let places: Vec<&MenuItem> = show.sub.iter().filter(at).collect();
+        assert_eq!(places.len(), 3);
+        assert!(places.iter().all(|i| !i.toggle));
+        assert_eq!(places.iter().filter(|i| i.checked).count(), 1);
     }
 
     #[test]
