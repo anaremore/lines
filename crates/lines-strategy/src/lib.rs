@@ -137,6 +137,9 @@ pub fn concerns(cfg: &lines_trading::StrategyConfig, e: &Event) -> bool {
         Event::Trigger(t) => &t.account == a && t.contract == k,
         Event::Strategy { id, .. } => *id == cfg.id,
         Event::Rebuilt { .. } => true,
+        // A strategy can't manage or act on groups; a group command's member commands are a
+        // person's, and their orders come as `Order` events like any other.
+        Event::Groups { .. } | Event::GroupCommand { .. } => false,
     }
 }
 

@@ -16,9 +16,13 @@
 //! - **v4**: an optional list of armed exit triggers (decision 0029). The version moved so that
 //!   an older build refuses the file instead of reading it and silently dropping a position's
 //!   Stop.
-//! - **v5**: the current format: no saved limit on an option quote's age, which is now one
-//!   function by expiry (`risk::option_quote_stale_ms`). The version moved so that an older build
-//!   refuses the file instead of reading it and going back to its 15 minutes.
+//! - **v5**: no saved limit on an option quote's age, which is now one function by expiry
+//!   (`risk::option_quote_stale_ms`). The version moved so that an older build refuses the file
+//!   instead of reading it and going back to its 15 minutes.
+//! - **v6**: the current format: account groups are a list of their own (`groups`: name and
+//!   members, `crate::group`), no longer an optional `group` name in each account's config. The
+//!   migration makes one group per name, members in account order. The version moved so that an
+//!   older build refuses the file instead of reading it and silently dropping the groups.
 //!
 //! A file from a newer Lines is refused (never half-read), and a damaged file is reported,
 //! never silently replaced.
@@ -34,7 +38,7 @@ use crate::guardrails::GuardrailTracker;
 use crate::paper::{PaperConfig, PaperState};
 use crate::rules::RuleTracker;
 
-pub const VERSION: u64 = 5;
+pub const VERSION: u64 = 6;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedAccount {
@@ -66,6 +70,9 @@ pub struct TradingFile {
     /// Optional: older files have none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub triggers: Vec<crate::trigger::SavedTrigger>,
+    /// Account groups, in the order they were created (from v6). Optional: none is empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<crate::group::AccountGroup>,
 }
 
 /// Bring any older layout up to the current one.
@@ -81,11 +88,69 @@ pub fn migrate(mut v: Value) -> Result<Value> {
             2 => v2_to_v3(v)?,
             3 => v3_to_v4(v)?,
             4 => v4_to_v5(v)?,
+            5 => v5_to_v6(v)?,
             n => bail!("no migration from version {n}"),
         };
         version += 1;
     }
     Ok(v)
+}
+
+/// v5 → v6: each account's optional `config.group` becomes a member of a group of that name in
+/// the new `groups` list (one per name, first seen first, members in account order). Names that
+/// v6 counts as one (`group::same_name`: trimmed, ignoring case) are merged under the first
+/// one's spelling, and a name v6 can't keep (`group::clean_name`) is cut down to one it can, so
+/// no membership is dropped on load.
+fn v5_to_v6(mut v: Value) -> Result<Value> {
+    let o = v.as_object_mut().context("v5 file is not an object")?;
+    let Some(accounts) = o.get_mut("accounts").and_then(Value::as_array_mut) else {
+        bail!("v5 file has no accounts");
+    };
+    let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
+    for a in accounts {
+        let Some(config) = a.get_mut("config").and_then(Value::as_object_mut) else {
+            continue;
+        };
+        let group = config.remove("group");
+        let (Some(Value::String(name)), Some(id)) = (group, config.get("id").cloned()) else {
+            continue;
+        };
+        let name = keepable_group_name(&name);
+        match groups
+            .iter_mut()
+            .find(|(n, _)| crate::group::same_name(n, &name))
+        {
+            Some((_, members)) => members.push(id),
+            None => groups.push((name, vec![id])),
+        }
+    }
+    if !groups.is_empty() {
+        let list: Vec<Value> = groups
+            .into_iter()
+            .map(|(name, members)| json!({ "name": name, "members": members }))
+            .collect();
+        o.insert("groups".into(), Value::Array(list));
+    }
+    o.insert("version".into(), json!(6));
+    Ok(v)
+}
+
+/// A v5 group name as v6 can keep it: control characters become spaces, then trimmed and cut
+/// to `group::MAX_NAME_CHARS`; an empty one is "Group".
+fn keepable_group_name(name: &str) -> String {
+    let spaced: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let cut: String = spaced
+        .trim()
+        .chars()
+        .take(crate::group::MAX_NAME_CHARS)
+        .collect();
+    match cut.trim() {
+        "" => "Group".to_owned(),
+        n => n.to_owned(),
+    }
 }
 
 /// v4 → v5: the 15 minutes every file holds (and any hand-set age) go, for the function by expiry.
@@ -479,6 +544,77 @@ mod tests {
         let again = serde_json::to_value(&f).unwrap();
         assert_eq!(again["version"], json!(VERSION));
         assert_eq!(read(&again.to_string()), f);
+    }
+
+    /// A v5 file's per-account group names become the v6 `groups` list: one group per name,
+    /// first seen first, members in account order; the configs lose the field, and the file
+    /// written back reads the same.
+    #[test]
+    fn a_v5_files_group_names_become_groups() {
+        let mut v: Value = serde_json::from_str(V2).unwrap();
+        v["version"] = json!(5);
+        let account = v["accounts"][0].clone();
+        let long = format!("{} tail", "x".repeat(crate::group::MAX_NAME_CHARS - 1));
+        let mut accounts = Vec::new();
+        for (id, group) in [
+            ("a", Some("Evals")),
+            ("b", None),
+            ("c", Some("Funded")),
+            // v6 counts these as "Evals" (case, spaces): merged, never dropped.
+            ("d", Some("evals ")),
+            ("e", Some("  ")),
+            // Kept, not dropped: a control character becomes a space, a long name is cut.
+            (
+                "f",
+                Some(
+                    "a
+b",
+                ),
+            ),
+            ("g", Some(&long)),
+        ] {
+            let mut a = account.clone();
+            a["config"]["id"] = json!(id);
+            if let Some(g) = group {
+                a["config"]["group"] = json!(g);
+            }
+            accounts.push(a);
+        }
+        v["accounts"] = json!(accounts);
+        let f = read(&v.to_string());
+        assert_eq!(f.version, VERSION);
+        let g = |n: &str, m: &[&str]| crate::group::AccountGroup {
+            name: n.into(),
+            members: m.iter().map(|s| crate::types::AccountId::new(s)).collect(),
+        };
+        assert_eq!(
+            f.groups,
+            vec![
+                g("Evals", &["a", "d"]),
+                g("Funded", &["c"]),
+                g("Group", &["e"]),
+                g("a b", &["f"]),
+                g(&"x".repeat(crate::group::MAX_NAME_CHARS - 1), &["g"]),
+            ]
+        );
+        // What loads is what the core keeps: nothing for `restore_groups` to drop.
+        assert_eq!(crate::group::restored(f.groups.clone()), f.groups);
+        let again = serde_json::to_value(&f).unwrap();
+        assert!(
+            again["accounts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|a| a["config"].get("group").is_none()),
+            "the configs lose the field"
+        );
+        assert_eq!(read(&again.to_string()), f);
+        // A v5 file without groups gets none, and writes none.
+        let mut plain: Value = serde_json::from_str(V2).unwrap();
+        plain["version"] = json!(5);
+        let f = read(&plain.to_string());
+        assert!(f.groups.is_empty());
+        assert!(serde_json::to_value(&f).unwrap().get("groups").is_none());
     }
 
     /// A v4 file holds 900000 twice. Both go, the guard's other settings stay, and a file written

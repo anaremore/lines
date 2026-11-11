@@ -27,6 +27,7 @@ pub mod command;
 pub mod core;
 pub mod event;
 pub mod extension;
+pub mod group;
 pub mod guardrails;
 pub mod journal;
 pub mod market;
