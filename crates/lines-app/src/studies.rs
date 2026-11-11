@@ -193,9 +193,11 @@ pub struct TagRoom<'a> {
     /// Where end tags go: tags in the price axis, in the label column, or on the chart (a
     /// column placement without a column draws them on the chart).
     pub place: crate::levels_layer::LabelPlace,
-    /// Rows (top, bottom, plot px) no tag outside the plot may cover: the last-price tag, the
+    /// Rows (top, bottom, plot px) no tag in the price axis may cover: the last-price tag, the
     /// drawings' and the levels' tags.
     pub blocked: &'a [(f32, f32)],
+    /// Rows no tag in the label column may cover: the levels' tags there.
+    pub column_blocked: &'a [(f32, f32)],
 }
 
 /// The nearest free row for a tag `h` tall that wants top `want` on a plot `ph` tall: its own,
@@ -1341,7 +1343,12 @@ impl Studies {
                     taken[n_taken] = m.at[1];
                     n_taken += 1;
                 }
-                let Some(ty) = free_row(y - h * 0.5, h, ph, blocked, &taken[..n_taken]) else {
+                let rows = if place == crate::levels_layer::LabelPlace::Axis {
+                    blocked
+                } else {
+                    room.column_blocked
+                };
+                let Some(ty) = free_row(y - h * 0.5, h, ph, rows, &taken[..n_taken]) else {
                     continue;
                 };
                 if covered(covers, ox + x, oy + ty, w, h) {

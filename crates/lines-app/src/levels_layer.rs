@@ -1879,9 +1879,15 @@ pub fn chart_label_x(newest_right: f32, widest: f32, plot_w: f32) -> Option<f32>
 }
 
 /// The label column's width this frame, px: the saved width at the UI zoom (`saved`), never
-/// more than 40 % of the chart beside the price axis (`beside`), in whole px.
+/// more than 40 % of the chart beside the price axis (`beside`), in whole px (rounded up, so a
+/// column fitted to a label holds it whole at any zoom).
 pub fn column_px(saved: f32, beside: f32) -> f32 {
-    saved.min((beside * 0.4).max(0.0)).round()
+    saved.min(column_cap(beside)).ceil()
+}
+
+/// The widest the label column is drawn beside the price axis (`beside` px of chart): 40 %.
+pub fn column_cap(beside: f32) -> f32 {
+    (beside * 0.4).max(0.0)
 }
 
 /// The label column's width (px at 100 % zoom) after its edge was dragged from window x

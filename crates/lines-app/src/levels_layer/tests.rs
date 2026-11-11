@@ -827,6 +827,8 @@ fn chart_x_column_width_and_drag() {
     assert_eq!(column_px(120.0, 1000.0), 120.0);
     assert_eq!(column_px(180.0, 300.0), 120.0, "40 % of the chart");
     assert_eq!(column_px(120.0, -5.0), 0.0);
+    // A fit at 150 % (a 100 % width times 1.5) is never rounded below the label it fits.
+    assert_eq!(column_px(80.87 * 1.5, 1000.0), 122.0);
     assert_eq!(
         dragged_column(120.0, 500.0, 470.0, 1.0),
         150.0,

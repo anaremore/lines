@@ -2895,9 +2895,14 @@ impl ChartView {
                 }
                 let col = crate::levels_layer::column_px(crate::zoom::f(c.column_w()), w - base);
                 let room = col - 2.0 * COLUMN_PAD - LABEL_CHROME;
-                let (_, cut) = self.levels.label_need();
-                self.levels
-                    .set_room((room > 0.0 && cut <= room).then_some(room));
+                let (need, cut) = self.levels.label_need();
+                // Nothing to show (a missing source), or not even a short cut fits: no column
+                // (never an empty strip).
+                if need <= 0.0 || room <= 0.0 || cut > room {
+                    self.levels.set_room(None);
+                    return (base, 0.0);
+                }
+                self.levels.set_room(Some(room));
                 (base, col)
             }
         }
@@ -3022,12 +3027,12 @@ impl ChartView {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.column_drag = None;
             } else {
-                let w = crate::levels_layer::dragged_column(
-                    w0,
-                    from,
-                    f32::from(ev.position.x),
-                    crate::zoom::f(1.0),
-                );
+                let zoom = crate::zoom::f(1.0);
+                let w =
+                    crate::levels_layer::dragged_column(w0, from, f32::from(ev.position.x), zoom);
+                // Never wider than it can be drawn (no hidden width saved to jump to later).
+                let beside = f32::from(self.chart.size.width) - self.axis_now;
+                let w = w.min(crate::levels_layer::column_cap(beside) / zoom);
                 self.set_label_column(w, cx);
                 return;
             }
@@ -5402,7 +5407,9 @@ impl ChartView {
                         n_blocked += 1;
                     }
                 }
-                // The levels' tags, where they share the axis or the column with end tags.
+                // The levels' tags, where they share the axis or the column with end tags (in
+                // the column only theirs: the last-price and drawings' tags are the axis's).
+                let axis_rows = n_blocked;
                 if self.levels.config.label_place != LabelPlace::Chart {
                     let half = LevelsLayer::label_h() * 0.5;
                     self.levels.tag_rows(|y| {
@@ -5417,6 +5424,7 @@ impl ChartView {
                     column: self.label_col,
                     place: self.levels.config.label_place,
                     blocked: &blocked[..n_blocked],
+                    column_blocked: &blocked[axis_rows..n_blocked],
                 };
                 // Their end tags changed: render measures their room again (`paint_chart`).
                 self.end_tags_moved |= self.studies.paint(
