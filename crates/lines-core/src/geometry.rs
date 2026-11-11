@@ -801,9 +801,9 @@ mod tests {
         }
     }
 
-    /// At 150 % UI zoom the labels are measured half again as wide (`chart_view` measures the
-    /// grid space again on a zoom change): the step grows to match and no label reaches the
-    /// next one. Owner's bug: measured once at 100 %, "11-10 22:0011-11 01:00 02:00" at 150 %.
+    /// With the label widths measured at 150 % (half again as wide), the step grows to match
+    /// and no label reaches the next one. (That they are measured again on a zoom change is
+    /// `chart_view`'s `axis_spacing_is_measured_again_after_a_zoom_change`.)
     #[test]
     fn time_labels_keep_apart_at_150_percent() {
         let b = bars(2000);

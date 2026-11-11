@@ -557,8 +557,9 @@ pub struct ChartView {
     toolbar_dock: Option<crate::drawing_toolbar::Dock>,
     /// Shows no orders and sends none (`set_view_only`).
     view_only: bool,
-    /// Axis label spacing has been measured with this window's font.
-    space_measured: bool,
+    /// The UI zoom generation the axis labels' spacing was measured at (`None`: not yet):
+    /// measured again at another (`space_stale`).
+    space_measured_at: Option<u32>,
     /// The time this chart last reported under its own crosshair.
     reported: (Option<UtcMillis>, Option<Price>),
     /// Screenshot fixture: price zoom to apply once, after the first auto-fit.
@@ -932,7 +933,7 @@ impl ChartView {
             drawing_tools: fixture.drawing_tools,
             toolbar_dock: None,
             view_only: false,
-            space_measured: false,
+            space_measured_at: None,
             reported: (None, None),
             hover: fixture.cursor,
             pending_price_zoom: fixture.price_zoom,
@@ -4191,8 +4192,12 @@ impl ChartView {
         if self.tick_marks.capacity() < marks {
             self.tick_marks.reserve_exact(marks - self.tick_marks.len());
         }
-        if !self.space_measured {
+        // At another UI zoom (or UI font: both bump the generation) the labels are another
+        // size: their spacing is measured again. Shaping allocates, but only on that change.
+        let generation = crate::zoom::generation();
+        if space_stale(self.space_measured_at, generation) {
             self.measure_grid_space(window);
+            self.space_measured_at = Some(generation);
         }
 
         // Sample the feed. If it holds the lock this instant, redraw the previous scene.
@@ -6949,7 +6954,6 @@ impl ChartView {
             time_px: time + gap,
             date_time_px: date_time + gap,
         };
-        self.space_measured = true;
     }
 
     /// The pointer at plot-local (`x`, `y`) as a drawing anchor: the bar's start and a price
@@ -9828,6 +9832,13 @@ fn price_label_shows(y: f32, plot_h: f32, size: f32) -> bool {
     y >= size * 0.65 && y <= plot_h
 }
 
+/// Whether the axis labels' spacing measured at UI zoom generation `measured_at` is stale at
+/// generation `now`: never measured, or measured at another zoom (owner's bug: measured once at
+/// 100 %, the time labels ran together after Ctrl+= made them larger).
+fn space_stale(measured_at: Option<u32>, now: u32) -> bool {
+    measured_at != Some(now)
+}
+
 /// The latency HUD's compact form for a chart `w` px wide (0: not laid out yet).
 fn hud_compact(w: f32) -> bool {
     // In 100 % units (`crate::zoom`): the header's text grows with the zoom.
@@ -9850,9 +9861,6 @@ impl Render for ChartView {
         let zoom = crate::zoom::generation();
         if zoom != self.zoom_generation {
             self.zoom_generation = zoom;
-            // The axis labels' spacing was measured at the old size: measured again, or the
-            // time labels run together (and the price labels crowd) at a larger zoom.
-            self.space_measured = false;
             self.labels.clear();
             self.readout = None;
             self.note_lines.clear();
@@ -10139,6 +10147,14 @@ fn recent_colors(cx: &App) -> Vec<lines_core::style::Rgb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The axis labels' spacing is measured again after a UI zoom change (and only then).
+    #[test]
+    fn axis_spacing_is_measured_again_after_a_zoom_change() {
+        assert!(space_stale(None, 0), "never measured");
+        assert!(!space_stale(Some(3), 3), "measured at this zoom");
+        assert!(space_stale(Some(3), 4), "measured at another zoom");
+    }
 
     /// The label column's edge is its own first few px, above the time axis: the plot's
     /// rightmost px stay the plot's (order tags, drawings, a lower pane's ×).
