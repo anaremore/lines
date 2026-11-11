@@ -3787,7 +3787,7 @@ impl ChartView {
             } else {
                 (0.0, 0.0)
             };
-            // 130 px at 100 % zoom; on a narrow plot a quarter of it, or what the shortest
+            // 144 px at 100 % zoom; on a narrow plot a quarter of it, or what the shortest
             // useful cut needs, but never more than 40 % of it. Not even that: no labels at
             // all (`gutter_plan`).
             let plan =
@@ -8815,8 +8815,10 @@ fn prepare_studies(
     levels.columns(bars, vp);
 }
 
-/// The level labels' gutter's widest (logical px at 100 % zoom).
-const GUTTER_CAP: f32 = 130.0;
+/// The level labels' gutter's widest (logical px at 100 % zoom): a whole 8 px step with room
+/// (124 px) for a 22-character label with a five-digit price ("Yellow Line : 27932.00") in
+/// the UI font (IBM Plex Sans, decision 0034) at 1400 px.
+const GUTTER_CAP: f32 = 144.0;
 
 /// Where a measure's readout goes (plot-local top-left): on the far side of the measured
 /// range from the live edge (left-aligned at the range's older end), above the box, or below
