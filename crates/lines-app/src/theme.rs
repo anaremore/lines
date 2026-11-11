@@ -10,9 +10,7 @@
 //! - Up/down also differ by shape, not only colour: one direction's candle bodies are hollow
 //!   ([`HollowBodies`]), so the chart reads correctly in greyscale or with colour blindness.
 
-#[cfg(test)]
-use gpui::Rgba;
-use gpui::{Hsla, rgb};
+use gpui::{Hsla, Rgba, rgb};
 use lines_core::style::{Color, DashPattern, LineType, Rgb};
 
 /// Brand palette.
@@ -471,6 +469,85 @@ impl Theme {
         if reads { color } else { self.text_main }
     }
 
+    /// A level source's legend box: `label_bg`, opaque (no zone, band or line shows through).
+    pub fn legend_box(&self) -> Hsla {
+        Hsla {
+            a: 1.0,
+            ..self.label_bg
+        }
+    }
+
+    /// A level legend stat's value in `color` (the theme's up or down): that color where it is
+    /// AA (4.5:1) on the opaque legend box ([`Theme::legend_box`]), else the theme's text.
+    pub fn legend_stat_text(&self, color: Hsla) -> Hsla {
+        let mut c = color;
+        c.a = 1.0;
+        if contrast(c, self.legend_box()) >= 4.5 {
+            c
+        } else {
+            self.text_main
+        }
+    }
+
+    /// What a level label's chip sits on in the labels' gutter besides the source's zones,
+    /// opaque: the chart and its grid. The gutter is right of the newest bar, so no candle,
+    /// study line or profile row is ever under a label; the last-price line and tag paint over
+    /// the labels, not under them.
+    pub fn label_gutter_underlays(&self) -> [Hsla; 2] {
+        [self.bg, over(self.grid, self.bg)]
+    }
+
+    /// The chart under a stack of zone `fills` (translucent, in paint order), opaque.
+    pub fn zones_over_chart(&self, fills: impl IntoIterator<Item = Hsla>) -> Hsla {
+        fills.into_iter().fold(self.bg, |under, f| over(f, under))
+    }
+
+    /// A level label's text for a level drawn in `color` (opaque): that color where it is AA
+    /// (4.5:1) on the label's box (`label_bg`, translucent) over everything under that box
+    /// (the gutter's chart and grid, [`Theme::label_gutter_underlays`], and each of `zones`:
+    /// the source's zone and band fills as drawn over the chart, opaque, alone and stacked
+    /// where they overlap under the label's box, [`Theme::zones_over_chart`]) and clear of the
+    /// last-price color (a label never reads as the last price: [`Theme::near_last`]), else
+    /// the theme's text for this label only (AA over any level color:
+    /// `level_labels_meet_aa_over_any_level_color`). A user's color, a source's and a type's
+    /// recommended one alike. No allocation.
+    pub fn level_label_text(&self, color: Hsla, zones: &[Hsla]) -> Hsla {
+        let mut c = color;
+        c.a = 1.0;
+        if !self.near_last(c) && self.level_label_ratio(c, zones) >= 4.5 {
+            c
+        } else {
+            self.text_main
+        }
+    }
+
+    /// A stale map's level label text: the theme's dim text, AA (4.5:1) on the label's box
+    /// over any chart content in every theme and palette (the box is 90 % opaque:
+    /// `stale_label_text_meets_aa_over_anything`).
+    pub fn stale_label_text(&self) -> Hsla {
+        self.text_dim
+    }
+
+    /// Whether `color` is close to the last price's (and the accent's) color: within the
+    /// style editor's "close to a color with a meaning" distance (CIEDE2000 under
+    /// `NEAR_MEANING`), so text in it could be read as the last price.
+    pub fn near_last(&self, color: Hsla) -> bool {
+        use lines_core::style::{NEAR_MEANING, delta_e_2000};
+        [self.last, self.accent]
+            .into_iter()
+            .any(|m| delta_e_2000(rgb_of(color), rgb_of(m)) < NEAR_MEANING)
+    }
+
+    /// The lowest contrast of a level label's text in `color` (opaque) on its box over what
+    /// [`Theme::level_label_text`] checks.
+    pub fn level_label_ratio(&self, color: Hsla, zones: &[Hsla]) -> f64 {
+        self.label_gutter_underlays()
+            .into_iter()
+            .chain(zones.iter().copied())
+            .map(|u| contrast(color, over(self.label_bg, u)))
+            .fold(f64::INFINITY, f64::min)
+    }
+
     /// A lower pane's title text for a line drawn in `color` (an external series study's):
     /// that color where it is AA on the title's box (`label_bg`) over everything the pane can
     /// show under the box (its background, its grid, and each of its lines as drawn, `lines`),
@@ -497,7 +574,6 @@ impl Theme {
     /// and so does
     /// every weaker alpha (steps of 1/64; no allocation). Returns (the fill, held back).
     pub fn under_candles(&self, fill: Hsla, layers: u8) -> (Hsla, bool) {
-        use lines_core::style::contrast;
         const STEPS: u16 = 64;
         let top = fill.a;
         if top <= 0.0 {
@@ -506,27 +582,12 @@ impl Theme {
         let bg = rgb_of(self.bg);
         let tint = rgb_of(fill);
         let blend = crate::footprint::blend;
-        // Each mark as drawn (the last-price line is translucent) against what it's drawn on.
-        let marks = [
-            (rgb_of(self.up), 1.0),
-            (rgb_of(self.down), 1.0),
-            (rgb_of(self.last), LAST_LINE_ALPHA),
-        ];
-        let k = |(m, a): (Rgb, f32), under: Rgb| contrast(blend(m, a, under), under);
-        let need = marks.map(|m| {
-            let bare = k(m, bg);
-            if bare >= UNDER_CANDLES_CONTRAST {
-                UNDER_CANDLES_CONTRAST
-            } else {
-                bare * UNDER_3_KEEP
-            }
-        });
         let reads = |a: f32| {
             let mut seen = bg;
             for _ in 0..layers.max(1) {
                 seen = blend(tint, a, seen);
             }
-            marks.iter().zip(&need).all(|(m, n)| k(*m, seen) >= *n)
+            self.candles_read_on(seen)
         };
         let mut ok = 0.0;
         for i in 1..=STEPS {
@@ -537,6 +598,55 @@ impl Theme {
             ok = a;
         }
         (with_alpha(fill, ok), ok < top)
+    }
+
+    /// The scale (0..=1, in steps of 1/64) on every fill of a stack drawn under the candles
+    /// (`fills`, translucent, in paint order over the chart: zones that overlap) at which the
+    /// candles and the last-price line over the stack keep what [`Theme::under_candles`]
+    /// keeps for one fill, and so does every weaker scale. No allocation.
+    pub fn stack_under_candles(&self, fills: &[Hsla]) -> f32 {
+        const STEPS: u16 = 64;
+        let bg = rgb_of(self.bg);
+        let blend = crate::footprint::blend;
+        let reads = |k: f32| {
+            let seen = fills
+                .iter()
+                .fold(bg, |under, f| blend(rgb_of(*f), f.a * k, under));
+            self.candles_read_on(seen)
+        };
+        let mut ok = 0.0;
+        for i in 1..=STEPS {
+            let k = f32::from(i) / f32::from(STEPS);
+            if !reads(k) {
+                break;
+            }
+            ok = k;
+        }
+        ok
+    }
+
+    /// Whether the up and down candles and the last-price line (as drawn) keep
+    /// [`UNDER_CANDLES_CONTRAST`] on `under` (one under that on the bare chart:
+    /// [`UNDER_3_KEEP`] of its contrast there).
+    fn candles_read_on(&self, under: Rgb) -> bool {
+        use lines_core::style::contrast;
+        let bg = rgb_of(self.bg);
+        let blend = crate::footprint::blend;
+        let marks = [
+            (rgb_of(self.up), 1.0),
+            (rgb_of(self.down), 1.0),
+            (rgb_of(self.last), LAST_LINE_ALPHA),
+        ];
+        let k = |(m, a): (Rgb, f32), under: Rgb| contrast(blend(m, a, under), under);
+        marks.iter().all(|m| {
+            let bare = k(*m, bg);
+            let need = if bare >= UNDER_CANDLES_CONTRAST {
+                UNDER_CANDLES_CONTRAST
+            } else {
+                bare * UNDER_3_KEEP
+            };
+            k(*m, under) >= need
+        })
     }
 
     /// A note's text drawn in `color` (opaque), its box asked for or not: (draw the box, text
@@ -746,7 +856,6 @@ pub fn source_colour(rgba: u32, alpha: f32) -> Hsla {
 }
 
 /// `top` (possibly translucent) composited over opaque `bottom`, as drawn.
-#[cfg(test)]
 pub fn over(top: Hsla, bottom: Hsla) -> Hsla {
     let (t, b) = (Rgba::from(top), Rgba::from(bottom));
     let a = t.a;
@@ -760,7 +869,6 @@ pub fn over(top: Hsla, bottom: Hsla) -> Hsla {
 }
 
 /// WCAG 2.x relative luminance.
-#[cfg(test)]
 pub fn luminance(c: Hsla) -> f64 {
     let Rgba { r, g, b, .. } = Rgba::from(c);
     let lin = |v: f32| {
@@ -775,7 +883,6 @@ pub fn luminance(c: Hsla) -> f64 {
 }
 
 /// WCAG contrast ratio (1..=21).
-#[cfg(test)]
 pub fn contrast(a: Hsla, b: Hsla) -> f64 {
     let (la, lb) = (luminance(a), luminance(b));
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
@@ -991,6 +1098,210 @@ mod tests {
                 let r = contrast(t.text_main, over(t.label_bg, u));
                 assert!(r >= 4.5, "{}: over {:?}: {r:.2}", t.name, rgb_of(u));
             }
+        }
+    }
+
+    /// A stale map's label text (dimmed) is AA (4.5:1) on its box over anything a chart can
+    /// draw under it in the gutter, in every theme and palette.
+    #[test]
+    fn stale_label_text_meets_aa_over_anything() {
+        for t in Theme::all() {
+            let text = t.stale_label_text();
+            // The gutter, every sampled color as a zone fill up to 45 % over the chart, and
+            // pure black and white under the box: anything a chart can draw there.
+            let fills = any_user_color()
+                .flat_map(|c| [0.15, 0.3, 0.45].map(|a| t.zones_over_chart([c.opacity(a)])));
+            let worst = t
+                .label_gutter_underlays()
+                .into_iter()
+                .chain(fills)
+                .chain([gpui::black(), gpui::white()])
+                .map(|u| contrast(text, over(t.label_bg, u)))
+                .fold(f64::INFINITY, f64::min);
+            println!("{}: stale label text worst {worst:.2}", t.name);
+            assert!(worst >= 4.5, "{}: {worst:.2}", t.name);
+        }
+    }
+
+    /// A level label is in its level's color only where that is AA (4.5:1) on its box over
+    /// everything under it in the gutter (the chart, its grid and the source's zone fills as
+    /// drawn, alone and stacked), else the theme's text, for that label only: any color a user,
+    /// a source or a type picks (216 sampled), over zone fills of those colors, in every theme
+    /// and palette. Not a blanket fallback: the theme's text and bright colors on dark keep
+    /// their color.
+    #[test]
+    fn level_label_text_meets_aa_or_falls_back() {
+        for t in Theme::all() {
+            let users: Vec<Hsla> = any_user_color().collect();
+            let fills: Vec<Hsla> = users.iter().step_by(17).map(|u| u.opacity(0.2)).collect();
+            let zone_sets: [Vec<Hsla>; 3] = [
+                Vec::new(),
+                fills.iter().map(|f| t.zones_over_chart([*f])).collect(),
+                vec![
+                    t.zones_over_chart([t.text_dim.opacity(0.35)]),
+                    t.zones_over_chart([t.text_dim.opacity(0.35), t.study[2].opacity(0.4)]),
+                ],
+            ];
+            let mut colored = 0;
+            for zones in &zone_sets {
+                for c in users.iter().chain([&t.text_main]) {
+                    let shown = t.level_label_text(*c, zones);
+                    if shown == *c {
+                        colored += 1;
+                    } else {
+                        assert_eq!(shown, t.text_main, "{}", t.name);
+                        continue;
+                    }
+                    let unders = t
+                        .label_gutter_underlays()
+                        .into_iter()
+                        .chain(zones.iter().copied());
+                    for u in unders {
+                        let r = contrast(shown, over(t.label_bg, u));
+                        assert!(
+                            r >= 4.5,
+                            "{}: {:?} over {:?}: {r:.2}",
+                            t.name,
+                            rgb_of(*c),
+                            rgb_of(u)
+                        );
+                    }
+                }
+            }
+            assert!(colored > 0, "{}", t.name);
+            assert_eq!(t.level_label_text(t.bg, &[]), t.text_main, "{}", t.name);
+        }
+    }
+
+    /// A level legend's signed stats keep the up and down colors in every theme and palette,
+    /// light ones too: each is AA on the opaque legend box (the sign is written as well).
+    #[test]
+    fn legend_stats_keep_up_and_down_colors_in_every_theme() {
+        for t in Theme::all() {
+            assert_eq!(t.legend_box().a, 1.0, "{}", t.name);
+            for c in [t.up, t.down] {
+                let shown = t.legend_stat_text(c);
+                assert_eq!(rgb_of(shown), rgb_of(c), "{}", t.name);
+                let r = contrast(shown, t.legend_box());
+                assert!(r >= 4.5, "{}: {r:.2}", t.name);
+                println!("{} stat {:?}: {r:.2}", t.name, rgb_of(c));
+            }
+        }
+        // The colorblind themes' stats are their own palette's up and down (blue and orange),
+        // never the standard green and red.
+        for (cb, std) in [
+            (
+                Theme::dark(Palette::Colorblind),
+                Theme::dark(Palette::Standard),
+            ),
+            (
+                Theme::light(Palette::Colorblind),
+                Theme::light(Palette::Standard),
+            ),
+        ] {
+            for (c, s) in [(cb.up, std.up), (cb.down, std.down)] {
+                assert_eq!(cb.legend_stat_text(c), Hsla { a: 1.0, ..c }, "{}", cb.name);
+                assert_ne!(rgb_of(cb.legend_stat_text(c)), rgb_of(s), "{}", cb.name);
+            }
+        }
+    }
+
+    /// A stack of zone fills (a gray zone on a gray band, a dark one on a light one, alone or
+    /// three deep) held back by `stack_under_candles` keeps the candles (the hollow body's
+    /// outline is the up color) and the last-price line where `under_candles` keeps them for
+    /// one fill, in every theme and palette; a stack that already reads isn't held back.
+    #[test]
+    fn stacked_zone_fills_keep_the_candles() {
+        use crate::footprint::blend;
+        let grays = [0x5a5e68, 0x8a8e98, 0xa9adb6, 0xc4c7ce, 0x000000];
+        for t in Theme::all() {
+            let bg = rgb_of(t.bg);
+            for a in grays {
+                for b in grays {
+                    for depth in [2, 3] {
+                        let fills: Vec<Hsla> = [a, b, a][..depth]
+                            .iter()
+                            .map(|c| user_color(Rgb::hex(*c), 40))
+                            .collect();
+                        let k = t.stack_under_candles(&fills);
+                        assert!((0.0..=1.0).contains(&k));
+                        let seen = fills.iter().fold(bg, |u, f| blend(rgb_of(*f), f.a * k, u));
+                        for (m, alpha) in [(t.up, 1.0), (t.down, 1.0)] {
+                            let bare = lines_core::style::contrast(rgb_of(m), bg);
+                            let need = if bare >= UNDER_CANDLES_CONTRAST {
+                                UNDER_CANDLES_CONTRAST
+                            } else {
+                                bare * UNDER_3_KEEP
+                            };
+                            let r =
+                                lines_core::style::contrast(blend(rgb_of(m), alpha, seen), seen);
+                            assert!(r >= need, "{}: {a:06x}/{b:06x} x{depth}: {r:.2}", t.name);
+                        }
+                    }
+                }
+            }
+            // A faint stack reads as it is.
+            let faint = [
+                user_color(Rgb::hex(0x808080), 3),
+                user_color(Rgb::hex(0x808080), 3),
+            ];
+            assert_eq!(t.stack_under_candles(&faint), 1.0, "{}", t.name);
+        }
+    }
+
+    /// Zone labels go through the same check as line labels, against what is actually under
+    /// their text: the chip over a gray zone's fill, a band's fill, both stacked, the chart and
+    /// its grid. On the light themes (standard and colorblind) a zone's mid-gray edge color
+    /// keeps its color only where it is AA over all of them, a light gray edge (#b4b8c1)
+    /// falls back to the theme's text, and whatever is shown is AA everywhere.
+    #[test]
+    fn zone_labels_meet_aa_on_light_over_zone_and_band_fills() {
+        let fill = user_color(Rgb::hex(0x8a8e98), 40);
+        let band = user_color(Rgb::hex(0xb4b8c1), 14);
+        let bear = user_color(Rgb::hex(0xa9adb6), 35);
+        for t in Theme::all().into_iter().filter(|t| !t.is_dark()) {
+            let zones = [
+                t.zones_over_chart([fill]),
+                t.zones_over_chart([band]),
+                t.zones_over_chart([bear]),
+                t.zones_over_chart([band, fill]),
+                t.zones_over_chart([band, bear]),
+            ];
+            for (edge, keeps) in [(0x4b4f58, true), (0x5f636d, true), (0xb4b8c1, false)] {
+                let c = user_color(Rgb::hex(edge), 100);
+                let shown = t.level_label_text(c, &zones);
+                let r = t.level_label_ratio(shown, &zones);
+                println!("{}: zone label #{edge:06x}: {r:.2}", t.name);
+                assert!(r >= 4.5, "{}: #{edge:06x}: {r:.2}", t.name);
+                assert_eq!(shown == c, keeps, "{}: #{edge:06x}", t.name);
+                if !keeps {
+                    assert_eq!(shown, t.text_main);
+                }
+            }
+        }
+    }
+
+    /// A level label never reads as the last price: a color near the last price's (and the
+    /// accent's) violet, like #9575CD or the accent itself, falls back to the theme's text in
+    /// every theme even where it is AA (a violet is 4.6:1 on the dark label); a color well
+    /// clear of it (an orange, a deep teal) keeps its color where it is AA.
+    #[test]
+    fn a_label_near_the_last_price_color_falls_back() {
+        let violet = user_color(Rgb::hex(0x9575cd), 100);
+        for t in Theme::all() {
+            for c in [violet, t.last, t.accent] {
+                assert!(t.near_last(c), "{}", t.name);
+                assert_eq!(t.level_label_text(c, &[]), t.text_main, "{}", t.name);
+            }
+            let keeps = if t.is_dark() { 0xff9800 } else { 0x00666b };
+            let keeps = user_color(Rgb::hex(keeps), 100);
+            assert!(!t.near_last(keeps), "{}", t.name);
+            assert_eq!(t.level_label_text(keeps, &[]), keeps, "{}", t.name);
+            println!(
+                "{}: #9575CD {:.2} (near the last price: text)",
+                t.name,
+                t.level_label_ratio(violet, &[])
+            );
         }
     }
 

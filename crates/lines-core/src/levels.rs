@@ -240,6 +240,84 @@ pub struct LevelMap {
     /// Only its series are new (a source's live push between refreshes): its levels are the
     /// previous map's, so their freshness and error stay as they were.
     pub series_update: bool,
+    /// What the source puts in its legend row beside its name (`None`: nothing): see
+    /// [`LevelLegend`].
+    pub legend: Option<LevelLegend>,
+    /// The source sent a legend that isn't valid ([`LevelError::BadLegend`]): it was dropped
+    /// and the levels kept (a legend is never worth the levels). The runtime logs it.
+    pub legend_dropped: bool,
+}
+
+/// A source's legend content (generic: the source decides the words): a short title after
+/// its name ("Map A") and up to [`MAX_LEGEND_STATS`] stats on a line under it, each a name
+/// and its text, with a tone. The app draws a stat's tone in the theme's up or down color,
+/// and the text carries the sign itself (validated: an up stat's text starts with `+`, a down
+/// stat's with `-` or `{2212}`), so direction is never shown by color alone. Never the map's
+/// time: the legend shows no map time while the map is current.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LevelLegend {
+    /// After the source's name; at most [`MAX_LEGEND_TEXT`] characters.
+    pub title: Option<String>,
+    pub stats: Vec<LegendStat>,
+}
+
+/// One legend stat: `name text` ("Bias -7.9").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LegendStat {
+    /// 1-12 characters.
+    pub name: String,
+    /// 1-12 characters, signed when the tone is up or down.
+    pub text: String,
+    pub tone: StatTone,
+}
+
+/// How a legend stat is colored.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum StatTone {
+    /// The theme's text.
+    #[default]
+    Plain,
+    /// The theme's up color; the text starts with `+`.
+    Up,
+    /// The theme's down color; the text starts with `-` or the minus sign.
+    Down,
+}
+
+/// Most stats in a legend.
+pub const MAX_LEGEND_STATS: usize = 8;
+/// Longest legend title (characters).
+pub const MAX_LEGEND_TEXT: usize = 40;
+const MAX_STAT_TEXT: usize = 12;
+
+impl LegendStat {
+    fn ok(&self) -> bool {
+        let len = |s: &str| (1..=MAX_STAT_TEXT).contains(&s.chars().count());
+        let signed = match self.tone {
+            StatTone::Plain => true,
+            StatTone::Up => self.text.starts_with('+'),
+            StatTone::Down => self.text.starts_with(['-', '\u{2212}']),
+        };
+        len(&self.name) && len(&self.text) && signed
+    }
+}
+
+impl LevelLegend {
+    /// Whether it is valid (`Err(BadLegend)` when not).
+    pub fn check(&self) -> Result<(), LevelError> {
+        if self.ok() {
+            Ok(())
+        } else {
+            Err(LevelError::BadLegend)
+        }
+    }
+
+    fn ok(&self) -> bool {
+        self.title
+            .as_ref()
+            .is_none_or(|t| t.chars().count() <= MAX_LEGEND_TEXT)
+            && self.stats.len() <= MAX_LEGEND_STATS
+            && self.stats.iter().all(LegendStat::ok)
+    }
 }
 
 impl LevelMap {
@@ -257,6 +335,8 @@ impl LevelMap {
                 series: Vec::new(),
                 levels_refused: None,
                 series_update: false,
+                legend: None,
+                legend_dropped: false,
             },
             error: None,
         }
@@ -301,6 +381,10 @@ pub enum LevelError {
     /// A series has a bad or repeated key, too many points, a value that isn't finite, or
     /// points or segments out of order.
     BadSeries(String),
+    /// The legend's title is too long, it has too many stats, or a stat is empty, too long, or
+    /// up or down without its sign ([`LevelLegend::check`]; the builder drops such a legend
+    /// and keeps the map: [`LevelMap::legend_dropped`]).
+    BadLegend,
 }
 
 impl fmt::Display for LevelError {
@@ -312,6 +396,7 @@ impl fmt::Display for LevelError {
             LevelError::TooLong(what) => write!(f, "{what} too long"),
             LevelError::TooMany(what) => write!(f, "too many {what}"),
             LevelError::BadSeries(k) => write!(f, "series {k:?} is malformed"),
+            LevelError::BadLegend => write!(f, "the legend is malformed"),
             LevelError::NotFinite => write!(f, "a level value is not a finite number"),
             LevelError::OffTick(p) => write!(f, "level {} is not on the tick grid", p.0),
             LevelError::Inverted => write!(f, "a zone's lower bound is above its upper bound"),
@@ -455,6 +540,12 @@ impl LevelMapBuilder {
         self
     }
 
+    /// The source's legend content: see [`LevelLegend`].
+    pub fn legend(mut self, legend: LevelLegend) -> Self {
+        self.map.legend = Some(legend);
+        self
+    }
+
     /// See [`LevelMap::levels_refused`].
     pub fn levels_refused(mut self, reason: impl Into<String>) -> Self {
         self.map.levels_refused = Some(reason.into());
@@ -479,6 +570,11 @@ impl LevelMapBuilder {
         }
         if !slug_ok(&self.map.source) {
             self.fail(LevelError::BadSlug(self.map.source.clone()));
+        }
+        // A bad legend is dropped, never the map.
+        if self.map.legend.as_ref().is_some_and(|l| !l.ok()) {
+            self.map.legend = None;
+            self.map.legend_dropped = true;
         }
         if self.map.levels.len() > MAX_LEVELS {
             self.fail(LevelError::TooMany("levels"));
@@ -583,7 +679,92 @@ pub struct TypeStyle {
     pub fill: FillStyle,
     /// The line's recommended color on the light themes, where it differs (a fixed color that
     /// reads only on dark, given a light-theme counterpart; `None`: `line.color` everywhere).
+    /// A label in the level's color takes it too.
     pub light: Option<Color>,
+    /// The fill's recommended color on the light themes, where it differs (`None`:
+    /// `fill.color` everywhere).
+    pub fill_light: Option<Color>,
+    /// Its labels' text: the level's color (the default; the theme's text where that color
+    /// isn't AA on the label) or the theme's text.
+    pub label: LabelColor,
+    /// Where its labels sit: on its own price (a zone's high edge, as always), or just under
+    /// its low edge or just above its high edge.
+    pub label_at: LabelAt,
+}
+
+/// A level label's text color (a level type's option, decision 0026).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LabelColor {
+    /// The level's own line color, where it is AA (4.5:1) on the label over everything under
+    /// it; else the theme's text for that label.
+    #[default]
+    Level,
+    /// The theme's text.
+    Text,
+}
+
+impl LabelColor {
+    pub const ALL: [LabelColor; 2] = [LabelColor::Level, LabelColor::Text];
+
+    /// The saved name.
+    pub fn key(self) -> &'static str {
+        match self {
+            LabelColor::Level => "level",
+            LabelColor::Text => "text",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<LabelColor> {
+        LabelColor::ALL.into_iter().find(|c| c.key() == s)
+    }
+
+    /// The style editor's words.
+    pub fn label(self) -> &'static str {
+        match self {
+            LabelColor::Level => "Level color",
+            LabelColor::Text => "Text color",
+        }
+    }
+}
+
+/// Where a level's label sits (a level type's option, decision 0026). A label that clashes
+/// stacks one row away, and is dropped only when no row is free; it never moves to another
+/// edge ([`place_labels`]).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LabelAt {
+    /// Centered on its own price: a line's, a zone's high edge.
+    #[default]
+    Own,
+    /// Just under its low edge (with that edge's price).
+    Low,
+    /// Just above its high edge.
+    High,
+}
+
+impl LabelAt {
+    pub const ALL: [LabelAt; 3] = [LabelAt::Low, LabelAt::High, LabelAt::Own];
+
+    /// The saved name.
+    pub fn key(self) -> &'static str {
+        match self {
+            LabelAt::Own => "own",
+            LabelAt::Low => "low",
+            LabelAt::High => "high",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Option<LabelAt> {
+        LabelAt::ALL.into_iter().find(|c| c.key() == s)
+    }
+
+    /// The style editor's words.
+    pub fn label(self) -> &'static str {
+        match self {
+            LabelAt::Own => "Own price",
+            LabelAt::Low => "Low edge",
+            LabelAt::High => "High edge",
+        }
+    }
 }
 
 impl TypeStyle {
@@ -602,6 +783,9 @@ impl TypeStyle {
             opacity: 25,
         },
         light: None,
+        fill_light: None,
+        label: LabelColor::Level,
+        label_at: LabelAt::Own,
     };
 
     /// Whether this is [`TypeStyle::OWN`]'s line: drawn as each level's own style says (its
@@ -701,14 +885,16 @@ impl LabelMode {
     }
 }
 
-/// The label drawn for level `l` in `mode` (`None`: it has none). Built when the map or the mode
-/// changes, never per frame: the price is the line's (a zone's upper edge, where its label
-/// sits), a raw value at the nearest price unit, printed with `fmt`.
-pub fn label_text(l: &Level, mode: LabelMode, fmt: &PriceFormat) -> Option<String> {
+/// The label drawn for level `l` in `mode`, sitting `at` (`None`: it has none). Built when the
+/// map or the mode changes, never per frame: the price is the line's, or the zone edge's its
+/// label sits at (the low edge's under it, else the high edge's), a raw value at the nearest
+/// price unit, printed with `fmt`.
+pub fn label_text(l: &Level, mode: LabelMode, at: LabelAt, fmt: &PriceFormat) -> Option<String> {
     let name = l.label.as_deref()?;
-    let value = match l.shape {
-        LevelShape::Line(v) => v,
-        LevelShape::Zone { upper, .. } => upper,
+    let value = match (l.shape, at) {
+        (LevelShape::Line(v), _) => v,
+        (LevelShape::Zone { lower, .. }, LabelAt::Low) => lower,
+        (LevelShape::Zone { upper, .. }, _) => upper,
     };
     let price = match (mode, value) {
         (LabelMode::Name, _) | (_, LevelValue::VwapOffset(_)) => None,
@@ -736,6 +922,20 @@ pub struct Placed {
     /// Moves with the VWAP: `top`/`bottom` are at the current VWAP (for the label and
     /// culling); the layer draws it along the VWAP bar by bar.
     pub vwap_relative: bool,
+    /// Where its label sits ([`LabelAt::Own`] from [`place`]; the layer sets its type's).
+    pub anchor: LabelAt,
+}
+
+impl Placed {
+    /// Its label's centre y before clamping into the plot: on its own price, just under its
+    /// low edge or just above its high edge (`half`: half a label's height).
+    pub fn label_anchor(&self, half: f32) -> f32 {
+        match self.anchor {
+            LabelAt::Own => self.top,
+            LabelAt::Low => self.bottom + half,
+            LabelAt::High => self.top - half,
+        }
+    }
 }
 
 /// Place the visible levels of `map` that intersect the plot into `out` (cleared first; at
@@ -769,6 +969,7 @@ pub fn place(
             bottom: vp.price_to_y(a) as f32,
             label_y: None,
             vwap_relative: l.is_vwap_relative(),
+            anchor: LabelAt::Own,
         });
     }
 }
@@ -784,22 +985,28 @@ pub enum LabelSeen {
     /// Not placed yet (a new map, a level that just came on screen).
     #[default]
     New,
+    /// At its anchor.
     Shown,
+    /// Stacked a row away from its anchor, or dropped.
     Hidden,
 }
 
-/// Choose label positions: a label is anchored to its own level (a line's on its line, a
-/// zone's on its top edge), clamped into the plot, and never moved for anything else: the
-/// last price and the tags on the axis paint over it. Labels only give way to each other: a
-/// label overlapping one already placed is dropped (the level is still drawn). Levels at
-/// fixed prices are placed first, in map order, then those moving with the VWAP, so a moving
-/// band never reshuffles the others. The layout depends only on the levels and the viewport,
-/// never the price, and keeps last frame's decision near the threshold: `seen` (by level
-/// index, updated in place) says what each label did last frame; one hidden then shows again
-/// only once it is clear of every shown label by [`LABEL_HYSTERESIS`] more (a new one needs
-/// only to be clear). `has_label(index)`: whether the level's label can be drawn at all (it
-/// has one, and it fits the plot's width): one that can't claims no room. A plot shorter
-/// than a label shows none. In place, no allocation.
+/// Choose label positions: a label is anchored to its own level where its type puts it
+/// ([`Placed::label_anchor`]: on its line or a zone's high edge, just under a low edge or just
+/// above a high edge), clamped into the plot, and never moved for anything but another label:
+/// the last price and the tags on the axis paint over it. Labels give way to each other: a
+/// label overlapping one already placed stacks to the nearest free row at most one label's
+/// height from its anchor ([`stack_row`]: a line's either way, a low-edge label only further
+/// down, a high-edge label only further up, so it never reaches its zone's other edge), and
+/// is dropped only when no such row is free (the level is still drawn). Levels at fixed
+/// prices are placed first, in map order, then those moving with the VWAP, so a moving band
+/// never reshuffles the others. The layout depends only on the levels and the viewport, never
+/// the price, and keeps last frame's decision near the threshold: `seen` (by level index,
+/// updated in place) says what each label did last frame; one moved or dropped then comes back
+/// to its anchor only once that is clear of every placed label by [`LABEL_HYSTERESIS`] more (a
+/// new one needs only to be clear). `has_label(index)`: whether the level's label can be drawn
+/// at all (it has one, and it fits the plot's width): one that can't claims no room. A plot
+/// shorter than a label shows none. In place, no allocation.
 pub fn place_labels(
     placed: &mut [Placed],
     label_h: f32,
@@ -814,6 +1021,7 @@ pub fn place_labels(
     if plot_h < label_h {
         return;
     }
+    // Last frame's state per placed label is read before any is updated.
     for moving in [false, true] {
         for i in 0..placed.len() {
             let p = placed[i];
@@ -821,7 +1029,7 @@ pub fn place_labels(
                 continue;
             }
             let was = seen.get(p.index as usize).copied().unwrap_or_default();
-            let y = p.top.clamp(half, plot_h - half);
+            let y = p.label_anchor(half).clamp(half, plot_h - half);
             let need = if was == LabelSeen::Hidden {
                 label_h * (1.0 + LABEL_HYSTERESIS)
             } else {
@@ -831,20 +1039,54 @@ pub fn place_labels(
                 .iter()
                 .filter_map(|q| q.label_y)
                 .any(|q| (q - y).abs() < need);
-            placed[i].label_y = (!clash).then_some(y);
-        }
-    }
-    for p in placed.iter() {
-        if let Some(s) = seen.get_mut(p.index as usize)
-            && has_label(p.index)
-        {
-            *s = if p.label_y.is_some() {
-                LabelSeen::Shown
+            let (at, home) = if clash {
+                (stack_row(placed, y, p.anchor, label_h, plot_h), false)
             } else {
-                LabelSeen::Hidden
+                (Some(y), true)
             };
+            placed[i].label_y = at;
+            if let Some(s) = seen.get_mut(p.index as usize) {
+                *s = if home {
+                    LabelSeen::Shown
+                } else {
+                    LabelSeen::Hidden
+                };
+            }
         }
     }
+}
+
+/// The nearest free row for a label anchored at `y` that clashes with labels already placed:
+/// right against one of them (a label's height `label_h` apart), at most `label_h` from `y`,
+/// inside the plot, overlapping none; a low-edge label only further down and a high-edge
+/// label only further up (`anchor`). `None`: no row is free.
+fn stack_row(placed: &[Placed], y: f32, anchor: LabelAt, label_h: f32, plot_h: f32) -> Option<f32> {
+    let half = label_h * 0.5;
+    // A hair of slack: rows exactly a label apart touch, they don't overlap.
+    let slack = label_h * 1e-4;
+    let mut best: Option<f32> = None;
+    for q in placed.iter().filter_map(|q| q.label_y) {
+        for c in [q - label_h, q + label_h] {
+            let d = c - y;
+            let way_ok = match anchor {
+                LabelAt::Own => true,
+                LabelAt::Low => d >= 0.0,
+                LabelAt::High => d <= 0.0,
+            };
+            if !way_ok || d.abs() > label_h + slack || c < half - slack || c > plot_h - half + slack
+            {
+                continue;
+            }
+            let free = placed
+                .iter()
+                .filter_map(|o| o.label_y)
+                .all(|o| (o - c).abs() >= label_h - slack);
+            if free && best.is_none_or(|b| d.abs() < (b - y).abs()) {
+                best = Some(c);
+            }
+        }
+    }
+    best
 }
 
 // ---- the labels' gutter (paint path: no allocation) ------------------------------------

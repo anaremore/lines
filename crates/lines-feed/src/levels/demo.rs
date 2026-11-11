@@ -100,7 +100,7 @@ pub const BODY: &str = r#"{
     {"kind": "pivot",  "line": 601000, "label": "Pivot 6010",  "color": "838799ff", "weight": 2},
     {"kind": "resist", "line": 602500, "label": "R1 6025",     "color": "a87719ff", "weight": 1},
     {"kind": "support","line": 599750, "label": "S1 5997.50",  "color": "2a9196ff", "weight": 1, "dashed": true},
-    {"kind": "zone",   "lower": 601750, "upper": 602250, "label": "Supply", "color": "888800ff"},
+    {"kind": "supply", "lower": 601750, "upper": 602250, "label": "Supply", "color": "888800ff"},
     {"kind": "zone",   "lower": 599000, "upper": 599500, "label": "Demand", "color": "868686ff"},
     {"kind": "band",   "vwap_lower": -750, "vwap_upper": 750, "label": "VWAP ±7.50", "color": "7a7f91ff", "dashed": true}
   ],
@@ -165,11 +165,18 @@ const OLIVE: (Color, Color) = (
     Color::Custom(Rgb::hex(0xbbdd44)),
     Color::Custom(Rgb::hex(0x777700)),
 );
-/// The pivot, support and the zones' and VWAP band's edges: a neutral gray, light on dark and deep on
-/// light (no blue in it: the colorblind palette's up is blue).
+/// The pivot and support: a neutral gray, light on dark and deep on light (no blue in it: the
+/// colorblind palette's up is blue).
 const GRAY: (Color, Color) = (
     Color::Custom(Rgb::hex(0xc8c8c8)),
     Color::Custom(Rgb::hex(0x7a7a7a)),
+);
+/// The zones' and the VWAP band's edges: a dim gray on each theme, quieter than the candles
+/// (a band's edges frame it; they aren't levels to read across the chart). Their labels fall
+/// back to the theme's text (the dim gray isn't AA on a label).
+const EDGE: (Color, Color) = (
+    Color::Custom(Rgb::hex(0x6b707c)),
+    Color::Custom(Rgb::hex(0xb4b8c1)),
 );
 
 /// The demo's level types (`LevelSource::types`): every kind its map uses. The lines in a
@@ -177,10 +184,13 @@ const GRAY: (Color, Color) = (
 /// palettes (the theme's study teal and orchid sit beside the mint up and rose down, an amber
 /// beside the colorblind orange down), so they are told apart by line type: pivot solid,
 /// support dashed, resistance dash-dot, the anchored line dotted, all 1 px (none louder than
-/// the last price). The zones: solid gray edges (drawn whole, 3:1 on both charts; a level's
-/// own look draws edges at 60 %) around a visible fill in each level's own color; the VWAP
-/// band's edges dotted.
-pub static TYPES: [LevelType; 6] = [
+/// the last price). The zones: solid dim gray edges (quieter than the candles) around a
+/// visible fill in each level's own color: a demand
+/// zone labeled just under its low edge (`LabelAt::Low`), a supply zone (split from it, so
+/// hiding zones hides both) just above its high edge (`LabelAt::High`), each with that edge's
+/// price; the VWAP band's edges dotted. Labels are in each level's color, or theme text where that isn't AA on the
+/// label (the light themes' grays and olive: the fallback).
+pub static TYPES: [LevelType; 7] = [
     LevelType::line(
         "pivot",
         "Pivot",
@@ -214,14 +224,29 @@ pub static TYPES: [LevelType; 6] = [
                 opacity: 40,
                 ..TypeStyle::OWN.fill
             },
-            ..themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1)
+            label_at: lines_core::levels::LabelAt::Low,
+            ..themed(EDGE.0, Some(EDGE.1), LineType::Solid, 1)
         },
     ),
+    LevelType::zone(
+        "supply",
+        "Supply zone",
+        "Zones",
+        TypeStyle {
+            fill: FillStyle {
+                opacity: 40,
+                ..TypeStyle::OWN.fill
+            },
+            label_at: lines_core::levels::LabelAt::High,
+            ..themed(EDGE.0, Some(EDGE.1), LineType::Solid, 1)
+        },
+    )
+    .child_of("zone"),
     LevelType::zone(
         "band",
         "VWAP band",
         "Zones",
-        themed(GRAY.0, Some(GRAY.1), LineType::Dotted, 1),
+        themed(EDGE.0, Some(EDGE.1), LineType::Dotted, 1),
     ),
 ];
 
@@ -359,6 +384,20 @@ impl LevelSource for DemoLevels {
         for s in series {
             b = b.series(std::sync::Arc::new(s));
         }
+        // The legend: a title and signed stats (synthetic words and numbers).
+        let stat = |name: &str, text: &str, tone| lines_core::levels::LegendStat {
+            name: name.into(),
+            text: text.into(),
+            tone,
+        };
+        b = b.legend(lines_core::levels::LevelLegend {
+            title: Some("Synthetic".into()),
+            stats: vec![
+                stat("Range", "12.50", lines_core::levels::StatTone::Plain),
+                stat("Bias", "+1.5", lines_core::levels::StatTone::Up),
+                stat("Skew", "\u{2212}0.4", lines_core::levels::StatTone::Down),
+            ],
+        });
         b.build(ctx.product.price.tick)
             .map(Some)
             .map_err(|e| e.to_string())

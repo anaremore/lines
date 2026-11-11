@@ -816,7 +816,7 @@ fn a_shared_imbalance_color_is_warned_about() {
 
 // ---- level types --------------------------------------------------------------------------
 
-use lines_core::levels::{LabelMode, LevelType, TypeStyle};
+use lines_core::levels::{LabelAt, LabelColor, LabelMode, LevelType, TypeStyle};
 
 /// A source's declared types, like a real source's: a zone type with a recommended theme
 /// color and fill, a line type with a recommended text color, one keeping the levels' own.
@@ -837,7 +837,7 @@ static TYPES: [LevelType; 3] = [
                 color: Color::Palette(2),
                 opacity: 50,
             },
-            light: None,
+            ..TypeStyle::OWN
         },
     ),
     LevelType::line(
@@ -965,6 +965,7 @@ fn a_saved_per_source_style_migrates() {
         &LevelEdit {
             looks,
             types: &TYPES,
+            labels: Vec::new(),
             label: LabelMode::NamePrice,
             label_default: LabelMode::Name,
         },
@@ -1102,9 +1103,33 @@ fn the_level_editor_round_trips() {
             "Width",
             "Opacity",
             "Fill",
-            "Fill opacity"
+            "Fill opacity",
+            "Label color",
+            "Label at"
         ]
     );
+    // Its labels: theme text, under its low edge.
+    let rows = e.rows();
+    let color = rows.iter().position(|r| r.label == "Label color").unwrap();
+    let text = rows[color]
+        .controls
+        .iter()
+        .position(|(c, _)| *c == Control::LabelColor(LabelColor::Text))
+        .unwrap();
+    assert_eq!(e.click(color, text), Outcome::Changed);
+    let at = rows.iter().position(|r| r.label == "Label at").unwrap();
+    let low = rows[at]
+        .controls
+        .iter()
+        .position(|(c, _)| *c == Control::LabelAt(LabelAt::Low))
+        .unwrap();
+    assert_eq!(e.click(at, low), Outcome::Changed);
+    assert_eq!(e.click(at, low), Outcome::Nothing, "already there");
+    // A line type offers the label color, never an edge (a line has one price).
+    e.select_tab(3);
+    let labels: Vec<_> = e.rows().iter().map(|r| r.label).collect();
+    assert!(labels.contains(&"Label color") && !labels.contains(&"Label at"));
+    e.select_tab(2);
     // Pick the fill's second study color and hide the type; then turn the price off (tab 0).
     let rows = e.rows();
     let fill = rows.iter().position(|r| r.label == "Fill").unwrap();
@@ -1125,7 +1150,19 @@ fn the_level_editor_round_trips() {
     styles = ss.levels["demo"].clone();
     assert_eq!(
         styles["types"]["demand"],
-        serde_json::json!({"shown": false, "fill": {"color": "p1", "opacity": 75}})
+        serde_json::json!({
+            "shown": false,
+            "fill": {"color": "p1", "opacity": 75},
+            "label-color": "text",
+            "label-at": "low"
+        })
+    );
+    assert_eq!(
+        read_type_label(&styles, &TYPES[0]),
+        TypeLabel {
+            color: LabelColor::Text,
+            at: LabelAt::Low
+        }
     );
     assert_eq!(styles["types"]["mid"], serde_json::json!({"width": 2}));
     assert_eq!(styles["label"], "name");
@@ -1157,6 +1194,80 @@ fn the_level_editor_round_trips() {
     assert_eq!(e.key("enter", false, None), Outcome::Changed);
     assert_eq!(e.parts[2].fill.unwrap().0.color, Color::Custom(MAGENTA));
     assert_eq!(e.parts[2].style, line_before, "the line is untouched");
+}
+
+/// A type's label options are saved as optional fields, each only while it differs from the
+/// type's own; back at the type's own they go (and an emptied entry with them); fields this
+/// build doesn't know, and unreadable values, stay.
+#[test]
+fn type_label_options_save_only_what_differs() {
+    let t = &TYPES[0];
+    let own = TypeLabel::of(t);
+    assert_eq!(own.color, LabelColor::Level);
+    assert_eq!(own.at, LabelAt::Own);
+    let mut m = PartStyles::new();
+    assert_eq!(read_type_label(&m, t), own);
+    write_type_label(&mut m, t, own);
+    assert!(m.is_empty(), "nothing saved for the type's own");
+    let high = TypeLabel {
+        at: LabelAt::High,
+        ..own
+    };
+    write_type_label(&mut m, t, high);
+    assert_eq!(
+        serde_json::to_value(&m).unwrap(),
+        serde_json::json!({"types": {"demand": {"label-at": "high"}}})
+    );
+    write_type_label(&mut m, t, own);
+    assert!(m.is_empty(), "back at its own: the entry goes");
+    // A newer build's value this build can't read: kept while the field isn't changed.
+    let mut m: PartStyles =
+        serde_json::from_str(r##"{"types": {"demand": {"label-at": "middle", "glow": 1}}}"##)
+            .unwrap();
+    assert_eq!(read_type_label(&m, t), own);
+    write_type_label(
+        &mut m,
+        t,
+        TypeLabel {
+            color: LabelColor::Text,
+            ..own
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(&m).unwrap(),
+        serde_json::json!({"types": {"demand": {"label-at": "middle", "glow": 1, "label-color": "text"}}})
+    );
+}
+
+/// A type's light-theme fill (`TypeStyle::fill_light`) applies on the light themes only, and
+/// only while the fill is the type's own.
+#[test]
+fn a_types_light_fill_applies_on_light_only() {
+    let t = LevelType::zone(
+        "gray",
+        "Gray zone",
+        "Zones",
+        TypeStyle {
+            fill: FillStyle {
+                color: Color::Custom(Rgb::hex(0x5a5e68)),
+                opacity: 50,
+            },
+            fill_light: Some(Color::Custom(Rgb::hex(0x9a9ea8))),
+            ..TypeStyle::OWN
+        },
+    );
+    let src = Look::defaults(&LEVELS);
+    let ty = read_type(&PartStyles::new(), &t);
+    let r = resolve_type(&t, &src, &ty);
+    assert_eq!(r.fill_color(true), Color::Custom(Rgb::hex(0x5a5e68)));
+    assert_eq!(r.fill_color(false), Color::Custom(Rgb::hex(0x9a9ea8)));
+    let mut picked = ty;
+    picked.fill = Some(FillStyle {
+        color: Color::Palette(1),
+        opacity: 50,
+    });
+    let r = resolve_type(&t, &src, &picked);
+    assert_eq!(r.fill_color(false), Color::Palette(1), "picked: everywhere");
 }
 
 /// A source declaring no types keeps the editor it had (Lines and Zones on one plain tab row),
@@ -1331,6 +1442,7 @@ fn level_styles_are_app_wide_and_keep_unknown_fields() {
         &LevelEdit {
             looks,
             types: &[],
+            labels: Vec::new(),
             label: LabelMode::Name,
             label_default: LabelMode::Name,
         },
@@ -1406,6 +1518,7 @@ fn an_edit_changes_only_its_source() {
         &LevelEdit {
             looks,
             types: &[],
+            labels: Vec::new(),
             label: LabelMode::Name,
             label_default: LabelMode::Name,
         },

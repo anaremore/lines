@@ -98,8 +98,9 @@ fn legend_and_levels_describe_the_same_frame() {
         &vp(),
     );
     assert_eq!(
-        rows[i].text, "as of 13:00 UTC",
-        "the legend sees the map drawn"
+        (rows[i].text.as_str(), rows[i].title.as_deref()),
+        ("", Some("Synthetic")),
+        "the legend sees the map drawn (no time while current)"
     );
     assert!(!rows[i].warn);
     assert!(layer.placed_per_source()[i] > 0);
@@ -120,7 +121,7 @@ fn legend_and_levels_describe_the_same_frame() {
         BarsView::fixed(d.series.bars(), d.series.period_ms()),
         &vp(),
     );
-    assert_eq!(layer.legend()[i].text, "as of 13:00 UTC");
+    assert_eq!(layer.legend()[i].text, "");
     assert!(layer.placed_per_source()[i] > 0);
 }
 
@@ -155,11 +156,27 @@ fn layer_places_filters_and_reports_freshness() {
     let (_, _, kinds) = &layer.sources()[i];
     assert_eq!(
         kinds,
-        &["pivot", "resist", "support", "zone", "band", "anchor"]
+        &[
+            "pivot", "resist", "support", "supply", "zone", "band", "anchor"
+        ]
     );
+    // Current: the source's title and stats, never the map's time.
     let rows = layer.legend();
-    assert_eq!(rows[i].text, "as of 13:00 UTC");
-    assert!(!rows[i].warn);
+    assert_eq!(rows[i].text, "");
+    assert!(!rows[i].warn && !rows[i].dim);
+    assert_eq!(rows[i].title.as_deref(), Some("Synthetic"));
+    assert_eq!(
+        rows[i]
+            .stats
+            .iter()
+            .map(|s| (s.name.as_str(), s.text.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("Range", "12.50"),
+            ("Bias", "+1.5"),
+            ("Skew", "\u{2212}0.4")
+        ]
+    );
 
     // Kinds and sources hide; labels stay on their levels.
     layer.config.toggle_kind("demo", "zone");
@@ -183,11 +200,15 @@ fn layer_places_filters_and_reports_freshness() {
     layer.force_status(i, LevelStatus::Stale { age_ms: 300_000 });
     let rows = layer.legend();
     assert_eq!(
-        (rows[i].text.as_str(), rows[i].warn),
-        ("stale · 5 min", true)
+        (rows[i].text.as_str(), rows[i].warn, rows[i].dim),
+        ("· stale", false, true),
+        "stale: said in words, dimmed, never the map's time"
     );
+    assert!(!rows[i].stats.is_empty(), "its stats, dimmed with it");
     layer.force_status(i, LevelStatus::Missing);
-    assert_eq!(layer.legend()[i].text, "missing");
+    let rows = layer.legend();
+    assert_eq!(rows[i].text, "missing");
+    assert!(rows[i].stats.is_empty() && rows[i].title.is_none());
 }
 
 #[test]
@@ -479,6 +500,7 @@ fn types_resolve_hide_and_label_with_the_price() {
         &study_style::LevelEdit {
             looks,
             types,
+            labels: Vec::new(),
             label: LabelMode::NamePrice,
             label_default: default,
         },
@@ -495,8 +517,8 @@ fn types_resolve_hide_and_label_with_the_price() {
         .collect();
     assert!(texts.contains(&"Pivot 6010 : 6010.00"), "{texts:?}");
     assert!(
-        texts.contains(&"Supply : 6022.50"),
-        "a zone: its upper edge"
+        texts.contains(&"Supply : 6022.50") && texts.contains(&"Demand : 5990.00"),
+        "a zone: the edge its label sits at (supply's high, demand's low)"
     );
     assert!(
         texts.contains(&"VWAP ±7.50"),
@@ -694,9 +716,9 @@ fn too_narrow_for_labels_no_labels_at_all() {
     let g = frame(&mut layer, 800.0);
     assert!(g > 0.0);
     assert!(layer.placed(i).iter().any(|p| p.label_y.is_some()));
-    // 40 % of 100 px (40) is under the shortest cut ("X…" and its chip, `LABEL_CHROME` wide,
+    // 40 % of 60 px (24) is under the shortest cut ("X…" and its chip, `LABEL_CHROME` wide,
     // in whole steps).
-    let g = frame(&mut layer, 100.0);
+    let g = frame(&mut layer, 60.0);
     assert_eq!(g, 0.0, "no gutter");
     assert!(
         layer.placed(i).iter().all(|p| p.label_y.is_none()),
@@ -857,6 +879,7 @@ fn one_style_restyles_every_chart_of_the_source() {
         &study_style::LevelEdit {
             looks,
             types,
+            labels: Vec::new(),
             label,
             label_default: label,
         },
@@ -1021,14 +1044,16 @@ fn a_series_only_push_keeps_label_state() {
 #[test]
 fn theme_change_drops_shaped_labels_only() {
     let mut layer = LevelsLayer::new(LevelsConfig::default());
-    layer
-        .shaped
-        .insert("Pivot 6010".into(), gpui::ShapedLine::default());
+    layer.shaped.get_or_make(
+        "Pivot 6010",
+        gpui::Hsla::default(),
+        gpui::ShapedLine::default,
+    );
     layer
         .cuts
         .insert("Pivot 6010".into(), (40.0, "P… 6010".into()));
     layer.theme_changed();
-    assert!(layer.shaped.is_empty());
+    assert_eq!(layer.shaped.len(), 0);
     assert_eq!(layer.cuts.len(), 1);
 }
 
@@ -1067,8 +1092,9 @@ fn reserved(t: &crate::theme::Theme) -> Vec<(&'static str, lines_core::style::Rg
 
 /// Every demo level's default color, as the layer resolves it (`study_style::resolve_type`,
 /// then `TypeLook::line_color` for the theme; a type left at the level's own color draws the
-/// map's color, decision 0022): a line (3:1) on the chart of every theme and palette, and clear
-/// of every color with a meaning there.
+/// map's color, decision 0022): a line (3:1) on the chart of every theme and palette (a zone's
+/// edges a dim gray, seen but quieter than the candles), and clear of every color with a
+/// meaning there.
 #[test]
 fn demo_level_colors_read_and_stay_off_meanings() {
     use crate::theme::{Theme, rgb_of, source_colour};
@@ -1112,7 +1138,19 @@ fn demo_level_colors_read_and_stay_off_meanings() {
             };
             let c = rgb_of(drawn);
             let r = contrast(c, rgb_of(t.bg));
-            assert!(r >= 3.0, "{}: {kind}: {r:.2}", t.name);
+            if ty.zone {
+                // A zone's or band's edges frame it: a dim gray, quieter than the candles but
+                // still seen.
+                let candles = contrast(rgb_of(t.up), rgb_of(t.bg))
+                    .min(contrast(rgb_of(t.down), rgb_of(t.bg)));
+                assert!(
+                    (1.5..candles).contains(&r),
+                    "{}: {kind}: {r:.2} (candles {candles:.2})",
+                    t.name
+                );
+            } else {
+                assert!(r >= 3.0, "{}: {kind}: {r:.2}", t.name);
+            }
             for (what, m) in reserved(&t) {
                 let de = delta_e_2000(c, m);
                 assert!(
@@ -1125,24 +1163,380 @@ fn demo_level_colors_read_and_stay_off_meanings() {
     }
 }
 
-/// A level label's swatch is drawn in its line's own type: each type's sample is its own,
-/// a full period of it inside the swatch.
+/// Labels are in each level's color where that is AA on the label (4.5:1 on its box over
+/// every underlay and the source's zone fills), else theme text for that label only: in every
+/// theme and palette, for the type's recommended color, a user's color and a type asking for
+/// text. The demo's demand zone sits under its low edge and its supply zone above its high
+/// edge, each with that edge's price.
 #[test]
-fn label_swatches_show_the_line_type() {
-    use lines_core::style::LineType;
-    let all = LineType::ALL.map(swatch_segments);
-    for (i, (segs, n)) in all.iter().enumerate() {
-        for &(x, w) in &segs[..*n] {
-            assert!(
-                x >= 0.0 && w > 0.0 && x + w <= SWATCH_W,
-                "{:?}",
-                LineType::ALL[i]
-            );
-        }
-        // A full period: a pattern shows at least two marks (solid is one bar).
-        assert!(*n >= 2 || LineType::ALL[i] == LineType::Solid);
-        for (j, other) in all.iter().enumerate().skip(i + 1) {
-            assert_ne!((segs, n), (&other.0, &other.1), "{i} and {j}");
+fn labels_take_the_level_color_where_it_reads_and_their_types_edge() {
+    use crate::theme::rgb_of;
+    use lines_core::levels::{LabelAt, LabelColor, LabelMode};
+    use lines_core::style::Color;
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let i = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo")
+        .expect("demo serves ES");
+    let frame = |layer: &mut LevelsLayer| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+        );
+    };
+    frame(&mut layer);
+    // Every label color reads (AA) on its box over the gutter's chart and grid, or is the
+    // text.
+    let reads = |t: &Theme, c: Hsla| t.level_label_ratio(c, &[]) >= 4.5;
+    let mut colored = 0;
+    let mut fell_back = 0;
+    for t in Theme::all() {
+        for c in layer.label_colors_for(i, &t) {
+            if c == t.text_main {
+                fell_back += 1;
+            } else {
+                colored += 1;
+                assert!(reads(&t, c), "{}: {c:?}", t.name);
+            }
         }
     }
+    assert!(
+        colored > 0,
+        "the demo's labels take their colors where they read"
+    );
+    assert!(
+        fell_back > 0,
+        "and fall back where they don't (the light grays)"
+    );
+    // On dark, the pivot's label is the pivot's line color.
+    let themes = Theme::all();
+    let dark = &themes[0];
+    assert!(dark.is_dark());
+    let pivot = layer.label_colors_for(i, dark)[0];
+    assert_ne!(pivot, dark.text_main);
+
+    // A user's color that can't read (the chart's own background) falls back; a type asking
+    // for text gets text.
+    let (types, default) = layer.source_types("demo").unwrap();
+    let mut styles = BTreeMap::new();
+    let mut looks = Look::defaults(&study_style::LEVELS).to_vec();
+    for t in types {
+        looks.push(study_style::read_type(&PartStyles::new(), t));
+    }
+    let pivot_at = study_style::LEVELS.len();
+    if let crate::style_editor::PartStyle::Line(l) = &mut looks[pivot_at].style {
+        l.color = Color::Custom(rgb_of(dark.bg));
+    }
+    let mut labels: Vec<_> = types.iter().map(study_style::TypeLabel::of).collect();
+    let resist = types.iter().position(|t| t.id == "resist").unwrap();
+    labels[resist].color = LabelColor::Text;
+    study_style::set_level_style(
+        &mut styles,
+        "demo",
+        &study_style::LevelEdit {
+            looks,
+            types,
+            labels,
+            label: LabelMode::NamePrice,
+            label_default: default,
+        },
+    );
+    layer.set_styles(&styles);
+    frame(&mut layer);
+    let colors = layer.label_colors_for(i, dark);
+    assert_eq!(colors[0], dark.text_main, "a color that can't read: text");
+    let map = layer.map(i).unwrap().clone();
+    let resist_level = map
+        .levels
+        .iter()
+        .position(|l| map.kinds[usize::from(l.kind)] == "resist")
+        .unwrap();
+    assert_eq!(colors[resist_level], dark.text_main, "asked for text");
+    // Saved as the type's own field, only while it differs.
+    assert_eq!(
+        styles["demo"]["types"]["resist"]["label-color"],
+        serde_json::json!("text")
+    );
+    assert!(
+        styles["demo"]["types"]["pivot"]
+            .get("label-color")
+            .is_none()
+    );
+
+    // The demo's demand zone: labeled under its low edge, with that edge's price; its supply
+    // zone above its high edge, with that edge's price.
+    for (kind, at, text) in [
+        ("zone", LabelAt::Low, "Demand : 5990.00"),
+        ("supply", LabelAt::High, "Supply : 6022.50"),
+    ] {
+        let zone = map
+            .levels
+            .iter()
+            .position(|l| map.kinds[usize::from(l.kind)] == kind)
+            .unwrap();
+        let placed = *layer
+            .placed(i)
+            .iter()
+            .find(|p| p.index as usize == zone)
+            .unwrap();
+        assert_eq!(placed.anchor, at, "{kind}");
+        if let Some(y) = placed.label_y {
+            match at {
+                LabelAt::Low => assert!(y > placed.bottom, "under its low edge: {y}"),
+                _ => assert!(y < placed.top, "above its high edge: {y}"),
+            }
+        }
+        assert_eq!(layer.label_texts(i)[zone].as_deref(), Some(text), "{kind}");
+    }
+}
+
+/// A child kind (`LevelType::parent`) hides with its parent's type too: hiding the parent in
+/// its style (the style editor's Show; a saved `types.<parent>.shown: false`) hides the child
+/// as well (the demo's supply zone is a kind of its zones).
+#[test]
+fn a_parent_type_hidden_in_its_style_hides_its_children() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut layer, store, i) = demo_layer();
+    let frame = |layer: &mut LevelsLayer| {
+        let d = store.read();
+        layer.snapshot(d.market_time);
+        layer.prepare(
+            &d,
+            BarsView::fixed(d.series.bars(), d.series.period_ms()),
+            &vp(),
+        );
+    };
+    frame(&mut layer);
+    let map = layer.map(i).unwrap().clone();
+    let of = |kind: &str| {
+        map.levels
+            .iter()
+            .position(|l| map.kinds[usize::from(l.kind)] == kind)
+            .unwrap()
+    };
+    let (zone, supply) = (of("zone"), of("supply"));
+    let placed =
+        |layer: &LevelsLayer, at: usize| layer.placed(i).iter().any(|p| p.index as usize == at);
+    assert!(placed(&layer, zone) && placed(&layer, supply));
+    assert!(layer.kind_styled_shown("demo", "supply"));
+    let hidden: BTreeMap<String, PartStyles> =
+        serde_json::from_str(r#"{"demo": {"types": {"zone": {"shown": false}}}}"#).unwrap();
+    layer.set_styles(&hidden);
+    frame(&mut layer);
+    assert!(!placed(&layer, zone), "the parent hidden");
+    assert!(!placed(&layer, supply), "and its child with it");
+    assert!(!layer.kind_styled_shown("demo", "supply"));
+    // Hiding only the child leaves the parent.
+    let child: BTreeMap<String, PartStyles> =
+        serde_json::from_str(r#"{"demo": {"types": {"supply": {"shown": false}}}}"#).unwrap();
+    layer.set_styles(&child);
+    frame(&mut layer);
+    assert!(placed(&layer, zone) && !placed(&layer, supply));
+}
+
+/// A legend row that doesn't fit the legend's width: a long title is cut with "…" at a whole
+/// character, within the room; stats that don't fit are dropped whole (never a number cut
+/// mid-glyph), leaving room for the closing "…"; a row that fits is left whole.
+#[test]
+fn a_long_legend_row_is_cut_whole() {
+    use super::fit_legend;
+    let mono = |t: &str| t.chars().count() as f32 * 7.0;
+    // Fits: whole.
+    let f = fit_legend(300.0, 70.0, 0.0, Some("Map A"), &[50.0, 60.0], 12.0, mono);
+    assert_eq!(f.title.as_deref(), Some("Map A"));
+    assert_eq!((f.stats, f.more), (2, false));
+    // A title wider than its room: cut at a whole character, "…" last, within the room.
+    let long = "A very long legend title from a source";
+    let f = fit_legend(200.0, 70.0, 0.0, Some(long), &[], 12.0, mono);
+    let t = f.title.unwrap();
+    assert!(t.ends_with('…') && mono(&t) <= 130.0, "{t}");
+    assert!(long.starts_with(t.trim_end_matches('…')), "{t}");
+    // Stats: as many whole as fit with the "…" after them.
+    let w = [80.0, 80.0, 80.0, 80.0];
+    let f = fit_legend(200.0, 70.0, 0.0, None, &w, 12.0, mono);
+    assert_eq!((f.stats, f.more), (2, true));
+    assert!(80.0 * 2.0 + 12.0 + 12.0 + mono("…") <= 200.0);
+    // The last one fits without room for "…": all shown.
+    let f = fit_legend(80.0 * 2.0 + 12.0, 70.0, 0.0, None, &w[..2], 12.0, mono);
+    assert_eq!((f.stats, f.more), (2, false));
+    // Not even one stat: none, and the "…".
+    let f = fit_legend(60.0, 70.0, 0.0, None, &w, 12.0, mono);
+    assert_eq!((f.stats, f.more), (0, true));
+    // A title whose room can't hold even "…": no title.
+    assert_eq!(
+        fit_legend(70.0, 70.0, 0.0, Some(long), &[], 12.0, mono).title,
+        None
+    );
+}
+
+/// A stale row keeps its "stale" whole: a 40-character title at 12 px (about 7 px a
+/// character) is cut to leave room for the state and its gap, never the state squeezed out.
+#[test]
+fn a_stale_legend_row_keeps_stale_beside_a_long_title() {
+    let mono = |t: &str| t.chars().count() as f32 * 7.0;
+    // The legend's room inside its padding (360 px, 8 px a side, a pixel spare).
+    let room = 360.0 - 16.0 - 1.0;
+    let gap = 6.0;
+    let head = mono("Acme Levels") + gap + mono("· ");
+    let status = gap + mono("· stale");
+    let title = "Map ABC with a forty character long title";
+    assert!(title.chars().count() >= 40);
+    let f = fit_legend(room, head, status, Some(title), &[], 12.0, mono);
+    let t = f.title.expect("a cut title");
+    assert!(t.ends_with('…'), "{t}");
+    assert!(
+        head + mono(&t) + status <= room,
+        "{t}: stale keeps its room"
+    );
+    // Current (no state): the title gets that room too.
+    let f = fit_legend(room, head, 0.0, Some(title), &[], 12.0, mono);
+    assert!(f.title.unwrap().chars().count() > t.chars().count());
+}
+
+/// Labels of one text in four or more colors (levels of the same name in their own colors,
+/// the stale dim) are each shaped once and kept: a second frame shapes nothing, and a flip
+/// back and forth shapes nothing either. The cache stays bounded.
+#[test]
+fn same_text_labels_in_many_colors_are_shaped_once() {
+    let mut cache: ColorCache<u32> = ColorCache::new();
+    let mut made = 0;
+    let colors: Vec<gpui::Hsla> = (0..6)
+        .map(|i| gpui::hsla(i as f32 / 6.0, 0.6, 0.5, 1.0))
+        .collect();
+    for _frame in 0..3 {
+        for c in &colors {
+            cache.get_or_make("Demand Zone : 7555.00", *c, || {
+                made += 1;
+                made
+            });
+        }
+    }
+    assert_eq!(made, 6, "each color shaped once");
+    // Bounded: past MAX_SHAPED it starts over, never grows past it.
+    for k in 0..(MAX_SHAPED * 2) {
+        cache.get_or_make(&format!("t{k}"), colors[0], || 0);
+        assert!(cache.len() <= MAX_SHAPED);
+    }
+}
+
+/// Level lines and zone edges leave the last-price line's row clear (it is drawn later,
+/// translucent, and reads above them): a stroke across it is split around it, one beside it
+/// is whole, one inside it is gone.
+#[test]
+fn level_strokes_leave_the_last_price_row_clear() {
+    let parts = |y, w, last| around_last(y, w, last, 1.0).collect::<Vec<_>>();
+    assert_eq!(parts(10.0, 2.0, None), [(10.0, 2.0)]);
+    assert_eq!(parts(10.0, 2.0, Some(20.0)), [(10.0, 2.0)]);
+    assert_eq!(parts(10.0, 1.0, Some(10.0)), []);
+    assert_eq!(parts(10.0, 3.0, Some(11.0)), [(10.0, 1.0), (12.0, 1.0)]);
+    assert_eq!(parts(10.0, 2.0, Some(9.5)), [(10.5, 1.5)]);
+}
+
+/// In footprint mode the last-price line breaks at drawn cells, so a level stroke keeps its
+/// last-price gap only where that line is drawn: whole across a cell, split beside it.
+#[test]
+fn level_strokes_gap_only_where_the_last_price_line_is_drawn() {
+    use crate::footprint::{FootprintConfig, FootprintLayer};
+    let mut fp = FootprintLayer::new(FootprintConfig::default());
+    let quads = |fp: &FootprintLayer, last| {
+        let mut v = Vec::new();
+        stroke_around_last(0.0, 100.0, 10.0, 3.0, last, 1.0, fp, &mut |a, b, t, h| {
+            v.push((a, b, t, h))
+        });
+        v
+    };
+    // No footprint: split around the row across the whole stroke.
+    assert_eq!(
+        quads(&fp, Some(11.0)),
+        [(0.0, 100.0, 10.0, 1.0), (0.0, 100.0, 12.0, 1.0)]
+    );
+    // Away from the row: whole.
+    assert_eq!(quads(&fp, Some(40.0)), [(0.0, 100.0, 10.0, 3.0)]);
+    // A cell across the row at 40..60: the stroke is whole there.
+    fp.set_drawn(vec![[40.0, 60.0, 0.0, 20.0]]);
+    assert_eq!(
+        quads(&fp, Some(11.0)),
+        [
+            (0.0, 40.0, 10.0, 1.0),
+            (0.0, 40.0, 12.0, 1.0),
+            (40.0, 60.0, 10.0, 3.0),
+            (60.0, 100.0, 10.0, 1.0),
+            (60.0, 100.0, 12.0, 1.0),
+        ]
+    );
+}
+
+/// The last-price line never runs through a level label's chip: it breaks at each chip on its
+/// row and runs whole past the others.
+#[test]
+fn the_last_price_line_breaks_at_label_chips() {
+    let segs = |chips: &[[f32; 4]], y| {
+        let mut v = Vec::new();
+        around_chips(chips, y, 1.0, 0.0, 500.0, |a, b| v.push((a, b)));
+        v
+    };
+    let chips = [[420.0, 496.0, 100.0, 116.0], [400.0, 496.0, 140.0, 156.0]];
+    assert_eq!(segs(&chips, 50.0), [(0.0, 500.0)]);
+    assert_eq!(segs(&chips, 108.0), [(0.0, 420.0), (496.0, 500.0)]);
+    assert_eq!(segs(&chips, 150.0), [(0.0, 400.0), (496.0, 500.0)]);
+    // A row touching a chip's edge only: a hair above its top is clear.
+    assert_eq!(segs(&chips, 99.0), [(0.0, 500.0)]);
+    // Two sources' chips overlapping on one row: one gap across both.
+    let both = [[420.0, 496.0, 100.0, 116.0], [380.0, 450.0, 104.0, 120.0]];
+    assert_eq!(segs(&both, 110.0), [(0.0, 380.0), (496.0, 500.0)]);
+    assert_eq!(segs(&[], 110.0), [(0.0, 500.0)]);
+}
+
+/// A stale map's zone fills, zone edges and lines dim with it, whatever their color: a type's
+/// fixed color (the demo's) and the source's own alike, in every theme.
+#[test]
+fn stale_fills_and_edges_dim_with_their_map() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let (layer, _store, i) = demo_layer();
+    let slot = &layer.slots[i];
+    let map = slot.map.clone().expect("a demo map");
+    let mut zones = 0;
+    for t in Theme::all() {
+        for l in &map.levels {
+            let zone = matches!(l.shape, LevelShape::Zone { .. });
+            let pairs = [
+                (
+                    slot.stroke(&t, l, 1.0, false, 1.0).color,
+                    slot.stroke(&t, l, 0.4, false, 1.0).color,
+                ),
+                (
+                    slot.stroke(&t, l, 1.0, zone, 1.0).color,
+                    slot.stroke(&t, l, 0.4, zone, 1.0).color,
+                ),
+            ];
+            for (now, stale) in pairs {
+                assert!(
+                    (stale.a - now.a * 0.4).abs() < 1e-5,
+                    "{}: {:?} {:?}",
+                    t.name,
+                    now,
+                    stale
+                );
+            }
+            if zone {
+                zones += 1;
+                let (now, stale) = (slot.zone_fill(&t, l, 1.0), slot.zone_fill(&t, l, 0.4));
+                assert!(now.a > 0.0);
+                assert!((stale.a - now.a * 0.4).abs() < 1e-5, "{}: fill", t.name);
+                assert_eq!((stale.h, stale.s, stale.l), (now.h, now.s, now.l));
+            }
+        }
+    }
+    assert!(zones > 0, "the demo has zones");
 }

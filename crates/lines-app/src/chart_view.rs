@@ -60,6 +60,7 @@ use lines_core::geometry::{
     Crosshair, CrosshairMode, GridSpace, Span, TimeLabel, crosshair, label_clear_of_tags, slot_x,
     snap, write_ohlcv,
 };
+use lines_core::levels::StatTone;
 use lines_core::timeframe::{BarSource, bar_date};
 use lines_core::viewport::{MAX_BAR_PX, MIN_BAR_PX, ScaleDrag, ScaleMode};
 use lines_core::{
@@ -463,6 +464,8 @@ pub struct ChartView {
     /// The legend and readout block at the plot's top-left (width, bottom; plot-local), as
     /// the last render built it: the footprint draws no cell number under it.
     legend_band: std::cell::Cell<(f32, f32)>,
+    /// Each level legend row's fit as last measured, with what it was measured for.
+    legend_fits: std::cell::RefCell<Vec<(LegendFitKey, crate::levels_layer::LegendFit)>>,
     /// The footprint's reasons for candles as last rendered in the legend.
     fp_seen: crate::footprint::Fallbacks,
     /// The trade marker under the pointer as of the last prepare: its hover text is built in
@@ -827,6 +830,7 @@ impl ChartView {
             fp_seen: Default::default(),
             trade_tip_seen: None,
             legend_band: std::cell::Cell::new((8.0 + LEGEND_MAX_W, readout_bottom())),
+            legend_fits: std::cell::RefCell::new(Vec::new()),
             visibility: fixture.visibility,
             picker,
             store,
@@ -2564,7 +2568,7 @@ impl ChartView {
 
     /// Study legends (VWAP …) and level-source rows, top left under the readout, unless the
     /// chart hides its study labels (render time).
-    fn legend(&self, t: &Theme) -> Option<gpui::AnyElement> {
+    fn legend(&self, t: &Theme, window: &mut Window) -> Option<gpui::AnyElement> {
         if !self.visibility.draws_labels() {
             // The readout still shows over the plot's top-left.
             self.legend_band.set((8.0 + LEGEND_MAX_W, readout_bottom()));
@@ -2606,7 +2610,10 @@ impl ChartView {
             usize::from(studies.is_some())
                 + usize::from(fp.is_some())
                 + usize::from(!rows.is_empty()),
-            self.studies.legend_rows() + usize::from(fp.is_some()) + rows.len(),
+            self.studies.legend_rows()
+                + usize::from(fp.is_some())
+                + rows.len()
+                + rows.iter().filter(|r| !r.stats.is_empty()).count(),
         );
         let row_h = crate::zoom::f(12.0 * 1.3 + 4.0);
         let bottom = crate::zoom::f(30.0 + boxes as f32 * 12.0 + 4.0) + text_rows as f32 * row_h;
@@ -2616,9 +2623,75 @@ impl ChartView {
             self.legend_band.set((8.0 + LEGEND_MAX_W, readout_bottom()));
             return None;
         }
-        // Level rows: the source's name, then its state; a long reason ends in an ellipsis at
-        // the legend's width, never running over the chart.
+        // Level rows: the source's name, its legend title, then its state (none while current);
+        // a long reason ends in an ellipsis at the legend's width, never running over the
+        // chart; a long title is cut with "…" at a whole character. A source's stats on a line
+        // under it, whole: those that don't fit are dropped and the line ends with "…" (a
+        // number is never cut, `levels_layer::fit_legend`). Each stat's name dim, its value in
+        // the up or down color where that is AA on the legend box (`Theme::legend_stat_text`,
+        // else text), the sign always written; a stale row all dim. The box is opaque, so no
+        // zone, band or line shows through it.
+        let size = crate::zoom::f(12.0);
+        let rem = f32::from(window.rem_size());
+        // Inside the box's padding and its 1 px edges, a pixel spare for rounding.
+        let room = LEGEND_MAX_W - 2.0 * crate::zoom::f(8.0) - 2.0 - 1.0;
         let levels = (!rows.is_empty()).then(|| {
+            // Each row's fit is measured once per (row content, room, zoom, rem) and kept
+            // (`legend_fits`): a frame that shows the same legend measures nothing.
+            let mut fits = self.legend_fits.borrow_mut();
+            fits.truncate(rows.len());
+            let zoom = crate::zoom::generation();
+            let rows: Vec<_> = rows
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let key = LegendFitKey {
+                        label: r.label,
+                        title: r.title.clone(),
+                        text: r.text.clone(),
+                        stats: r.stats.clone(),
+                        room: room.to_bits(),
+                        rem: rem.to_bits(),
+                        zoom,
+                    };
+                    if let Some((k, fit)) = fits.get(i)
+                        && *k == key
+                    {
+                        return (r, fit.clone());
+                    }
+                    let mut m = |s: &str| crate::levels_layer::measure_at(s, size, t, window);
+                    let head = m(r.label) + 0.5 * rem + m("· ");
+                    // The state ("· stale", "missing · …") keeps its room and gap: the title
+                    // is cut first.
+                    let status = if r.text.is_empty() {
+                        0.0
+                    } else {
+                        0.5 * rem + m(&r.text)
+                    };
+                    let stat_w: Vec<f32> = r
+                        .stats
+                        .iter()
+                        .map(|s| m(&s.name) + 0.25 * rem + m(&s.text))
+                        .collect();
+                    let fit = crate::levels_layer::fit_legend(
+                        room,
+                        head,
+                        status,
+                        r.title.as_deref(),
+                        &stat_w,
+                        0.75 * rem,
+                        &mut m,
+                    );
+                    let entry = (key, fit.clone());
+                    if i < fits.len() {
+                        fits[i] = entry;
+                    } else {
+                        fits.push(entry);
+                    }
+                    (r, fit)
+                })
+                .collect();
+            drop(fits);
             div()
                 .flex()
                 .flex_col()
@@ -2626,22 +2699,77 @@ impl ChartView {
                 .max_w(px(LEGEND_MAX_W))
                 .px(crate::zoom::ui(8.0))
                 .py(crate::zoom::ui(4.0))
-                .bg(t.label_bg)
+                // Opaque across its whole width, and nothing drawn past it; a 1 px edge in the
+                // theme's line color.
+                .overflow_hidden()
+                .bg(t.legend_box())
+                .border_1()
+                .border_color(t.axis_line)
                 .text_size(crate::zoom::ui(12.0))
-                .children(rows.into_iter().map(|r| {
-                    div()
+                .children(rows.into_iter().map(|(r, fit)| {
+                    let head = div()
                         .flex()
                         .flex_row()
                         .gap_2()
                         .min_w_0()
-                        .child(div().flex_shrink_0().text_color(t.text_main).child(r.label))
+                        .whitespace_nowrap()
                         .child(
                             div()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(if r.warn { t.text_main } else { t.text_dim })
-                                .child(r.text),
+                                .flex_shrink_0()
+                                .text_color(if r.dim { t.text_dim } else { t.text_main })
+                                .child(r.label),
                         )
+                        .when_some(fit.title, |d, title| {
+                            d.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(t.text_dim)
+                                    .child(format!("· {title}")),
+                            )
+                        })
+                        .when(!r.text.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(if r.warn { t.text_main } else { t.text_dim })
+                                    .child(r.text),
+                            )
+                        });
+                    let dim = r.dim;
+                    let stats = (!r.stats.is_empty()).then(|| {
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap_3()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .children(r.stats.into_iter().take(fit.stats).map(|s| {
+                                let value = match (dim, s.tone) {
+                                    (true, _) => t.text_dim,
+                                    (false, StatTone::Plain) => t.text_main,
+                                    (false, StatTone::Up) => t.legend_stat_text(t.up),
+                                    (false, StatTone::Down) => t.legend_stat_text(t.down),
+                                };
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap_1()
+                                    .flex_shrink_0()
+                                    .child(div().text_color(t.text_dim).child(s.name))
+                                    .child(div().text_color(value).child(s.text))
+                            }))
+                            .when(fit.more, |d| {
+                                d.child(div().flex_shrink_0().text_color(t.text_dim).child("…"))
+                            })
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .min_w_0()
+                        .child(head)
+                        .children(stats)
                 }))
         });
         Some(
@@ -3662,7 +3790,7 @@ impl ChartView {
             } else {
                 (0.0, 0.0)
             };
-            // 130 px at 100 % zoom; on a narrow plot a quarter of it, or what the shortest
+            // 144 px at 100 % zoom; on a narrow plot a quarter of it, or what the shortest
             // useful cut needs, but never more than 40 % of it. Not even that: no labels at
             // all (`gutter_plan`).
             let plan =
@@ -5067,6 +5195,8 @@ impl ChartView {
                     crate::eyedropper::rect(rect(bx, c.body_top, bw, bh.max(hair)), color, body);
                 }
             }
+            // Painted labels this frame only (the last-price line breaks around them).
+            self.levels.clear_chips();
             if studies {
                 // Footprint cells' fills, then the study and level lines over them (visible
                 // across the cells), then the cells' numbers on tight boxes of their cell's
@@ -5124,7 +5254,13 @@ impl ChartView {
                     window,
                     cx,
                 );
-                self.levels.paint_front(plot, &t, window);
+                // The last price draws above every level line and zone edge: its row is
+                // left clear of them.
+                self.levels.set_last_y(
+                    self.last_trade
+                        .map(|p| self.vp.price_to_y(p.0 as f64) as f32),
+                );
+                self.levels.paint_front(plot, &t, &self.footprint, window);
                 self.footprint.paint_numbers(plot, &self.vp, &t, window, cx);
                 // In the gutter right of the newest bar (no bar under a label), under the
                 // drawings and the strategy markers as study labels always were.
@@ -5156,15 +5292,15 @@ impl ChartView {
                     window.paint_quad(fill(rect(a, y, b - a, hair), color));
                 });
             };
+            // The last-price line never runs through a level label's chip (nor a footprint
+            // number).
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
-                hline(
-                    window,
-                    y,
-                    0.0,
-                    pw,
-                    t.last.opacity(crate::theme::LAST_LINE_ALPHA),
-                );
+                let c = t.last.opacity(crate::theme::LAST_LINE_ALPHA);
+                let chips = self.levels.label_chips();
+                crate::levels_layer::around_chips(chips, y, hair, 0.0, pw, |a, b| {
+                    hline(window, y, a, b, c);
+                });
             }
             // The open position: a dashed line at its average price (never the last price's
             // solid violet).
@@ -6535,6 +6671,7 @@ impl ChartView {
                             None => crate::study_style::LevelEdit {
                                 looks: crate::study_style::looks_of(&e),
                                 types: &[],
+                                labels: Vec::new(),
                                 label: lines_core::levels::LabelMode::Name,
                                 label_default: lines_core::levels::LabelMode::Name,
                             },
@@ -8683,8 +8820,10 @@ fn prepare_studies(
     levels.columns(bars, vp);
 }
 
-/// The level labels' gutter's widest (logical px at 100 % zoom).
-const GUTTER_CAP: f32 = 130.0;
+/// The level labels' gutter's widest (logical px at 100 % zoom): a whole 8 px step with room
+/// (124 px) for a 22-character label with a five-digit price ("Prior Close : 27932.00") in
+/// the UI font (IBM Plex Sans, decision 0034) at 1400 px.
+const GUTTER_CAP: f32 = 144.0;
 
 /// Where a measure's readout goes (plot-local top-left): on the far side of the measured
 /// range from the live edge (left-aligned at the range's older end), above the box, or below
@@ -9061,6 +9200,19 @@ fn readout_bottom() -> f32 {
 /// Widest the level-source legend grows (logical px); longer text ends in an ellipsis.
 const LEGEND_MAX_W: f32 = 360.0;
 
+/// What a level legend row's fit was measured for: its content, the room, the zoom and the
+/// window's rem.
+#[derive(PartialEq)]
+struct LegendFitKey {
+    label: &'static str,
+    title: Option<String>,
+    text: String,
+    stats: Vec<lines_core::levels::LegendStat>,
+    room: u32,
+    rem: u32,
+    zoom: u32,
+}
+
 /// Charts narrower than this show the latency HUD's p99s only (no sparklines).
 const HUD_COMPACT_BELOW_PX: f32 = 1_200.0;
 
@@ -9224,7 +9376,7 @@ impl Render for ChartView {
                         )
                         .size_full(),
                     )
-                    .when_some(self.legend(&t), |d, l| d.child(l))
+                    .when_some(self.legend(&t, window), |d, l| d.child(l))
                     .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
                     .when_some(
                         crate::order_group_view::layer(self, window, &t, cx),

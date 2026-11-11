@@ -5,7 +5,8 @@ use lines_core::{Bar, ContractKey, Month, Price, Qty, UtcMillis};
 
 use super::demo::{self, DemoLevels};
 use super::runtime::{
-    LevelCell, LevelMode, LevelStatus, NOT_RECORDED, mode_for, read_recording, recording_path,
+    LevelCell, LevelMode, LevelStatus, NOT_RECORDED, legend_newly_dropped, mode_for,
+    read_recording, recording_path,
 };
 use super::*;
 use crate::catalog;
@@ -156,7 +157,9 @@ fn demo_decode_translates_the_anchor_only_where_the_chart_has_a_price() {
     assert_eq!(m.as_of, t("2026-11-05T13:00:00"));
     assert_eq!(
         m.kinds,
-        ["pivot", "resist", "support", "zone", "band", "anchor"]
+        [
+            "pivot", "resist", "support", "supply", "zone", "band", "anchor"
+        ]
     );
     let band = m.levels.iter().find(|l| l.is_vwap_relative()).unwrap();
     assert_eq!(band.vwap_offsets(), Some((-750.0, 750.0)));
@@ -651,4 +654,30 @@ fn registering_announces_a_serving_change() {
     let before = serving_generation();
     register(Arc::new(DemoLevels)).unwrap();
     assert!(serving_generation() > before);
+}
+
+/// A source that keeps sending a bad legend is warned about once, when its legend is first
+/// dropped (and again only after a good one), not on every refresh.
+#[test]
+fn a_dropped_legend_warns_once_per_change() {
+    let ctx = es_ctx();
+    let none = Fixed {
+        bars: Vec::new(),
+        now: None,
+    };
+    let good = DemoLevels
+        .decode(&ctx, &none, None, &frames())
+        .unwrap()
+        .unwrap();
+    let mut bad = good.clone();
+    bad.legend = None;
+    bad.legend_dropped = true;
+    assert!(legend_newly_dropped(None, &bad));
+    assert!(legend_newly_dropped(Some(&good), &bad));
+    assert!(
+        !legend_newly_dropped(Some(&bad), &bad),
+        "the same again: quiet"
+    );
+    assert!(!legend_newly_dropped(Some(&bad), &good));
+    assert!(!legend_newly_dropped(None, &good));
 }

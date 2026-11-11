@@ -27,8 +27,8 @@ use lines_core::{ContractKey, ProductId, UtcMillis};
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use super::{
-    ChartPrices, LevelContext, LevelFrame, LevelMap, LevelSource, RefreshMode, SettingValues,
-    decode_batch, encode_batch,
+    ChartPrices, LevelContext, LevelError, LevelFrame, LevelMap, LevelSource, RefreshMode,
+    SettingValues, decode_batch, encode_batch,
 };
 use crate::provider::Frame;
 use crate::recording::{Direction, FORMAT_VERSION, Header, Reader, Writer};
@@ -555,6 +555,16 @@ fn apply(
     let prev = cell.read().map.clone();
     let result = source.decode(ctx, prices, prev.as_deref(), frames);
     let series_only = matches!(&result, Ok(Some(m)) if m.series_update);
+    if let Ok(Some(m)) = &result
+        && legend_newly_dropped(prev.as_deref(), m)
+    {
+        // Once per change: a source that keeps sending the same bad legend logs it once.
+        tracing::warn!(
+            "levels {}: {}; its legend dropped, its levels kept",
+            source.id(),
+            LevelError::BadLegend
+        );
+    }
     cell.update(|s| match result {
         Ok(Some(map)) if map.product != ctx.product.id || map.source != source.id() => {
             s.error = Some(format!(
@@ -565,6 +575,12 @@ fn apply(
         r => s.take(r, time),
     });
     series_only
+}
+
+/// Whether `map`'s legend was dropped (`LevelMap::legend_dropped`) where the map before it
+/// (`prev`) kept its legend: the warning is logged once per change, not every refresh.
+pub(crate) fn legend_newly_dropped(prev: Option<&LevelMap>, map: &LevelMap) -> bool {
+    map.legend_dropped && !prev.is_some_and(|p| p.legend_dropped)
 }
 
 pub(crate) struct Recorder {

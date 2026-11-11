@@ -254,6 +254,25 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         s(name, quick, end, a)
     };
     v.push(paper("orders-armed", true, ORDERS, "--arm"));
+    // Level labels in each level's color, or theme text where that isn't AA (the light
+    // themes' gray and olive fallbacks), zone labels at their edges (supply above its high
+    // edge, demand under its low edge), the legend's title and signed stats. Only in a build
+    // with the demo source (`--features demo-levels`).
+    #[cfg(feature = "demo-levels")]
+    for (name, quick, theme) in [
+        ("levels-light", true, "--theme light"),
+        ("levels-light-cb", false, "--theme light --palette cb"),
+        ("levels-dark", false, "--theme dark"),
+    ] {
+        v.push(s(
+            name,
+            quick,
+            end,
+            args(&format!(
+                "--layout chart --size 1400x800 {theme} --demo-levels"
+            )),
+        ));
+    }
     // The trading panel's Qty and Bracket lists: anchored under their field, as wide as their
     // content (never the window's width).
     v.push(s(
