@@ -149,6 +149,8 @@ pub struct Studies {
     /// texts it was measured for.
     end_need: f32,
     end_texts: String,
+    /// The UI zoom (`crate::zoom::generation`) `end_need` was measured at.
+    end_zoom: u32,
     /// This frame's newest bar's slot's right edge in plot px: end tags go right of it.
     newest_right: Option<f32>,
     /// A line reaches the newest bar from here ([`reach_from`], [`reaches_newest`]; `None`:
@@ -208,16 +210,16 @@ fn out_of_plot<'a>(
     pw: f32,
     w: f32,
 ) -> Option<(f32, &'a [(f32, f32)])> {
-    use crate::levels_layer::{AXIS_LEADER, COLUMN_PAD, LabelPlace};
+    use crate::levels_layer::{LabelPlace, axis_edge, axis_leader, column_pad};
     let (x, room_w, rows) = match place {
         LabelPlace::Axis => (
-            pw + room.column + AXIS_LEADER,
-            room.axis_w - room.column - AXIS_LEADER - 2.0,
+            pw + room.column + axis_leader(),
+            room.axis_w - room.column - axis_leader() - axis_edge(),
             room.blocked,
         ),
         LabelPlace::Column => (
-            pw + COLUMN_PAD,
-            room.column - 2.0 * COLUMN_PAD,
+            pw + column_pad(),
+            room.column - 2.0 * column_pad(),
             room.column_blocked,
         ),
         LabelPlace::Chart => return None,
@@ -509,7 +511,7 @@ fn on_tick(v: f64, tick: i64) -> lines_core::Price {
 
 /// A tag's color bars: one per study it names, 3 px each with 1 px between.
 fn bars_w(n: usize) -> f32 {
-    n as f32 * 4.0 - 1.0
+    crate::zoom::f(n as f32 * 4.0 - 1.0)
 }
 
 /// A tag's box: an opaque chip of the chart's background (a line or a wick never shows
@@ -518,9 +520,9 @@ fn tag_box(window: &mut Window, at: (f32, f32), w: f32, h: f32, theme: &Theme, c
     let o = point(px(at.0), px(at.1));
     window.paint_quad(fill(Bounds::new(o, size(px(w), px(h))), theme.bg));
     for (i, c) in cs.iter().enumerate() {
-        let x = at.0 + i as f32 * 4.0;
+        let x = at.0 + i as f32 * crate::zoom::f(4.0);
         window.paint_quad(fill(
-            Bounds::new(point(px(x), px(at.1)), size(px(3.0), px(h))),
+            Bounds::new(point(px(x), px(at.1)), size(px(crate::zoom::f(3.0)), px(h))),
             *c,
         ));
     }
@@ -752,6 +754,7 @@ impl Studies {
             bar_boxes: Vec::new(),
             end_need: 0.0,
             end_texts: String::new(),
+            end_zoom: 0,
             newest_right: None,
             reach_from: None,
             newest_bar: None,
@@ -1066,7 +1069,8 @@ impl Studies {
         self.sync_tags((lines_core::display_tz::epoch(), crate::zoom::generation()));
         let (ox, oy) = origin;
         let (pw, ph) = (vp.width as f32, vp.height as f32);
-        let pad = 4.0;
+        // Paddings, gaps and the color bars at the UI zoom (`crate::zoom`), as the text.
+        let (pad, gap) = (crate::zoom::f(4.0), crate::zoom::f(2.0));
         let h = (label_px * 1.4).round();
         let line_h = px(h);
         let tick_h = (h * 0.5).round();
@@ -1205,11 +1209,11 @@ impl Studies {
                 );
                 let row = &mut edge_rows[usize::from(!above)];
                 let w = f32::from(line.width) + pad * 2.0 + bars_w(1);
-                let step = f32::from(*row) * (h + 2.0);
+                let step = f32::from(*row) * (h + gap);
                 let y = if above {
-                    2.0 + step
+                    gap + step
                 } else {
-                    ph - h - 2.0 - step
+                    ph - h - gap - step
                 };
                 *row = row.saturating_add(1);
                 // A line that runs on to the newest bar: where the chart's study labels go
@@ -1236,14 +1240,14 @@ impl Studies {
                 // newest bar (on the plot or panned past), else in the price axis column at
                 // that edge (never over the bars, nor the last-price tag); a line that ends
                 // mid-plot, at its end where no bar is there.
-                let x = if at_newest && x_end + 2.0 + w <= pw {
-                    x_end + 2.0
+                let x = if at_newest && x_end + gap + w <= pw {
+                    x_end + gap
                 } else if reaches {
                     // Clear of the last-price tag and the drawings' and levels' price tags (a
                     // half-covered number reads as another price): on the nearest free row at
                     // that edge, else not at all.
                     let (taken, n_taken) = taken_tops(&axis_marks[..n_axis]);
-                    if let Some(x) = axis_mark_x(w, x_end + 2.0, pw, axis_w)
+                    if let Some(x) = axis_mark_x(w, x_end + gap, pw, axis_w)
                         && n_axis < MAX_AXIS_MARKS
                         && let Some(ty) = free_row(y, h, ph, blocked, &taken[..n_taken])
                         && !covered(covers, ox + x, oy + ty, w, h)
@@ -1415,13 +1419,13 @@ impl Studies {
             }
             // On the chart: just right of the newest bar, else pinned to the plot's edge
             // (over the bars, on its chip), as the chart's other study labels are.
-            let x = if x_end + 2.0 + w <= pw {
-                x_end + 2.0
+            let x = if x_end + gap + w <= pw {
+                x_end + gap
             } else {
-                (pw - w - 6.0).max(0.0)
+                (pw - w - crate::zoom::f(6.0)).max(0.0)
             };
             let ty = (y - h * 0.5).max(next_top).clamp(0.0, (ph - h).max(0.0));
-            next_top = ty + h + 1.0;
+            next_top = ty + h + crate::zoom::f(1.0);
             // Never a tag partly under an open panel.
             if covered(covers, ox + x, oy + ty, w, h) {
                 continue;
@@ -1527,9 +1531,11 @@ impl Studies {
             let _ = fmt.write(lines_core::Price(v), &mut texts);
             texts.push('\n');
         }
-        if texts == self.end_texts {
+        let zoom = crate::zoom::generation();
+        if texts == self.end_texts && zoom == self.end_zoom {
             return;
         }
+        self.end_zoom = zoom;
         let mut need = 0.0f32;
         for (line, &(mask, _, _)) in texts.lines().zip(&groups) {
             let run = TextRun {
@@ -1550,7 +1556,12 @@ impl Studies {
                 )
                 .width;
             // As paint sizes it (its color bars and padding), and 2 px off the last bar.
-            need = need.max(f32::from(w) + 8.0 + bars_w(mask.count_ones() as usize) + 4.0);
+            need = need.max(
+                f32::from(w)
+                    + crate::zoom::f(8.0)
+                    + bars_w(mask.count_ones() as usize)
+                    + crate::zoom::f(4.0),
+            );
         }
         self.end_need = need;
         self.end_texts = texts;

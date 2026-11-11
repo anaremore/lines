@@ -3079,7 +3079,7 @@ impl ChartView {
     /// keeps its own width (never more than 40 % of the chart beside the axis); on the chart,
     /// neither. Labels hidden: neither. From the whole level set, so a pan never moves them.
     fn label_strips(&mut self, w: f32) -> (f32, f32) {
-        use crate::levels_layer::{AXIS_TAG_CAP, COLUMN_PAD, LABEL_CHROME};
+        use crate::levels_layer::{AXIS_TAG_CAP, column_pad, label_chrome};
         let base = axis_w();
         let c = &self.levels.config;
         let shown = self.visibility.draws_studies()
@@ -3111,7 +3111,7 @@ impl ChartView {
                     0.0
                 };
                 let ends = if ends > 0.0 {
-                    (ends + crate::levels_layer::AXIS_LEADER)
+                    (ends + crate::levels_layer::axis_leader())
                         .clamp(base, cap.max(base))
                         .ceil()
                 } else {
@@ -3125,7 +3125,7 @@ impl ChartView {
                     return (base, 0.0);
                 }
                 let col = crate::levels_layer::column_px(crate::zoom::f(c.column_w()), w - base);
-                let room = col - 2.0 * COLUMN_PAD - LABEL_CHROME;
+                let room = col - 2.0 * column_pad() - label_chrome();
                 let (need, cut) = self.levels.label_need();
                 // Nothing to show (a missing source), or not even a short cut fits: no column
                 // (never an empty strip).
@@ -3168,10 +3168,11 @@ impl ChartView {
     /// Fit the label column to its widest label (a double-click on its edge), as the DOM's
     /// columns fit theirs; no labels: its default width.
     fn fit_label_column(&mut self, cx: &mut Context<Self>) {
-        use crate::levels_layer::{COLUMN_PAD, COLUMN_W_DEFAULT, LABEL_CHROME};
+        use crate::levels_layer::{COLUMN_W_DEFAULT, column_pad, label_chrome};
         let (need, _) = self.levels.label_need();
+        // Measured at the UI zoom; saved at 100 %.
         let w = if need > 0.0 {
-            (need + LABEL_CHROME + 2.0 * COLUMN_PAD) / crate::zoom::f(1.0)
+            (need + label_chrome() + 2.0 * column_pad()) / crate::zoom::f(1.0)
         } else {
             f32::from(COLUMN_W_DEFAULT)
         };
@@ -5801,7 +5802,7 @@ impl ChartView {
             let strip = self.label_strip();
             self.levels.paint_labels(self.plot, strip, &t, window, cx);
             if self.label_col > 0.0 {
-                let col = (pw + crate::levels_layer::COLUMN_PAD, self.label_col);
+                let col = (pw + crate::levels_layer::column_pad(), self.label_col);
                 self.profile
                     .paint_label(self.plot, Some(col), &t, window, cx);
             }
