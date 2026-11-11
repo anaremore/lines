@@ -1303,9 +1303,19 @@ impl DomView {
             _ => None,
         };
         // A narrow header drops the source tag first; the contract and words never.
+        let tw = pane::text_px(window, crate::zoom::ui(12.0));
+        // A narrow pane shows only ⋯, so its header keeps only that gutter free.
+        // An unavailable pane paints no canvas, so its last width may be stale: the full gutter.
+        let gutter = if pane::unavailable_title(&self.feed).is_some() {
+            pane::controls_gutter(crate::layout::PaneKind::Dom)
+        } else {
+            pane::controls_gutter_at(crate::layout::PaneKind::Dom, self.pane_w)
+        };
+        // In 100 % units, as `text_px` and the fit's gaps are (the gutter doesn't zoom); 0 or
+        // less until the pane is laid out.
+        let room = (self.pane_w - gutter) / crate::zoom::get();
         if let Some(tg) = &tag {
-            let tw = pane::text_px(window, crate::zoom::ui(12.0));
-            let room = self.pane_w - pane::controls_gutter(crate::layout::PaneKind::Dom);
+            // In 100 % units, as `text_px` and the fit's gaps are (the gutter doesn't zoom).
             let rest = pane::side_header_px(
                 true, // a market pane always shows its link marker
                 &contract,
@@ -1320,6 +1330,13 @@ impl DomView {
             }
         }
         let has_contract = !contract.is_empty();
+        let stale = self.store.stale_for().is_some();
+        // The pane's word only when it fits whole beside everything that never gives way (the
+        // right-hand text goes first); else left out, with its gap.
+        // The left group's least width: all of it but the pane's word, which gives way first.
+        let keep = pane::side_header_keep_px(true, &left, tag.as_deref(), word, state, stale, &tw);
+        // The pane's word only when it fits whole beside all that; else left out, with its gap.
+        let shows_name = has_contract && pane::side_header_shows_name(keep, tw("DOM"), room);
         div()
             .flex()
             .flex_row()
@@ -1328,7 +1345,7 @@ impl DomView {
             .whitespace_nowrap()
             .overflow_hidden()
             .px_2()
-            .pr(px(pane::controls_gutter(crate::layout::PaneKind::Dom)))
+            .pr(px(gutter))
             .py_1()
             .bg(t.panel)
             .border_b_1()
@@ -1342,61 +1359,83 @@ impl DomView {
                             .flex_row()
                             .gap_2()
                             .items_center()
+                            .min_w(crate::zoom::ui(keep.ceil() + 1.0))
                             .child(pane::market_link_chip(self.common.link, &t))
+                            // The contract (and the tag, when it fits) never gives way; the
+                            // pane's name after them is the only item that shrinks: it gives way
+                            // first, whole, its gap with it.
                             .child(
                                 div()
-                                    .text_color(t.text_main)
-                                    .relative()
-                                    .children(crate::layout_rec::text_marker(&left))
-                                    .child(left),
+                                    .flex()
+                                    .flex_row()
+                                    .min_w_0()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_color(t.text_main)
+                                            .relative()
+                                            .children(crate::layout_rec::text_marker(&left))
+                                            .child(left),
+                                    )
+                                    .children(tag.map(|tg| {
+                                        div()
+                                            .flex_shrink_0()
+                                            .ml_2()
+                                            .text_color(t.text_dim)
+                                            .relative()
+                                            .children(crate::layout_rec::text_marker(&tg))
+                                            .child(tg)
+                                    }))
+                                    .when(shows_name, |d| {
+                                        d.child(pane::whole_or_none_at(
+                                            "DOM",
+                                            t.text_main,
+                                            false,
+                                            Some(tw("DOM")),
+                                        ))
+                                    }),
                             )
-                            .children(tag.map(|tg| {
-                                div()
-                                    .text_color(t.text_dim)
-                                    .relative()
-                                    .children(crate::layout_rec::text_marker(&tg))
-                                    .child(tg)
-                            }))
-                            .when(has_contract, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(t.text_main)
-                                        .relative()
-                                        .children(crate::layout_rec::text_marker("DOM"))
-                                        .child("DOM"),
-                                )
-                            })
                             // Every state but live is a word beside the contract that never
                             // gives way, as on the chart: an ended or failed feed must not
                             // read as live (docs/design.md §7).
                             .children(word.map(|w| {
                                 div()
+                                    .flex_shrink_0()
                                     .text_color(t.text_main)
                                     .relative()
                                     .children(crate::layout_rec::text_marker(w))
                                     .child(w)
                             }))
+                            // The book's state is text, not only colour, and never gives way:
+                            // it's counted in the left group's least width.
+                            .when_some(state, |d, s| {
+                                d.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_color(t.text_main)
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .relative()
+                                        .children(crate::layout_rec::text_marker(s))
+                                        .child(s),
+                                )
+                            })
                             .children(pane::stale_badge(&self.store, &t)),
                     )
                     .child(
+                        // Takes only what the left group leaves (zero basis): the contract and
+                        // the status word never shrink for it.
                         div()
                             .flex()
                             .flex_row()
+                            .flex_1()
+                            .justify_end()
                             .gap_2()
                             .min_w_0()
                             .overflow_hidden()
                             .text_color(t.text_dim)
-                            .when_some(state, |d, s| {
-                                // The book's state is text, not only colour.
-                                d.child(
-                                    div()
-                                        .text_color(t.text_main)
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child(s),
-                                )
-                            })
-                            // Cut with "…" when the pane is narrow, never mid-word.
-                            .child(div().min_w_0().truncate().child(right)),
+                            // Whole or not at all when the pane is narrow, never a bare "…".
+                            .child(pane::whole_or_none(right, t.text_dim, true)),
                     ),
             )
     }

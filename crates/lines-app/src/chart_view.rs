@@ -3505,6 +3505,12 @@ impl ChartView {
         self.above_axis = above_axis;
         let plot_h = self.split.map_or(above_axis, |s| s.price_h);
         self.footprint.ensure_capacity(plot_w);
+        // The header's gutter (only ⋯ on a narrow pane) follows this width, as the workspace's
+        // controls do: render again when it crosses over, or the two disagree until then.
+        let narrow = |w: f32| w > 0.0 && w < pane::NARROW_CONTROLS_W;
+        if narrow(f32::from(bounds.size.width)) != narrow(f32::from(self.chart.size.width)) {
+            cx.notify();
+        }
         self.chart = bounds;
         if self.styling() && self.editor_pane != (w, above_axis) {
             // The style editor is placed from the pane's size: place it again.
@@ -5120,7 +5126,7 @@ impl ChartView {
         };
         for i in 0..price_lines {
             let l = self.scene.price_lines[i];
-            if l.y < 0.0 || l.y > ph {
+            if !price_label_shows(l.y, ph, label_px()) {
                 continue;
             }
             let span = Span::around(l.y, label_px() * 0.65);
@@ -7549,6 +7555,16 @@ impl ChartView {
     /// controls' gutter.
     fn header(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;
+        // An unavailable chart never paints its canvas, so its last width may be stale: it keeps
+        // the full gutter (more room than the controls need, never less).
+        let gutter = if pane::unavailable_title(&self.feed).is_some() {
+            pane::controls_gutter(crate::layout::PaneKind::Chart)
+        } else {
+            pane::controls_gutter_at(
+                crate::layout::PaneKind::Chart,
+                f32::from(self.chart.size.width),
+            )
+        };
         let bar = || {
             div()
                 .flex()
@@ -7558,7 +7574,7 @@ impl ChartView {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .px_3()
-                .pr(px(pane::controls_gutter(crate::layout::PaneKind::Chart)))
+                .pr(px(gutter))
                 .py_1()
                 .bg(t.panel)
                 .border_b_1()
@@ -7725,8 +7741,12 @@ impl ChartView {
         // What fits whole beside the hover controls' gutter (from last frame's width); the
         // rest is dropped whole, never cut: typing a timeframe and the palette still change
         // the timeframe, and the palette the account.
-        let room = f32::from(self.chart.size.width)
-            - pane::controls_gutter(crate::layout::PaneKind::Chart);
+        // The fit model's gaps and paddings are 100 % sizes (they scale with the UI zoom, as
+        // the text does); the controls' gutter doesn't. So the fit runs in 100 % units: room
+        // and text widths over the zoom.
+        let z = crate::zoom::get();
+        let width = f32::from(self.chart.size.width);
+        let room = (width - pane::controls_gutter_at(crate::layout::PaneKind::Chart, width)) / z;
         let acct = crate::trade_bar::chart_account(self, cx);
         // Header text widths as the UI font shapes them (text_sm; `fonts::ui`, as drawn).
         let font = crate::fonts::ui();
@@ -7746,7 +7766,7 @@ impl ChartView {
                 &[run],
                 None,
             );
-            f32::from(line.width)
+            f32::from(line.width) / z
         };
         let chip_text = pane::chip_text(self.timeframe, self.tick_continuous(), to_go);
         let fit_in = |room: f32| {
@@ -7769,7 +7789,7 @@ impl ChartView {
             fit_in,
         );
         let tag = tag.filter(|_| shows_tag);
-        let desc_w = measure(i.description).ceil() + 1.0;
+        let desc_w = (measure(i.description) * z).ceil() + 1.0;
         let account = crate::trade_bar::chart_chip(self, &t, fit.account, cx);
         let timeframe = fit.timeframe.then(|| {
             let dismiss: popover::OnDismiss = Box::new(
@@ -8887,6 +8907,13 @@ const LEGEND_MAX_W: f32 = 360.0;
 /// Charts narrower than this show the latency HUD's p99s only (no sparklines).
 const HUD_COMPACT_BELOW_PX: f32 = 1_200.0;
 
+/// Whether a price-axis label for the line at `y` (plot px from its top) shows: its line inside
+/// the plot and the label clear of the plot's top, centered on its line (`size` px text). A label
+/// near the top would reach up into the header row, where header text can sit above the axis.
+fn price_label_shows(y: f32, plot_h: f32, size: f32) -> bool {
+    y >= size * 0.65 && y <= plot_h
+}
+
 /// The latency HUD's compact form for a chart `w` px wide (0: not laid out yet).
 fn hud_compact(w: f32) -> bool {
     // In 100 % units (`crate::zoom`): the header's text grows with the zoom.
@@ -9134,6 +9161,18 @@ fn recent_colors(cx: &App) -> Vec<lines_core::style::Rgb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A price label shows only clear of the plot's top: one whose line is within its half
+    /// height of the top would reach into the header row (and under header text there).
+    #[test]
+    fn a_price_label_near_the_top_is_left_out() {
+        let size = 12.0;
+        assert!(!price_label_shows(0.0, 400.0, size));
+        assert!(!price_label_shows(7.0, 400.0, size));
+        assert!(price_label_shows(7.8, 400.0, size));
+        assert!(price_label_shows(200.0, 400.0, size));
+        assert!(!price_label_shows(401.0, 400.0, size));
+    }
 
     /// A theme switch reshapes chart labels: a label cached in one theme's color is shaped
     /// again when asked for in another theme's, and kept when the color is the same.

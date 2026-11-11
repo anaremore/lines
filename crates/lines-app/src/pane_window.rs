@@ -379,6 +379,7 @@ impl Render for PaneWindow {
                 kind,
                 true,
                 false,
+                f32::from(window.viewport_size().width),
                 |this: &mut Self, cmd, _, at, window, cx| match (cmd, at) {
                     (Command::Menu, Some(at)) => this.open_menu(at, cx),
                     _ => this.run(cmd, window, cx),

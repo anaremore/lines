@@ -206,6 +206,36 @@ pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
     }
 }
 
+/// Below this pane width (logical px) a header's hover controls are only the pane menu ⋯ (its
+/// other commands are all in that menu), so a narrow chart header keeps its contract and its
+/// PAPER/LIVE badge whole.
+pub const NARROW_CONTROLS_W: f32 = 360.0;
+
+/// [`controls`] for a pane `width` logical px wide: only ⋯ below [`NARROW_CONTROLS_W`] (0 or
+/// less: not laid out yet, all of them, as [`controls_gutter_at`]).
+pub fn controls_at(kind: PaneKind, detached: bool, width: f32) -> &'static [Control] {
+    let all = controls(kind, detached);
+    if width > 0.0 && width < NARROW_CONTROLS_W {
+        &all[all.len() - 1..]
+    } else {
+        all
+    }
+}
+
+/// [`controls_gutter`] for a pane `width` logical px wide (0 or less: not laid out yet, the
+/// full gutter).
+pub fn controls_gutter_at(kind: PaneKind, width: f32) -> f32 {
+    if width > 0.0 && width < NARROW_CONTROLS_W {
+        gutter_for(1.0)
+    } else {
+        controls_gutter(kind)
+    }
+}
+
+fn gutter_for(n: f32) -> f32 {
+    n * crate::icons::HIT + (n - 1.0) * CONTROL_GAP + 2.0 * CONTROL_PAD
+}
+
 /// A pane header's height (logical px): its padding, one line of its text and its bottom
 /// border (charts use the larger `text_sm`). The hover controls are centered on it.
 pub fn header_height(kind: PaneKind) -> f32 {
@@ -227,8 +257,7 @@ pub const CONTROL_PAD: f32 = 4.0;
 /// header content never reaches it (`header_content` clips there), so the controls never
 /// cover anything (the account chip, status text). Sized for the most icons any header shows.
 pub fn controls_gutter(kind: PaneKind) -> f32 {
-    let n = controls(kind, false).len().max(controls(kind, true).len()) as f32;
-    n * crate::icons::HIT + (n - 1.0) * CONTROL_GAP + 2.0 * CONTROL_PAD
+    gutter_for(controls(kind, false).len().max(controls(kind, true).len()) as f32)
 }
 
 /// The chip's timeframe: "233t", with "∞" when tick bars run continuously ("1000t ∞").
@@ -278,6 +307,56 @@ pub fn header_content() -> Div {
         .justify_between()
         .items_center()
         .gap_2()
+}
+
+/// Line height of a DOM or time & sales header's text at 100 % (its 12 px text).
+const SMALL_HEADER_LINE_100: f32 = 18.0;
+
+/// A DOM or time & sales header item that shows whole or not at all: it wraps onto a hidden
+/// second line when the row is too narrow, never cut mid-word or shown as a bare "…".
+/// `end`: right-aligned (the header's right group); else it follows the item before it with
+/// its own leading gap, so nothing is left behind when it goes.
+pub fn whole_or_none(text: impl Into<gpui::SharedString>, color: gpui::Hsla, end: bool) -> Div {
+    whole_or_none_at(text, color, end, None)
+}
+
+/// [`whole_or_none`] with its measured width (`text_px`, 100 % units) as its basis, plus 2 px of
+/// slack: given that much it never wraps away for sub-pixel rounding, and drops only when the
+/// row squeezes it.
+pub fn whole_or_none_at(
+    text: impl Into<gpui::SharedString>,
+    color: gpui::Hsla,
+    end: bool,
+    measured: Option<f32>,
+) -> Div {
+    use gpui::prelude::FluentBuilder as _;
+    let text = text.into();
+    let line = crate::zoom::ui(SMALL_HEADER_LINE_100);
+    let lead = if end { 0.0 } else { 8.0 };
+    div()
+        .flex()
+        .flex_row()
+        .flex_wrap()
+        .when(end, |d| d.flex_1().justify_end())
+        .when_some(measured, |d, w| {
+            d.flex_basis(crate::zoom::ui(w + lead + 2.0))
+        })
+        .min_w_0()
+        .h(line)
+        .line_height(line)
+        .items_center()
+        .overflow_hidden()
+        // A zero-width first item: the text can wrap away too (a line's first item never wraps).
+        .child(div().w(gpui::px(0.0)).h(line))
+        .child(
+            div()
+                .flex_shrink_0()
+                .when(!end, |d| d.pl_2())
+                .text_color(color)
+                .relative()
+                .children(crate::layout_rec::text_marker(&text))
+                .child(text),
+        )
 }
 
 /// The pane header's contract text: the active contract is always shown (decision 0013);
@@ -596,6 +675,44 @@ pub fn chart_header_fit(
     }
 }
 
+/// The STALE badge's widest likely text, for the header fits: a feed quiet for a quarter hour
+/// and more (the badge counts seconds).
+const STALE_SAMPLE: &str = "STALE · no data 9999 s";
+
+/// Whether a DOM or T&S header shows its pane's word (`name_px` wide): only when it fits whole
+/// beside everything that never gives way (`keep`, [`side_header_keep_px`]), with the row's left
+/// padding (px_2), the gap before the right group (there even when its text isn't), the word's
+/// own gap and its basis' slack ([`whole_or_none_at`]); all in 100 % units. `room` 0 or less
+/// is "not laid out yet": it shows.
+pub fn side_header_shows_name(keep: f32, name_px: f32, room: f32) -> bool {
+    room <= 0.0 || keep + 8.0 + HEADER_GAP + HEADER_GAP + 2.0 + name_px <= room
+}
+
+/// What a DOM or T&S header's left group never gives up, in 100 % units: the link chip, the
+/// contract (or the unavailable title), the source tag when it shows, the feed's status word,
+/// the DOM's book state (bold: "crossed") and the STALE badge while stale. Only the pane's word ("DOM") may go from it, so it is the left
+/// group's least width: the contract is never drawn over the status word.
+pub fn side_header_keep_px(
+    linked: bool,
+    contract: &str,
+    tag: Option<&str>,
+    status: Option<&str>,
+    book: Option<&str>,
+    stale: bool,
+    tw: TextPx,
+) -> f32 {
+    // `header_base_px` counts the chart's px_3 row padding: not part of the group.
+    header_base_px(linked, contract, tw) - 12.0
+        + tag.map_or(0.0, |t| HEADER_GAP + tw(t))
+        + status.map_or(0.0, |s| HEADER_GAP + tw(s))
+        + book.map_or(0.0, |b| HEADER_GAP + tw(b) * BOLD)
+        + if stale {
+            HEADER_GAP + tw(STALE_SAMPLE) * BOLD + 8.0
+        } else {
+            0.0
+        }
+}
+
 /// The width of a DOM or T&S header's parts, all but its source tag: the row's left padding,
 /// the link chip, the contract, the pane's word ("DOM"), the feed's status word, the STALE
 /// badge while stale, and the right group's text, each after a gap. The right padding is the
@@ -616,8 +733,8 @@ pub fn side_header_px(
         + tw(pane_word)
         + status.map_or(0.0, |s| HEADER_GAP + tw(s))
         + if stale {
-            // "STALE · no data 99 s", bold, px_1 each side.
-            HEADER_GAP + tw("STALE · no data 99 s") * BOLD + 8.0
+            // STALE_SAMPLE, bold, px_1 each side.
+            HEADER_GAP + tw(STALE_SAMPLE) * BOLD + 8.0
         } else {
             0.0
         }
@@ -675,9 +792,11 @@ pub fn source_tag(tag: &str) -> String {
     format!("({tag})")
 }
 
-/// A UI text's width in logical px at `size`, shaped as the header draws it.
+/// A UI text's width at `size`, shaped as the header draws it, in 100 % units (logical px over
+/// the UI zoom), as the header fit models count their gaps and paddings.
 pub fn text_px(window: &gpui::Window, size: gpui::Pixels) -> impl Fn(&str) -> f32 + '_ {
-    let font = window.text_style().font();
+    // The UI font in force (`fonts::ui`), as drawn: in render the window's style is GPUI's default.
+    let font = crate::fonts::ui();
     move |s: &str| -> f32 {
         let run = gpui::TextRun {
             len: s.len(),
@@ -693,7 +812,8 @@ pub fn text_px(window: &gpui::Window, size: gpui::Pixels) -> impl Fn(&str) -> f3
             &[run],
             None,
         );
-        f32::from(line.width)
+        // In 100 % units, as the fit's gaps and paddings are (they scale with the zoom).
+        f32::from(line.width) / crate::zoom::get()
     }
 }
 
@@ -896,6 +1016,60 @@ mod tests {
             (S::Stopped, "stopped"),
         ] {
             assert_eq!(status_word(&s), Some(w));
+        }
+    }
+
+    /// A DOM or T&S header's least width counts everything that never gives way, each after its
+    /// gap: the contract, the tag, the status word, the book's state (bold) and STALE.
+    #[test]
+    fn a_side_header_keeps_its_contract_and_states() {
+        let base = side_header_keep_px(true, "ESZ26", None, None, None, false, &tw7);
+        assert_eq!(base, header_base_px(true, "ESZ26", &tw7) - 12.0);
+        let all = side_header_keep_px(
+            true,
+            "ESZ26",
+            Some("CQG"),
+            Some("ended"),
+            Some("crossed"),
+            true,
+            &tw7,
+        );
+        let want = base
+            + (HEADER_GAP + tw7("CQG"))
+            + (HEADER_GAP + tw7("ended"))
+            + (HEADER_GAP + tw7("crossed") * BOLD)
+            + (HEADER_GAP + tw7(STALE_SAMPLE) * BOLD + 8.0);
+        assert!((all - want).abs() < 0.01, "{all} vs {want}");
+    }
+
+    /// The pane's word shows only when it fits whole beside what never gives way.
+    #[test]
+    fn a_side_header_shows_its_name_only_when_it_fits() {
+        // keep 100, the word 30: 100 + 8 + 8 + 8 + 2 + 30 = 156.
+        assert!(side_header_shows_name(100.0, 30.0, 156.0));
+        assert!(!side_header_shows_name(100.0, 30.0, 155.0));
+        assert!(side_header_shows_name(100.0, 30.0, 0.0), "not laid out yet");
+    }
+
+    /// A narrow pane's header shows only ⋯ (every other control is in the pane menu), and keeps
+    /// only its gutter free: the 480 px window at 150 % has room for the contract and PAPER.
+    #[test]
+    fn a_narrow_pane_shows_only_the_menu_control() {
+        for kind in [PaneKind::Chart, PaneKind::Dom, PaneKind::Tape] {
+            for detached in [false, true] {
+                let narrow = controls_at(kind, detached, NARROW_CONTROLS_W - 1.0);
+                assert_eq!(narrow.len(), 1, "{kind:?}");
+                assert_eq!(narrow[0].cmd, crate::commands::Command::Menu);
+                assert_eq!(
+                    controls_at(kind, detached, NARROW_CONTROLS_W),
+                    controls(kind, detached)
+                );
+            }
+            assert!(controls_gutter_at(kind, 200.0) < controls_gutter(kind));
+            assert!(controls_gutter_at(kind, 200.0) >= crate::icons::HIT + 2.0 * CONTROL_PAD);
+            // Not laid out yet: the full gutter and every control.
+            assert_eq!(controls_gutter_at(kind, 0.0), controls_gutter(kind));
+            assert_eq!(controls_at(kind, false, 0.0), controls(kind, false));
         }
     }
 

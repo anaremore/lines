@@ -369,7 +369,10 @@ impl TapeView {
         }
         let mw = self.glyphs.width("▲", t.text_main, false, window);
         self.cols.need(TapeCol::Side.index(), mw, pad() * 0.5);
-        self.cols.layout(w);
+        let side_w = mw + pad();
+        // Narrow: every column narrows to what its numbers need, then the time gives way;
+        // price, size and the side marker (direction is never color alone) stay whole.
+        self.cols.layout_tape(w);
         self.cols.paint_header(
             &mut self.glyphs,
             &t,
@@ -459,9 +462,11 @@ impl TapeView {
                 );
             }
             if let Some((x, cw)) = side {
+                // At its own width from the left: beside the size even when the column takes
+                // the leftover (the time gave way and the side column fills).
                 self.glyphs.paint_right(
                     marker,
-                    x + cw - pad() * 0.5,
+                    x + cw.min(side_w) - pad() * 0.5,
                     y,
                     row_h(),
                     color,
@@ -503,9 +508,19 @@ impl TapeView {
         }
         let _ = write!(right, "large ≥ {q}");
         // A narrow header drops the source tag first; the contract and words never.
+        let tw = pane::text_px(window, crate::zoom::ui(12.0));
+        // A narrow pane shows only ⋯, so its header keeps only that gutter free.
+        // An unavailable pane paints no canvas, so its last width may be stale: the full gutter.
+        let gutter = if pane::unavailable_title(&self.feed).is_some() {
+            pane::controls_gutter(crate::layout::PaneKind::Tape)
+        } else {
+            pane::controls_gutter_at(crate::layout::PaneKind::Tape, self.pane_w)
+        };
+        // In 100 % units, as `text_px` and the fit's gaps are (the gutter doesn't zoom); 0 or
+        // less until the pane is laid out.
+        let room = (self.pane_w - gutter) / crate::zoom::get();
         if let Some(tg) = &tag {
-            let tw = pane::text_px(window, crate::zoom::ui(12.0));
-            let room = self.pane_w - pane::controls_gutter(crate::layout::PaneKind::Tape);
+            // In 100 % units, as `text_px` and the fit's gaps are (the gutter doesn't zoom).
             let rest = pane::side_header_px(
                 true, // a market pane always shows its link marker
                 &contract,
@@ -520,6 +535,14 @@ impl TapeView {
             }
         }
         let has_contract = !contract.is_empty();
+        let stale = self.store.stale_for().is_some();
+        // The pane's word only when it fits whole beside everything that never gives way (the
+        // right-hand text goes first); else left out, with its gap.
+        // The left group's least width: all of it but the pane's word, which gives way first.
+        let keep = pane::side_header_keep_px(true, &left, tag.as_deref(), word, None, stale, &tw);
+        // The pane's word only when it fits whole beside all that; else left out, with its gap.
+        let shows_name =
+            has_contract && pane::side_header_shows_name(keep, tw("Time & sales"), room);
         div()
             .flex()
             .flex_row()
@@ -528,7 +551,7 @@ impl TapeView {
             .whitespace_nowrap()
             .overflow_hidden()
             .px_2()
-            .pr(px(pane::controls_gutter(crate::layout::PaneKind::Tape)))
+            .pr(px(gutter))
             .py_1()
             .bg(t.panel)
             .border_b_1()
@@ -543,35 +566,49 @@ impl TapeView {
                             .flex_row()
                             .gap_2()
                             .items_center()
+                            .min_w(crate::zoom::ui(keep.ceil() + 1.0))
                             .child(pane::market_link_chip(self.common.link, &t))
+                            // The contract (and the tag, when it fits) never gives way; the
+                            // pane's name after them is the only item that shrinks: it gives way
+                            // first, whole, its gap with it.
                             .child(
                                 div()
-                                    .text_color(t.text_main)
-                                    .relative()
-                                    .children(crate::layout_rec::text_marker(&left))
-                                    .child(left),
+                                    .flex()
+                                    .flex_row()
+                                    .min_w_0()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_color(t.text_main)
+                                            .relative()
+                                            .children(crate::layout_rec::text_marker(&left))
+                                            .child(left),
+                                    )
+                                    .children(tag.map(|tg| {
+                                        div()
+                                            .flex_shrink_0()
+                                            .ml_2()
+                                            .text_color(t.text_dim)
+                                            .relative()
+                                            .children(crate::layout_rec::text_marker(&tg))
+                                            .child(tg)
+                                    }))
+                                    .when(shows_name, |d| {
+                                        d.child(pane::whole_or_none_at(
+                                            "Time & sales",
+                                            t.text_main,
+                                            false,
+                                            Some(tw("Time & sales")),
+                                        ))
+                                    }),
                             )
-                            .children(tag.map(|tg| {
-                                div()
-                                    .text_color(t.text_dim)
-                                    .relative()
-                                    .children(crate::layout_rec::text_marker(&tg))
-                                    .child(tg)
-                            }))
-                            .when(has_contract, |d| {
-                                d.child(
-                                    div()
-                                        .text_color(t.text_main)
-                                        .relative()
-                                        .children(crate::layout_rec::text_marker("Time & sales"))
-                                        .child("Time & sales"),
-                                )
-                            })
                             // Every state but live is a word beside the contract that never
                             // gives way, as on the chart: an ended or failed feed must not
                             // read as live (docs/design.md §7).
                             .children(word.map(|w| {
                                 div()
+                                    .flex_shrink_0()
                                     .text_color(t.text_main)
                                     .relative()
                                     .children(crate::layout_rec::text_marker(w))
@@ -579,15 +616,8 @@ impl TapeView {
                             }))
                             .children(pane::stale_badge(&self.store, &t)),
                     )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .text_color(t.text_dim)
-                            .relative()
-                            .children(crate::layout_rec::text_marker(&right))
-                            .child(right),
-                    ),
+                    // Whole or not at all, never cut to a bare "l…".
+                    .child(pane::whole_or_none(right, t.text_dim, true)),
             )
     }
 }
