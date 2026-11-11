@@ -2925,9 +2925,12 @@ pub fn toggle_panel_menu<V: TradePane>(v: &mut V, which: PanelMenu, cx: &mut Con
     t.account_menu = false;
     t.panel_menu = Some(which);
     // One popover kind for the panel's lists: the account's, Qty and Bracket open one at a time.
-    crate::popover::opened(cx, crate::popover::Kind::Account, |v: &mut V, cx| {
-        close_account_menu(v, cx)
-    });
+    crate::popover::opened(
+        cx,
+        crate::popover::Kind::Account,
+        |v: &mut V, cx| close_account_menu(v, cx),
+        |v: &V| v.trade_ref().menu_open(),
+    );
     cx.notify();
 }
 
@@ -4907,9 +4910,12 @@ pub fn toggle_account_menu<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
     }
     v.trade().account_menu = true;
     v.trade().panel_menu = None;
-    crate::popover::opened(cx, crate::popover::Kind::Account, |v: &mut V, cx| {
-        close_account_menu(v, cx)
-    });
+    crate::popover::opened(
+        cx,
+        crate::popover::Kind::Account,
+        |v: &mut V, cx| close_account_menu(v, cx),
+        |v: &V| v.trade_ref().menu_open(),
+    );
     cx.notify();
 }
 

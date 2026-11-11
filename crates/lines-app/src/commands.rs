@@ -1137,6 +1137,34 @@ pub fn emergency(cmd: Command) -> bool {
     )
 }
 
+/// Who takes a key in a window's key capture (the main window's, a popped-out pane window's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyRoute {
+    /// Flatten, Cancel all or Stop all: close whatever is open, then run it.
+    Emergency(Command),
+    /// The open menu takes it.
+    Menu,
+    /// The open prompt takes it.
+    Prompt,
+    /// Neither is open: the key's command, by the window's usual rules (typing, replay).
+    Command(Command),
+    /// Not a command and nothing open to take it.
+    Pass,
+}
+
+/// The order a window's key capture checks in: the emergency keys first, before an open menu
+/// or prompt (or any popover) can take them (owner, 2026-11-10), then the menu, the prompt,
+/// the command.
+pub fn key_route(cmd: Option<Command>, menu_open: bool, prompt_open: bool) -> KeyRoute {
+    match cmd {
+        Some(c) if emergency(c) => KeyRoute::Emergency(c),
+        _ if menu_open => KeyRoute::Menu,
+        _ if prompt_open => KeyRoute::Prompt,
+        Some(c) => KeyRoute::Command(c),
+        None => KeyRoute::Pass,
+    }
+}
+
 pub fn runs_while_typing(_k: &Keystroke, cmd: Command) -> bool {
     !matches!(cmd, Command::Draw(_))
 }
@@ -1180,6 +1208,30 @@ mod tests {
             ],
             "Ctrl+Shift+A, F and R, and nothing else"
         );
+    }
+
+    /// Key capture's order: Flatten, Cancel all and Stop all act with a menu or a prompt open
+    /// (both windows' capture route through this); any other key goes to what is open first.
+    #[test]
+    fn the_emergency_keys_come_before_an_open_menu_or_prompt() {
+        let flatten = Command::Trade(TradeCmd::Flatten);
+        let cancel = Command::Trade(TradeCmd::CancelAll);
+        let stop = Command::Strategy(StrategyCmd::StopAll);
+        for c in [flatten, cancel, stop] {
+            for (menu, prompt) in [(true, false), (false, true), (true, true), (false, false)] {
+                assert_eq!(
+                    key_route(Some(c), menu, prompt),
+                    KeyRoute::Emergency(c),
+                    "{c:?} with menu {menu}, prompt {prompt}"
+                );
+            }
+        }
+        let buy = Command::Trade(TradeCmd::BuyMarket);
+        assert_eq!(key_route(Some(buy), true, false), KeyRoute::Menu);
+        assert_eq!(key_route(Some(buy), false, true), KeyRoute::Prompt);
+        assert_eq!(key_route(Some(buy), false, false), KeyRoute::Command(buy));
+        assert_eq!(key_route(None, true, false), KeyRoute::Menu);
+        assert_eq!(key_route(None, false, false), KeyRoute::Pass);
     }
 
     /// AltGr is Ctrl+Alt on Windows/Linux: a character it types other than the key itself

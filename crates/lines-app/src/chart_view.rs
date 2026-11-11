@@ -1113,9 +1113,12 @@ impl ChartView {
         let items = self.menu_items(&m, cx);
         m.clamp(&items);
         self.study_menu = Some(m);
-        popover::opened(cx, Kind::Studies, |v: &mut Self, cx| {
-            v.close_popover(Kind::Studies, cx)
-        });
+        popover::opened(
+            cx,
+            Kind::Studies,
+            |v: &mut Self, cx| v.close_popover(Kind::Studies, cx),
+            |v: &Self| v.study_menu.is_some(),
+        );
         cx.notify();
     }
 
@@ -1320,9 +1323,12 @@ impl ChartView {
         self.anchoring = None;
         self.editor_scroll = Default::default();
         self.study_style = Some((r, e));
-        popover::opened(cx, Kind::StyleEditor, |v: &mut Self, cx| {
-            v.close_popover(Kind::StyleEditor, cx)
-        });
+        popover::opened(
+            cx,
+            Kind::StyleEditor,
+            |v: &mut Self, cx| v.close_popover(Kind::StyleEditor, cx),
+            |v: &Self| v.styling(),
+        );
         cx.notify();
     }
 
@@ -2182,9 +2188,12 @@ impl ChartView {
         self.close_popover(Kind::Account, cx);
         self.tf_entry = None;
         self.tf_menu = true;
-        popover::opened(cx, Kind::Timeframe, |v: &mut Self, cx| {
-            v.close_popover(Kind::Timeframe, cx)
-        });
+        popover::opened(
+            cx,
+            Kind::Timeframe,
+            |v: &mut Self, cx| v.close_popover(Kind::Timeframe, cx),
+            |v: &Self| v.tf_menu,
+        );
         cx.notify();
     }
 
@@ -3141,9 +3150,12 @@ impl ChartView {
             tag_bottom,
             confirm: None,
         });
-        popover::opened(cx, Kind::OrderGroup, |v: &mut Self, cx| {
-            v.close_popover(Kind::OrderGroup, cx)
-        });
+        popover::opened(
+            cx,
+            Kind::OrderGroup,
+            |v: &mut Self, cx| v.close_popover(Kind::OrderGroup, cx),
+            |v: &Self| v.ct.group_menu.is_some(),
+        );
     }
 
     /// Cancel one order of a group's list, by its row: never through this frame's marks (a busy
@@ -6852,9 +6864,12 @@ impl ChartView {
         self.close_popover(Kind::Studies, cx);
         self.close_popover(Kind::Timeframe, cx);
         self.close_popover(Kind::Account, cx);
-        popover::opened(cx, Kind::StyleEditor, |v: &mut Self, cx| {
-            v.close_popover(Kind::StyleEditor, cx)
-        });
+        popover::opened(
+            cx,
+            Kind::StyleEditor,
+            |v: &mut Self, cx| v.close_popover(Kind::StyleEditor, cx),
+            |v: &Self| v.styling(),
+        );
         cx.notify();
         true
     }

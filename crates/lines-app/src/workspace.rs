@@ -2524,11 +2524,16 @@ impl WindowView {
     /// Open a pane, tab or column menu: any other popover closes (`crate::popover`).
     fn show_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
         self.menu = Some(menu);
-        crate::popover::opened(cx, crate::popover::Kind::Menu, |this: &mut Self, cx| {
-            if this.menu.take().is_some() {
-                cx.notify();
-            }
-        });
+        crate::popover::opened(
+            cx,
+            crate::popover::Kind::Menu,
+            |this: &mut Self, cx| {
+                if this.menu.take().is_some() {
+                    cx.notify();
+                }
+            },
+            |this: &Self| this.menu.is_some(),
+        );
         cx.notify();
     }
 
@@ -2968,10 +2973,14 @@ impl WindowView {
     // ---- input ------------------------------------------------------------------------------
 
     fn on_key_capture(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        // Flatten and Cancel all always act: whatever is open (a menu, a prompt, any popover in
-        // any pane or window) closes and never takes the key.
-        if let Some(cmd) = commands::command_for(&ev.keystroke).filter(|c| commands::emergency(*c))
-        {
+        // Flatten, Cancel all and Stop all always act: whatever is open (a menu, a prompt, any
+        // popover in any pane or window) closes and never takes the key.
+        let route = commands::key_route(
+            commands::command_for(&ev.keystroke),
+            self.menu.is_some(),
+            self.prompt.is_some(),
+        );
+        if let commands::KeyRoute::Emergency(cmd) = route {
             self.menu = None;
             self.prompt = None;
             crate::popover::close_any(cx);
@@ -2988,10 +2997,10 @@ impl WindowView {
             cx.notify();
             return;
         }
-        if self.menu.is_some() {
+        if route == commands::KeyRoute::Menu {
             self.menu_key(ev, window, cx);
             cx.stop_propagation();
-        } else if self.prompt.is_some() {
+        } else if route == commands::KeyRoute::Prompt {
             self.prompt_key(ev, window, cx);
             cx.stop_propagation();
         } else if let Some(cmd) = commands::command_for(&ev.keystroke) {

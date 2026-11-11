@@ -11,8 +11,8 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::{
-    Context, InteractiveElement, IntoElement, Modifiers, MouseButton, ParentElement, Render,
-    Styled, TestAppContext, Window, div, point, px,
+    AppContext, Context, InteractiveElement, IntoElement, Modifiers, MouseButton, ParentElement,
+    Render, Styled, TestAppContext, Window, div, point, px,
 };
 
 #[derive(Clone, Default)]
@@ -21,7 +21,6 @@ struct Hits {
     cancel_all: Rc<Cell<u32>>,
     row: Rc<Cell<u32>>,
     dismissed: Rc<Cell<u32>>,
-    closed: Rc<Cell<u32>>,
 }
 
 struct Panel {
@@ -32,12 +31,6 @@ struct Panel {
 impl Panel {
     fn close_list(&mut self, cx: &mut Context<Self>) {
         self.list_open = false;
-        cx.notify();
-    }
-
-    /// A popover's close as `popover::opened` keeps it (a studies menu, in another window).
-    fn close_menu(&mut self, cx: &mut Context<Self>) {
-        self.hits.closed.set(self.hits.closed.get() + 1);
         cx.notify();
     }
 }
@@ -156,26 +149,62 @@ fn an_open_list_covers_flatten_and_cancel_all(cx: &mut TestAppContext) {
     assert_eq!(hits.cancel_all.get(), 1);
 }
 
-/// A popover open where no backdrop covers the buttons (a studies menu in another window): a
-/// press on Flatten or Cancel all only closes it; the next press acts.
+/// Another view's popover (a studies menu in another window), so no backdrop covers the
+/// buttons here.
+struct Elsewhere {
+    open: bool,
+    closed: Rc<Cell<u32>>,
+}
+
+impl Elsewhere {
+    fn close(&mut self, _: &mut Context<Self>) {
+        if std::mem::take(&mut self.open) {
+            self.closed.set(self.closed.get() + 1);
+        }
+    }
+}
+
+/// A popover open in another view: a press on Flatten or Cancel all only closes it; the next
+/// press acts. One that view shut without saying so (a stale entry) doesn't take the press.
 #[gpui::test]
 fn a_press_with_a_popover_open_elsewhere_only_closes_it(cx: &mut TestAppContext) {
     let hits = Hits::default();
     let h = hits.clone();
-    let (view, cx) = cx.add_window_view(move |_, _| Panel {
+    let (_view, cx) = cx.add_window_view(move |_, _| Panel {
         hits: h,
         list_open: false,
     });
     cx.run_until_parked();
-    for (y, hit) in [(50.0, &hits.flatten), (90.0, &hits.cancel_all)] {
-        view.update(cx, |_, cx| {
-            crate::popover::opened(cx, crate::popover::Kind::Studies, Panel::close_menu)
+    let closed = Rc::new(Cell::new(0));
+    let c = closed.clone();
+    let menu = cx.new(move |_| Elsewhere {
+        open: false,
+        closed: c,
+    });
+    let open_menu = |cx: &mut gpui::VisualTestContext| {
+        menu.update(cx, |m, cx| {
+            m.open = true;
+            crate::popover::opened(
+                cx,
+                crate::popover::Kind::Studies,
+                Elsewhere::close,
+                |m: &Elsewhere| m.open,
+            );
         });
-        let closed = hits.closed.get();
+    };
+    for (y, hit) in [(50.0, &hits.flatten), (90.0, &hits.cancel_all)] {
+        open_menu(cx);
+        let before = closed.get();
         press(cx, 160.0, y);
-        assert_eq!(hits.closed.get(), closed + 1, "the menu closed");
+        assert_eq!(closed.get(), before + 1, "the menu closed");
         assert_eq!(hit.get(), 0, "and nothing else happened");
         press(cx, 160.0, y);
         assert_eq!(hit.get(), 1, "the next press acts");
     }
+    // Shut by a path that never told the registry (Esc, an item run): nothing is open, so
+    // Flatten is one press.
+    open_menu(cx);
+    menu.update(cx, |m, _| m.open = false);
+    press(cx, 160.0, 50.0);
+    assert_eq!(hits.flatten.get(), 2, "a stale entry never eats an exit");
 }

@@ -112,12 +112,17 @@ impl<K: Copy + PartialEq> Slot<K> {
 
 type Key = (EntityId, Kind);
 type Closer = Box<dyn FnOnce(&mut App)>;
+type Probe = Box<dyn Fn(&App) -> bool>;
 
 /// The app's open popover and how to close it.
 #[derive(Default)]
 struct Open {
     slot: Slot<Key>,
     close: Option<Closer>,
+    /// Whether the slot's popover is really still open: its view's own state, read through
+    /// `opened`'s `is_open` (an entry can be stale: a popover shut by a path that skipped
+    /// [`closed`]).
+    is_open: Option<Probe>,
 }
 
 impl Global for Open {}
@@ -125,13 +130,24 @@ impl Global for Open {}
 /// The view's popover `kind` just opened: any other open popover (this view's, another pane's,
 /// another window's) closes. `close` closes this one when the next popover opens; it must do
 /// nothing if this one is already shut. It runs after the current update (never re-entrantly).
-pub fn opened<V: 'static>(cx: &mut Context<V>, kind: Kind, close: fn(&mut V, &mut Context<V>)) {
+/// `is_open` reads, from the view's own state, whether this popover is still open: a press
+/// elsewhere asks it before treating the press as a dismiss ([`press_closes_popover`]).
+pub fn opened<V: 'static>(
+    cx: &mut Context<V>,
+    kind: Kind,
+    close: fn(&mut V, &mut Context<V>),
+    is_open: fn(&V) -> bool,
+) {
     let key = (cx.entity_id(), kind);
     let weak = cx.weak_entity();
+    let probe = weak.clone();
     let g = cx.default_global::<Open>();
     let prev = g.slot.open(key).and(g.close.take());
     g.close = Some(Box::new(move |cx: &mut App| {
         let _ = weak.update(cx, close);
+    }));
+    g.is_open = Some(Box::new(move |cx: &App| {
+        probe.upgrade().is_some_and(|v| is_open(v.read(cx)))
     }));
     if let Some(prev) = prev {
         cx.defer(prev);
@@ -149,6 +165,7 @@ pub fn closed<V: 'static>(cx: &mut Context<V>, kind: Kind) {
         let g = cx.global_mut::<Open>();
         g.slot.close(key);
         g.close = None;
+        g.is_open = None;
     }
 }
 
@@ -293,6 +310,7 @@ pub fn close_any(cx: &mut App) -> bool {
         mark_moved_under_pointer();
         let g = cx.global_mut::<Open>();
         let close = g.close.take();
+        g.is_open = None;
         g.slot = Slot::default();
         if let Some(close) = close {
             cx.defer(close);
@@ -302,16 +320,36 @@ pub fn close_any(cx: &mut App) -> bool {
     false
 }
 
-/// An order control's press (Flatten, Cancel all, Buy, Sell, Stop all, a position's Flatten)
-/// with a popover open anywhere: the press only closes it and does nothing else, its release
-/// included (owner, 2026-11-10). In the popover's own window its backdrop takes the press
-/// first; this covers a popover open in another window. `true`: stop here.
-pub fn press_closes_popover(cx: &mut App) -> bool {
-    if close_any(cx) {
-        mark_dismissing();
-        return true;
+/// An order control's press (Flatten, Cancel all, Buy, Sell, Stop all, a position's Flatten),
+/// or a press on a DOM or chart, with another view's popover open (another pane's, another
+/// window's): the press only closes it and does nothing else, its release included (owner,
+/// 2026-11-10). In the popover's own window its backdrop takes the press first; this covers a
+/// popover in another window. The view's own popover is left to its backdrop and its own
+/// fallback. Asks the popover's view whether it is really open (a stale entry is dropped and
+/// the press acts). `true`: stop here.
+pub fn press_closes_popover<V: 'static>(cx: &mut Context<V>) -> bool {
+    let here = cx.entity_id();
+    let Some(g) = cx.try_global::<Open>() else {
+        return false;
+    };
+    let Some((owner, _)) = g.slot.current() else {
+        return false;
+    };
+    if owner == here {
+        return false;
     }
-    false
+    // The popover's view isn't the one being updated here, so it can be read.
+    let open = g.is_open.as_ref().is_some_and(|f| f(cx));
+    if !open {
+        let g = cx.global_mut::<Open>();
+        g.slot = Slot::default();
+        g.close = None;
+        g.is_open = None;
+        return false;
+    }
+    close_any(cx);
+    mark_dismissing();
+    true
 }
 
 // ---- floating panels ----------------------------------------------------------------------

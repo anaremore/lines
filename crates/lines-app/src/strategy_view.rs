@@ -485,6 +485,12 @@ impl StrategyView {
                 MouseButton::Left,
                 cx.listener(move |this, _: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
+                    // Start and Stop as the other order controls: a popover open elsewhere
+                    // only closes.
+                    if crate::popover::press_closes_popover(cx) {
+                        cx.notify();
+                        return;
+                    }
                     this.click(id, cmd, cx);
                 }),
             ),
