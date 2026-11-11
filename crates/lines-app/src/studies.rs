@@ -675,6 +675,15 @@ pub enum ValueFormat {
     Number,
 }
 
+/// An external series pane's last-value tags (`Studies::lower_tags`).
+#[derive(Clone, Copy, Debug)]
+pub struct SeriesTags {
+    pub def: &'static lines_feed::levels::SeriesStudyDef,
+    pub values: [Option<f64>; crate::series_pane::MAX_LINES],
+    pub styles: [Option<lines_core::style::LineStyle>; crate::series_pane::MAX_LINES],
+    pub stale: bool,
+}
+
 /// What a lower pane's title shows.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum LowerTitle {
@@ -1750,6 +1759,35 @@ impl Studies {
     /// How many lower panes the shown studies ask for.
     pub fn lower_count(&self) -> usize {
         self.lower().count()
+    }
+
+    /// Lower pane `k`'s last-value tags, for an external series study whose label is on (the
+    /// tags are its labels on the axis): each line's value (`ExtFrame::tag_values`; `None` for
+    /// a line hidden or without one), its style (for its drawn color) and whether the pane is
+    /// stale (the tags dim).
+    pub fn lower_tags(&self, k: usize) -> Option<SeriesTags> {
+        let s = self.lower().nth(k)?;
+        if !s.config.display().label {
+            return None;
+        }
+        let IndicatorConfig::External { .. } = &s.config else {
+            return None;
+        };
+        let def = s.ext_def?;
+        let mut values = s.ext.tag_values(def);
+        let mut styles = [None; crate::series_pane::MAX_LINES];
+        for (i, v) in values.iter_mut().enumerate() {
+            match s.looks.get(i) {
+                Some(l) if l.shown => styles[i] = Some(l.line()),
+                _ => *v = None,
+            }
+        }
+        Some(SeriesTags {
+            def,
+            values,
+            styles,
+            stale: s.ext.status == ExtStatus::Stale,
+        })
     }
 
     /// Lower pane `k`'s title (`None`: its study's label is off). `hovered`: the bar under

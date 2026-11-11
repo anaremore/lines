@@ -182,6 +182,9 @@ enum LabelKind {
     SubNote,
     /// The crosshair's value tag on the sub-pane's axis.
     SubCross,
+    /// An external series line's last-value tag on its pane's axis, by pane and line
+    /// (`k * MAX_LINES + i`: each has its own text color), keyed by its value.
+    SeriesTag(u8),
     /// A part of Volume's title readout (`VOL_*`), keyed by its value.
     Volume(u8),
     /// An external series pane's title: its name, a line's label and value, its state.
@@ -219,6 +222,7 @@ impl LabelKind {
                 | LabelKind::SubValue
                 | LabelKind::SubLast
                 | LabelKind::SubCross
+                | LabelKind::SeriesTag(_)
                 | LabelKind::CrossTime
                 | LabelKind::DrawingTag(_)
         )
@@ -6343,14 +6347,25 @@ impl ChartView {
             );
             (last, y)
         });
-        // The tag, then each label drawn: a later mark (the zero line's 0) that would cover one
+        // An external series' last-value tags, one per line in its color (number only: the
+        // title keys colors to names), stacked so none covers another (`series_pane::
+        // stack_tags`); hidden with study labels, as other study tags.
+        let series_tags = self
+            .visibility
+            .draws_labels()
+            .then(|| self.studies.lower_tags(k))
+            .flatten();
+        let tag_ys = series_tags.map_or([None; crate::series_pane::MAX_LINES], |tg| {
+            let want = tg.values.map(|v| v.map(|v| s.sub_top + sc.y(v)));
+            crate::series_pane::stack_tags(want, tag_h(), s.sub_top, s.sub_top + s.sub_h)
+        });
+        // The tags, then each label drawn: a later mark (the zero line's 0) that would cover one
         // is left out.
-        let mut taken = [
-            newest.map(|(_, y)| Span::around(y, tag_h() * 0.5)),
-            None,
-            None,
-            None,
-        ];
+        let mut taken = [None; 4 + crate::series_pane::MAX_LINES];
+        taken[0] = newest.map(|(_, y)| Span::around(y, tag_h() * 0.5));
+        for (i, y) in tag_ys.iter().enumerate() {
+            taken[4 + i] = y.map(|y| Span::around(y, tag_h() * 0.5));
+        }
         for (i, v) in marks.into_iter().enumerate() {
             let Some(v) = v else { continue };
             let y = s.sub_top + sc.y(v);
@@ -6388,6 +6403,53 @@ impl ChartView {
                 cx,
                 value(last),
             );
+        }
+        if let Some(tg) = series_tags {
+            for (i, y) in tag_ys.iter().enumerate() {
+                let (Some(y), Some(v)) = (*y, tg.values[i]) else {
+                    continue;
+                };
+                let base = t.series[crate::series_pane::series_index(tg.def.lines[i].color)];
+                let line = tg.styles[i].map_or(base, |st| t.part_color(st.color, base, 100));
+                let (chip, edge, text) = t.series_tag(line, tg.stale);
+                let r = rect(ax + hair, y - tag_h() * 0.5, self.axis_now, tag_h());
+                match chip {
+                    Some(c) => window.paint_quad(fill(r, c)),
+                    // Stale: dimmed by shape (design §5), a dashed edge in the line's color.
+                    None => {
+                        let w = 1.0;
+                        let (x0, y0) = (
+                            f32::from(r.origin.x) + w * 0.5,
+                            f32::from(r.origin.y) + w * 0.5,
+                        );
+                        let (x1, y1) = (
+                            x0 + f32::from(r.size.width) - w * 2.0,
+                            y0 + f32::from(r.size.height) - w,
+                        );
+                        let mut b =
+                            gpui::PathBuilder::stroke(px(w)).dash_array(&[px(3.0), px(2.0)]);
+                        b.move_to(point(px(x0), px(y0)));
+                        b.line_to(point(px(x1), px(y0)));
+                        b.line_to(point(px(x1), px(y1)));
+                        b.line_to(point(px(x0), px(y1)));
+                        b.close();
+                        if let Ok(path) = b.build() {
+                            window.paint_path(path, edge);
+                        }
+                    }
+                }
+                let origin = point(px(ox + ax + 8.0), px(oy + y - label_px() * 0.65));
+                self.paint_label(
+                    LabelKind::SeriesTag((k * crate::series_pane::MAX_LINES + i) as u8),
+                    key(v),
+                    origin,
+                    line_h,
+                    text,
+                    window,
+                    cx,
+                    value(v),
+                );
+            }
         }
         // The pointer in the sub-pane: its value on the axis, in the crosshair tag's style.
         if let Some(cy) = cross_in {
