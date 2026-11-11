@@ -6745,7 +6745,7 @@ impl ChartView {
     /// released (`false`): the warnings slot is fixed at its height for the drag, then settles
     /// (`StyleEditor::warn_slot`).
     pub fn picker_drag(&mut self, on: bool, cx: &mut Context<Self>) {
-        let now = self.editor_scroll.warnings_drawn();
+        let now = self.editor_scroll.warn_slot();
         let e = match self.study_style.as_mut() {
             Some((_, e)) => Some(e),
             None => self.drawings.editor_mut(),

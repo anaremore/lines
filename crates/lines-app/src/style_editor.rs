@@ -226,11 +226,10 @@ pub struct StyleEditor {
     pub recent: Vec<Rgb>,
     /// `recent` changed since the host saved it.
     pub recent_changed: bool,
-    /// While a press drags in the picker's square or a slider: the warnings slot's height,
-    /// fixed when the drag began (`style_editor_view::warnings_height`), so nothing around the
-    /// picker changes size under the pointer; the warnings show live inside it and the slot
-    /// settles on release. Whole logical px, rounded up. `None` otherwise.
-    pub warn_slot: Option<u32>,
+    /// While a press drags in the picker's square or a slider: the warnings slot, fixed when
+    /// the drag began, so nothing around the picker changes size or place under the pointer;
+    /// the warnings show live inside it and the slot settles on release. `None` otherwise.
+    pub warn_slot: Option<WarnSlot>,
     /// The current tab's style was just saved as the default (until the next change).
     pub saved: bool,
     /// A study's editor: theme colors are the study colors, every part offers the line
@@ -359,6 +358,16 @@ pub(crate) fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
         [one] => format!(" in the {one}"),
         [init @ .., last] => format!(" in the {}; and the {last}", init.join("; the ")),
     }
+}
+
+/// The warnings slot a picker drag holds (logical px at 100 %, whole, rounded up): `drawn`,
+/// the box's painted height, is what is drawn (clipped); `room`, the layout's estimate at the
+/// press (`style_editor_view::warnings_height`), is what the editor's height and place count,
+/// so neither the editor nor anything in it moves when the press starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WarnSlot {
+    pub drawn: u32,
+    pub room: u32,
 }
 
 impl StyleEditor {
