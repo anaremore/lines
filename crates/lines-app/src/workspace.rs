@@ -1390,6 +1390,11 @@ impl WindowView {
         if i >= self.tabs.len() {
             return;
         }
+        // A popover in the tab left behind would stay open unseen and take the next press on an
+        // order control in this one (`popover::press_closes_popover`): it closes.
+        if i != self.active {
+            crate::popover::close_any(cx);
+        }
         self.active = i;
         if scroll_into_view {
             let strip = self.tab_strip(f32::from(window.viewport_size().width));
