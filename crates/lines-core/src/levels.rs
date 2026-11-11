@@ -924,16 +924,21 @@ pub struct Placed {
     pub vwap_relative: bool,
     /// Where its label sits ([`LabelAt::Own`] from [`place`]; the layer sets its type's).
     pub anchor: LabelAt,
+    /// Its label is centred on its edge's own price rather than beside it (a tag in the price
+    /// axis marks the price itself): a low-edge label on the low edge, a high-edge one on the
+    /// high edge. Off from [`place`]; the layer sets it.
+    pub on_edge: bool,
 }
 
 impl Placed {
     /// Its label's centre y before clamping into the plot: on its own price, just under its
     /// low edge or just above its high edge (`half`: half a label's height).
     pub fn label_anchor(&self, half: f32) -> f32 {
-        match self.anchor {
-            LabelAt::Own => self.top,
-            LabelAt::Low => self.bottom + half,
-            LabelAt::High => self.top - half,
+        match (self.anchor, self.on_edge) {
+            (LabelAt::Own, _) | (LabelAt::High, true) => self.top,
+            (LabelAt::Low, true) => self.bottom,
+            (LabelAt::Low, false) => self.bottom + half,
+            (LabelAt::High, false) => self.top - half,
         }
     }
 }
@@ -970,6 +975,7 @@ pub fn place(
             label_y: None,
             vwap_relative: l.is_vwap_relative(),
             anchor: LabelAt::Own,
+            on_edge: false,
         });
     }
 }
@@ -1006,11 +1012,14 @@ pub enum LabelSeen {
 /// to its anchor only once that is clear of every placed label by [`LABEL_HYSTERESIS`] more (a
 /// new one needs only to be clear). `has_label(index)`: whether the level's label can be drawn
 /// at all (it has one, and it fits the plot's width): one that can't claims no room. A plot
-/// shorter than a label shows none. In place, no allocation.
+/// shorter than a label shows none. `blocked`: a span no label may overlap (its centre and
+/// height: the last-price tag, when labels are tags in the price axis); a label on it stacks
+/// off it the same way, or is dropped. In place, no allocation.
 pub fn place_labels(
     placed: &mut [Placed],
     label_h: f32,
     plot_h: f32,
+    blocked: Option<(f32, f32)>,
     seen: &mut [LabelSeen],
     has_label: impl Fn(u32) -> bool,
 ) {
@@ -1038,9 +1047,13 @@ pub fn place_labels(
             let clash = placed
                 .iter()
                 .filter_map(|q| q.label_y)
-                .any(|q| (q - y).abs() < need);
+                .any(|q| (q - y).abs() < need)
+                || on_blocked(blocked, y, label_h, need - label_h);
             let (at, home) = if clash {
-                (stack_row(placed, y, p.anchor, label_h, plot_h), false)
+                (
+                    stack_row(placed, blocked, y, p.anchor, label_h, plot_h),
+                    false,
+                )
             } else {
                 (Some(y), true)
             };
@@ -1056,31 +1069,58 @@ pub fn place_labels(
     }
 }
 
-/// The nearest free row for a label anchored at `y` that clashes with labels already placed:
-/// right against one of them (a label's height `label_h` apart), at most `label_h` from `y`,
-/// inside the plot, overlapping none; a low-edge label only further down and a high-edge
-/// label only further up (`anchor`). `None`: no row is free.
-fn stack_row(placed: &[Placed], y: f32, anchor: LabelAt, label_h: f32, plot_h: f32) -> Option<f32> {
+/// Whether a label centred at `y` (`label_h` tall) overlaps the blocked span, by more than
+/// `extra` px of hysteresis.
+fn on_blocked(blocked: Option<(f32, f32)>, y: f32, label_h: f32, extra: f32) -> bool {
+    blocked.is_some_and(|(b, h)| (b - y).abs() < (label_h + h) * 0.5 + extra.max(0.0))
+}
+
+/// The nearest free row for a label anchored at `y` that clashes with labels already placed
+/// or with the blocked span: right against one of them (a label's height `label_h` apart, or
+/// the span's edge), at most `label_h` from `y` (from the span: as far as it must), inside
+/// the plot, overlapping none; a low-edge label only further down and a high-edge label only
+/// further up (`anchor`). `None`: no row is free.
+fn stack_row(
+    placed: &[Placed],
+    blocked: Option<(f32, f32)>,
+    y: f32,
+    anchor: LabelAt,
+    label_h: f32,
+    plot_h: f32,
+) -> Option<f32> {
     let half = label_h * 0.5;
     // A hair of slack: rows exactly a label apart touch, they don't overlap.
     let slack = label_h * 1e-4;
     let mut best: Option<f32> = None;
-    for q in placed.iter().filter_map(|q| q.label_y) {
-        for c in [q - label_h, q + label_h] {
+    // Rows beside the blocked span: as far as clearing it takes.
+    let beside = blocked.map(|(b, h)| {
+        let off = (label_h + h) * 0.5;
+        [b - off, b + off]
+    });
+    // Rows against another label reach a label's height; rows beside the blocked span as far
+    // as clearing it takes.
+    let reach_beside = blocked.map_or(label_h, |(_, h)| label_h.max((label_h + h) * 0.5 + half));
+    let rows = placed
+        .iter()
+        .filter_map(|q| q.label_y)
+        .flat_map(|q| [(q - label_h, label_h), (q + label_h, label_h)])
+        .chain(beside.into_iter().flatten().map(|c| (c, reach_beside)));
+    {
+        for (c, reach) in rows {
             let d = c - y;
             let way_ok = match anchor {
                 LabelAt::Own => true,
                 LabelAt::Low => d >= 0.0,
                 LabelAt::High => d <= 0.0,
             };
-            if !way_ok || d.abs() > label_h + slack || c < half - slack || c > plot_h - half + slack
-            {
+            if !way_ok || d.abs() > reach + slack || c < half - slack || c > plot_h - half + slack {
                 continue;
             }
             let free = placed
                 .iter()
                 .filter_map(|o| o.label_y)
-                .all(|o| (o - c).abs() >= label_h - slack);
+                .all(|o| (o - c).abs() >= label_h - slack)
+                && !on_blocked(blocked, c, label_h - 2.0 * slack, 0.0);
             if free && best.is_none_or(|b| d.abs() < (b - y).abs()) {
                 best = Some(c);
             }
@@ -1089,7 +1129,7 @@ fn stack_row(placed: &[Placed], y: f32, anchor: LabelAt, label_h: f32, plot_h: f
     best
 }
 
-// ---- the labels' gutter (paint path: no allocation) ------------------------------------
+// ---- label text --------------------------------------------------------------------
 
 /// A label cut to fit `room` px (as `width` measures text): the name shortened with "…"
 /// before ` : price` (the price is never cut), or the name alone cut with "…" when there is
@@ -1114,79 +1154,6 @@ pub fn cut_label(
         }
     }
     None
-}
-
-/// Plot px the level labels' gutter (`gutter` px wide, at the plot's right) takes from the
-/// bars: only what the empty space already right of the newest bar (the view's right margin,
-/// or a scroll past the end) doesn't cover. `vp` without any inset; `len` bars. While the
-/// newest bar is scrolled off to the right, the whole gutter.
-pub fn gutter_inset(gutter: f64, vp: &Viewport, len: usize) -> f64 {
-    if gutter <= 0.0 {
-        return 0.0;
-    }
-    let free = if len == 0 {
-        vp.width
-    } else {
-        ((vp.right_index - (len - 1) as f64 - 0.5) * vp.bar_px).max(0.0)
-    };
-    (gutter - free).max(0.0)
-}
-
-/// One frame's gutter: the stepped width from `prev` for what the labels need (`need`, from
-/// the whole level set, never the view), no wider than `cap`, and the inset it sets on `vp`
-/// for `len` bars (the bars end exactly at the gutter). Returns the width.
-pub fn settle_gutter(vp: &mut Viewport, len: usize, prev: f32, need: f32, cap: f32) -> f32 {
-    let g = step_gutter(prev, need.min(cap)).min(cap.max(0.0));
-    vp.right_inset = 0.0;
-    vp.right_inset = gutter_inset(f64::from(g), vp, len);
-    g
-}
-
-/// What a frame's gutter may be: its cap (in whole steps) and whether labels show at all.
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct GutterPlan {
-    /// The widest the gutter may be, in whole [`GUTTER_STEP`]s.
-    pub cap: f32,
-    /// Labels show: some label would (`need` > 0) and the shortest useful cut fits the cap.
-    /// Otherwise no labels and no gutter.
-    pub fits: bool,
-}
-
-/// The gutter's plan for a plot `plot_w` px wide: the cap is `wide_cap` (130 px at 100 %
-/// zoom); on a narrow plot a quarter of it, or what the shortest useful cut needs
-/// (`min_cut`, with its chip, stepped up), but never more than 40 % of it; in whole steps.
-/// Labels show only when something would (`need` > 0) and the shortest cut fits the cap.
-pub fn gutter_plan(need: f32, min_cut: f32, plot_w: f32, wide_cap: f32) -> GutterPlan {
-    let down = |v: f32| (v.max(0.0) / GUTTER_STEP).floor() * GUTTER_STEP;
-    // The shortest cut rounded up (a cap stepped down below it would never fit it).
-    let cut = (min_cut.max(0.0) / GUTTER_STEP).ceil() * GUTTER_STEP;
-    let cap = down(wide_cap)
-        .min(down(plot_w * 0.25).max(cut))
-        .min(down(plot_w * 0.4));
-    GutterPlan {
-        cap,
-        fits: need > 0.0 && cut <= cap,
-    }
-}
-
-/// The gutter's width step (px): widths are whole steps, so a label a few px wider or
-/// narrower doesn't move the bars.
-pub const GUTTER_STEP: f32 = 8.0;
-
-/// The gutter's width this frame from last frame's (`current`) and what the visible labels
-/// need now (`target`, 0: no label shows): it grows at once to the next whole step, shrinks
-/// only once the labels need two steps less (labels scrolling in and out at a step's edge
-/// don't make it flicker), and goes as soon as no label shows.
-pub fn step_gutter(current: f32, target: f32) -> f32 {
-    if target <= 0.0 {
-        return 0.0;
-    }
-    let want = (target / GUTTER_STEP).ceil() * GUTTER_STEP;
-    if want > current || want <= current - 2.0 * GUTTER_STEP {
-        want
-    } else {
-        current
-    }
 }
 
 // ---- price at time --------------------------------------------------------------------

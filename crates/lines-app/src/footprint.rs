@@ -1329,29 +1329,6 @@ mod tests {
         vp
     }
 
-    /// A column cut by the time axis's end (the level labels' gutter right of it) isn't
-    /// whole: it is drawn as a candle, never as cells under the labels.
-    #[test]
-    fn a_column_past_the_gutter_is_not_whole() {
-        let mut vp = Viewport::default();
-        vp.set_size(800.0, 400.0);
-        vp.bar_px = 120.0;
-        vp.right_index = 20.4;
-        vp.right_inset = 96.0;
-        // Bar 20 ends past the gutter's edge but inside the plot: not whole (judged by the
-        // edge, not the plot's width).
-        let c = Column::of(&vp, 20, 1.0);
-        let right = f64::from(c.cell_left + c.cell_w);
-        assert!(right > vp.edge() && right <= vp.width, "{right}");
-        assert!(!whole_column(&vp, 20, 1.0));
-        for i in 0..=20 {
-            if whole_column(&vp, i, 1.0) {
-                let c = Column::of(&vp, i, 1.0);
-                assert!(f64::from(c.cell_left + c.cell_w) <= vp.edge());
-            }
-        }
-    }
-
     #[test]
     fn cells_where_there_are_trades_candles_elsewhere_and_when_narrow() {
         let s = store();

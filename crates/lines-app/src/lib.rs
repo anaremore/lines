@@ -536,6 +536,17 @@ struct Cli {
     /// Volume profile grouping in ticks per row (Alt+G); default: automatic.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     profile_grouping: Option<u32>,
+    /// The volume profile's label says where the counted trades have gaps (off by default;
+    /// the studies menu's Label group in the app).
+    #[arg(long)]
+    profile_label_gaps: bool,
+    /// Where charts put their study labels this run (a chart's saved choice wins): tags in
+    /// the price axis (the default), a column between the plot and the axis, or on the chart.
+    #[arg(long, value_enum)]
+    label_place: Option<LabelPlaceArg>,
+    /// The label column's width, logical px at 100 % zoom (with `--label-place column`).
+    #[arg(long, requires = "label_place", value_parser = clap::value_parser!(u16).range(48..=320))]
+    label_column: Option<u16>,
     /// Screenshot mode (decision 0009): replay --replay up to --at at full speed, render one
     /// frame at --size/--theme with a frozen clock, write this PNG, exit.
     /// Requires building with `--features screenshot`.
@@ -1008,6 +1019,23 @@ enum ProfileModeArg {
     Session,
     Visible,
     Composite,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum LabelPlaceArg {
+    Axis,
+    Column,
+    Chart,
+}
+
+impl From<LabelPlaceArg> for levels_layer::LabelPlace {
+    fn from(a: LabelPlaceArg) -> Self {
+        match a {
+            LabelPlaceArg::Axis => levels_layer::LabelPlace::Axis,
+            LabelPlaceArg::Column => levels_layer::LabelPlace::Column,
+            LabelPlaceArg::Chart => levels_layer::LabelPlace::Chart,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -2035,8 +2063,10 @@ where
                 value_area_percent: cli.profile_va,
                 split: cli.profile_split,
                 grouping: cli.profile_grouping,
+                label_gaps: cli.profile_label_gaps,
                 ..ProfileConfig::default()
             },
+            labels: cli.label_place.map(|p| (p.into(), cli.label_column)),
             visibility: wsdoc::StudyVisibility {
                 hide_study_labels: cli.hide_study_labels,
                 hide_studies: cli.hide_studies,

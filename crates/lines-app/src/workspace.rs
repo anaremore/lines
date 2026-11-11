@@ -1779,6 +1779,18 @@ impl WindowView {
                 }
                 chart.update(cx, |v, cx| v.set_levels_config(c, cx));
             }
+            Command::LevelLabelPlace(p) => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chart(chart)) => {
+                    chart.update(cx, |c, cx| c.set_label_place(p, cx))
+                }
+                _ => self.refuse("Study labels are on charts: focus a chart first", cx),
+            },
+            Command::ProfileLabel(part) => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chart(chart)) => {
+                    chart.update(cx, |c, cx| c.toggle_profile_label(part, cx))
+                }
+                _ => self.refuse("The volume profile is on charts: focus a chart first", cx),
+            },
             Command::TogglePerfStats => {
                 let show = !cx.global::<Workspace>().show_perf_stats;
                 set_show_perf_stats(show, cx);
@@ -2603,8 +2615,11 @@ impl WindowView {
                     timeframe: c.timeframe(),
                     on_ticks: c.on_ticks(),
                     tick_continuous: c.tick_continuous(),
-                    levels: (!c.level_sources().is_empty())
-                        .then_some((!lc.hidden, !lc.hide_labels)),
+                    levels: (!c.level_sources().is_empty()).then_some((
+                        !lc.hidden,
+                        !lc.hide_labels,
+                        lc.label_place,
+                    )),
                     studies_shown: !v.hide_studies,
                     study_labels_shown: !v.hide_study_labels,
                     strategy_marks_shown: !c.strategy_marks_hidden(),

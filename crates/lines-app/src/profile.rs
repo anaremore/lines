@@ -105,6 +105,60 @@ pub struct ProfileConfig {
     /// Hidden on this chart (the studies menu's eye): kept, not computed or drawn.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// No label at all (hiding study labels and Clean chart hide it too). Optional.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub label_hidden: bool,
+    /// The label leaves out the session's date or the range's name. Optional.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_label_name: bool,
+    /// The label leaves out where the counted trades start ("partial from"). Optional.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub no_label_partial: bool,
+    /// The label says where the counted trades have gaps (off by default). Optional.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub label_gaps: bool,
+}
+
+/// One part of the profile's label (the studies menu's Label group, the palette).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ProfileLabelPart {
+    /// The label itself.
+    Shown,
+    /// The session's date or the range's name.
+    Name,
+    /// "partial from HH:MM", where the counted trades start after the range does.
+    Partial,
+    /// "gap HH:MM–HH:MM", where the counted trades have holes.
+    Gaps,
+}
+
+impl ProfileLabelPart {
+    pub const ALL: [ProfileLabelPart; 4] = [
+        ProfileLabelPart::Shown,
+        ProfileLabelPart::Name,
+        ProfileLabelPart::Partial,
+        ProfileLabelPart::Gaps,
+    ];
+
+    /// Its name in the studies menu's Label group.
+    pub fn label(self) -> &'static str {
+        match self {
+            ProfileLabelPart::Shown => "Show",
+            ProfileLabelPart::Name => "Session or range",
+            ProfileLabelPart::Partial => "Partial from",
+            ProfileLabelPart::Gaps => "Gaps",
+        }
+    }
+
+    /// Its name in the palette.
+    pub fn words(self) -> &'static str {
+        match self {
+            ProfileLabelPart::Shown => "show/hide",
+            ProfileLabelPart::Name => "session or range name",
+            ProfileLabelPart::Partial => "partial from",
+            ProfileLabelPart::Gaps => "gaps",
+        }
+    }
 }
 
 impl Default for ProfileConfig {
@@ -118,6 +172,10 @@ impl Default for ProfileConfig {
             grouping: None,
             width_percent: 25,
             hidden: false,
+            label_hidden: false,
+            no_label_name: false,
+            no_label_partial: false,
+            label_gaps: false,
         }
     }
 }
@@ -125,6 +183,26 @@ impl Default for ProfileConfig {
 impl ProfileConfig {
     pub fn is_default(&self) -> bool {
         *self == ProfileConfig::default()
+    }
+
+    /// Whether one part of the label shows.
+    pub fn label_part(&self, part: ProfileLabelPart) -> bool {
+        match part {
+            ProfileLabelPart::Shown => !self.label_hidden,
+            ProfileLabelPart::Name => !self.no_label_name,
+            ProfileLabelPart::Partial => !self.no_label_partial,
+            ProfileLabelPart::Gaps => self.label_gaps,
+        }
+    }
+
+    /// Turn one part of the label on or off.
+    pub fn toggle_label_part(&mut self, part: ProfileLabelPart) {
+        match part {
+            ProfileLabelPart::Shown => self.label_hidden = !self.label_hidden,
+            ProfileLabelPart::Name => self.no_label_name = !self.no_label_name,
+            ProfileLabelPart::Partial => self.no_label_partial = !self.no_label_partial,
+            ProfileLabelPart::Gaps => self.label_gaps = !self.label_gaps,
+        }
     }
 
     fn composite(&self) -> usize {
@@ -189,6 +267,9 @@ pub struct VolumeProfileLayer {
     active: bool,
     label: FixedStr<96>,
     shaped: Option<(FixedStr<96>, ShapedLine)>,
+    /// The label cut with "…" to the label column's room (its text, the room in whole px,
+    /// the cut shaped, or `None` when not even one letter fits): made once per label and room.
+    cut: Option<(FixedStr<96>, u32, Option<ShapedLine>)>,
     /// User styles (decision 0026), as saved, and resolved for paint.
     style: PartStyles,
     looks: [Look; 4],
@@ -198,6 +279,7 @@ impl VolumeProfileLayer {
     /// A new theme: the label is shaped again in its text color.
     pub fn theme_changed(&mut self) {
         self.shaped = None;
+        self.cut = None;
     }
 
     pub fn new(config: ProfileConfig) -> Self {
@@ -210,6 +292,7 @@ impl VolumeProfileLayer {
             active: false,
             label: FixedStr::new(),
             shaped: None,
+            cut: None,
         }
     }
 
@@ -241,15 +324,18 @@ impl VolumeProfileLayer {
     }
 
     /// The profile's label (mode, session, coverage), drawn after the indicator lines so it
-    /// stays readable: the rows themselves are painted behind the candles.
+    /// stays readable: the rows themselves are painted behind the candles. At the bottom of
+    /// the plot, or of the chart's label column (`column`: its left edge with its margin, and
+    /// its width, plot px), cut with "…" to fit it.
     pub fn paint_label(
         &mut self,
         plot: Bounds<Pixels>,
+        column: Option<(f32, f32)>,
         theme: &Theme,
         window: &mut Window,
         cx: &mut App,
     ) {
-        if !self.active {
+        if !self.active || self.label.is_empty() {
             return;
         }
         let t = theme;
@@ -268,22 +354,46 @@ impl VolumeProfileLayer {
             .as_ref()
             .is_none_or(|(s, _)| s.as_str() != self.label.as_str())
         {
-            let text = self.label.as_str();
-            let run = TextRun {
-                len: text.len(),
-                font: crate::fonts::ui(),
-                color: t.text_dim,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let line = window.text_system().shape_line(
-                SharedString::from(text.to_owned()),
-                px(LABEL_PX),
-                &[run],
-                None,
-            );
+            let line = shape_label(window, self.label.as_str().to_owned(), t.text_dim);
             self.shaped = Some((self.label, line));
+        }
+        if let Some((left, col_w)) = column {
+            // In the label column: as much as its room holds, the rest cut with "…".
+            let room = (col_w - 2.0 * crate::levels_layer::COLUMN_PAD - 12.0).max(0.0);
+            let fits = self
+                .shaped
+                .as_ref()
+                .is_some_and(|(_, l)| f32::from(l.width) <= room);
+            if !fits
+                && self
+                    .cut
+                    .as_ref()
+                    .is_none_or(|(s, r, _)| s.as_str() != self.label.as_str() || *r != room as u32)
+            {
+                let line = cut_to(self.label.as_str(), room, t.text_dim, window);
+                self.cut = Some((self.label, room as u32, line));
+            }
+            let line = if fits {
+                self.shaped.as_ref().map(|(_, l)| l)
+            } else {
+                self.cut.as_ref().and_then(|(_, _, l)| l.as_ref())
+            };
+            if let Some(line) = line {
+                let w = f32::from(line.width) + 12.0;
+                let box_h = LABEL_PX * 1.6;
+                let x = snap(f64::from(left), scale);
+                let y = snap(f64::from((ph - box_h - 6.0).max(0.0)), scale);
+                paint(window, x, y, w, box_h, t.label_bg);
+                let _ = line.paint(
+                    point(px(ox + x + 6.0), px(oy + y + box_h * 0.5 - LABEL_PX * 0.65)),
+                    px(LABEL_PX * 1.3),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+            return;
         }
         if let Some((_, line)) = &self.shaped {
             let w = f32::from(line.width) + 12.0;
@@ -320,6 +430,35 @@ impl VolumeProfileLayer {
         self.rows
             .build(i64::from(g) * tick, self.config.value_area(), levels);
     }
+}
+
+/// The label's text shaped in `color` (the label, and its cuts).
+fn shape_label(window: &mut Window, text: String, color: Hsla) -> ShapedLine {
+    let run = TextRun {
+        len: text.len(),
+        font: crate::fonts::ui(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(SharedString::from(text), px(LABEL_PX), &[run], None)
+}
+
+/// `text` cut with "…" to fit `room` px, shaped in `color` (the longest head that fits);
+/// `None` when not even one letter does. Allocates: only when the label or the room changes.
+fn cut_to(text: &str, room: f32, color: Hsla, window: &mut Window) -> Option<ShapedLine> {
+    let n = text.chars().count();
+    for k in (1..n).rev() {
+        let head: String = text.chars().take(k).collect();
+        let line = shape_label(window, format!("{}…", head.trim_end()), color);
+        if f32::from(line.width) <= room {
+            return Some(line);
+        }
+    }
+    None
 }
 
 /// The smallest DOM preset whose rows are at least [`AUTO_MIN_ROW_PX`] tall.
@@ -411,17 +550,32 @@ impl ChartLayer for VolumeProfileLayer {
         };
         // Where the counted trades (stored and live) don't cover the range: it starts later
         // (`partial from`), or has holes (`gap`).
+        // The label's parts as the chart wants them (none: no label).
         let gaps = data.counted_gaps(from.0, to.0 - 1);
-        if gaps.any {
-            let zone = lines_core::display_tz::current();
-            if let Some(s) = gaps.data_from {
-                write_partial(&mut label, UtcMillis(s), &zone);
+        let mut text = FixedStr::<96>::new();
+        if !cfg.label_hidden {
+            if !cfg.no_label_name {
+                let _ = text.write_str(label.as_str());
             }
-            if let Some(g) = gaps.first_gap {
-                write_gap(&mut label, g, gaps.more_gaps, &zone);
+            if gaps.any {
+                let zone = lines_core::display_tz::current();
+                if let (Some(s), false) = (gaps.data_from, cfg.no_label_partial) {
+                    write_partial(&mut text, UtcMillis(s), &zone);
+                }
+                if let (Some(g), true) = (gaps.first_gap, cfg.label_gaps) {
+                    write_gap(&mut text, g, gaps.more_gaps, &zone);
+                }
             }
         }
-        self.label = label;
+        // Without the name, a part starts it: no leading separator.
+        self.label = match text.as_str().strip_prefix(" · ") {
+            Some(rest) => {
+                let mut s = FixedStr::<96>::new();
+                let _ = s.write_str(rest);
+                s
+            }
+            None => text,
+        };
         let key = BuildKey {
             version: profiles.version(),
             config: cfg,
@@ -694,6 +848,27 @@ mod tests {
         }
     }
 
+    /// The label's parts: on by default except gaps; saved only when changed; each toggles.
+    #[test]
+    fn the_label_parts_default_and_toggle() {
+        let d = ProfileConfig::default();
+        assert!(d.label_part(ProfileLabelPart::Shown));
+        assert!(d.label_part(ProfileLabelPart::Name));
+        assert!(d.label_part(ProfileLabelPart::Partial));
+        assert!(!d.label_part(ProfileLabelPart::Gaps), "gaps off by default");
+        for part in ProfileLabelPart::ALL {
+            let mut c = d;
+            c.toggle_label_part(part);
+            assert_ne!(c.label_part(part), d.label_part(part), "{part:?}");
+            let json = serde_json::to_string(&c).unwrap();
+            assert_eq!(serde_json::from_str::<ProfileConfig>(&json).unwrap(), c);
+            c.toggle_label_part(part);
+            assert_eq!(c, d);
+        }
+        let json = serde_json::to_string(&d).unwrap();
+        assert!(!json.contains("label"), "{json}");
+    }
+
     #[test]
     fn config_round_trips_and_tolerates_missing_fields() {
         let c = ProfileConfig {
@@ -705,6 +880,7 @@ mod tests {
             grouping: Some(5),
             width_percent: 30,
             hidden: false,
+            ..Default::default()
         };
         let json = serde_json::to_string(&c).unwrap();
         assert_eq!(
@@ -764,6 +940,78 @@ mod tests {
             [Some(1), Some(2), Some(5), Some(10), Some(25), None]
         );
         assert!(!c.on_alt_key("x"));
+    }
+
+    /// The label says what its parts say: the name, "partial from", gaps only when asked, no
+    /// leading separator without the name, nothing at all when hidden.
+    #[test]
+    fn the_label_has_the_parts_asked_for() {
+        use lines_core::{Aggressor, Capabilities, Month, Qty};
+        use lines_feed::catalog;
+        use lines_feed::provider::MarketEvent;
+        use lines_feed::store::ChartStore;
+
+        let es = catalog::get(catalog::ES).unwrap();
+        let z26 = lines_core::ContractKey::monthly(es.id, 2026, Month::new(12).unwrap());
+        let store = ChartStore::new(es, Some(z26), Capabilities::default(), "test", 60_000, 1000);
+        let mut d = store.read();
+        let trade = |at: &str, p: i64, q: i64| MarketEvent::Trade {
+            time: UtcMillis::parse_iso(at).unwrap(),
+            price: Price(p),
+            qty: Qty(q),
+            aggressor: Some(Aggressor::Buy),
+        };
+        // Data from 13:00 UTC (partial), then a hole: a gap ends the counted run at 15:01 and
+        // the next trade starts one at 16:00.
+        d.apply(&[
+            trade("2026-11-05T13:00:00", 600_000, 5),
+            trade("2026-11-05T15:01:00", 600_050, 3),
+        ]);
+        d.apply(&[MarketEvent::Gap { missed: 4 }]);
+        d.apply(&[trade("2026-11-05T16:00:00", 600_025, 2)]);
+        let mut vp = Viewport::default();
+        vp.set_size(800.0, 600.0);
+        (vp.price_lo, vp.price_hi) = (599_000.0, 601_000.0);
+        vp.right_index = 61.0;
+        let label = |cfg: ProfileConfig| {
+            let mut layer = VolumeProfileLayer::new(cfg);
+            layer.prepare(
+                &d,
+                BarsView::fixed(d.series.bars(), d.series.period_ms()),
+                &vp,
+            );
+            layer.label.as_str().to_owned()
+        };
+        let base = ProfileConfig {
+            mode: ProfileMode::Session,
+            ..ProfileConfig::default()
+        };
+        let plain = label(base);
+        assert_eq!(plain, "ETH 2026-11-05 · partial from 13:00 UTC", "gaps off");
+        let gaps = label(ProfileConfig {
+            label_gaps: true,
+            ..base
+        });
+        assert!(
+            gaps.starts_with("ETH 2026-11-05 · partial from 13:00 UTC · gap "),
+            "{gaps}"
+        );
+        let no_name = label(ProfileConfig {
+            no_label_name: true,
+            ..base
+        });
+        assert_eq!(no_name, "partial from 13:00 UTC", "no leading separator");
+        let name_only = label(ProfileConfig {
+            no_label_partial: true,
+            ..base
+        });
+        assert_eq!(name_only, "ETH 2026-11-05");
+        let hidden = label(ProfileConfig {
+            label_hidden: true,
+            label_gaps: true,
+            ..base
+        });
+        assert_eq!(hidden, "", "no label at all");
     }
 
     /// `prepare` on a real store: session selection, ETH vs RTH, partial coverage, composite

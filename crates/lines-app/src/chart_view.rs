@@ -75,7 +75,7 @@ use lines_feed::ticks::{TickKey, TickLease};
 use crate::chart_draw::{self, ChartDrawings};
 use crate::commands::{Command, DrawCmd};
 use crate::feeds::PaneFeed;
-use crate::levels_layer::{LevelsConfig, LevelsLayer};
+use crate::levels_layer::{LabelPlace, LevelsConfig, LevelsLayer};
 use crate::pane::{self, FeedChanged, Pane, PaneCommon};
 use crate::picker_view::{PickerKey, PickerUi};
 use crate::pnl::PnlDisplay;
@@ -251,6 +251,10 @@ const NOTE_PAD: f32 = 6.0;
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Region {
     Plot,
+    /// The label column (study labels between the plot and the axis): nothing happens here.
+    Column,
+    /// The label column's edge with the plot: drag to resize, double-click to fit.
+    ColumnEdge,
     /// The price axis column, including the corner below it.
     PriceAxis,
     TimeAxis,
@@ -312,6 +316,9 @@ pub struct Fixture {
     pub profile: ProfileConfig,
     /// Study labels / studies hidden from the start (screenshots of a clean chart).
     pub visibility: StudyVisibility,
+    /// Where study labels go, and the label column's width (CLI `--label-place`,
+    /// `--label-column`). A pane's saved choice takes precedence.
+    pub labels: Option<(LabelPlace, Option<u16>)>,
     /// Studies to start with, as a template or a new chart's defaults would give them
     /// (screenshots: `--study-set FILE`).
     pub studies: Option<StudySet>,
@@ -432,9 +439,15 @@ pub struct ChartView {
     pending_levels: crate::study_style::PendingLevels,
     /// `study_style::level_styles_generation()` this chart last read the app-wide styles at.
     level_styles_gen: u64,
-    /// The level labels' gutter (plot px at the right, `lines_core::levels::step_gutter`): 0
-    /// while no level label shows.
-    gutter: f32,
+    /// This frame's price axis width (it grows to the widest level tag while study labels are
+    /// tags in the axis) and label column width (0 unless they are in a column), px.
+    axis_now: f32,
+    label_col: f32,
+    /// A drag of the label column's edge: where it began (window x) and the column's width
+    /// then (px at 100 % zoom).
+    column_drag: Option<(f32, f32)>,
+    /// The pointer is on the label column's edge (its resize cursor).
+    column_edge_hover: bool,
     /// A press on the plot while a strip limit's pick is armed: where (window px), and the
     /// price there (the crosshair's, computed at the press). Sent on release if still a click.
     pick_press: Option<(Point<Pixels>, PickPrice)>,
@@ -780,6 +793,10 @@ impl ChartView {
         let mut studies = crate::studies::Studies::new(fixture.indicators.clone());
         studies.attach(feed_info(&store));
         let mut levels = LevelsLayer::new(LevelsConfig::default());
+        if let Some((place, column)) = fixture.labels {
+            levels.config.label_place = place;
+            levels.config.label_column = column;
+        }
         levels.attach(&store);
         let (fixture_studies, fixture_menu) =
             (fixture.studies.clone(), fixture.studies_menu.clone());
@@ -806,7 +823,10 @@ impl ChartView {
             styles_extra: serde_json::Map::new(),
             pending_levels: Default::default(),
             level_styles_gen: 0,
-            gutter: 0.0,
+            axis_now: axis_w(),
+            label_col: 0.0,
+            column_drag: None,
+            column_edge_hover: false,
             study_draft: None,
             anchoring: None,
             pick_press: None,
@@ -1602,10 +1622,16 @@ impl ChartView {
     // ---- input ---------------------------------------------------------------------
 
     fn region(&self, pos: Point<Pixels>) -> Option<Region> {
+        let x = f32::from(pos.x - self.plot.right());
+        let y = f32::from(pos.y - self.plot.origin.y);
         if !self.chart.contains(&pos) {
             None
+        } else if self.label_col > 0.0 && column_edge_hit(x, y, self.above_axis) {
+            Some(Region::ColumnEdge)
         } else if self.plot.contains(&pos) {
             Some(Region::Plot)
+        } else if self.label_col > 0.0 && x >= 0.0 && x < self.label_col && y < self.above_axis {
+            Some(Region::Column)
         } else if pos.x >= self.plot.right() {
             let y = f32::from(pos.y - self.plot.origin.y);
             if self.split.is_some() && y >= f32::from(self.plot.size.height) && y < self.above_axis
@@ -1684,6 +1710,17 @@ impl ChartView {
             return;
         }
         self.end_drag();
+        if region == Region::ColumnEdge {
+            if ev.click_count >= 2 {
+                self.fit_label_column(cx);
+            } else {
+                // From the width drawn (the 40 % cap may hold it under the saved one), so
+                // the edge follows the pointer from the first move.
+                let drawn = self.label_col / crate::zoom::f(1.0);
+                self.column_drag = Some((f32::from(ev.position.x), drawn));
+            }
+            return;
+        }
         let (x, y) = self.local(ev.position);
         // A lower pane's ×: its study goes (as Remove in the studies menu) on a release still
         // on the same × (a pan that starts there removes nothing).
@@ -1804,7 +1841,7 @@ impl ChartView {
                 Region::Divider(_) => {
                     self.subpane_ratios = std::array::from_fn(crate::subpane::default_ratio)
                 }
-                Region::SubAxis => return,
+                Region::SubAxis | Region::Column | Region::ColumnEdge => return,
             }
             cx.notify();
             return;
@@ -1836,7 +1873,7 @@ impl ChartView {
                     .split
                     .map_or(self.subpane_ratios, |s| s.ratios(self.above_axis)),
             },
-            Region::SubAxis => return,
+            Region::SubAxis | Region::Column | Region::ColumnEdge => return,
             Region::PriceAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Price, x, y)),
             Region::TimeAxis => Drag::Scale(ScaleDrag::new(&self.vp, ScaleMode::Time, x, y)),
         };
@@ -2805,6 +2842,132 @@ impl ChartView {
         }
     }
 
+    /// The price axis's width and the label column's this frame (`w`: the chart's width), from
+    /// where this chart puts its study labels, and each label's room to match: tags in the
+    /// axis widen it to the widest tag (to [`crate::levels_layer::AXIS_TAG_CAP`]); a column
+    /// keeps its own width (never more than 40 % of the chart beside the axis); on the chart,
+    /// neither. Labels hidden: neither. From the whole level set, so a pan never moves them.
+    fn label_strips(&mut self, w: f32) -> (f32, f32) {
+        use crate::levels_layer::{AXIS_TAG_CAP, COLUMN_PAD, LABEL_CHROME};
+        let base = axis_w();
+        let c = &self.levels.config;
+        let shown = self.visibility.draws_studies()
+            && self.visibility.draws_labels()
+            && !c.hidden
+            && !c.hide_labels;
+        // A column only for a chart with level sources (never an empty strip).
+        let column_ok = shown && self.levels.has_sources();
+        match c.label_place {
+            LabelPlace::Chart => {
+                self.levels.set_room_plot();
+                (base, 0.0)
+            }
+            LabelPlace::Axis => {
+                // Label widths were measured in render (`measure_labels`).
+                let (need, cut) = if shown {
+                    self.levels.label_need()
+                } else {
+                    (0.0, 0.0)
+                };
+                let cap = crate::zoom::f(AXIS_TAG_CAP);
+                let (axis, room) = crate::levels_layer::axis_fit(need, cut, base, cap);
+                self.levels.set_room(room);
+                // The VWAPs' end tags are tags here too (measured in render): the axis grows
+                // to the widest of either.
+                let ends = if self.visibility.draws_studies() && self.visibility.draws_labels() {
+                    self.studies.end_tags_need()
+                } else {
+                    0.0
+                };
+                let ends = if ends > 0.0 {
+                    (ends + crate::levels_layer::AXIS_LEADER)
+                        .clamp(base, cap.max(base))
+                        .ceil()
+                } else {
+                    base
+                };
+                (axis.max(ends), 0.0)
+            }
+            LabelPlace::Column => {
+                if !column_ok {
+                    self.levels.set_room(None);
+                    return (base, 0.0);
+                }
+                let col = crate::levels_layer::column_px(crate::zoom::f(c.column_w()), w - base);
+                let room = col - 2.0 * COLUMN_PAD - LABEL_CHROME;
+                let (need, cut) = self.levels.label_need();
+                // Nothing to show (a missing source), or not even a short cut fits: no column
+                // (never an empty strip).
+                if need <= 0.0 || room <= 0.0 || cut > room {
+                    self.levels.set_room(None);
+                    return (base, 0.0);
+                }
+                self.levels.set_room(Some(room));
+                (base, col)
+            }
+        }
+    }
+
+    /// Where this frame's study labels are drawn: the axis's or the column's left edge, the
+    /// newest bar's right edge while it is on the plot, and the pointer (plot px).
+    fn label_strip(&self) -> crate::levels_layer::LabelStrip {
+        let pw = f32::from(self.plot.size.width);
+        let newest_right = (self.series_len > 0)
+            .then(|| {
+                (self.vp.index_to_x((self.series_len - 1) as f64) + self.vp.bar_px * 0.5) as f32
+            })
+            .filter(|x| (0.0..=pw).contains(x));
+        crate::levels_layer::LabelStrip {
+            left: pw,
+            newest_right,
+            hover: self.hover,
+        }
+    }
+
+    /// The label column's width (px at 100 % zoom, within its limits), saved with the chart.
+    fn set_label_column(&mut self, w: f32, cx: &mut Context<Self>) {
+        use crate::levels_layer::{COLUMN_W_MAX, COLUMN_W_MIN};
+        let w = (w.round() as i32).clamp(i32::from(COLUMN_W_MIN), i32::from(COLUMN_W_MAX)) as u16;
+        if self.levels.config.label_column != Some(w) {
+            self.levels.config.label_column = Some(w);
+            cx.notify();
+        }
+    }
+
+    /// Fit the label column to its widest label (a double-click on its edge), as the DOM's
+    /// columns fit theirs; no labels: its default width.
+    fn fit_label_column(&mut self, cx: &mut Context<Self>) {
+        use crate::levels_layer::{COLUMN_PAD, COLUMN_W_DEFAULT, LABEL_CHROME};
+        let (need, _) = self.levels.label_need();
+        let w = if need > 0.0 {
+            (need + LABEL_CHROME + 2.0 * COLUMN_PAD) / crate::zoom::f(1.0)
+        } else {
+            f32::from(COLUMN_W_DEFAULT)
+        };
+        self.set_label_column(w.ceil(), cx);
+    }
+
+    /// One part of the volume profile's label on or off (the palette).
+    pub fn toggle_profile_label(
+        &mut self,
+        part: crate::profile::ProfileLabelPart,
+        cx: &mut Context<Self>,
+    ) {
+        let mut p = self.profile.config();
+        p.toggle_label_part(part);
+        self.profile.set_config(p);
+        cx.notify();
+    }
+
+    /// Where this chart puts its study labels (commands, menus).
+    pub fn set_label_place(&mut self, place: LabelPlace, cx: &mut Context<Self>) {
+        if self.levels.config.label_place != place {
+            self.levels.config.label_place = place;
+            self.seen_levels = u64::MAX;
+            cx.notify();
+        }
+    }
+
     /// What this chart draws of its studies.
     pub fn visibility(&self) -> StudyVisibility {
         self.visibility
@@ -2858,6 +3021,27 @@ impl ChartView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        // The label column's edge: dragged (absolute, from where the drag began: the edge
+        // follows the pointer), or hovered (its resize cursor).
+        if let Some((from, w0)) = self.column_drag {
+            if ev.pressed_button != Some(MouseButton::Left) {
+                self.column_drag = None;
+            } else {
+                let zoom = crate::zoom::f(1.0);
+                let w =
+                    crate::levels_layer::dragged_column(w0, from, f32::from(ev.position.x), zoom);
+                // Never wider than it can be drawn (no hidden width saved to jump to later).
+                let beside = f32::from(self.chart.size.width) - self.axis_now;
+                let w = w.min(crate::levels_layer::column_cap(beside) / zoom);
+                self.set_label_column(w, cx);
+                return;
+            }
+        }
+        let edge = self.region(ev.position) == Some(Region::ColumnEdge);
+        if edge != self.column_edge_hover {
+            self.column_edge_hover = edge;
+            cx.notify();
+        }
         self.set_hover(ev.position, cx);
         self.trade.resize_armed = true;
         let (tx, ty) = self.local(ev.position);
@@ -2966,6 +3150,7 @@ impl ChartView {
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.column_drag = None;
         // The release of a press that closed a popover does nothing here (no drawing finished).
         if popover::dismissing() {
             return;
@@ -3698,7 +3883,12 @@ impl ChartView {
         self.common.paints += 1;
         let scale = window.scale_factor();
         let (w, h) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
-        let plot_w = (w - axis_w()).max(10.0);
+        // Where the study labels go: the price axis grows to its widest tag, or a column of
+        // their own sits between the plot and the axis. Never room inside the plot.
+        let (axis_now, label_col) = self.label_strips(w);
+        self.axis_now = axis_now;
+        self.label_col = label_col;
+        let plot_w = (w - axis_now - label_col).max(10.0);
         let above_axis = (h - axis_h()).max(10.0);
         // Lower panes (cumulative delta, Volume) take their shares below the plot, above the
         // time axis.
@@ -3775,34 +3965,6 @@ impl ChartView {
             self.last_trade = d.last_trade;
             let fmt = self.instrument.price;
             let bars = view.bars;
-            // The level labels' gutter, right of the newest bar: from the whole level set (never
-            // the view), so it changes only with the levels, the label settings or the zoom,
-            // never on a pan, a zoom of the time axis or a price move. The view settles and
-            // the prices fit with it applied.
-            let labels_on = self.visibility.draws_studies() && self.visibility.draws_labels();
-            let (need, min_cut) = if labels_on {
-                // Label widths were measured in render (`measure_labels`). The VWAPs' end tags
-                // ("ETH 6004.50", measured in render) share the gutter (never over the
-                // forming bar); they can't be cut.
-                let (levels, cut) = self.levels.gutter_need();
-                let vwap = self.studies.end_tags_need();
-                (levels.max(vwap), if levels > 0.0 { cut } else { vwap })
-            } else {
-                (0.0, 0.0)
-            };
-            // 144 px at 100 % zoom; on a narrow plot a quarter of it, or what the shortest
-            // useful cut needs, but never more than 40 % of it. Not even that: no labels at
-            // all (`gutter_plan`).
-            let plan =
-                lines_core::levels::gutter_plan(need, min_cut, plot_w, crate::zoom::f(GUTTER_CAP));
-            self.gutter = lines_core::levels::settle_gutter(
-                &mut self.vp,
-                bars.len(),
-                self.gutter,
-                if plan.fits { need } else { 0.0 },
-                plan.cap,
-            );
-            self.levels.set_gutter(self.gutter, plot_w, plan.fits);
             keep_view(
                 &mut self.vp,
                 &mut self.series_trimmed,
@@ -3837,10 +3999,13 @@ impl ChartView {
             {
                 self.vp.pan(n * self.vp.bar_px, 0.0, bars.len());
             }
-            // The inset again for the settled view (a new bar while following moves it).
-            self.vp.right_inset =
-                lines_core::levels::gutter_inset(f64::from(self.gutter), &self.vp, bars.len());
             if self.visibility.draws_studies() {
+                // Tags in the price axis never cover the last-price tag.
+                let ph_now = self.vp.height as f32;
+                self.levels.set_blocked(
+                    self.last_trade
+                        .map(|p| (last_tag_y(&self.vp, p, ph_now), tag_h())),
+                );
                 self.levels.place(&d, &self.vp);
             }
             if display_tz::epoch() != self.zone_epoch {
@@ -5074,7 +5239,7 @@ impl ChartView {
             // Paint order inside the plot: grid, volume profile, the levels' zones and VWAP
             // band fills (behind the candles: a heavy fill never covers a bar), candles,
             // `layers`, footprint cell fills, indicator studies (VWAP lines and band edges),
-            // the levels' lines, the footprint's numbers on their cells' color, the levels' labels (in their gutter right of the
+            // the levels' lines, the footprint's numbers on their cells' color, the levels' labels (where the chart puts them: on the chart, after the
             // newest bar), drawings, strategy markers, the profile's label, then the
             // last-price line (above every study fill and line), crosshair.
             let (studies, labels) = (
@@ -5218,9 +5383,10 @@ impl ChartView {
                         .flatten(),
                 ];
                 // Off-scale markers with no room right of the newest bar go to the price axis
-                // column, clear of the last-price tag and the drawings' price tags (painted after the
-                // axis below; fixed arrays, allocation-free).
-                let mut blocked = [(0.0f32, 0.0f32); 1 + MAX_DRAWING_TAGS];
+                // column, and end tags where the chart's study labels go (the axis or the label
+                // column), clear of the last-price tag, the drawings' price tags and the
+                // levels' tags (painted after the axis below; fixed arrays, allocation-free).
+                let mut blocked = [(0.0f32, 0.0f32); 1 + MAX_DRAWING_TAGS + MAX_LEVEL_ROWS];
                 let mut n_blocked = 0;
                 let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
                 if let Some(y) = last_y {
@@ -5241,6 +5407,25 @@ impl ChartView {
                         n_blocked += 1;
                     }
                 }
+                // The levels' tags, where they share the axis or the column with end tags (in
+                // the column only theirs: the last-price and drawings' tags are the axis's).
+                let axis_rows = n_blocked;
+                if self.levels.config.label_place != LabelPlace::Chart {
+                    let half = LevelsLayer::label_h() * 0.5;
+                    self.levels.tag_rows(|y| {
+                        if n_blocked < blocked.len() {
+                            blocked[n_blocked] = (y - half, y + half);
+                            n_blocked += 1;
+                        }
+                    });
+                }
+                let room = crate::studies::TagRoom {
+                    axis_w: self.label_col + self.axis_now,
+                    column: self.label_col,
+                    place: self.levels.config.label_place,
+                    blocked: &blocked[..n_blocked],
+                    column_blocked: &blocked[axis_rows..n_blocked],
+                };
                 // Their end tags changed: render measures their room again (`paint_chart`).
                 self.end_tags_moved |= self.studies.paint(
                     (ox, oy),
@@ -5249,7 +5434,7 @@ impl ChartView {
                     &fmt,
                     label_px(),
                     labels,
-                    (axis_w(), &blocked[..n_blocked]),
+                    room,
                     &covers,
                     window,
                     cx,
@@ -5262,10 +5447,11 @@ impl ChartView {
                 );
                 self.levels.paint_front(plot, &t, &self.footprint, window);
                 self.footprint.paint_numbers(plot, &self.vp, &t, window, cx);
-                // In the gutter right of the newest bar (no bar under a label), under the
-                // drawings and the strategy markers as study labels always were.
-                if labels {
-                    self.levels.paint_labels(plot, &t, window, cx);
+                // On the chart: under the drawings and the strategy markers, as study labels
+                // always were (in the axis or the column: after the plot, outside it).
+                if labels && self.levels.config.label_place == LabelPlace::Chart {
+                    let strip = self.label_strip();
+                    self.levels.paint_labels(plot, strip, &t, window, cx);
                 }
             }
             // Drawings: the trader's own marks, above the studies (shown unless hidden on
@@ -5279,8 +5465,9 @@ impl ChartView {
             // crosshair.
             self.trade_marks.paint(plot, labels, &t, window, cx);
             self.marks.paint(plot, &t, window, cx);
-            if labels {
-                self.profile.paint_label(plot, &t, window, cx);
+            // The profile's tag: in the plot's corner, unless the labels have a column.
+            if labels && self.label_col <= 0.0 {
+                self.profile.paint_label(plot, None, &t, window, cx);
             }
             if let Some((from, x)) = self.tick_from {
                 self.draw_tick_from(from, x, (ox, oy), ph, window, cx);
@@ -5343,9 +5530,27 @@ impl ChartView {
             }
         }
 
-        // Axis borders.
+        // Axis borders (and the label column's, between it and the axis).
+        let ax = pw + self.label_col;
         window.paint_quad(fill(rect(pw, 0.0, hair, ph), t.axis_line));
         window.paint_quad(fill(rect(0.0, ph, pw, hair), t.axis_line));
+        if self.label_col > 0.0 {
+            window.paint_quad(fill(rect(ax, 0.0, hair, self.above_axis), t.axis_line));
+        }
+        // Study labels in the price axis or their column (outside the plot), before the axis's
+        // own prices and tags; the axis's prices keep clear of the level tags.
+        let study_labels = self.visibility.draws_studies() && self.visibility.draws_labels();
+        let place = self.levels.config.label_place;
+        if study_labels && place != LabelPlace::Chart {
+            let strip = self.label_strip();
+            self.levels.paint_labels(self.plot, strip, &t, window, cx);
+            if self.label_col > 0.0 {
+                let col = (pw + crate::levels_layer::COLUMN_PAD, self.label_col);
+                self.profile
+                    .paint_label(self.plot, Some(col), &t, window, cx);
+            }
+        }
+        let tagged = study_labels && place == LabelPlace::Axis;
 
         let line_h = px(label_px() * 1.3);
         // The VWAPs' off-scale markers this frame moved to the price axis (none while studies
@@ -5411,13 +5616,24 @@ impl ChartView {
             if !label_clear_of_tags(span, &tags)
                 || !label_clear_of_tags(span, &drawing_tags)
                 || (axis_marks
-                    && self
-                        .studies
-                        .axis_marks_cover(l.y - label_px() * 0.65, l.y + label_px() * 0.65))
+                    && self.studies.axis_marks_cover(
+                        l.y - label_px() * 0.65,
+                        l.y + label_px() * 0.65,
+                        ax,
+                    ))
             {
                 continue;
             }
-            let origin = point(px(ox + pw + 8.0), px(oy + l.y - label_px() * 0.65));
+            // Nor under a level's tag.
+            if tagged {
+                let reach = (LevelsLayer::label_h() + label_px() * 1.3) * 0.5;
+                let mut under = false;
+                self.levels.tag_rows(|y| under |= (y - l.y).abs() < reach);
+                if under {
+                    continue;
+                }
+            }
+            let origin = point(px(ox + ax + 8.0), px(oy + l.y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::Price,
                 l.price.0,
@@ -5499,7 +5715,7 @@ impl ChartView {
             // fit (`corner_layout`; "manual" is drawn later from the same layout).
             let manual_w = (!self.vp.auto_price).then(|| self.manual_label_w(window));
             let (_, zone_x) = corner_layout(
-                f32::from(bounds.size.width) - pw,
+                f32::from(bounds.size.width) - ax,
                 manual_w,
                 Some(w),
                 crate::zoom::f(CORNER_GAP_100),
@@ -5507,7 +5723,7 @@ impl ChartView {
             );
             if let Some(zone_x) = zone_x {
                 self.corner_zone_w = Some(w);
-                let origin = point(px(ox + pw + zone_x), px(oy + self.above_axis + 4.0));
+                let origin = point(px(ox + ax + zone_x), px(oy + self.above_axis + 4.0));
                 self.paint_label(
                     LabelKind::Zone,
                     key,
@@ -5523,15 +5739,20 @@ impl ChartView {
         self.draw_drawing_tags(bounds, window, cx);
         if let (Some(p), Some(y)) = (self.last_trade, last_y) {
             window.paint_quad(fill(
-                rect(pw + hair, y - tag_h() * 0.5, axis_w(), tag_h()),
+                rect(ax + hair, y - tag_h() * 0.5, self.axis_now, tag_h()),
                 t.last,
             ));
             crate::layout_rec::reserved(
                 window,
-                (ox + pw + hair, oy + y - tag_h() * 0.5, axis_w(), tag_h()),
+                (
+                    ox + ax + hair,
+                    oy + y - tag_h() * 0.5,
+                    self.axis_now,
+                    tag_h(),
+                ),
                 "last-price-tag",
             );
-            let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
+            let origin = point(px(ox + ax + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::LastPrice,
                 p.0,
@@ -5617,7 +5838,8 @@ impl ChartView {
         cx: &mut App,
     ) {
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
-        let pw = f32::from(self.plot.size.width);
+        // The axis's left edge (right of the label column).
+        let pw = f32::from(self.plot.size.width) + self.label_col;
         let accent = self.theme.accent;
         let w = self.manual_label_w(window);
         // The same layout the zone label took (`corner_layout`): beside it, or alone.
@@ -5686,6 +5908,8 @@ impl ChartView {
         let hair = 1.0 / window.scale_factor();
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
         let pw = f32::from(self.plot.size.width);
+        // The axis's left edge (right of the label column).
+        let ax = pw + self.label_col;
         let rect = |x: f32, y: f32, w: f32, h: f32| {
             Bounds::new(point(px(ox + x), px(oy + y)), size(px(w), px(h)))
         };
@@ -5883,7 +6107,7 @@ impl ChartView {
                 continue;
             }
             taken[i + 1] = Some(span);
-            let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
+            let origin = point(px(ox + ax + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubValue,
                 key(v),
@@ -5898,10 +6122,10 @@ impl ChartView {
         if let Some((last, y)) = newest {
             // A filled chip (inverted text colors), so it never reads as a range label.
             window.paint_quad(fill(
-                rect(pw + hair, y - tag_h() * 0.5, axis_w(), tag_h()),
+                rect(ax + hair, y - tag_h() * 0.5, self.axis_now, tag_h()),
                 t.text_main,
             ));
-            let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
+            let origin = point(px(ox + ax + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubLast,
                 key(last),
@@ -5925,10 +6149,10 @@ impl ChartView {
                 s.sub_top + s.sub_h - tag_h() * 0.5,
             );
             window.paint_quad(fill(
-                rect(pw + hair, y - tag_h() * 0.5, axis_w(), tag_h()),
+                rect(ax + hair, y - tag_h() * 0.5, self.axis_now, tag_h()),
                 t.cross_tag,
             ));
-            let origin = point(px(ox + pw + 8.0), px(oy + y - label_px() * 0.65));
+            let origin = point(px(ox + ax + 8.0), px(oy + y - label_px() * 0.65));
             self.paint_label(
                 LabelKind::SubCross,
                 key(v),
@@ -6272,8 +6496,9 @@ impl ChartView {
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        // The axis's left edge (right of the label column).
         let (pw, ph) = (
-            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.width) + self.label_col,
             f32::from(self.plot.size.height),
         );
         let fmt = self.instrument.price;
@@ -6326,7 +6551,10 @@ impl ChartView {
                 fill(
                     Bounds::new(
                         point(px(x0 + DRAWING_TAG_INSET), px(oy + top)),
-                        size(px(axis_w() - DRAWING_TAG_INSET - 2.0), px(DRAWING_TAG_H)),
+                        size(
+                            px(self.axis_now - DRAWING_TAG_INSET - 2.0),
+                            px(DRAWING_TAG_H),
+                        ),
                     ),
                     t.bg,
                 )
@@ -6362,8 +6590,9 @@ impl ChartView {
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+        // The axis's left edge (right of the label column).
         let (pw, ph) = (
-            f32::from(self.plot.size.width),
+            f32::from(self.plot.size.width) + self.label_col,
             f32::from(self.plot.size.height),
         );
         let line_h = px(label_px() * 1.3);
@@ -6373,7 +6602,7 @@ impl ChartView {
         window.paint_quad(fill(
             Bounds::new(
                 point(px(ox + pw + hair), px(oy + top)),
-                size(px(axis_w()), px(tag_h())),
+                size(px(self.axis_now), px(tag_h())),
             ),
             t.cross_tag,
         ));
@@ -7194,7 +7423,7 @@ impl ChartView {
                     Some((StudyRef::Profile, _))
                         if pc.mode != crate::profile::ProfileMode::Off && !pc.hidden =>
                     {
-                        (area.0 - axis_w()).max(0.0) * pc.width()
+                        (area.0 - self.axis_now - self.label_col).max(0.0) * pc.width()
                     }
                     _ => 0.0,
                 };
@@ -8835,15 +9064,20 @@ fn prepare_studies(
         l.prepare(d, bars, vp);
     }
     studies.prepare(bars, d.profiles.footprint(), &*levels, vp, max_columns);
-    // Placed by price before the scene (the labels' gutter needs them); its VWAP-relative
-    // columns now, on the final time axis.
+    // Placed by price before the scene; its VWAP-relative columns now, on the final time
+    // axis.
     levels.columns(bars, vp);
 }
 
-/// The level labels' gutter's widest (logical px at 100 % zoom): a whole 8 px step with room
-/// (124 px) for a 22-character label with a five-digit price ("Prior Close : 27932.00") in
-/// the UI font (IBM Plex Sans, decision 0034) at 1400 px.
-const GUTTER_CAP: f32 = 144.0;
+/// The levels' tag rows the end tags keep clear of, at most (fixed array: allocation-free).
+const MAX_LEVEL_ROWS: usize = 32;
+
+/// Whether a pointer at `x` from the plot's right edge and `y` from its top is on the label
+/// column's edge (the plot's right edge, above the time axis): its first few px, on the
+/// column's side only, so the plot keeps every press it had.
+fn column_edge_hit(x: f32, y: f32, above_axis: f32) -> bool {
+    (0.0..=4.0).contains(&x) && (0.0..above_axis).contains(&y)
+}
 
 /// Where a measure's readout goes (plot-local top-left): on the far side of the measured
 /// range from the live edge (left-aligned at the range's older end), above the box, or below
@@ -9315,7 +9549,7 @@ impl Render for ChartView {
         }
         let today = pane::today(self.frozen, &self.store);
         // The list stays off the price axis.
-        self.picker.set_right_inset(axis_w());
+        self.picker.set_right_inset(self.axis_now + self.label_col);
         let overlay = self.picker.overlay(
             &t,
             &crate::sources::pick_if(self.picker.is_open(), &self.feed, cx),
@@ -9381,6 +9615,9 @@ impl Render for ChartView {
                         self.drawings.active() && self.drawings.measure_grip().is_none(),
                         |d| d.cursor_crosshair(),
                     )
+                    .when(self.column_edge_hover || self.column_drag.is_some(), |d| {
+                        d.cursor(gpui::CursorStyle::ResizeLeftRight)
+                    })
                     .when(
                         !self.drawings.active()
                             && self.drawings.measure_grip().is_none()
@@ -9506,6 +9743,17 @@ fn recent_colors(cx: &App) -> Vec<lines_core::style::Rgb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The label column's edge is its own first few px, above the time axis: the plot's
+    /// rightmost px stay the plot's (order tags, drawings, a lower pane's ×).
+    #[test]
+    fn the_column_edge_is_on_the_columns_side() {
+        assert!(column_edge_hit(0.0, 10.0, 500.0));
+        assert!(column_edge_hit(4.0, 10.0, 500.0));
+        assert!(!column_edge_hit(-1.0, 10.0, 500.0), "the plot's");
+        assert!(!column_edge_hit(5.0, 10.0, 500.0), "the column's body");
+        assert!(!column_edge_hit(2.0, 500.0, 500.0), "the time axis");
+    }
 
     /// A price label shows only clear of the plot's top: one whose line is within its half
     /// height of the top would reach into the header row (and under header text there).
