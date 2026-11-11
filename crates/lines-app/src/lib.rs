@@ -2329,60 +2329,62 @@ where
             Some((gb.max(0.0) * (1u64 << 30) as f64) as u64)
         },
     };
-    gpui_platform::application().run(move |cx: &mut App| {
-        // The built-in fonts, before the first window (decision 0034).
-        fonts::load(cx);
-        let font_problem = match ui_font_flag.as_deref().map(fonts::parse_flag) {
-            Some(Ok(c)) => fonts::apply(&c),
-            Some(Err(e)) => Some(format!("--ui-font: {e}")),
-            None => fonts::apply(&fonts::UiFont::from_saved(saved_ui_font.as_deref())),
-        };
-        // Theme: System starts in the OS appearance (windows then report changes).
-        let dark = workspace::is_dark(cx.window_appearance());
-        let known = settings_schema::os_dark();
-        match settings_schema::os_report(ws.env.frozen, known, dark, look.theme_choice()) {
-            settings_schema::OsReport::Ignore => {}
-            settings_schema::OsReport::Remember => {
-                settings_schema::set_os_dark(dark);
+    gpui_platform::application()
+        .with_assets(crate::icons::Assets)
+        .run(move |cx: &mut App| {
+            // The built-in fonts, before the first window (decision 0034).
+            fonts::load(cx);
+            let font_problem = match ui_font_flag.as_deref().map(fonts::parse_flag) {
+                Some(Ok(c)) => fonts::apply(&c),
+                Some(Err(e)) => Some(format!("--ui-font: {e}")),
+                None => fonts::apply(&fonts::UiFont::from_saved(saved_ui_font.as_deref())),
+            };
+            // Theme: System starts in the OS appearance (windows then report changes).
+            let dark = workspace::is_dark(cx.window_appearance());
+            let known = settings_schema::os_dark();
+            match settings_schema::os_report(ws.env.frozen, known, dark, look.theme_choice()) {
+                settings_schema::OsReport::Ignore => {}
+                settings_schema::OsReport::Remember => {
+                    settings_schema::set_os_dark(dark);
+                }
+                settings_schema::OsReport::Apply => {
+                    settings_schema::set_os_dark(dark);
+                    ws.env.theme.set(settings_schema::theme_for(&look));
+                    journal_shots::set_theme(ws.env.theme.get());
+                }
             }
-            settings_schema::OsReport::Apply => {
-                settings_schema::set_os_dark(dark);
-                ws.env.theme.set(settings_schema::theme_for(&look));
-                journal_shots::set_theme(ws.env.theme.get());
+            cx.set_global(download_env);
+            cx.set_global(Feeds(registry));
+            cx.set_global(trading);
+            if let Some(r) = replay {
+                cx.set_global(r);
             }
-        }
-        cx.set_global(download_env);
-        cx.set_global(Feeds(registry));
-        cx.set_global(trading);
-        if let Some(r) = replay {
-            cx.set_global(r);
-        }
-        if let Some(s) = strategies {
-            cx.set_global(strategy_panel::Strategies(Arc::new(s)));
-        }
-        cx.set_global(settings);
-        cx.set_global(drawings);
-        cx.set_global(ws);
-        workspace::install(cx);
-        if let Err(e) = workspace::open_workspace(&doc, cx) {
-            tracing::error!("failed to open the workspace: {e:#}");
-            cx.quit();
-            return;
-        }
-        if let Some(p) = font_problem {
-            workspace::notice(p, cx);
-        }
-        workspace::start_autosave(cx);
-        workspace::start_trigger_watch(cx);
-        diagnostics::start_sampler(cx);
-        // In-app updates (decision 0031): interactive runs with a settings folder only;
-        // `--no-update-check` and Settings › General › Updates: Off make no request.
-        if !no_update_check && let Some(dir) = persist::config_dir() {
-            let mode = picker_view::settings(cx).updates;
-            update::start(dir, mode, cx);
-        }
-        cx.activate(true);
-    });
+            if let Some(s) = strategies {
+                cx.set_global(strategy_panel::Strategies(Arc::new(s)));
+            }
+            cx.set_global(settings);
+            cx.set_global(drawings);
+            cx.set_global(ws);
+            workspace::install(cx);
+            if let Err(e) = workspace::open_workspace(&doc, cx) {
+                tracing::error!("failed to open the workspace: {e:#}");
+                cx.quit();
+                return;
+            }
+            if let Some(p) = font_problem {
+                workspace::notice(p, cx);
+            }
+            workspace::start_autosave(cx);
+            workspace::start_trigger_watch(cx);
+            diagnostics::start_sampler(cx);
+            // In-app updates (decision 0031): interactive runs with a settings folder only;
+            // `--no-update-check` and Settings › General › Updates: Off make no request.
+            if !no_update_check && let Some(dir) = persist::config_dir() {
+                let mode = picker_view::settings(cx).updates;
+                update::start(dir, mode, cx);
+            }
+            cx.activate(true);
+        });
     writer.flush(Duration::from_secs(3));
     journal.flush(Duration::from_secs(3));
     // A restart to update (or a rollback) applies and starts the new executable now that this

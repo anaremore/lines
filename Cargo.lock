@@ -3241,6 +3241,7 @@ dependencies = [
  "lines-databento",
  "lines-feed",
  "lines-fonts",
+ "lines-icons",
  "lines-indicators",
  "lines-strategy",
  "lines-trading",
@@ -3320,6 +3321,10 @@ dependencies = [
  "prost",
  "tokio",
 ]
+
+[[package]]
+name = "lines-icons"
+version = "0.3.21"
 
 [[package]]
 name = "lines-indicators"

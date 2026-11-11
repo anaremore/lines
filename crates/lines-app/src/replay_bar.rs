@@ -529,7 +529,7 @@ impl Render for ReplayBar {
                     .child(
                         canvas(
                             |_, _, _| (),
-                            move |b, (), w, _| icons::paint(icon, b, fg, w),
+                            move |b, (), w, cx| icons::paint(icon, b, fg, w, cx),
                         )
                         .size_full(),
                     ),

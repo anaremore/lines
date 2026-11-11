@@ -1,29 +1,34 @@
-//! Small line icons for pane headers and tabs, drawn in code (no vendored artwork, so no
-//! third-party licence): polylines on a 16-unit grid, stroked 1.5 px, every point snapped to
-//! the device-pixel grid when painted so lines stay crisp at any DPI. Original shapes, not
-//! copied from any trading platform. Colors come from the caller (theme tokens).
+//! Line icons for pane headers, tabs and the replay bar: [Lucide](https://lucide.dev)
+//! (vendored in `lines-icons`: ISC, MIT for the icons derived from Feather; stroke 1.6 on the
+//! 24 grid, round caps and joins), drawn 16 px in a 20 px hit box. GPUI rasterizes each SVG
+//! once per size into its sprite atlas (antialiased, at device resolution) and tints it with the
+//! caller's theme token, so painting a cached icon allocates nothing of ours. The same SVGs are
+//! the app's assets ([`Assets`], registered with the app) under `icons/<name>.svg`, for GPUI's
+//! `svg()` element (no caller yet; the drawing toolbar will be one).
+
+use std::borrow::Cow;
 
 use gpui::{
-    Bounds, Div, ElementId, Hsla, InteractiveElement, ParentElement, PathBuilder, Pixels, Stateful,
-    Styled, Window, canvas, div, point, px,
+    App, AssetSource, Bounds, Div, ElementId, Hsla, InteractiveElement, ParentElement, Pixels,
+    SharedString, Stateful, Styled, TransformationMatrix, Window, canvas, div, point, px, size,
 };
 
 use crate::commands::Command;
 use crate::theme::Theme;
 
-/// The icon grid (units per side) and the stroke width (logical px).
-pub const GRID: f32 = 16.0;
-pub const STROKE: f32 = 1.5;
+/// An icon's drawn size (logical px): Lucide's 24 grid scaled to this.
+pub const SIZE: f32 = 16.0;
 /// A clickable icon's box (logical px): never under 20 × 20.
 pub const HIT: f32 = 20.0;
 
+/// The icons Lines draws (each a Lucide icon: [`Icon::lucide`]).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Icon {
     /// A square with an arrow leaving up-right: pop the pane out into its own window.
     PopOut,
-    /// An arrow coming into a square: re-attach a popped-out pane where it was.
+    /// An arrow coming into an open bracket: re-attach a popped-out pane where it was.
     Reattach,
-    /// Two panes side by side, an arrow into the right one: dock beside the chart.
+    /// A panel with its right side marked off: dock beside the chart.
     Dock,
     /// An eye with a stroke through it: hide the pane.
     Hide,
@@ -61,152 +66,91 @@ impl Icon {
         Icon::Close,
         Icon::Pin,
     ];
+}
 
-    /// The polylines, in grid units (0..=16, y down).
-    pub fn lines(self) -> &'static [&'static [(f32, f32)]] {
+impl Icon {
+    /// The Lucide icon it is drawn with (`lines_icons::ICONS`).
+    pub fn lucide(self) -> &'static str {
         match self {
-            Icon::PopOut => &[
-                // The box, open at the top right.
-                &[
-                    (8.0, 3.0),
-                    (3.0, 3.0),
-                    (3.0, 13.0),
-                    (13.0, 13.0),
-                    (13.0, 8.0),
-                ],
-                // The arrow up-right.
-                &[(7.0, 9.0), (13.0, 3.0)],
-                &[(9.0, 3.0), (13.0, 3.0), (13.0, 7.0)],
-            ],
-            Icon::Reattach => &[
-                &[
-                    (8.0, 3.0),
-                    (3.0, 3.0),
-                    (3.0, 13.0),
-                    (13.0, 13.0),
-                    (13.0, 8.0),
-                ],
-                // The arrow down-left, into the box.
-                &[(13.0, 3.0), (7.0, 9.0)],
-                &[(7.0, 5.0), (7.0, 9.0), (11.0, 9.0)],
-            ],
-            Icon::Dock => &[
-                &[
-                    (2.0, 3.0),
-                    (14.0, 3.0),
-                    (14.0, 13.0),
-                    (2.0, 13.0),
-                    (2.0, 3.0),
-                ],
-                &[(8.0, 3.0), (8.0, 13.0)],
-                // The arrow into the right pane.
-                &[(4.0, 8.0), (12.0, 8.0)],
-                &[(10.0, 6.0), (12.0, 8.0), (10.0, 10.0)],
-            ],
-            Icon::Hide => &[
-                // The eye's lids.
-                &[(2.0, 8.0), (5.0, 5.0), (8.0, 4.0), (11.0, 5.0), (14.0, 8.0)],
-                &[
-                    (2.0, 8.0),
-                    (5.0, 11.0),
-                    (8.0, 12.0),
-                    (11.0, 11.0),
-                    (14.0, 8.0),
-                ],
-                // The stroke through it (no pupil: at 16 px it merged with the stroke).
-                &[(3.0, 13.0), (13.0, 3.0)],
-            ],
-            Icon::ChartOnly => &[
-                &[(2.0, 6.0), (2.0, 2.0), (6.0, 2.0)],
-                &[(10.0, 2.0), (14.0, 2.0), (14.0, 6.0)],
-                &[(14.0, 10.0), (14.0, 14.0), (10.0, 14.0)],
-                &[(6.0, 14.0), (2.0, 14.0), (2.0, 10.0)],
-            ],
-            Icon::Menu => &[
-                // Three dots: 2-unit squares on whole grid units, closed (solid when stroked).
-                &[(2.0, 7.0), (4.0, 7.0), (4.0, 9.0), (2.0, 9.0), (2.0, 7.0)],
-                &[(7.0, 7.0), (9.0, 7.0), (9.0, 9.0), (7.0, 9.0), (7.0, 7.0)],
-                &[
-                    (12.0, 7.0),
-                    (14.0, 7.0),
-                    (14.0, 9.0),
-                    (12.0, 9.0),
-                    (12.0, 7.0),
-                ],
-            ],
-            Icon::Close => &[&[(4.0, 4.0), (12.0, 12.0)], &[(12.0, 4.0), (4.0, 12.0)]],
-            Icon::Pin => &[
-                // The head, the body and the base, then the needle.
-                &[(5.0, 2.0), (11.0, 2.0)],
-                &[(6.0, 2.0), (6.0, 8.0)],
-                &[(10.0, 2.0), (10.0, 8.0)],
-                &[(4.0, 9.0), (12.0, 9.0)],
-                &[(8.0, 9.0), (8.0, 14.0)],
-            ],
-            Icon::Play => &[&[(5.0, 3.0), (13.0, 8.0), (5.0, 13.0), (5.0, 3.0)]],
-            Icon::Pause => &[&[(5.0, 3.0), (5.0, 13.0)], &[(11.0, 3.0), (11.0, 13.0)]],
-            Icon::SkipBack => &[
-                &[(4.0, 3.0), (4.0, 13.0)],
-                &[(12.0, 3.0), (6.0, 8.0), (12.0, 13.0), (12.0, 3.0)],
-            ],
-            Icon::SkipForward => &[
-                &[(12.0, 3.0), (12.0, 13.0)],
-                &[(4.0, 3.0), (10.0, 8.0), (4.0, 13.0), (4.0, 3.0)],
-            ],
+            Icon::PopOut => "square-arrow-out-up-right",
+            Icon::Reattach => "log-in",
+            Icon::Dock => "panel-right",
+            Icon::Hide => "eye-off",
+            Icon::ChartOnly => "maximize",
+            Icon::Menu => "ellipsis",
+            Icon::Close => "x",
+            Icon::Pin => "pin",
+            Icon::Play => "play",
+            Icon::Pause => "pause",
+            Icon::SkipBack => "skip-back",
+            Icon::SkipForward => "skip-forward",
+        }
+    }
+
+    /// Its asset path (`icons/<name>.svg`): the key GPUI caches its rasterized tile by.
+    fn path(self) -> &'static str {
+        match self {
+            Icon::PopOut => "icons/square-arrow-out-up-right.svg",
+            Icon::Reattach => "icons/log-in.svg",
+            Icon::Dock => "icons/panel-right.svg",
+            Icon::Hide => "icons/eye-off.svg",
+            Icon::ChartOnly => "icons/maximize.svg",
+            Icon::Menu => "icons/ellipsis.svg",
+            Icon::Close => "icons/x.svg",
+            Icon::Pin => "icons/pin.svg",
+            Icon::Play => "icons/play.svg",
+            Icon::Pause => "icons/pause.svg",
+            Icon::SkipBack => "icons/skip-back.svg",
+            Icon::SkipForward => "icons/skip-forward.svg",
         }
     }
 }
 
-/// The stroke as drawn at `scale`: `STROKE` rounded to whole device pixels (at least one), in
-/// logical px. [`snap`] places points for exactly this width, so every straight edge covers
-/// whole pixels (1.0: 2 device px on pixel edges; 2.0: 3 device px on pixel centers).
-pub fn stroke_width(scale: f32) -> f32 {
-    let s = scale.max(1.0);
-    (STROKE * s).round().max(1.0) / s
+/// The app's assets: the vendored icons, by `icons/<name>.svg` (for GPUI's `svg()` element; a
+/// painted [`Icon`] passes its bytes directly). Registered with `Application::with_assets`.
+pub struct Assets;
+
+impl AssetSource for Assets {
+    fn load(&self, path: &str) -> gpui::Result<Option<Cow<'static, [u8]>>> {
+        Ok(path
+            .strip_prefix("icons/")
+            .and_then(|p| p.strip_suffix(".svg"))
+            .and_then(lines_icons::svg)
+            .map(Cow::Borrowed))
+    }
+
+    fn list(&self, path: &str) -> gpui::Result<Vec<SharedString>> {
+        Ok(lines_icons::ICONS
+            .iter()
+            .map(|i| SharedString::from(format!("icons/{}.svg", i.name)))
+            .filter(|p| p.starts_with(path))
+            .collect())
+    }
 }
 
-/// Snap a logical coordinate for a stroke of [`stroke_width`]: odd device widths on pixel
-/// centers, even ones on pixel edges.
-pub fn snap(v: f32, scale: f32) -> f32 {
-    let s = scale.max(1.0);
-    let w = (stroke_width(s) * s).round();
-    // Odd device widths sit on pixel centers, even ones on pixel edges.
-    let offset = if w as i32 % 2 == 1 { 0.5 } else { 0.0 };
-    ((v * s - offset).round() + offset) / s
-}
-
-/// Paint `icon` centered in `bounds` (logical px) in `color`. Builds a few short GPUI paths
-/// (GPUI tessellates them per frame, like the chart's study lines): for the hovered pane's
-/// header controls and the tab bar's close buttons, never for ladder or chart rows.
-pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
-    let scale = window.scale_factor();
-    let side = f32::from(bounds.size.width).min(f32::from(bounds.size.height));
-    let unit = side.min(GRID) / GRID;
-    let x0 = f32::from(bounds.origin.x) + (f32::from(bounds.size.width) - GRID * unit) * 0.5;
-    let y0 = f32::from(bounds.origin.y) + (f32::from(bounds.size.height) - GRID * unit) * 0.5;
-    for line in icon.lines() {
-        let mut b = PathBuilder::stroke(px(stroke_width(scale)));
-        // A line ending where it began is a closed shape: closed with a join, so its first
-        // corner isn't cut by the stroke's flat end.
-        let closed = line.len() > 2 && line.first() == line.last();
-        let n = if closed { line.len() - 1 } else { line.len() };
-        for (i, &(x, y)) in line[..n].iter().enumerate() {
-            let p = point(
-                px(snap(x0 + x * unit, scale)),
-                px(snap(y0 + y * unit, scale)),
-            );
-            if i == 0 {
-                b.move_to(p);
-            } else {
-                b.line_to(p);
-            }
-        }
-        if closed {
-            b.close();
-        }
-        if let Ok(path) = b.build() {
-            window.paint_path(path, color);
-        }
+/// Paint `icon` centered in `bounds` (logical px), [`SIZE`] px square (smaller if `bounds` is),
+/// in `color`. GPUI rasterizes it once per size and caches the tile: for the hovered pane's
+/// header controls, the tab bar and the replay bar.
+pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Window, cx: &App) {
+    let side = f32::from(bounds.size.width)
+        .min(f32::from(bounds.size.height))
+        .min(SIZE);
+    let x = f32::from(bounds.origin.x) + (f32::from(bounds.size.width) - side) * 0.5;
+    let y = f32::from(bounds.origin.y) + (f32::from(bounds.size.height) - side) * 0.5;
+    let b = Bounds::new(point(px(x), px(y)), size(px(side), px(side)));
+    let svg = lines_icons::svg(icon.lucide());
+    // Every icon is embedded and parses (tested below); a failure would draw nothing, so it's
+    // logged once rather than every frame.
+    if let Err(e) = window.paint_svg(
+        b,
+        SharedString::new_static(icon.path()),
+        svg,
+        TransformationMatrix::unit(),
+        color,
+        cx,
+    ) {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| tracing::warn!("icon {icon:?} not drawn: {e}"));
     }
 }
 
@@ -215,7 +159,7 @@ pub fn glyph(icon: Icon, color: Hsla) -> Div {
     div().flex_none().w(px(HIT)).h(px(HIT)).child(
         canvas(
             |_, _, _| (),
-            move |b, (), window, _| paint(icon, b, color, window),
+            move |b, (), window, cx| paint(icon, b, color, window, cx),
         )
         .size_full(),
     )
@@ -246,7 +190,7 @@ pub fn button(
         .child(
             canvas(
                 |_, _, _| (),
-                move |b, (), window, _| {
+                move |b, (), window, cx| {
                     // The pointer's last position stays after it leaves the window (no exit
                     // event on Windows): only a hovered window lights an icon.
                     let hot = window.is_window_hovered() && b.contains(&window.mouse_position());
@@ -257,7 +201,7 @@ pub fn button(
                     } else {
                         dim
                     };
-                    paint(icon, b, c, window);
+                    paint(icon, b, c, window, cx);
                 },
             )
             .size_full(),
@@ -269,53 +213,35 @@ pub fn button(
 mod tests {
     use super::*;
 
-    /// Every icon stays inside its grid with a margin (the stroke never clips), has at least
-    /// one line of two points, and no two icons are drawn the same.
+    /// Every icon is drawn with a vendored Lucide SVG, at its own asset path, and no two icons
+    /// share one; the assets serve exactly what painting uses.
     #[test]
-    fn icons_fit_their_grid_and_differ() {
-        for icon in Icon::ALL {
-            let lines = icon.lines();
-            assert!(!lines.is_empty(), "{icon:?}");
-            for l in lines {
-                assert!(l.len() >= 2, "{icon:?}");
-                for &(x, y) in *l {
-                    let m = STROKE / 2.0;
-                    assert!(
-                        (m..=GRID - m).contains(&x) && (m..=GRID - m).contains(&y),
-                        "{icon:?} ({x}, {y})"
-                    );
-                }
+    fn every_icon_is_a_vendored_lucide_icon() {
+        for (i, icon) in Icon::ALL.iter().enumerate() {
+            let svg = lines_icons::svg(icon.lucide()).unwrap_or_else(|| panic!("{icon:?}"));
+            assert_eq!(icon.path(), format!("icons/{}.svg", icon.lucide()));
+            let served = Assets.load(icon.path()).unwrap().unwrap();
+            assert_eq!(served.as_ref(), svg);
+            for other in &Icon::ALL[i + 1..] {
+                assert_ne!(icon.lucide(), other.lucide(), "{icon:?} vs {other:?}");
             }
         }
-        for (i, a) in Icon::ALL.iter().enumerate() {
-            for b in &Icon::ALL[i + 1..] {
-                assert_ne!(a.lines(), b.lines(), "{a:?} vs {b:?}");
-            }
+        // Every vendored SVG parses as GPUI will rasterize it (a malformed file would fail in
+        // paint, drawing nothing).
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        for f in lines_icons::ICONS {
+            assert!(
+                renderer.parse_svg(f.svg).is_ok(),
+                "{} doesn't parse",
+                f.name
+            );
         }
-        const { assert!(HIT >= 20.0) };
-    }
-
-    /// Points land on device-pixel centers (odd stroke widths) at DPI 1.0 and 2.0.
-    #[test]
-    fn strokes_snap_to_device_pixels() {
-        // 1.5 px at 1.0 is drawn 2 device px wide (even): on pixel edges.
-        assert_eq!(stroke_width(1.0), 2.0);
-        assert_eq!(snap(10.3, 1.0), 10.0);
-        // 1.5 px at 2.0 is 3 device px (odd): on pixel centers (half device pixels).
-        assert_eq!(stroke_width(2.0), 1.5);
-        assert_eq!(snap(10.3, 2.0), 10.25);
-        assert_eq!(snap(10.0, 2.0), 10.25);
-        // At every common scale a snapped straight edge covers whole device pixels: both
-        // sides of the drawn stroke land on pixel boundaries.
-        for scale in [1.0_f32, 1.25, 1.5, 1.75, 2.0, 3.0] {
-            let w = stroke_width(scale) * scale;
-            assert!((w - w.round()).abs() < 1e-4 && w >= 1.0, "{scale}");
-            for v in [3.0_f32, 7.6, 10.3, 13.9] {
-                let c = snap(v, scale) * scale;
-                for edge in [c - w / 2.0, c + w / 2.0] {
-                    assert!((edge - edge.round()).abs() < 1e-3, "{scale} {v}: {edge}");
-                }
-            }
-        }
+        assert!(Assets.load("icons/nope.svg").unwrap().is_none());
+        assert!(Assets.load("fonts/x.ttf").unwrap().is_none());
+        assert_eq!(
+            Assets.list("icons/").unwrap().len(),
+            lines_icons::ICONS.len()
+        );
+        const { assert!(HIT >= 20.0 && SIZE <= HIT) };
     }
 }

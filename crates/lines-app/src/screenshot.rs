@@ -357,96 +357,98 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         }
         None => None,
     };
-    gpui_platform::application().run(move |cx: &mut App| {
-        let _keep = &feeds;
-        // The built-in fonts before the first window; screenshots use IBM Plex Sans unless
-        // `--ui-font` names another (decision 0034: the same text widths on every machine).
-        crate::fonts::load(cx);
-        let ui_font = match ui_font.as_deref().map(crate::fonts::parse_flag) {
-            Some(Ok(c)) => c,
-            Some(Err(e)) => fail(&anyhow::anyhow!("--ui-font: {e}")),
-            None => crate::fonts::UiFont::BuiltIn,
-        };
-        if let Some(p) = crate::fonts::apply(&ui_font) {
-            fail(&anyhow::anyhow!("--ui-font: {p}"));
-        }
-        cx.set_global(Feeds(registry));
-        cx.set_global(trading);
-        if let Some(r) = replay {
-            cx.set_global(r);
-        }
-        if let Some(s) = &strategies {
-            cx.set_global(crate::strategy_panel::Strategies(s.clone()));
-        }
-        if let Some(k) = &update_shot
-            && let Err(e) = crate::update::screenshot(k, cx)
-        {
-            fail(&anyhow::anyhow!("--update-shot: {e}"));
-        }
-        let mut settings = AppSettings::ephemeral();
-        // `--ui-zoom` as Settings › Appearance would have saved it (its row shows it).
-        settings.settings.ui_zoom = ui_zoom.and_then(crate::zoom::saved);
-        // `--ui-font` as Settings › Appearance would have saved it (its row shows it).
-        settings.settings.ui_font = ui_font.to_saved();
-        settings.settings.new_panes.default_qty = order_size;
-        if let Some((x, y)) = panel_at {
-            for p in crate::popover::Panel::ALL {
-                settings
-                    .settings
-                    .panel_places
-                    .insert(p.key().to_owned(), (x.round() as i32, y.round() as i32));
+    gpui_platform::application()
+        .with_assets(crate::icons::Assets)
+        .run(move |cx: &mut App| {
+            let _keep = &feeds;
+            // The built-in fonts before the first window; screenshots use IBM Plex Sans unless
+            // `--ui-font` names another (decision 0034: the same text widths on every machine).
+            crate::fonts::load(cx);
+            let ui_font = match ui_font.as_deref().map(crate::fonts::parse_flag) {
+                Some(Ok(c)) => c,
+                Some(Err(e)) => fail(&anyhow::anyhow!("--ui-font: {e}")),
+                None => crate::fonts::UiFont::BuiltIn,
+            };
+            if let Some(p) = crate::fonts::apply(&ui_font) {
+                fail(&anyhow::anyhow!("--ui-font: {p}"));
             }
-        }
-        if let Some(m) = pnl {
-            settings.settings.pnl_display = m;
-        }
-        if let Some(show) = measure_parts {
-            settings.settings.measure = show;
-        }
-        for a in &account_ids {
-            for s in &position_symbols {
-                settings
-                    .settings
-                    .bracket_presets
-                    .entry(a.clone())
-                    .or_default()
-                    .position
-                    .insert((*s).to_owned());
+            cx.set_global(Feeds(registry));
+            cx.set_global(trading);
+            if let Some(r) = replay {
+                cx.set_global(r);
             }
-        }
-        if let Some(u) = bracket_units {
+            if let Some(s) = &strategies {
+                cx.set_global(crate::strategy_panel::Strategies(s.clone()));
+            }
+            if let Some(k) = &update_shot
+                && let Err(e) = crate::update::screenshot(k, cx)
+            {
+                fail(&anyhow::anyhow!("--update-shot: {e}"));
+            }
+            let mut settings = AppSettings::ephemeral();
+            // `--ui-zoom` as Settings › Appearance would have saved it (its row shows it).
+            settings.settings.ui_zoom = ui_zoom.and_then(crate::zoom::saved);
+            // `--ui-font` as Settings › Appearance would have saved it (its row shows it).
+            settings.settings.ui_font = ui_font.to_saved();
+            settings.settings.new_panes.default_qty = order_size;
+            if let Some((x, y)) = panel_at {
+                for p in crate::popover::Panel::ALL {
+                    settings
+                        .settings
+                        .panel_places
+                        .insert(p.key().to_owned(), (x.round() as i32, y.round() as i32));
+                }
+            }
+            if let Some(m) = pnl {
+                settings.settings.pnl_display = m;
+            }
+            if let Some(show) = measure_parts {
+                settings.settings.measure = show;
+            }
             for a in &account_ids {
-                settings
-                    .settings
-                    .bracket_presets
-                    .entry(a.clone())
-                    .or_default()
-                    .units = u;
+                for s in &position_symbols {
+                    settings
+                        .settings
+                        .bracket_presets
+                        .entry(a.clone())
+                        .or_default()
+                        .position
+                        .insert((*s).to_owned());
+                }
             }
-        }
-        cx.set_global(settings);
-        cx.set_global(crate::drawings_store::Drawings::ephemeral(
-            seed.into_iter().collect(),
-        ));
-        cx.set_global(ws);
-        workspace::set_meta(&doc, cx);
-        if let Err(e) = capture(
-            cx,
-            window,
-            out,
-            size,
-            scale,
-            script,
-            hover_header,
-            context_menu,
-            prompt,
-            settings_shot,
-            download,
-            strategies,
-        ) {
-            fail(&e);
-        }
-    });
+            if let Some(u) = bracket_units {
+                for a in &account_ids {
+                    settings
+                        .settings
+                        .bracket_presets
+                        .entry(a.clone())
+                        .or_default()
+                        .units = u;
+                }
+            }
+            cx.set_global(settings);
+            cx.set_global(crate::drawings_store::Drawings::ephemeral(
+                seed.into_iter().collect(),
+            ));
+            cx.set_global(ws);
+            workspace::set_meta(&doc, cx);
+            if let Err(e) = capture(
+                cx,
+                window,
+                out,
+                size,
+                scale,
+                script,
+                hover_header,
+                context_menu,
+                prompt,
+                settings_shot,
+                download,
+                strategies,
+            ) {
+                fail(&e);
+            }
+        });
     // Only reached if the platform returned without the capture finishing.
     eprintln!("screenshot failed: the app exited before a frame was captured");
     Ok(1)
