@@ -1547,3 +1547,62 @@ fn unsaved_settings_keep_the_charts_own_style() {
     assert!(pending.promote_into(&mut app, true));
     assert!(pending.saved().is_empty());
 }
+
+/// A kind that replaced others (`LevelType::replaces`, e.g. two mirrored fills merged into
+/// one) loads a style saved under them: an equal pair, a differing pair (the first listed,
+/// the upper, wins) and only one side saved. Its first edit moves the style to its own entry
+/// and drops the replaced ones, so a reset back to its default sticks; its own entry, once
+/// saved, wins over any replaced one.
+#[test]
+fn a_merged_kind_loads_the_styles_of_the_kinds_it_replaced() {
+    let t = TYPES[0].replacing(&["demand-upper", "demand-lower"]);
+    let saved = |types: serde_json::Value| -> PartStyles {
+        serde_json::from_value(serde_json::json!({ "types": types })).unwrap()
+    };
+    let width = |m: &PartStyles| read_type(m, &t).line().width;
+    let upper = serde_json::json!({"width": 3, "label-at": "high"});
+    let lower = serde_json::json!({"width": 2});
+    // Equal pair.
+    let m = saved(serde_json::json!({"demand-upper": upper, "demand-lower": upper}));
+    assert_eq!(width(&m), 3);
+    assert_eq!(read_type_label(&m, &t).at, LabelAt::High);
+    // Differing pair: the upper wins.
+    let mut m = saved(serde_json::json!({"demand-upper": upper, "demand-lower": lower}));
+    assert_eq!(width(&m), 3);
+    // Only one side saved (either one).
+    assert_eq!(width(&saved(serde_json::json!({"demand-lower": lower}))), 2);
+    assert_eq!(width(&saved(serde_json::json!({"demand-upper": upper}))), 3);
+    // Nothing saved: the type's own.
+    assert_eq!(width(&PartStyles::new()), 1);
+    // A first edit moves the winner to the kind's own entry; the replaced entries go.
+    let mut look = read_type(&m, &t);
+    set_line(&mut look, |l| l.line = LineType::Dashed);
+    write_type(&mut m, &t, &look);
+    assert_eq!(
+        serde_json::to_value(&m).unwrap(),
+        serde_json::json!({"types": {"demand": {"width": 3, "line": "dashed", "label-at": "high"}}})
+    );
+    assert_eq!(read_type(&m, &t), look);
+    // Back at the default: nothing left, and the replaced styles don't come back.
+    write_type(&mut m, &t, &read_type(&PartStyles::new(), &t));
+    write_type_label(&mut m, &t, TypeLabel::of(&t));
+    assert!(m.is_empty(), "{m:?}");
+    assert_eq!(read_type(&m, &t), read_type(&PartStyles::new(), &t));
+    // A label edit adopts too.
+    let mut m = saved(serde_json::json!({"demand-lower": lower}));
+    write_type_label(
+        &mut m,
+        &t,
+        TypeLabel {
+            color: LabelColor::Text,
+            ..TypeLabel::of(&t)
+        },
+    );
+    assert_eq!(
+        serde_json::to_value(&m).unwrap(),
+        serde_json::json!({"types": {"demand": {"width": 2, "label-color": "text"}}})
+    );
+    // Its own entry wins over a replaced one.
+    let m = saved(serde_json::json!({"demand": {"width": 4}, "demand-upper": upper}));
+    assert_eq!(width(&m), 4);
+}

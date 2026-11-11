@@ -814,6 +814,10 @@ pub struct LevelType {
     /// A kind it was split from (`None`: none): a chart that hid the parent kind hides this one
     /// too, so splitting a kind never shows what a chart had hidden.
     pub parent: Option<&'static str>,
+    /// Kinds this one replaced (none: `&[]`), in order of precedence: a source's saved style
+    /// with no entry for this kind takes the first of these that has one, so merging kinds
+    /// keeps what a trader styled. The style editor moves it to this kind on its first edit.
+    pub replaces: &'static [&'static str],
 }
 
 impl LevelType {
@@ -830,6 +834,7 @@ impl LevelType {
             zone: false,
             style,
             parent: None,
+            replaces: &[],
         }
     }
 
@@ -846,6 +851,7 @@ impl LevelType {
             zone: true,
             style,
             parent: None,
+            replaces: &[],
         }
     }
 
@@ -853,6 +859,14 @@ impl LevelType {
     pub const fn child_of(self, parent: &'static str) -> LevelType {
         LevelType {
             parent: Some(parent),
+            ..self
+        }
+    }
+
+    /// This type, replacing kinds `ids` (see [`LevelType::replaces`]).
+    pub const fn replacing(self, ids: &'static [&'static str]) -> LevelType {
+        LevelType {
+            replaces: ids,
             ..self
         }
     }

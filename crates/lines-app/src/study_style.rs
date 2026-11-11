@@ -782,11 +782,41 @@ fn type_defs(t: &LevelType) -> (PartDef, PartDef) {
     (line, fill)
 }
 
+/// Type `t`'s entry in a source's saved `styles`: its own, else that of the first kind it
+/// replaced that has one (`LevelType::replaces`: kinds merged into one keep their style).
+fn saved_type<'a>(styles: &'a PartStyles, t: &LevelType) -> Option<&'a Value> {
+    let types = styles.get(TYPES_KEY)?;
+    std::iter::once(t.id)
+        .chain(t.replaces.iter().copied())
+        .find_map(|id| types.get(id))
+}
+
+/// Before type `t`'s entry is written: an entry saved under a kind it replaced becomes its own
+/// (the first that has one, as [`saved_type`] reads it) and every replaced kind's entry goes, so
+/// a reset back to the type's default sticks. No-op when `t` has its own entry.
+fn adopt_replaced(styles: &mut PartStyles, t: &LevelType) {
+    let Some(Value::Object(types)) = styles.get_mut(TYPES_KEY) else {
+        return;
+    };
+    if t.replaces.is_empty() || types.contains_key(t.id) {
+        return;
+    }
+    let mut adopted = None;
+    for id in t.replaces {
+        if let Some(v) = types.remove(*id) {
+            adopted.get_or_insert(v);
+        }
+    }
+    if let Some(v) = adopted {
+        types.insert(t.id.to_owned(), v);
+    }
+}
+
 /// Level type `t`'s look as saved in a source's `styles` (missing fields: the type's default;
-/// a type never saved, or new since: its default).
+/// a type never saved, or new since: its default, or a replaced kind's saved look).
 pub fn read_type(styles: &PartStyles, t: &LevelType) -> Look {
     let (ld, fd) = type_defs(t);
-    let o = styles.get(TYPES_KEY).and_then(|v| v.get(t.id));
+    let o = saved_type(styles, t);
     let mut look = read_part(o, &ld);
     look.shown = o
         .and_then(|o| o.get("shown"))
@@ -807,6 +837,7 @@ pub fn write_type(styles: &mut PartStyles, t: &LevelType, look: &Look) {
     if read_type(styles, t) == *look {
         return;
     }
+    adopt_replaced(styles, t);
     let (ld, fd) = type_defs(t);
     let mut types = match styles.remove(TYPES_KEY) {
         Some(Value::Object(o)) => o,
@@ -897,7 +928,7 @@ const LABEL_AT_KEY: &str = "label-at";
 
 /// Level type `t`'s label options as saved (missing or unreadable: the type's own).
 pub fn read_type_label(styles: &PartStyles, t: &LevelType) -> TypeLabel {
-    let o = styles.get(TYPES_KEY).and_then(|v| v.get(t.id));
+    let o = saved_type(styles, t);
     let field = |k: &str| o.and_then(|o| o.get(k)).and_then(Value::as_str);
     let own = TypeLabel::of(t);
     TypeLabel {
@@ -917,6 +948,7 @@ pub fn write_type_label(styles: &mut PartStyles, t: &LevelType, label: TypeLabel
     if was == label {
         return;
     }
+    adopt_replaced(styles, t);
     let own = TypeLabel::of(t);
     let types = styles
         .entry(TYPES_KEY.to_owned())
