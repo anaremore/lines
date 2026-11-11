@@ -137,8 +137,10 @@ impl ExtFrame {
                 continue;
             };
             // Its newest report, never past the source's clock (a synthetic source's day runs
-            // ahead of a replay's).
-            if let Some(last) = s.segments.last() {
+            // ahead of a replay's): the end of the last segment begun by then, so a gap that
+            // outlasts the stale time reads stale (a later segment hasn't begun).
+            let begun = s.segments.partition_point(|g| g.0 <= now);
+            if let Some(last) = begun.checked_sub(1).map(|g| s.segments[g]) {
                 let n = last.1.min(now);
                 newest = Some(newest.map_or(n, |m| m.max(n)));
             }
@@ -228,6 +230,93 @@ impl ExtFrame {
         }
         out
     }
+
+    /// Each line's last-value tag (`None`: no tag): while live, the value the title reads with
+    /// the crosshair off ([`Self::values`]); while stale, each line's last reported value, so
+    /// the dimmed tags still say where the lines ended. A line whose own reports stopped more
+    /// than the study's stale time before the newest line's (a gap of its own) has none, never
+    /// a 0.
+    pub fn tag_values(&self, def: &SeriesStudyDef) -> [Option<f64>; MAX_LINES] {
+        match self.status {
+            ExtStatus::Live => self.values(def, None),
+            ExtStatus::Missing(_) => [None; MAX_LINES],
+            ExtStatus::Stale => {
+                let mut out = [None; MAX_LINES];
+                let Some(map) = &self.map else {
+                    return out;
+                };
+                // Each line's last report (never past the source's clock), and the newest.
+                let mut ends = [None; MAX_LINES];
+                for (i, line) in def.lines.iter().enumerate().take(MAX_LINES) {
+                    let Some(s) = find(map, line.key) else {
+                        continue;
+                    };
+                    let seg = s.segments.partition_point(|g| g.0 <= self.now);
+                    ends[i] = seg.checked_sub(1).map(|g| s.segments[g].1.min(self.now));
+                }
+                let Some(newest) = ends.iter().flatten().max().copied() else {
+                    return out;
+                };
+                let stale_ms = i64::from(def.stale_after_secs) * 1000;
+                for (i, line) in def.lines.iter().enumerate().take(MAX_LINES) {
+                    let (Some(end), Some(s)) = (ends[i], find(map, line.key)) else {
+                        continue;
+                    };
+                    if newest.0.saturating_sub(end.0) <= stale_ms {
+                        out[i] = s.value_at(end);
+                    }
+                }
+                out
+            }
+        }
+    }
+}
+
+/// Where each tag `h` tall goes on an axis from `top` to `bottom` (centers), given where it
+/// wants to be (its value's height; `None`: no tag): clamped inside, then stacked nearest-first
+/// (in order of height, each pushed just below the one above it, the stack pushed back up from
+/// the bottom edge), so tags never cover each other and each sits as near its value as the
+/// others allow. Tags that don't fit at all (more tags than rows) are left out, lowest first.
+pub fn stack_tags(
+    want: [Option<f32>; MAX_LINES],
+    h: f32,
+    top: f32,
+    bottom: f32,
+) -> [Option<f32>; MAX_LINES] {
+    let mut out = [None; MAX_LINES];
+    let rows = ((bottom - top) / h).floor().max(0.0) as usize;
+    // Ordered by wanted height (clamped into the axis; ties by how far out, then by line).
+    let mut order: [(f32, f32, usize); MAX_LINES] = [(0.0, 0.0, 0); MAX_LINES];
+    let mut n = 0;
+    for (i, w) in want.iter().enumerate() {
+        if let Some(y) = w {
+            order[n] = (y.clamp(top + h * 0.5, bottom - h * 0.5), *y, i);
+            n += 1;
+        }
+    }
+    let order = &mut order[..n];
+    order.sort_by(|a, b| {
+        a.0.total_cmp(&b.0)
+            .then(a.1.total_cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    let n = n.min(rows);
+    let order = &mut order[..n];
+    // Down: each at least a tag below the one above.
+    for k in 1..n {
+        order[k].0 = order[k].0.max(order[k - 1].0 + h);
+    }
+    // Up from the bottom edge: the last inside, each at least a tag above the one below.
+    if n > 0 {
+        order[n - 1].0 = order[n - 1].0.min(bottom - h * 0.5);
+        for k in (0..n - 1).rev() {
+            order[k].0 = order[k].0.min(order[k + 1].0 - h);
+        }
+    }
+    for &(y, _, i) in order.iter() {
+        out[i] = Some(y);
+    }
+    out
 }
 
 /// A value as the pane prints it: one decimal from 10 up, two below (a swing of 0.75 keeps its
@@ -397,6 +486,157 @@ mod tests {
         vp.bar_px = 10.0;
         vp.right_index = 59.0;
         vp
+    }
+
+    /// A gap in the reports longer than the stale time reads stale, even with a later segment
+    /// to come (a source's day can run ahead of a replay's): the pane says STALE and its tags
+    /// dim, never a live pane with nothing to read.
+    #[test]
+    fn a_long_gap_reads_stale() {
+        let b = bars();
+        let view = BarsView::fixed(&b, 60_000);
+        let axis = TimeAxis::new(view);
+        // Reports to minute 20, then from minute 40: at minute 30, ten minutes into the gap.
+        let m = map(&[(10, 2.0), (40, 3.0)], &[(10, 20), (40, 50)]);
+        let mut f = ExtFrame::default();
+        f.reserve(1, 256);
+        f.build(
+            &DEF,
+            Some((Some(&m), LevelStatus::Current, t(30))),
+            &axis,
+            &vp(),
+        );
+        assert_eq!(f.status, ExtStatus::Stale);
+        assert_eq!(f.tag_values(&DEF)[0], Some(2.0), "the last report, dimmed");
+        // Back once the next segment has begun.
+        f.build(
+            &DEF,
+            Some((Some(&m), LevelStatus::Current, t(41))),
+            &axis,
+            &vp(),
+        );
+        assert_eq!(f.status, ExtStatus::Live);
+        assert_eq!(f.tag_values(&DEF)[0], Some(3.0));
+    }
+
+    /// Tags stack nearest-first and never cover each other: apart ones stay at their values,
+    /// close ones push apart around them, ones past an edge sit at it, and more than fit leave
+    /// out the lowest.
+    #[test]
+    fn tags_stack_and_never_cover_each_other() {
+        let h = 18.0;
+        let none = [None; MAX_LINES];
+        let want = |v: &[f32]| {
+            let mut w = none;
+            for (i, y) in v.iter().enumerate() {
+                w[i] = Some(*y);
+            }
+            w
+        };
+        let get = |o: [Option<f32>; MAX_LINES], n: usize| -> Vec<f32> {
+            o[..n].iter().map(|y| y.unwrap()).collect()
+        };
+        // Apart: each at its value.
+        assert_eq!(
+            get(stack_tags(want(&[30.0, 80.0]), h, 0.0, 200.0), 2),
+            [30.0, 80.0]
+        );
+        // Two at one height (41.1 and 41.0): the higher stays, the other goes just below.
+        assert_eq!(
+            get(stack_tags(want(&[50.0, 51.0]), h, 0.0, 200.0), 2),
+            [50.0, 68.0]
+        );
+        // Line order doesn't matter, height does.
+        assert_eq!(
+            get(stack_tags(want(&[51.0, 50.0]), h, 0.0, 200.0), 2),
+            [68.0, 50.0]
+        );
+        // Off the axis: at the edge (the one further out nearest it), the rest pushed back up
+        // from the bottom.
+        assert_eq!(
+            get(stack_tags(want(&[-40.0, 500.0, 195.0]), h, 0.0, 200.0), 3),
+            [9.0, 191.0, 173.0]
+        );
+        // Never covering: every pair at least a tag apart, all inside.
+        let o = stack_tags(want(&[100.0, 101.0, 102.0, 99.0]), h, 0.0, 200.0);
+        let mut ys = get(o, 4);
+        ys.sort_by(f32::total_cmp);
+        assert!(ys.windows(2).all(|p| p[1] - p[0] >= h - 1e-3), "{ys:?}");
+        assert!(ys.iter().all(|y| (9.0..=191.0).contains(y)));
+        // More than fit (a 40 px axis has two rows): the lowest is left out.
+        let o = stack_tags(want(&[10.0, 20.0, 30.0]), h, 0.0, 40.0);
+        assert_eq!(o[..3], [Some(10.0), Some(28.0), None]);
+        assert_eq!(stack_tags(none, h, 0.0, 200.0), none);
+    }
+
+    /// Tag values: live, the title's own (the line's value now); stale, the last reports (the
+    /// pane dims them), but a line with a gap of its own at the end has none; no data, none.
+    #[test]
+    fn tags_show_the_latest_values_and_never_a_gap() {
+        const TWO: SeriesStudyDef = SeriesStudyDef {
+            id: "two",
+            name: "Two",
+            lines: &[
+                SeriesLineDef {
+                    key: "a",
+                    label: "A",
+                    color: SeriesColor::Foreground,
+                    line: LineType::Solid,
+                },
+                SeriesLineDef {
+                    key: "b",
+                    label: "B",
+                    color: SeriesColor::Orange,
+                    line: LineType::Dashed,
+                },
+            ],
+            zero_line: false,
+            stale_after_secs: 300,
+        };
+        let series = |key: &str, points: &[(i64, f64)], segments: &[(i64, i64)]| {
+            Arc::new(Series {
+                key: key.into(),
+                points: points.iter().map(|(m, v)| (t(*m), *v)).collect(),
+                segments: segments.iter().map(|(a, b)| (t(*a), t(*b))).collect(),
+            })
+        };
+        // A reports to minute 40; B stopped at minute 20 (a gap of its own).
+        let m = Arc::new(
+            LevelMap::builder("demo", ProductId(1), t(0))
+                .series(series("a", &[(10, 41.1), (30, 41.0)], &[(10, 40)]))
+                .series(series("b", &[(10, 0.337)], &[(10, 20)]))
+                .build(25)
+                .unwrap(),
+        );
+        let b = bars();
+        let view = BarsView::fixed(&b, 60_000);
+        let axis = TimeAxis::new(view);
+        let mut f = ExtFrame::default();
+        f.reserve(2, 256);
+        // Live at minute 42: A's value now, as the title reads it; B's gap: no tag.
+        f.build(
+            &TWO,
+            Some((Some(&m), LevelStatus::Current, t(42))),
+            &axis,
+            &vp(),
+        );
+        assert_eq!(f.status, ExtStatus::Live);
+        let tags = f.tag_values(&TWO);
+        assert_eq!(tags[..2], f.values(&TWO, None)[..2]);
+        assert_eq!(tags[..2], [Some(41.0), None]);
+        // Stale at minute 50 (no report for 10 minutes): A's last value still tagged; B, 20
+        // minutes behind A, none.
+        f.build(
+            &TWO,
+            Some((Some(&m), LevelStatus::Current, t(50))),
+            &axis,
+            &vp(),
+        );
+        assert_eq!(f.status, ExtStatus::Stale);
+        assert_eq!(f.tag_values(&TWO)[..2], [Some(41.0), None]);
+        // No data: no tags.
+        f.build(&TWO, None, &axis, &vp());
+        assert_eq!(f.tag_values(&TWO), [None; MAX_LINES]);
     }
 
     /// A gap breaks the line (a new run), values hold to their segment's end, zero joins the

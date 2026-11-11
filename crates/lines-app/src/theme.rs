@@ -415,6 +415,20 @@ impl Theme {
         if k(a) >= k(b) { a } else { b }
     }
 
+    /// An external series' last-value tag on its pane's axis: a chip filled in the line's
+    /// color (opaque), its number in the main text or the paper, whichever reads better
+    /// (`on_fill`; AA for every series role, tested). Stale, the chip dims as the pane's lines
+    /// do (`series_pane::STALE_FADE`, over the axis). Returns (fill, text).
+    pub fn series_tag(&self, line: Hsla, stale: bool) -> (Hsla, Hsla) {
+        let fill = Hsla { a: 1.0, ..line };
+        let fill = if stale {
+            over(fill.opacity(crate::series_pane::STALE_FADE), self.bg)
+        } else {
+            fill
+        };
+        (fill, self.on_fill(fill))
+    }
+
     /// A drawing's price tag on the axis (decision 0026): outlined, never filled (filled tags
     /// are the last price's and orders'). Its border is the drawing's color, opaque; its text
     /// the same color where that is AA (4.5:1) on the axis background, else the theme's text
@@ -1668,6 +1682,32 @@ mod tests {
                 let faded = over(c.opacity(crate::series_pane::STALE_FADE), t.bg);
                 let r = contrast(faded, t.bg);
                 assert!(r >= 3.0, "{}: stale series {i}: {r}", t.name);
+            }
+        }
+    }
+
+    /// An external series' last-value tag: a chip filled in its line's color with its number
+    /// AA (4.5:1) on it, for every series role in all four theme/palette combinations, live
+    /// and stale (dimmed as the pane's lines are); the chip reads on the axis (3:1).
+    #[test]
+    fn series_tags_are_aa_in_every_theme() {
+        for t in Theme::all() {
+            for (i, c) in t.series.iter().enumerate() {
+                for stale in [false, true] {
+                    let (fill, text) = t.series_tag(*c, stale);
+                    let r = contrast(text, fill);
+                    assert!(r >= 4.5, "{}: series {i}, stale {stale}: text {r}", t.name);
+                    let e = contrast(fill, t.bg);
+                    assert!(e >= 3.0, "{}: series {i}, stale {stale}: chip {e}", t.name);
+                }
+                // Stale is visibly dimmer than live.
+                let (live, _) = t.series_tag(*c, false);
+                let (stale, _) = t.series_tag(*c, true);
+                assert!(
+                    contrast(stale, t.bg) < contrast(live, t.bg),
+                    "{}: {i}",
+                    t.name
+                );
             }
         }
     }
