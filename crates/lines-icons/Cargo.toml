@@ -1,0 +1,12 @@
+[package]
+name = "lines-icons"
+edition.workspace = true
+version.workspace = true
+# Lucide's licence: ISC, and MIT (Cole Bemis, Feather) for the Lucide icons derived from Feather
+# (here log-in, maximize and x); the texts are LICENSE-ISC.txt and LICENSE-MIT.txt. Not `publish = false` on
+# purpose: cargo-about and cargo-deny skip private crates, and this one must be counted, so the
+# notice ships in every release's THIRD_PARTY_LICENSES.txt (as lines-fonts).
+license = "ISC AND MIT"
+description = "Lucide line icons (stroke 1.6), embedded for the Lines UI."
+
+[dependencies]

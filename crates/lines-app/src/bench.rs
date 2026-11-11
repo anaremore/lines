@@ -98,7 +98,9 @@ pub fn run(
         registry.clone(),
         ws.env.sources.primary().base.clone(),
     );
-    gpui_platform::application().run(move |cx: &mut App| {
+    gpui_platform::application()
+        .with_assets(crate::icons::Assets)
+        .run(move |cx: &mut App| {
         // The fonts the app draws with (decision 0034), so paint and shaping are measured in
         // them.
         crate::fonts::load(cx);
