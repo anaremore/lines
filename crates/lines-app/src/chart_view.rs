@@ -463,6 +463,10 @@ pub struct ChartView {
     /// `--study-set`): a product that already has a set doesn't take them, so the chart keeps
     /// them as separate studies instead (never overwriting the product's).
     cli_studies: bool,
+    /// The app's settings are saved (`AppSettings::writable`): a shared chart's studies live
+    /// there. Not saved (a settings file that couldn't be backed up): the chart saves its own
+    /// too, so nothing is lost on a restart.
+    settings_saved: bool,
     /// This frame's price axis width (it grows to the widest level tag while study labels are
     /// tags in the axis) and label column width (0 unless they are in a column), px.
     axis_now: f32,
@@ -864,6 +868,9 @@ impl ChartView {
             studies_gen: 0,
             other_separate: Default::default(),
             cli_studies,
+            settings_saved: cx
+                .try_global::<crate::picker_view::AppSettings>()
+                .is_some_and(|s| s.writable()),
             axis_now: axis_w(),
             label_col: 0.0,
             column_drag: None,
@@ -1087,10 +1094,20 @@ impl ChartView {
         // On a product that has a set: the chart keeps them as its own, on top of the
         // product's set (its other studies stay), never overwriting the product's.
         if cli && let Some(mut own) = product_set.clone() {
-            own.indicators = merge_indicators(own.indicators, self.studies.configs());
-            let profile = self.profile.config();
-            if !profile.is_default() {
-                own.profile = profile;
+            let given = self.study_set();
+            own.indicators = merge_indicators(own.indicators, given.indicators);
+            if !given.profile.is_default() {
+                own.profile = given.profile;
+            }
+            if !given.levels.is_default() {
+                own.levels.label_place = given.levels.label_place;
+                own.levels.label_column = given.levels.label_column;
+            }
+            if !given.footprint.is_default() {
+                own.footprint = given.footprint;
+            }
+            if !given.styles.is_empty() {
+                own.styles = given.styles;
             }
             self.set_study_set(own);
             self.separate_studies = true;
@@ -1100,8 +1117,11 @@ impl ChartView {
         // A product without a set: a switch to it, or a restored chart that keeps none of its
         // own (decision 0039 §4), starts from the defaults for new charts; command-line
         // studies stay (and give the product its set).
+        // A restored chart that holds studies of its own (saved while settings weren't, or
+        // written by hand) keeps them and gives the product its set.
+        let own = !switched && self.study_set().has_studies();
         let set = product_set.or_else(|| {
-            (switched || !cli).then(|| {
+            (switched || !(cli || own)).then(|| {
                 crate::picker_view::settings(cx)
                     .chart_defaults
                     .clone()
@@ -9000,6 +9020,7 @@ impl Pane for ChartView {
         });
         // A chart sharing its product's set saves none of it (the app's settings hold it).
         if !self.separate_studies
+            && self.settings_saved
             && let Some(state) = doc.chart.as_mut()
         {
             crate::symbol_studies::clear(state);
@@ -10641,7 +10662,7 @@ mod symbol_studies_tests {
         sync(&b, cx);
         assert_eq!(indicators(&a, cx), vec![vwap("eth"), vwap("weekly")]);
         assert_eq!(indicators(&b, cx), vec![vwap("eth")]);
-        // Saved: A with its own (separate), B with none (ES's are in the settings).
+        // Saved: A with its own (separate).
         let saved = |c: &Entity<ChartView>, cx: &mut TestAppContext| {
             c.read_with(cx, |c, _| {
                 let mut d = PaneDoc::new(crate::layout::PaneKind::Chart, None, None);
@@ -10651,7 +10672,11 @@ mod symbol_studies_tests {
         };
         let (sa, sb) = (saved(&a, cx), saved(&b, cx));
         assert!(sa.separate_studies && sa.indicators.len() == 2);
-        assert!(!sb.separate_studies && sb.indicators.is_empty());
+        // B shares ES's. These settings are never saved (a test's, like a settings file that
+        // couldn't be backed up), so B keeps its studies on the pane too: nothing lost on a
+        // restart. (With saved settings the pane holds none: `settings_saved`.)
+        assert!(!sb.separate_studies);
+        assert_eq!(sb.indicators, vec![vwap("eth")]);
         // Separate studies are kept per symbol: A to NQ shows NQ's, back to ES its own again.
         a.update(cx, |c, cx| c.set_feed(feed(catalog::NQ), cx));
         sync(&a, cx);
