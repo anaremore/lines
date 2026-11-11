@@ -271,7 +271,9 @@ pub fn row(info: &StrategyInfo, c: &RowCtx<'_>) -> Row {
     };
     // P&L display off shows no money: the limit is still named.
     if c.mode.money() {
-        limits.push_str(&format!(" · daily loss ${}", l.max_daily_loss));
+        // Grouped as every amount (`$1,000`): `pnl::write_grouped`.
+        limits.push_str(" · daily loss $");
+        let _ = crate::pnl::write_grouped(&mut limits, u128::from(l.max_daily_loss.unsigned_abs()));
     } else {
         limits.push_str(" · daily loss limit set");
     }

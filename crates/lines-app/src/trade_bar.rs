@@ -2601,7 +2601,8 @@ fn fields_w(
 }
 
 /// The position card's large text size: 15 px where the side and the P&L fit beside each other,
-/// else 13, else 12. Neither is ever cut: the average gives way first ([`card_line_fit`]).
+/// else 13, else 12, else 11. Neither is cut up to a six-figure P&L at the narrowest DOM: the
+/// average gives way first ([`card_line_fit`]).
 pub fn card_big_px(width: f32, side: &str, pnl: Option<&str>) -> f32 {
     let room = card_inner(width);
     // 11 px last (the DOM's small text): a six-figure P&L beside a three-digit position, with its
