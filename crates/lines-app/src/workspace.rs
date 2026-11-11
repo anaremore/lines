@@ -1390,6 +1390,11 @@ impl WindowView {
         if i >= self.tabs.len() {
             return;
         }
+        // A popover in the tab left behind would stay open unseen and take the next press on an
+        // order control in this one (`popover::press_closes_popover`): it closes.
+        if i != self.active {
+            crate::popover::close_any(cx);
+        }
         self.active = i;
         if scroll_into_view {
             let strip = self.tab_strip(f32::from(window.viewport_size().width));
@@ -2524,11 +2529,16 @@ impl WindowView {
     /// Open a pane, tab or column menu: any other popover closes (`crate::popover`).
     fn show_menu(&mut self, menu: Menu, cx: &mut Context<Self>) {
         self.menu = Some(menu);
-        crate::popover::opened(cx, crate::popover::Kind::Menu, |this: &mut Self, cx| {
-            if this.menu.take().is_some() {
-                cx.notify();
-            }
-        });
+        crate::popover::opened(
+            cx,
+            crate::popover::Kind::Menu,
+            |this: &mut Self, cx| {
+                if this.menu.take().is_some() {
+                    cx.notify();
+                }
+            },
+            |this: &Self| this.menu.is_some(),
+        );
         cx.notify();
     }
 
@@ -2968,10 +2978,34 @@ impl WindowView {
     // ---- input ------------------------------------------------------------------------------
 
     fn on_key_capture(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.menu.is_some() {
+        // Flatten, Cancel all and Stop all always act: whatever is open (a menu, a prompt, any
+        // popover in any pane or window) closes and never takes the key.
+        let route = commands::key_route(
+            commands::command_for(&ev.keystroke),
+            self.menu.is_some(),
+            self.prompt.is_some(),
+        );
+        if let commands::KeyRoute::Emergency(cmd) = route {
+            self.menu = None;
+            self.prompt = None;
+            crate::popover::close_any(cx);
+            if !ev.is_held {
+                match cmd {
+                    Command::Trade(tc) => {
+                        self.focus_for_size(tc, window, cx);
+                        self.run_trade(tc, true, cx)
+                    }
+                    _ => self.run(cmd, window, cx),
+                }
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
+        if route == commands::KeyRoute::Menu {
             self.menu_key(ev, window, cx);
             cx.stop_propagation();
-        } else if self.prompt.is_some() {
+        } else if route == commands::KeyRoute::Prompt {
             self.prompt_key(ev, window, cx);
             cx.stop_propagation();
         } else if let Some(cmd) = commands::command_for(&ev.keystroke) {

@@ -262,11 +262,16 @@ impl PaneWindow {
     /// tag or a drawing, else the pane's, with what this window can run (`command`).
     fn open_menu(&mut self, at: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         // Any other popover closes (`crate::popover`).
-        crate::popover::opened(cx, crate::popover::Kind::Menu, |this: &mut Self, cx| {
-            if this.menu.take().is_some() {
-                cx.notify();
-            }
-        });
+        crate::popover::opened(
+            cx,
+            crate::popover::Kind::Menu,
+            |this: &mut Self, cx| {
+                if this.menu.take().is_some() {
+                    cx.notify();
+                }
+            },
+            |this: &Self| this.menu.is_some(),
+        );
         let object = match &self.handle {
             PaneHandle::Chart(chart) => chart.update(cx, |c, _| c.take_menu_object()),
             _ => None,
@@ -348,6 +353,23 @@ impl PaneWindow {
     }
 
     fn on_key_capture(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flatten and Cancel all always act: an open menu or popover closes and never takes
+        // the key (as in main windows).
+        let route = commands::key_route(
+            commands::command_for(&ev.keystroke).and_then(command),
+            self.menu.is_some(),
+            false,
+        );
+        if let commands::KeyRoute::Emergency(cmd) = route {
+            self.menu = None;
+            crate::popover::close_any(cx);
+            if !ev.is_held {
+                self.run(cmd, window, cx);
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if let Some(menu) = self.menu.as_mut() {
             match menu.key(ev.keystroke.key.as_str()) {
                 MenuKey::Close => self.menu = None,

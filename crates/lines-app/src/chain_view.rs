@@ -1751,6 +1751,11 @@ impl ChainView {
                     MouseButton::Left,
                     cx.listener(move |this, _: &MouseDownEvent, window, cx| {
                         cx.stop_propagation();
+                        // A popover open elsewhere: this press only closes it.
+                        if crate::popover::press_closes_popover(cx) {
+                            cx.notify();
+                            return;
+                        }
                         this.focus.focus(window, cx);
                         this.run_exit(flatten, lines_trading::Source::Dom, cx);
                     }),
@@ -2774,6 +2779,12 @@ impl ChainView {
 
     /// A click in the table: select the row's strike, and the side by which half was hit.
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A popover open in another window: this press only closes it (never an order).
+        if crate::popover::press_closes_popover(cx) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         // The click that only brings the pane forward aims at nothing: One-click waits for the
         // next. As of the last frame: the workspace has already focused the pane by now.
         let focused = self.aimed;
@@ -5002,6 +5013,11 @@ impl ChainView {
                         MouseButton::Left,
                         cx.listener(|this, _: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
+                            // A popover open elsewhere: this press only closes it.
+                            if crate::popover::press_closes_popover(cx) {
+                                cx.notify();
+                                return;
+                            }
                             this.focus.focus(window, cx);
                             this.send_ticket(cx);
                             cx.notify();

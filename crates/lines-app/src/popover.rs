@@ -6,8 +6,11 @@
 //! it); Esc closes it; inline edits not yet applied stay as a draft for the next open; and only
 //! one popover is open at a time in the app.
 //!
-//! Flatten and Cancel all stay one action (docs/design.md §3): [`always_live`] draws them over
-//! every backdrop, so their own handler takes the press, and closes the popover.
+//! An open popover covers everything under it, Flatten and Cancel all included (owner,
+//! 2026-11-10: no accidental flatten through a menu, no controls drawn over a list): with one
+//! open in any pane or window, the first press outside it only closes it
+//! ([`press_closes_popover`] for a popover in another window). Their keys always act
+//! (`commands::emergency`) and close it.
 //!
 //! [`outside_click`] is the click rule. A popover puts a transparent, occluding, window-wide
 //! backdrop under itself ([`defer_backdrop`], deferred at `dropdown::BACKDROP_PRIORITY`, below
@@ -109,12 +112,17 @@ impl<K: Copy + PartialEq> Slot<K> {
 
 type Key = (EntityId, Kind);
 type Closer = Box<dyn FnOnce(&mut App)>;
+type Probe = Box<dyn Fn(&App) -> bool>;
 
 /// The app's open popover and how to close it.
 #[derive(Default)]
 struct Open {
     slot: Slot<Key>,
     close: Option<Closer>,
+    /// Whether the slot's popover is really still open: its view's own state, read through
+    /// `opened`'s `is_open` (an entry can be stale: a popover shut by a path that skipped
+    /// [`closed`]).
+    is_open: Option<Probe>,
 }
 
 impl Global for Open {}
@@ -122,13 +130,24 @@ impl Global for Open {}
 /// The view's popover `kind` just opened: any other open popover (this view's, another pane's,
 /// another window's) closes. `close` closes this one when the next popover opens; it must do
 /// nothing if this one is already shut. It runs after the current update (never re-entrantly).
-pub fn opened<V: 'static>(cx: &mut Context<V>, kind: Kind, close: fn(&mut V, &mut Context<V>)) {
+/// `is_open` reads, from the view's own state, whether this popover is still open: a press
+/// elsewhere asks it before treating the press as a dismiss ([`press_closes_popover`]).
+pub fn opened<V: 'static>(
+    cx: &mut Context<V>,
+    kind: Kind,
+    close: fn(&mut V, &mut Context<V>),
+    is_open: fn(&V) -> bool,
+) {
     let key = (cx.entity_id(), kind);
     let weak = cx.weak_entity();
+    let probe = weak.clone();
     let g = cx.default_global::<Open>();
     let prev = g.slot.open(key).and(g.close.take());
     g.close = Some(Box::new(move |cx: &mut App| {
         let _ = weak.update(cx, close);
+    }));
+    g.is_open = Some(Box::new(move |cx: &App| {
+        probe.upgrade().is_some_and(|v| is_open(v.read(cx)))
     }));
     if let Some(prev) = prev {
         cx.defer(prev);
@@ -146,6 +165,7 @@ pub fn closed<V: 'static>(cx: &mut Context<V>, kind: Kind) {
         let g = cx.global_mut::<Open>();
         g.slot.close(key);
         g.close = None;
+        g.is_open = None;
     }
 }
 
@@ -283,173 +303,53 @@ pub fn clear_dismissing() {
     DISMISSING.with(|d| d.set(false));
 }
 
-/// Close whatever popover is open (Flatten or Cancel all was pressed with one open).
-pub fn close_any(cx: &mut App) {
+/// Close whatever popover is open, in any pane or window (Flatten or Cancel all from its key,
+/// an order control's press). Whether one was open.
+pub fn close_any(cx: &mut App) -> bool {
     if cx.try_global::<Open>().is_some_and(|g| g.close.is_some()) {
         mark_moved_under_pointer();
         let g = cx.global_mut::<Open>();
         let close = g.close.take();
+        g.is_open = None;
         g.slot = Slot::default();
         if let Some(close) = close {
             cx.defer(close);
         }
+        return true;
     }
+    false
 }
 
-/// `content` (Flatten, Cancel all) drawn over every popover's backdrop, at
-/// `dropdown::LIVE_PRIORITY` and clipped as where it sits: one press even with a popover
-/// open (docs/design.md §3). Its own handler runs (left button only, as always) and closes
-/// the popover ([`close_any`]). Deferred draws are kept with a cached pane, so this holds on
-/// frames the pane doesn't redraw.
-pub fn always_live(content: impl IntoElement) -> Live {
-    let mask = std::rc::Rc::new(std::cell::Cell::new(None));
-    Live {
-        content: Some(
-            Masked {
-                child: content.into_any_element(),
-                mask: mask.clone(),
-            }
-            .into_any_element(),
-        ),
-        mask,
+/// An order control's press (Flatten, Cancel all, Buy, Sell, Stop all, a position's Flatten),
+/// or a press on a DOM or chart, with another view's popover open (another pane's, another
+/// window's): the press only closes it and does nothing else, its release included (owner,
+/// 2026-11-10). In the popover's own window its backdrop takes the press first; this covers a
+/// popover in another window. The view's own popover is left to its backdrop and its own
+/// fallback. Asks the popover's view whether it is really open (a stale entry is dropped and
+/// the press acts). `true`: stop here.
+pub fn press_closes_popover<V: 'static>(cx: &mut Context<V>) -> bool {
+    let here = cx.entity_id();
+    let Some(g) = cx.try_global::<Open>() else {
+        return false;
+    };
+    let Some((owner, _)) = g.slot.current() else {
+        return false;
+    };
+    if owner == here {
+        return false;
     }
-}
-
-type MaskCell = std::rc::Rc<std::cell::Cell<Option<gpui::ContentMask<Pixels>>>>;
-
-pub struct Live {
-    content: Option<AnyElement>,
-    /// The clip where the control sits, for the deferred draw ([`Masked`]).
-    mask: MaskCell,
-}
-
-/// A deferred child under a clip in every phase: GPUI applies a deferred draw's mask when
-/// painting only, so without this the control's hitbox would take presses outside its pane
-/// (a short DOM's clipped Flatten over the pane below).
-struct Masked {
-    child: AnyElement,
-    mask: MaskCell,
-}
-
-impl IntoElement for Masked {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
+    // The popover's view isn't the one being updated here, so it can be read.
+    let open = g.is_open.as_ref().is_some_and(|f| f(cx));
+    if !open {
+        let g = cx.global_mut::<Open>();
+        g.slot = Slot::default();
+        g.close = None;
+        g.is_open = None;
+        return false;
     }
-}
-
-impl Element for Masked {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<gpui::ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        (self.child.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        window.with_content_mask(self.mask.get(), |w| {
-            self.child.prepaint(w, cx);
-        });
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut (),
-        _prepaint: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        window.with_content_mask(self.mask.get(), |w| self.child.paint(w, cx));
-    }
-}
-
-impl IntoElement for Live {
-    type Element = Self;
-
-    fn into_element(self) -> Self {
-        self
-    }
-}
-
-impl Element for Live {
-    type RequestLayoutState = ();
-    type PrepaintState = ();
-
-    fn id(&self) -> Option<gpui::ElementId> {
-        None
-    }
-
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
-        None
-    }
-
-    fn request_layout(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> (LayoutId, ()) {
-        let content = self.content.as_mut().expect("laid out once");
-        (content.request_layout(window, cx), ())
-    }
-
-    fn prepaint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut (),
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let _ = cx;
-        let Some(content) = self.content.take() else {
-            return;
-        };
-        let offset = window.element_offset();
-        let mask = window.content_mask();
-        self.mask.set(Some(mask));
-        window.defer_draw(content, offset, crate::dropdown::LIVE_PRIORITY, Some(mask));
-    }
-
-    fn paint(
-        &mut self,
-        _id: Option<&GlobalElementId>,
-        _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
-        _request_layout: &mut (),
-        _prepaint: &mut (),
-        _window: &mut Window,
-        _cx: &mut App,
-    ) {
-    }
+    close_any(cx);
+    mark_dismissing();
+    true
 }
 
 // ---- floating panels ----------------------------------------------------------------------
@@ -1063,6 +963,9 @@ mod panel_tests {
     }
 }
 
+#[cfg(all(test, feature = "screenshot"))]
+mod cover_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1205,16 +1108,12 @@ mod tests {
         assert_eq!(s.current(), Some((0, Kind::Menu)));
     }
 
-    /// Draw order: every backdrop under Flatten and Cancel all (one press with a popover
-    /// open), those under the lists and menus, the window's overlays on top.
+    /// Draw order: every backdrop under the lists and menus, the window's overlays on top.
+    /// Nothing draws over a backdrop but a popover (owner, 2026-11-10).
     #[test]
-    fn always_live_controls_draw_between_backdrops_and_popovers() {
-        use crate::dropdown::{
-            BACKDROP_PRIORITY, LIVE_PRIORITY, OVERLAY_PRIORITY, PANEL_PRIORITY, PRIORITY,
-        };
-        const { assert!(BACKDROP_PRIORITY < PANEL_PRIORITY) };
-        const { assert!(PANEL_PRIORITY < LIVE_PRIORITY) };
-        const { assert!(LIVE_PRIORITY < PRIORITY) };
+    fn backdrops_draw_under_lists_and_lists_under_overlays() {
+        use crate::dropdown::{BACKDROP_PRIORITY, OVERLAY_PRIORITY, PRIORITY};
+        const { assert!(BACKDROP_PRIORITY < PRIORITY) };
         const { assert!(PRIORITY < OVERLAY_PRIORITY) };
     }
 

@@ -10,7 +10,7 @@
 //! applies it with the trigger's real bounds, in window coordinates, so a list escapes its
 //! pane's header and the pane itself. Every dropdown is placed so, the trading panel's Qty and
 //! Bracket lists included (docs/design.md: a field's list opens under it, in the menus' look);
-//! those draw under Flatten and Cancel all ([`PANEL_PRIORITY`]), which stay one press (§3).
+//! like every list they cover what is under them, Flatten and Cancel all included (§3).
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, GlobalElementId, InspectorElementId,
@@ -27,16 +27,9 @@ pub const MARGIN: f32 = 4.0;
 /// Deferred-draw priority of an open list: over the panes.
 pub const PRIORITY: usize = 4;
 /// Deferred-draw priority of every popover's backdrop (`crate::popover`): over the panes,
-/// under Flatten and Cancel all (`LIVE_PRIORITY`) and every list and menu.
+/// Flatten and Cancel all included (nothing draws over a backdrop but a popover), under every
+/// list and menu.
 pub const BACKDROP_PRIORITY: usize = 1;
-/// Deferred-draw priority of a trading panel's own lists (Qty, Bracket): over the backdrops and
-/// the panes, under Flatten and Cancel all, which a list opening under its field can reach
-/// (docs/design.md §3: those stay one press and in view with any popover open).
-pub const PANEL_PRIORITY: usize = 2;
-/// Deferred-draw priority of Flatten and Cancel all (`popover::always_live`): over the
-/// backdrops and the panel's lists, so they stay one press with a popover open; under the
-/// other lists.
-pub const LIVE_PRIORITY: usize = 3;
 /// Deferred-draw priority of the window's own overlays (pane and tab menus, palette and
 /// prompts, the switch-all banner): over any open list, so a list never hides or takes the
 /// clicks of a menu opened after it.
@@ -103,13 +96,6 @@ pub struct Dropdown {
 }
 
 impl Dropdown {
-    /// A trading panel's list (Qty, Bracket): placed as every list is ([`fit`]), drawn under
-    /// Flatten and Cancel all ([`PANEL_PRIORITY`]), which stay one press over it.
-    pub fn in_panel(mut self) -> Self {
-        self.priority = PANEL_PRIORITY;
-        self
-    }
-
     /// Closes the open list on a press anywhere outside it, which goes no further
     /// (`popover::defer_backdrop`, the popover rule).
     pub fn on_dismiss(mut self, dismiss: OnDismiss) -> Self {

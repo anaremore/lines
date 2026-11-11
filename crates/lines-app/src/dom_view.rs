@@ -500,6 +500,12 @@ impl DomView {
     // ---- input ---------------------------------------------------------------------
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A popover open in another window: this press only closes it (never an order).
+        if crate::popover::press_closes_popover(cx) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let second = crate::popover::second_press(ev.click_count, ev.position);
         // A click that closes a list (the account list, the picker) does only that: never
         // also an order on the ladder under it. The account list (a popover) takes no focus

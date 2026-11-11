@@ -351,11 +351,16 @@ impl PositionsView {
         let t = self.theme;
         let amber = |b: gpui::Stateful<gpui::Div>| b.border_color(t.warn);
         if !self.confirm {
-            return crate::popover::always_live(
-                amber(self.button("positions-flatten-all".into(), "Flatten all")).on_mouse_down(
+            return amber(self.button("positions-flatten-all".into(), "Flatten all"))
+                .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
+                        // A popover open anywhere: this press only closes it.
+                        if crate::popover::press_closes_popover(cx) {
+                            cx.notify();
+                            return;
+                        }
                         if this.guarded(ev) && !this.rows.is_empty() {
                             this.confirm = true;
                             // The question's buttons appear under the pointer: a double-click's
@@ -364,9 +369,8 @@ impl PositionsView {
                         }
                         cx.notify();
                     }),
-                ),
-            )
-            .into_any_element();
+                )
+                .into_any_element();
         }
         div()
             .flex()
@@ -379,23 +383,26 @@ impl PositionsView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(model::flatten_prompt(count)),
             )
-            .child(crate::popover::always_live(
+            .child(
                 amber(self.button("positions-flatten-yes".into(), "Flatten")).on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
+                        if crate::popover::press_closes_popover(cx) {
+                            cx.notify();
+                            return;
+                        }
                         if ev.click_count > 1 {
                             this.note = Some("Press Flatten once to flatten them".to_owned());
                         } else if this.guarded(ev) {
                             this.confirm = false;
-                            crate::popover::close_any(cx);
                             let rows = this.rows.clone();
                             this.flatten(&rows, cx);
                         }
                         cx.notify();
                     }),
                 ),
-            ))
+            )
             .child(
                 self.button("positions-flatten-no".into(), "Keep")
                     .on_mouse_down(
@@ -731,29 +738,30 @@ impl PositionsView {
                     } else {
                         "Flatten"
                     };
-                    Self::cell(c)
-                        .flex()
-                        .justify_end()
-                        .child(crate::popover::always_live(
-                            self.button(SharedString::from(format!("position-flatten-{n}")), word)
-                                .when(off.is_some(), |b| b.text_color(t.text_dim))
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        if let Some(why) = this.off_reason(&row) {
-                                            this.note = Some(why);
-                                        } else if !this.press_guard.may_press() {
-                                            // Said once; the next press is the trader's own.
-                                            this.press_guard.pointer_moved();
-                                            this.note = Some(ROWS_MOVED.to_owned());
-                                        } else if this.guarded(ev) {
-                                            this.flatten(std::slice::from_ref(&row), cx);
-                                        }
+                    Self::cell(c).flex().justify_end().child(
+                        self.button(SharedString::from(format!("position-flatten-{n}")), word)
+                            .when(off.is_some(), |b| b.text_color(t.text_dim))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, ev: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    if crate::popover::press_closes_popover(cx) {
                                         cx.notify();
-                                    }),
-                                ),
-                        ))
+                                        return;
+                                    }
+                                    if let Some(why) = this.off_reason(&row) {
+                                        this.note = Some(why);
+                                    } else if !this.press_guard.may_press() {
+                                        // Said once; the next press is the trader's own.
+                                        this.press_guard.pointer_moved();
+                                        this.note = Some(ROWS_MOVED.to_owned());
+                                    } else if this.guarded(ev) {
+                                        this.flatten(std::slice::from_ref(&row), cx);
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                    )
                 }
             });
         }

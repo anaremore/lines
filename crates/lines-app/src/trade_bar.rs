@@ -2705,6 +2705,11 @@ fn run_on_click<V: TradePane>(
         MouseButton::Left,
         cx.listener(move |v: &mut V, ev: &gpui::MouseDownEvent, _, cx| {
             cx.stop_propagation();
+            // A popover open anywhere (another window's): this press only closes it.
+            if crate::popover::press_closes_popover(cx) {
+                cx.notify();
+                return;
+            }
             // Aimed at what has moved (the bracket editor closing, a list over this row).
             let exit = matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll);
             let refused = if exit {
@@ -2723,10 +2728,6 @@ fn run_on_click<V: TradePane>(
             }
             if exit {
                 v.trade().clear_notice();
-            }
-            if matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll) {
-                // Drawn over an open popover's backdrop (`popover::always_live`): it closes.
-                crate::popover::close_any(cx);
             }
             run_from(v, cmd, Instant::now(), Source::Dom, cx);
         }),
@@ -2924,9 +2925,12 @@ pub fn toggle_panel_menu<V: TradePane>(v: &mut V, which: PanelMenu, cx: &mut Con
     t.account_menu = false;
     t.panel_menu = Some(which);
     // One popover kind for the panel's lists: the account's, Qty and Bracket open one at a time.
-    crate::popover::opened(cx, crate::popover::Kind::Account, |v: &mut V, cx| {
-        close_account_menu(v, cx)
-    });
+    crate::popover::opened(
+        cx,
+        crate::popover::Kind::Account,
+        |v: &mut V, cx| close_account_menu(v, cx),
+        |v: &V| v.trade_ref().menu_open(),
+    );
     cx.notify();
 }
 
@@ -3385,12 +3389,7 @@ pub fn dom_bar<V: TradePane>(
                 .text_color(t.text_dim);
         }
         let b = run_on_click(tip(b, name, Some(cmd), t), cmd, cx);
-        if entry {
-            b.into_any_element()
-        } else {
-            // Cancel all and Flatten: one press even with a popover open (design.md §3).
-            crate::popover::always_live(b).into_any_element()
-        }
+        b.into_any_element()
     };
     if rows.actions_row(width) {
         let mut row = div()
@@ -4261,14 +4260,12 @@ fn controls<V: TradePane>(
             cx.listener(|v: &mut V, _: &gpui::MouseDownEvent, _, cx| close_account_menu(v, cx)),
         )
     };
-    // Each list opens under its field (`dropdown::fit`), under Flatten and Cancel all, which it
-    // can reach and which stay one press over it (`dropdown::PANEL_PRIORITY`).
+    // Each list opens under its field (`dropdown::fit`) and covers what is under it, Flatten and
+    // Cancel all included (owner, 2026-11-10).
     let qty = crate::dropdown::dropdown(div().flex().flex_shrink_0().child(qty), qty_menu)
-        .in_panel()
         .on_dismiss(dismiss(cx));
     let bracket =
         crate::dropdown::dropdown(div().flex().flex_1().min_w_0().child(bracket), bracket_menu)
-            .in_panel()
             .on_dismiss(dismiss(cx));
     div()
         .flex()
@@ -4913,9 +4910,12 @@ pub fn toggle_account_menu<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
     }
     v.trade().account_menu = true;
     v.trade().panel_menu = None;
-    crate::popover::opened(cx, crate::popover::Kind::Account, |v: &mut V, cx| {
-        close_account_menu(v, cx)
-    });
+    crate::popover::opened(
+        cx,
+        crate::popover::Kind::Account,
+        |v: &mut V, cx| close_account_menu(v, cx),
+        |v: &V| v.trade_ref().menu_open(),
+    );
     cx.notify();
 }
 
