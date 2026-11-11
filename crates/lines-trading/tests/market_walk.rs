@@ -871,8 +871,9 @@ fn the_slippage_cap_is_ten_basis_points_on_crypto() {
     assert_eq!(slippage_ticks(true, None, 1), SLIPPAGE_TICKS);
 }
 
-/// A BTC/USD.KR market buy past a one-unit ask walks 700 ticks (10 bp of 70,000.0), the rest at
-/// the last of them: the whole quantity, never more, never a better price as it goes.
+/// A BTC/USD.KR market buy past a one-unit ask walks 700 ticks (10 bp of 70,000.0) in 20 steps
+/// of 35 ticks, each holding 35 ticks' worth of the thinnest level, the rest at the last: the
+/// whole quantity, never more, never a better price as it goes, at most 20 modelled fills.
 #[test]
 fn a_crypto_market_order_slips_ten_basis_points() {
     let btc = ContractKey::spot(catalog::BTC_USD_KR);
@@ -906,12 +907,58 @@ fn a_crypto_market_order_slips_ten_basis_points() {
     let f = r.fills(id);
     assert_eq!(f.iter().map(|x| x.1).sum::<i64>(), 1_000);
     assert_eq!(f.first(), Some(&(Price(700_000), 1)));
+    assert_eq!(f[1], (Price(700_035), 35), "a step: 35 ticks, 35 units");
+    assert_eq!(
+        f.len(),
+        1 + 20,
+        "the inside, then at most 20 modelled fills"
+    );
     assert_eq!(
         f.last(),
-        Some(&(Price(700_700), 1_000 - 700)),
+        Some(&(Price(700_700), 1_000 - 1 - 19 * 35)),
         "the 700th tick: $70 up"
     );
-    assert_eq!(f.len(), 701);
     assert!(f.windows(2).all(|w| w[1].0 > w[0].0));
     assert_eq!(r.pos(btc), 1_000);
+}
+
+/// A BTC/USD.KR market sell past a one-unit bid walks down 700 ticks the same way.
+#[test]
+fn a_crypto_market_sell_slips_down_ten_basis_points() {
+    let btc = ContractKey::spot(catalog::BTC_USD_KR);
+    let mut r = Rig::new(CME_OPEN);
+    r.market(
+        btc,
+        &[
+            MarketInput::BookClear,
+            MarketInput::Book {
+                side: BookSide::Bid,
+                price: Price(700_000),
+                qty: Qty(1),
+            },
+            MarketInput::Book {
+                side: BookSide::Ask,
+                price: Price(700_010),
+                qty: Qty(5),
+            },
+        ],
+    );
+    let id = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: btc,
+            side: Side::Sell,
+            qty: Qty(1_000),
+            kind: OrderKind::Market,
+        }))
+        .unwrap()[0];
+    r.wait(LAT);
+    let f = r.fills(id);
+    assert_eq!(f.iter().map(|x| x.1).sum::<i64>(), 1_000);
+    assert_eq!(f.last().map(|x| x.0), Some(Price(700_000 - 700)));
+    assert!(
+        f.windows(2).all(|w| w[1].0 < w[0].0),
+        "never better as it goes"
+    );
+    assert_eq!(r.pos(btc), -1_000);
 }
