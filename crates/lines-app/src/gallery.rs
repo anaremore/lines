@@ -81,6 +81,12 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             args("--layout chart --size 1400x800 --theme dark"),
         ),
         s(
+            "chart-zoom-to-150",
+            true,
+            end,
+            args("--layout chart --size 1400x800 --theme dark --ui-zoom 100 --ui-zoom-to 150"),
+        ),
+        s(
             "chart-light",
             false,
             end,
@@ -1078,6 +1084,15 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         s(name, quick, end, a)
     };
     v.push(volume("volume-with-delta-dark", true, "pane", "dark", ""));
+    // UI zoom changed to 150 % after the first frame, as Ctrl+= does (owner's bug: the time
+    // labels kept their 100 % spacing and ran together). With two lower panes: their time
+    // axis too.
+    let mut zoomed = args(
+        "--layout chart --size 1400x800 --theme light --volume pane --ui-zoom 100 --ui-zoom-to 150",
+    );
+    zoomed.push("--study-set".into());
+    zoomed.push(ws("volume-and-delta.json"));
+    v.push(s("zoom-to-150-lower-panes", false, end, zoomed));
     v.push(volume(
         "volume-split-average-light-cb",
         false,

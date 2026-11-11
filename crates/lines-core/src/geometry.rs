@@ -801,6 +801,35 @@ mod tests {
         }
     }
 
+    /// At 150 % UI zoom the labels are measured half again as wide (`chart_view` measures the
+    /// grid space again on a zoom change): the step grows to match and no label reaches the
+    /// next one. Owner's bug: measured once at 100 %, "11-10 22:0011-11 01:00 02:00" at 150 %.
+    #[test]
+    fn time_labels_keep_apart_at_150_percent() {
+        let b = bars(2000);
+        let mut vp = Viewport::default();
+        vp.on_data(&b, 25);
+        let base = GridSpace::default();
+        let zoomed = GridSpace {
+            price_px: base.price_px * 1.5,
+            time_px: base.time_px * 1.5,
+            date_time_px: base.date_time_px * 1.5,
+        };
+        let step = |space: &GridSpace| time_step(&vp, 60_000, space.time_px);
+        assert!(step(&zoomed) >= step(&base));
+        let mut out = Vec::with_capacity(MAX_GRID_LINES);
+        build_time_grid(&b, &vp, 60_000, 1.0, &zoomed, &DisplayTz::utc(), &mut out);
+        assert!(out.len() >= 2);
+        for w in out.windows(2) {
+            let room = match w[0].label {
+                TimeLabel::DateTime => zoomed.date_time_px,
+                TimeLabel::TimeSeconds => zoomed.time_px * 1.5,
+                _ => zoomed.time_px,
+            };
+            assert!((w[1].x - w[0].x) as f64 >= room - 1.0, "{w:?}");
+        }
+    }
+
     /// Plot of `height` px over `span` price units starting at 400_000.
     fn price_vp(span: f64) -> Viewport {
         Viewport {

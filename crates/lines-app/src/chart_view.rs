@@ -6934,7 +6934,8 @@ impl ChartView {
         );
     }
 
-    /// Measure the axis labels' spacing (`GridSpace`) with this window's font, once.
+    /// Measure the axis labels' spacing (`GridSpace`) with this window's font, at this UI
+    /// zoom (again after a zoom change).
     fn measure_grid_space(&mut self, window: &mut Window) {
         let dim = self.theme.text_dim;
         // In the time labels' font, the number font (`LabelKind::numeric`), which a UI font
@@ -9849,6 +9850,9 @@ impl Render for ChartView {
         let zoom = crate::zoom::generation();
         if zoom != self.zoom_generation {
             self.zoom_generation = zoom;
+            // The axis labels' spacing was measured at the old size: measured again, or the
+            // time labels run together (and the price labels crowd) at a larger zoom.
+            self.space_measured = false;
             self.labels.clear();
             self.readout = None;
             self.note_lines.clear();
