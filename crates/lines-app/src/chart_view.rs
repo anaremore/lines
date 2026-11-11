@@ -6232,11 +6232,33 @@ impl ChartView {
                 };
                 let base = t.series[crate::series_pane::series_index(tg.def.lines[i].color)];
                 let line = tg.styles[i].map_or(base, |st| t.part_color(st.color, base, 100));
-                let (chip, text) = t.series_tag(line, tg.stale);
-                window.paint_quad(fill(
-                    rect(ax + hair, y - tag_h() * 0.5, self.axis_now, tag_h()),
-                    chip,
-                ));
+                let (chip, edge, text) = t.series_tag(line, tg.stale);
+                let r = rect(ax + hair, y - tag_h() * 0.5, self.axis_now, tag_h());
+                match chip {
+                    Some(c) => window.paint_quad(fill(r, c)),
+                    // Stale: dimmed by shape (design §5), a dashed edge in the line's color.
+                    None => {
+                        let w = 1.0;
+                        let (x0, y0) = (
+                            f32::from(r.origin.x) + w * 0.5,
+                            f32::from(r.origin.y) + w * 0.5,
+                        );
+                        let (x1, y1) = (
+                            x0 + f32::from(r.size.width) - w * 2.0,
+                            y0 + f32::from(r.size.height) - w,
+                        );
+                        let mut b =
+                            gpui::PathBuilder::stroke(px(w)).dash_array(&[px(3.0), px(2.0)]);
+                        b.move_to(point(px(x0), px(y0)));
+                        b.line_to(point(px(x1), px(y0)));
+                        b.line_to(point(px(x1), px(y1)));
+                        b.line_to(point(px(x0), px(y1)));
+                        b.close();
+                        if let Ok(path) = b.build() {
+                            window.paint_path(path, edge);
+                        }
+                    }
+                }
                 let origin = point(px(ox + ax + 8.0), px(oy + y - label_px() * 0.65));
                 self.paint_label(
                     LabelKind::SeriesTag((k * crate::series_pane::MAX_LINES + i) as u8),

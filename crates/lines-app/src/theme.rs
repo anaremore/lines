@@ -415,18 +415,18 @@ impl Theme {
         if k(a) >= k(b) { a } else { b }
     }
 
-    /// An external series' last-value tag on its pane's axis: a chip filled in the line's
-    /// color (opaque), its number in the main text or the paper, whichever reads better
-    /// (`on_fill`; AA for every series role, tested). Stale, the chip dims as the pane's lines
-    /// do (`series_pane::STALE_FADE`, over the axis). Returns (fill, text).
-    pub fn series_tag(&self, line: Hsla, stale: bool) -> (Hsla, Hsla) {
-        let fill = Hsla { a: 1.0, ..line };
-        let fill = if stale {
-            over(fill.opacity(crate::series_pane::STALE_FADE), self.bg)
+    /// An external series' last-value tag on its pane's axis. Live: a chip filled in the
+    /// line's color (opaque), its number in the main text or the paper, whichever reads better
+    /// (`on_fill`; AA for every series role, tested). Stale it is dimmed, never faded (design
+    /// §5): no fill, a dashed edge in the line's color and the number in dim text. Returns
+    /// (fill, or `None` for the dashed edge, edge or fill color, text).
+    pub fn series_tag(&self, line: Hsla, stale: bool) -> (Option<Hsla>, Hsla, Hsla) {
+        let solid = Hsla { a: 1.0, ..line };
+        if stale {
+            (None, solid, self.text_dim)
         } else {
-            fill
-        };
-        (fill, self.on_fill(fill))
+            (Some(solid), solid, self.on_fill(solid))
+        }
     }
 
     /// A drawing's price tag on the axis (decision 0026): outlined, never filled (filled tags
@@ -1686,28 +1686,26 @@ mod tests {
         }
     }
 
-    /// An external series' last-value tag: a chip filled in its line's color with its number
-    /// AA (4.5:1) on it, for every series role in all four theme/palette combinations, live
-    /// and stale (dimmed as the pane's lines are); the chip reads on the axis (3:1).
+    /// An external series' last-value tag, for every series role in all four theme/palette
+    /// combinations: live, a chip in the line's color with its number AA (4.5:1) on it, the
+    /// chip 3:1 on the axis; stale, by shape (no fill, a dashed edge 3:1 on the axis) with its
+    /// number in dim text, AA on the axis.
     #[test]
     fn series_tags_are_aa_in_every_theme() {
         for t in Theme::all() {
             for (i, c) in t.series.iter().enumerate() {
-                for stale in [false, true] {
-                    let (fill, text) = t.series_tag(*c, stale);
-                    let r = contrast(text, fill);
-                    assert!(r >= 4.5, "{}: series {i}, stale {stale}: text {r}", t.name);
-                    let e = contrast(fill, t.bg);
-                    assert!(e >= 3.0, "{}: series {i}, stale {stale}: chip {e}", t.name);
-                }
-                // Stale is visibly dimmer than live.
-                let (live, _) = t.series_tag(*c, false);
-                let (stale, _) = t.series_tag(*c, true);
-                assert!(
-                    contrast(stale, t.bg) < contrast(live, t.bg),
-                    "{}: {i}",
-                    t.name
-                );
+                let (fill, edge, text) = t.series_tag(*c, false);
+                let fill = fill.expect("live: filled");
+                let r = contrast(text, fill);
+                assert!(r >= 4.5, "{}: series {i}: text {r}", t.name);
+                assert!(contrast(fill, t.bg) >= 3.0, "{}: series {i}: chip", t.name);
+                assert_eq!(edge, fill);
+                let (fill, edge, text) = t.series_tag(*c, true);
+                assert!(fill.is_none(), "stale: dimmed by shape, never faded");
+                let e = contrast(edge, t.bg);
+                assert!(e >= 3.0, "{}: stale series {i}: edge {e}", t.name);
+                let r = contrast(text, t.bg);
+                assert!(r >= 4.5, "{}: stale series {i}: text {r}", t.name);
             }
         }
     }

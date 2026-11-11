@@ -323,14 +323,17 @@ pub fn stack_tags(
     out
 }
 
-/// A value as the pane prints it: one decimal from 10 up, two below (a swing of 0.75 keeps its
-/// digits), a minus sign where negative.
+/// A value as the pane prints it (its title, axis labels and tags): one decimal from 10 up, two
+/// below (a swing of 0.75 keeps its digits), and a true minus (U+2212, as the money format:
+/// never read as a hyphen) where it is negative once rounded (never "−0.00").
 pub fn write_value(v: f64, out: &mut impl std::fmt::Write) {
-    let _ = if v.abs() >= 10.0 {
-        write!(out, "{v:.1}")
-    } else {
-        write!(out, "{v:.2}")
-    };
+    let digits = if v.abs() >= 10.0 { 1 } else { 2 };
+    let m = if digits == 1 { 10.0 } else { 100.0 };
+    let r = (v.abs() * m).round() / m;
+    if v < 0.0 && r > 0.0 {
+        let _ = out.write_char('\u{2212}');
+    }
+    let _ = write!(out, "{r:.digits$}");
 }
 
 /// The study's line parts (`study_style`): one per line, its own color its theme role and its
@@ -815,6 +818,9 @@ mod tests {
         };
         assert_eq!(s(22.84), "22.8");
         assert_eq!(s(0.75), "0.75");
-        assert_eq!(s(-0.5), "-0.50");
+        assert_eq!(s(-0.5), "\u{2212}0.50");
+        assert_eq!(s(-41.06), "\u{2212}41.1");
+        assert_eq!(s(-0.001), "0.00", "no sign on a value that rounds to zero");
+        assert_eq!(s(9.996), "10.00");
     }
 }
