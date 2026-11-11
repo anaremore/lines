@@ -2990,6 +2990,23 @@ impl ChartView {
         self.studies.configs()
     }
 
+    /// The chart's Volume: on the chart (`Some(true)`) or in its pane; `None` without one.
+    pub fn volume_overlay(&self) -> Option<bool> {
+        self.studies.configs().iter().find_map(|c| match c {
+            lines_indicators::IndicatorConfig::Volume { spec, .. } => Some(spec.overlay),
+            _ => None,
+        })
+    }
+
+    /// Volume on the chart or in a pane (command `VolumeOverlay`): moves the chart's Volume,
+    /// or adds one there.
+    pub fn place_volume(&mut self, overlay: bool, cx: &mut Context<Self>) {
+        let mut s = self.study_set();
+        s.apply(&StudyAction::PlaceVolume(overlay));
+        self.set_study_set(s);
+        cx.notify();
+    }
+
     /// Replace this chart's indicators.
     pub fn set_indicator_configs(&mut self, configs: Vec<lines_indicators::IndicatorConfig>) {
         self.studies = crate::studies::Studies::new(configs);
@@ -9622,6 +9639,12 @@ impl Render for ChartView {
                         !self.drawings.active()
                             && self.drawings.measure_grip().is_none()
                             && self.drawings.hover_hit().is_some(),
+                        |d| d.cursor_pointer(),
+                    )
+                    // A lower pane's × (painted, so it says it is a button itself).
+                    .when(
+                        self.hover
+                            .is_some_and(|(x, y)| self.close_hit(x, y).is_some()),
                         |d| d.cursor_pointer(),
                     )
                     .child(

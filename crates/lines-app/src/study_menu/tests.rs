@@ -109,8 +109,8 @@ fn cumulative_delta_and_footprint_are_studies() {
     assert_eq!(set.indicators.len(), 1);
 }
 
-/// Volume (owner-approved 2026-11-09): added from the catalog as plain bars in a lower pane,
-/// one per chart; each option is a control in its editor, off by default; the average's
+/// Volume (owner-approved 2026-11-09): added from the catalog as plain bars on the chart
+/// (owner, 2026-11-10; along the plot's bottom), one per chart; "Volume: in a pane" moves it; each option is a control in its editor, off by default; the average's
 /// length is 20 when first turned on; it sits beside cumulative delta (each in its own pane).
 #[test]
 fn volume_is_a_study_with_its_options() {
@@ -129,6 +129,17 @@ fn volume_is_a_study_with_its_options() {
     set.apply(&a);
     set.apply(&StudyAction::AddVolume); // one per chart
     set.apply(&StudyAction::AddDelta(DeltaReset::Eth));
+    assert_eq!(set.indicators.len(), 2);
+    let IndicatorConfig::Volume { spec, .. } = set.indicators[0] else {
+        panic!("volume")
+    };
+    assert_eq!(spec, VolumeSpec::added());
+    assert!(
+        spec.overlay && !set.indicators[0].in_subpane(),
+        "on the chart"
+    );
+    // The command moves it into a pane (and back), never adding a second.
+    set.apply(&StudyAction::PlaceVolume(false));
     assert_eq!(set.indicators.len(), 2);
     assert_eq!(
         set.indicators.iter().filter(|c| c.in_subpane()).count(),
@@ -173,6 +184,8 @@ fn volume_is_a_study_with_its_options() {
         panic!("volume")
     };
     assert!(spec.color_by_candle && spec.average && spec.split && spec.overlay);
+    set.apply(&StudyAction::PlaceVolume(true));
+    assert_eq!(set.indicators.len(), 2);
     assert_eq!(spec.average_len, 20, "20 when first turned on");
     assert!(
         !set.indicators[0].in_subpane(),
@@ -809,4 +822,18 @@ fn session_opens_go_by_the_replay_before_its_first_frame() {
     // Live (or a replay with no frame yet): the wall clock.
     assert_eq!(opens_clock(None, None, None, || wall), wall);
     assert_eq!(opens_clock(None, None, Some(None), || wall), wall);
+}
+
+/// "Volume: in a pane" (or "on the chart") on a chart without Volume adds one there.
+#[test]
+fn placing_volume_adds_one_where_asked() {
+    use lines_indicators::IndicatorConfig;
+    for overlay in [false, true] {
+        let mut set = StudySet::default();
+        set.apply(&StudyAction::PlaceVolume(overlay));
+        let [IndicatorConfig::Volume { spec, .. }] = set.indicators.as_slice() else {
+            panic!("one volume: {:?}", set.indicators)
+        };
+        assert_eq!(spec.overlay, overlay);
+    }
 }

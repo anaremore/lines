@@ -81,8 +81,11 @@ pub enum StudyAction {
     },
     AddProfile(ProfileMode),
     AddDelta(DeltaReset),
-    /// Add Volume (plain bars in its own pane); one per chart.
+    /// Add Volume (on the chart: `VolumeSpec::added`); one per chart.
     AddVolume,
+    /// Volume on the chart (`true`) or in its own pane: the chart's Volume moves, or one is
+    /// added there (the command "Volume: on the chart / in a pane").
+    PlaceVolume(bool),
     /// Add a level source's lower-pane series study (source id, study id); once per chart.
     AddExternal(String, String),
     /// Set Volume `index`'s options.
@@ -217,10 +220,27 @@ impl StudySet {
                     .any(|c| matches!(c, IndicatorConfig::Volume { .. }))
                 {
                     self.indicators.push(IndicatorConfig::Volume {
-                        spec: VolumeSpec::default(),
+                        spec: VolumeSpec::added(),
                         display: Default::default(),
                         style: Default::default(),
                     });
+                }
+            }
+            StudyAction::PlaceVolume(overlay) => {
+                let at = self.indicators.iter_mut().find_map(|c| match c {
+                    IndicatorConfig::Volume { spec, .. } => Some(spec),
+                    _ => None,
+                });
+                match at {
+                    Some(spec) => spec.overlay = *overlay,
+                    None => self.indicators.push(IndicatorConfig::Volume {
+                        spec: VolumeSpec {
+                            overlay: *overlay,
+                            ..VolumeSpec::added()
+                        },
+                        display: Default::default(),
+                        style: Default::default(),
+                    }),
                 }
             }
             StudyAction::AddExternal(source, study) => {

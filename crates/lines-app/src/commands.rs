@@ -80,6 +80,9 @@ pub enum Command {
     ToggleStudies,
     /// The focused chart without legends or study tags; again restores them.
     CleanChart,
+    /// The focused chart's Volume on the chart (`true`, along the plot's bottom) or in its own
+    /// lower pane; a chart without Volume gets one there.
+    VolumeOverlay(bool),
     /// Trade history on the focused chart (`trade_marks`): shown or hidden (Alt+E).
     ToggleTrades,
     /// Trade history shown (`true`) or hidden on every open chart: every window, popped-out
@@ -869,6 +872,8 @@ pub fn label(c: Command) -> String {
         Command::ToggleStudies => "Chart: hide/show studies".into(),
         Command::CleanChart => "Clean chart (no study labels or trades)".into(),
         Command::ShowKeys => "Keyboard shortcuts…".into(),
+        Command::VolumeOverlay(true) => "Volume: on the chart".into(),
+        Command::VolumeOverlay(false) => "Volume: in a pane".into(),
         Command::ToggleTrades => "Show trades on the chart".into(),
         Command::TradesOnAllCharts(false) => "Trades: hide on all charts".into(),
         Command::TradesOnAllCharts(true) => "Trades: show on all charts".into(),
@@ -1053,6 +1058,8 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleStudyLabels,
         Command::ToggleStudies,
         Command::CleanChart,
+        Command::VolumeOverlay(true),
+        Command::VolumeOverlay(false),
         Command::ToggleTrades,
         Command::TradesOnAllCharts(false),
         Command::TradesOnAllCharts(true),

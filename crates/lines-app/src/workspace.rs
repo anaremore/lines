@@ -1507,6 +1507,11 @@ impl WindowView {
             Command::Strategy(StrategyCmd::Open) => {
                 self.open_panel(PaneKind::Strategies, window, cx)
             }
+            Command::VolumeOverlay(overlay) => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| c.place_volume(overlay, cx));
+                }
+            }
             Command::TradesOnAllCharts(show) => {
                 // After this update, so this window's panes are reachable too.
                 cx.defer(move |cx| trades_on_all_charts(show, cx));
@@ -2621,6 +2626,7 @@ impl WindowView {
                         lc.label_place,
                     )),
                     studies_shown: !v.hide_studies,
+                    volume: c.volume_overlay(),
                     study_labels_shown: !v.hide_study_labels,
                     strategy_marks_shown: !c.strategy_marks_hidden(),
                     trades: c.trades_config(),

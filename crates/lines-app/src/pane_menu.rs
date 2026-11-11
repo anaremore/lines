@@ -39,6 +39,8 @@ pub struct ChartMenu {
     /// The chart has level sources: (levels shown, labels shown, where its labels go).
     pub levels: Option<(bool, bool, crate::levels_layer::LabelPlace)>,
     pub studies_shown: bool,
+    /// The chart's Volume: on the chart (`Some(true)`) or in a pane; `None`: no Volume.
+    pub volume: Option<bool>,
     pub study_labels_shown: bool,
     pub strategy_marks_shown: bool,
     pub clean: bool,
@@ -477,6 +479,14 @@ fn chart_show(c: &ChartMenu) -> MenuItem {
         sub.push(row("Level types…", Command::Studies));
     }
     sub.push(toggle("Studies", Command::ToggleStudies, c.studies_shown));
+    // With a Volume: on the chart (on) or in its pane (off).
+    if let Some(overlay) = c.volume {
+        sub.push(toggle(
+            "Volume on the chart",
+            Command::VolumeOverlay(!overlay),
+            overlay,
+        ));
+    }
     sub.push(toggle(
         "Study labels",
         Command::ToggleStudyLabels,
@@ -653,6 +663,7 @@ mod tests {
             tick_continuous: false,
             levels: Some((true, true, crate::levels_layer::LabelPlace::Axis)),
             studies_shown: true,
+            volume: None,
             study_labels_shown: false,
             strategy_marks_shown: true,
             clean: false,
@@ -1093,6 +1104,32 @@ mod tests {
         assert_eq!(places.len(), 3);
         assert!(places.iter().all(|i| !i.toggle));
         assert_eq!(places.iter().filter(|i| i.checked).count(), 1);
+    }
+
+    /// With a Volume, Show has its placement as a switch: on the chart (on) or in a pane;
+    /// its command moves it the other way. Without one, no row.
+    #[test]
+    fn volume_placement_is_a_switch_in_show() {
+        let show = |volume| {
+            let mut c = chart();
+            c.volume = volume;
+            let v = items(&PaneMenu {
+                chart: Some(c),
+                ..pane_of(PaneKind::Chart)
+            });
+            v.into_iter().find(|i| i.label == "Show").unwrap().sub
+        };
+        assert!(!show(None).iter().any(|i| i.label.starts_with("Volume")));
+        for overlay in [false, true] {
+            let sub = show(Some(overlay));
+            let row = sub
+                .iter()
+                .find(|i| i.label == "Volume on the chart")
+                .unwrap();
+            assert!(row.toggle);
+            assert_eq!(row.checked, overlay);
+            assert_eq!(row.cmd, Some(Command::VolumeOverlay(!overlay)));
+        }
     }
 
     #[test]
