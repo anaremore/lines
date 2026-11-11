@@ -1067,7 +1067,7 @@ fn table() -> Vec<Setting> {
                 "charts.trades",
                 Sec::Charts,
                 "Trade history on new charts",
-                "A new chart shows your closed trades on its contract (Alt+E on a chart).",
+                "When on, a new chart shows your closed trades on its contract (Alt+E on a chart).",
                 Scope::NewPanes,
                 Normal,
                 Toggle,
