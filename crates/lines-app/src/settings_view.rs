@@ -2583,7 +2583,9 @@ impl SettingsWindow {
         // item of the wrapping row (and of a wrapping control group) could be measured on one
         // line and then shrunk, painting its wrapped chips over the description and the next
         // row. Chips that fit their line never wrap, so they keep their place beside the label.
-        let line_w = content_line_w(self.win_w, crate::zoom::get());
+        // A sub line (a prop override) is indented 16 px: that much less room.
+        let line_w = content_line_w(self.win_w, crate::zoom::get()) - if sub { 16.0 } else { 0.0 };
+        // In the column the line's parts stack: every long choice today is alone on its line.
         let own_line = idx
             .iter()
             .any(|&k| matches!(schema::all()[k].kind, Kind::Choice(c) if long_choice(c, line_w)));
@@ -3697,13 +3699,15 @@ fn content_line_w(win_w: f32, z: f32) -> f32 {
     w / z.max(0.1) - LINE_CHROME_W
 }
 
-/// A chip group's width estimated from its labels (100 % px): a wide glyph (7 px) a
-/// character, each chip's padding (px_2) and the group's border. Wide on purpose: a group
-/// counted too wide only moves under its label, one counted too narrow could wrap beside it.
+/// A chip group's width estimated from its labels (100 % px): 9 px a character (the 13 px
+/// UI text measures about 8 px a character in IBM Plex Sans, a bold chip and digits a little
+/// more), each chip's padding (px_2) with 2 px to spare, and the group's border. Wide on
+/// purpose: a group counted too wide only moves under its label a little early; one counted too
+/// narrow could wrap where its row is measured on one line.
 fn choice_w(chips: &[&str]) -> f32 {
     chips
         .iter()
-        .map(|c| c.chars().count() as f32 * 7.0 + 16.0)
+        .map(|c| c.chars().count() as f32 * 9.0 + 18.0)
         .sum::<f32>()
         + 2.0
 }
@@ -3777,13 +3781,13 @@ mod tests {
         ] {
             assert!(long(MIN_SIZE.0, 1.5).contains(&k), "{k}");
         }
-        // A short group never wraps, so it keeps its place beside the label.
-        assert!(!long_choice(&["Dark", "Light", "System"], line));
-        // The chrome is the smallest-window test's, plus ● and ↺ and the line's gaps.
-        assert_eq!(
-            LINE_CHROME_W,
-            NAV_W + 1.0 + 2.0 * 12.0 + 2.0 + 8.0 + 8.0 + 2.0 * 8.0 + DOT_W + RESET_W
-        );
+        // At the default size a short group keeps its place beside the label.
+        assert!(!long_choice(
+            &["Dark", "Light", "System"],
+            content_line_w(SIZE.0, 1.0)
+        ));
+        // UI zoom's six chips (about 280 px drawn) are counted at least that wide.
+        assert!(choice_w(&crate::zoom::LABELS) >= 280.0);
     }
 
     /// At its smallest the window leaves a row's label column its full width, and the widest

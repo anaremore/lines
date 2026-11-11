@@ -324,6 +324,18 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         set.windows = 2;
         v.push(set);
     }
+    // Near the threshold: Appearance at 760 px and 150 %, where UI zoom's chips just fit (or just
+    // don't fit) a line of their own; either way the row holds them.
+    let mut set = s(
+        "settings-appearance-760-150",
+        false,
+        end,
+        args(
+            "--layout chart --size 1000x700 --theme dark --ui-zoom 150 --settings appearance --settings-size 760x900",
+        ),
+    );
+    set.windows = 2;
+    v.push(set);
     // The trading panel's Qty and Bracket lists: anchored under their field, as wide as their
     // content (never the window's width).
     v.push(s(
