@@ -1158,6 +1158,23 @@ mod tests {
                 println!("{} stat {:?}: {r:.2}", t.name, rgb_of(c));
             }
         }
+        // The colorblind themes' stats are their own palette's up and down (blue and orange),
+        // never the standard green and red.
+        for (cb, std) in [
+            (
+                Theme::dark(Palette::Colorblind),
+                Theme::dark(Palette::Standard),
+            ),
+            (
+                Theme::light(Palette::Colorblind),
+                Theme::light(Palette::Standard),
+            ),
+        ] {
+            for (c, s) in [(cb.up, std.up), (cb.down, std.down)] {
+                assert_eq!(cb.legend_stat_text(c), Hsla { a: 1.0, ..c }, "{}", cb.name);
+                assert_ne!(rgb_of(cb.legend_stat_text(c)), rgb_of(s), "{}", cb.name);
+            }
+        }
     }
 
     /// A stack of zone fills (a gray zone on a gray band, a dark one on a light one, alone or
