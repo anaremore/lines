@@ -954,6 +954,78 @@ mod tests {
         assert!(!c.on_alt_key("x"));
     }
 
+    /// The label says what its parts say: the name, "partial from", gaps only when asked, no
+    /// leading separator without the name, nothing at all when hidden.
+    #[test]
+    fn the_label_has_the_parts_asked_for() {
+        use lines_core::{Aggressor, Capabilities, Month, Qty};
+        use lines_feed::catalog;
+        use lines_feed::provider::MarketEvent;
+        use lines_feed::store::ChartStore;
+
+        let es = catalog::get(catalog::ES).unwrap();
+        let z26 = lines_core::ContractKey::monthly(es.id, 2026, Month::new(12).unwrap());
+        let store = ChartStore::new(es, Some(z26), Capabilities::default(), "test", 60_000, 1000);
+        let mut d = store.read();
+        let trade = |at: &str, p: i64, q: i64| MarketEvent::Trade {
+            time: UtcMillis::parse_iso(at).unwrap(),
+            price: Price(p),
+            qty: Qty(q),
+            aggressor: Some(Aggressor::Buy),
+        };
+        // Data from 13:00 UTC (partial), then a hole: a gap ends the counted run at 15:01 and
+        // the next trade starts one at 16:00.
+        d.apply(&[
+            trade("2026-11-05T13:00:00", 600_000, 5),
+            trade("2026-11-05T15:01:00", 600_050, 3),
+        ]);
+        d.apply(&[MarketEvent::Gap { missed: 4 }]);
+        d.apply(&[trade("2026-11-05T16:00:00", 600_025, 2)]);
+        let mut vp = Viewport::default();
+        vp.set_size(800.0, 600.0);
+        (vp.price_lo, vp.price_hi) = (599_000.0, 601_000.0);
+        vp.right_index = 61.0;
+        let label = |cfg: ProfileConfig| {
+            let mut layer = VolumeProfileLayer::new(cfg);
+            layer.prepare(
+                &d,
+                BarsView::fixed(d.series.bars(), d.series.period_ms()),
+                &vp,
+            );
+            layer.label.as_str().to_owned()
+        };
+        let base = ProfileConfig {
+            mode: ProfileMode::Session,
+            ..ProfileConfig::default()
+        };
+        let plain = label(base);
+        assert_eq!(plain, "ETH 2026-11-05 · partial from 13:00 UTC", "gaps off");
+        let gaps = label(ProfileConfig {
+            label_gaps: true,
+            ..base
+        });
+        assert!(
+            gaps.starts_with("ETH 2026-11-05 · partial from 13:00 UTC · gap "),
+            "{gaps}"
+        );
+        let no_name = label(ProfileConfig {
+            no_label_name: true,
+            ..base
+        });
+        assert_eq!(no_name, "partial from 13:00 UTC", "no leading separator");
+        let name_only = label(ProfileConfig {
+            no_label_partial: true,
+            ..base
+        });
+        assert_eq!(name_only, "ETH 2026-11-05");
+        let hidden = label(ProfileConfig {
+            label_hidden: true,
+            label_gaps: true,
+            ..base
+        });
+        assert_eq!(hidden, "", "no label at all");
+    }
+
     /// `prepare` on a real store: session selection, ETH vs RTH, partial coverage, composite
     /// and visible-range sources, and no rebuild when nothing changed.
     #[test]
