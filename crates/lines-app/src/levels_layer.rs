@@ -393,7 +393,7 @@ struct Slot {
     /// Each level's label text color (by level index) for (theme name, map, looks revision):
     /// resolved when one of them changes (`Slot::label_colors`), not every frame.
     label_colors: Vec<Hsla>,
-    label_colors_key: Option<(&'static str, usize, u64, i32)>,
+    label_colors_key: Option<(&'static str, usize, u64, i32, u32)>,
     /// `label_colors`' buffers: the fixed zones (span, fill as drawn), the fills moving with
     /// the VWAP, and what is under one label.
     label_zones: Vec<((f64, f64), Paint)>,
@@ -557,7 +557,14 @@ impl Slot {
         } else {
             i32::MIN
         };
-        let key = (theme.name, Arc::as_ptr(map) as usize, self.rev, step);
+        // The UI zoom too: a label's box (its reach over zones) is its size.
+        let key = (
+            theme.name,
+            Arc::as_ptr(map) as usize,
+            self.rev,
+            step,
+            crate::zoom::generation(),
+        );
         if self.label_colors_key == Some(key) {
             return;
         }

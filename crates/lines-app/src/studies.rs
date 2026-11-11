@@ -245,7 +245,7 @@ fn free_row(want: f32, h: f32, ph: f32, blocked: &[(f32, f32)], taken: &[f32]) -
     let top = |y: f32| y.clamp(0.0, (ph - h).max(0.0));
     [0.0f32, -1.0, 1.0, -2.0, 2.0]
         .iter()
-        .map(|k| top(want + k * (h + 1.0)))
+        .map(|k| top(want + k * (h + crate::zoom::f(1.0))))
         .find(|&y| clear_of(blocked, y, h) && taken.iter().all(|&t| y + h <= t || y >= t + h))
 }
 
@@ -1006,10 +1006,11 @@ impl Studies {
                 theme.label_bg,
             ));
             window.paint_quad(fill(
-                Bounds::new(point(px(x), px(y)), size(px(3.0), px(h))),
+                Bounds::new(point(px(x), px(y)), size(px(crate::zoom::f(3.0)), px(h))),
                 m.color,
             ));
-            let o = point(px(x + bars_w(1) + 4.0), px(y));
+            // As `paint_tags` sizes it: its bar, then its padding (at the UI zoom).
+            let o = point(px(x + bars_w(1) + crate::zoom::f(4.0)), px(y));
             let _ = line.paint(o, line_h, TextAlign::Left, None, window, cx);
             crate::layout_rec::line(window, line, o, line_h, "");
         }
