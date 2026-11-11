@@ -127,6 +127,7 @@ impl PaneWindow {
             this.placement = workspace::placement(window, cx);
             cx.notify();
         }));
+        subs.push(crate::settings_view::observe_os_appearance(window, cx));
         handle.set_visible(true, cx);
         handle.focus(window, cx);
         PaneWindow {

@@ -98,6 +98,13 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             end,
             args("--layout chart --size 1400x800 --theme light --palette cb"),
         ),
+        // Theme: System, resolved by the pretended OS appearance.
+        s(
+            "chart-system-light",
+            false,
+            end,
+            args("--layout chart --size 1400x800 --theme system --appearance light"),
+        ),
         s(
             "trading-dark",
             true,

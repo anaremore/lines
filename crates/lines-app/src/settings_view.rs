@@ -88,15 +88,51 @@ fn restore_look(
         w.env.look_flags.set(flags);
     }
     let t = schema::theme_for(&saved.with_flags(flags));
-    cx.defer(move |cx| {
-        crate::workspace::set_theme(t, cx);
-        if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
-            let _ = h.update(cx, |v, _, cx| {
-                v.theme = t;
-                cx.notify();
-            });
+    cx.defer(move |cx| apply_theme(t, cx));
+}
+
+/// A new look in every window: the main windows and their panes (hidden tabs too), popped-out
+/// pane windows (`workspace::set_theme`) and the Settings window. Call it outside any window's
+/// update (deferred): the window that asked can't be updated while it is being updated.
+fn apply_theme(t: Theme, cx: &mut App) {
+    crate::workspace::set_theme(t, cx);
+    if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
+        let _ = h.update(cx, |v, _, cx| {
+            v.theme = t;
+            cx.notify();
+        });
+    }
+}
+
+/// A window reported the OS appearance (dark or light). Under Theme: System, every window
+/// changes to it through the same path as a Settings change ([`apply_theme`]); otherwise it
+/// is only remembered. Screenshots never follow the OS (they stay deterministic).
+pub(crate) fn os_appearance(dark: bool, cx: &mut App) {
+    let frozen = cx.try_global::<Workspace>().is_none_or(|w| w.env.frozen);
+    let (saved, flags) = look_now(cx);
+    let look = saved.with_flags(flags);
+    match schema::os_report(frozen, schema::os_dark(), dark, look.theme_choice()) {
+        schema::OsReport::Ignore => {}
+        schema::OsReport::Remember => {
+            schema::set_os_dark(dark);
         }
-    });
+        schema::OsReport::Apply => {
+            schema::set_os_dark(dark);
+            let t = schema::theme_for(&look);
+            cx.defer(move |cx| apply_theme(t, cx));
+        }
+    }
+}
+
+/// Follow the OS appearance from this window (Theme: System): each window reports it, the
+/// first report of a change applies it everywhere.
+pub(crate) fn observe_os_appearance<V: 'static>(
+    window: &mut Window,
+    cx: &mut Context<V>,
+) -> gpui::Subscription {
+    cx.observe_window_appearance(window, |_, window, cx| {
+        os_appearance(crate::workspace::is_dark(window.appearance()), cx);
+    })
 }
 
 /// A risk change sent to the trading core, until it answers: a refusal puts the account's
@@ -437,6 +473,7 @@ fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
             if watch {
                 SettingsWindow::watch(cx);
             }
+            observe_os_appearance(window, cx).detach();
             if let Some(i) = at {
                 v.show(i);
             }
@@ -568,15 +605,7 @@ fn commit(
         // After the current update: the window that asked (the Settings window, or a main
         // window running a palette command) can't be updated while it is being updated.
         let t = schema::theme_for(&saved_look.with_flags(flags));
-        cx.defer(move |cx| {
-            crate::workspace::set_theme(t, cx);
-            if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
-                let _ = h.update(cx, |v, _, cx| {
-                    v.theme = t;
-                    cx.notify();
-                });
-            }
-        });
+        cx.defer(move |cx| apply_theme(t, cx));
     }
     if after.app.time_zone != before.app.time_zone {
         let problem = crate::display_zone::apply(&lines_core::display_tz::ZoneChoice::from_saved(
@@ -2059,6 +2088,7 @@ impl SettingsWindow {
 
     /// A setting's control. `unit`: a number shows its unit ("15 min"; on a line of two the
     /// words around it may say it instead). `focused`: the selected field of a line of two.
+    #[allow(clippy::too_many_arguments)]
     fn control(
         &self,
         i: usize,
@@ -2066,6 +2096,7 @@ impl SettingsWindow {
         unit_shown: bool,
         focused: bool,
         muted: bool,
+        prefs: &Prefs,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let t = self.theme;
@@ -2084,6 +2115,11 @@ impl SettingsWindow {
                     .border_1()
                     .border_color(t.axis_line)
                     .rounded_sm();
+                // A palette row whose palette isn't shown now (the other appearance's): its
+                // choice outlined in accent (3:1 on the row, `idle_choice_outline_is_3_to_1`),
+                // not filled; still editable. An overlay, so the chip keeps its size.
+                let a = &prefs.app.appearance;
+                let idle = schema::palette_in_use(st.key, a, schema::os_dark()) == Some(false);
                 for (j, name) in c.iter().enumerate() {
                     let on = j == *k;
                     seg = seg.child(
@@ -2093,12 +2129,24 @@ impl SettingsWindow {
                             .whitespace_nowrap()
                             .px_2()
                             .cursor_pointer()
-                            .when(on, |d| {
+                            .when(on && !idle, |d| {
                                 d.bg(t.accent)
                                     .text_color(t.bg)
                                     .font_weight(FontWeight::BOLD)
                             })
-                            .child(*name)
+                            .when(on && idle, |d| {
+                                d.relative()
+                                    .text_color(t.text_main)
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .inset_0()
+                                            .border_1()
+                                            .border_color(t.accent),
+                                    )
+                            })
+                            .child(schema::choice_label(st.key, j, name, a))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |v, _, _, cx| {
@@ -2492,6 +2540,19 @@ impl SettingsWindow {
                     .child(schema::all()[s].description),
             );
         }
+        // Theme: System says what it shows now ("Now: Dark · Standard"), selected or not.
+        if idx
+            .iter()
+            .any(|&i| schema::all()[i].key == "appearance.theme")
+            && let Some(now) = schema::system_now(&prefs.app.appearance, schema::os_dark())
+        {
+            left = left.child(
+                div()
+                    .text_size(crate::zoom::ui(11.5))
+                    .text_color(t.text_main)
+                    .child(now),
+            );
+        }
         let mut right = div()
             .flex()
             .flex_row()
@@ -2571,11 +2632,11 @@ impl SettingsWindow {
                                 .text_color(t.text_dim)
                                 .child(s.clone()),
                         )
-                        .child(self.control(i, &value, unit, false, muted, cx));
+                        .child(self.control(i, &value, unit, false, muted, prefs, cx));
                 }
                 _ => {
                     let focused = idx.len() > 1 && sel == Some(i);
-                    right = right.child(self.control(i, &value, unit, focused, muted, cx));
+                    right = right.child(self.control(i, &value, unit, focused, muted, prefs, cx));
                 }
             }
         }
@@ -2694,7 +2755,9 @@ impl SettingsWindow {
                     .flex_wrap()
                     .flex_1()
                     .min_w_0()
-                    .items_center()
+                    // Controls sit on the title line: a description that grows (the Theme
+                    // row's "Now:" line) never moves them.
+                    .items_start()
                     .gap_x_2()
                     .gap_y_1()
                     .when(sub, |d| d.pl(crate::zoom::ui(16.0)))
@@ -3591,6 +3654,19 @@ fn summary_beside(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A palette row not in use outlines its choice in accent: 3:1 against the row it sits on
+    /// (plain, or the selected row's panel) in every theme (WCAG 1.4.11).
+    #[test]
+    fn idle_choice_outline_is_3_to_1() {
+        use crate::theme::{Theme, contrast};
+        for t in Theme::all() {
+            for (what, bg) in [("bg", t.bg), ("panel", t.panel)] {
+                let r = contrast(t.accent, bg);
+                assert!(r >= 3.0, "accent on {what}: {r:.2} ({:?})", t.is_dark());
+            }
+        }
+    }
+
     use super::*;
 
     /// At its smallest the window leaves a row's label column its full width, and the widest

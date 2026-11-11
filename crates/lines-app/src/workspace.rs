@@ -844,10 +844,16 @@ impl WindowView {
                 }
             }));
         }
-        subs.push(cx.observe_window_activation(window, |this, window, cx| {
-            this.window_active = window.is_window_active();
-            cx.notify();
-        }));
+        // Screenshots stay active whichever window the OS activated last (a Settings or
+        // other window opened beside it), so the focus outline and footer never vary by run.
+        let frozen = env.frozen;
+        subs.push(
+            cx.observe_window_activation(window, move |this, window, cx| {
+                this.window_active = frozen || window.is_window_active();
+                cx.notify();
+            }),
+        );
+        subs.push(crate::settings_view::observe_os_appearance(window, cx));
         subs.push(cx.observe_window_bounds(window, |this, window, cx| {
             this.screen = screen_rect(window);
             // A move to a monitor with another DPI re-renders everything (GPUI refreshes on
@@ -4984,6 +4990,14 @@ pub fn set_show_latency_hud(show: bool, cx: &mut App) {
         ws.show_latency_hud = show;
         cx.refresh_windows();
     }
+}
+
+/// Whether an OS appearance GPUI reports is a dark one (Theme: System).
+pub fn is_dark(a: gpui::WindowAppearance) -> bool {
+    matches!(
+        a,
+        gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+    )
 }
 
 /// Change the look of every window and pane now (the Settings window's appearance), and of
