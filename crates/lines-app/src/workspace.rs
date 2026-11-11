@@ -4616,6 +4616,7 @@ pub(crate) fn chart_trades(c: &crate::chart_view::ChartView, switches: &[DomSwit
 pub(crate) type ControlRun<V> =
     fn(&mut V, Command, PaneId, Option<Point<Pixels>>, &mut Window, &mut Context<V>);
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn header_controls<V: 'static>(
     t: &Theme,
     kind: PaneKind,
