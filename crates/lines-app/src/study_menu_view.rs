@@ -47,7 +47,7 @@ pub fn render(
                         .text_size(crate::zoom::ui(11.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(t.text_dim)
-                        .child(*h),
+                        .child(h.to_string()),
                 );
                 i += 1;
             }

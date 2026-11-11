@@ -161,6 +161,9 @@ pub enum Command {
     JournalGroup(crate::wsdoc::JournalGroup),
     /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
     Studies,
+    /// The focused chart keeps its own studies (a copy of its symbol's), or takes its symbol's
+    /// again (decision 0039).
+    SeparateStudies,
     /// Trading on the focused DOM or chart (roadmap 7): its account and contract.
     Trade(TradeCmd),
     /// The app-wide P&L display: the next mode (off, ticks, currency, both).
@@ -921,6 +924,7 @@ pub fn label(c: Command) -> String {
         }
         .into(),
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
+        Command::SeparateStudies => "Chart: use separate studies on this chart (on/off)".into(),
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
         Command::Settings | Command::SettingsAt(_) => "Settings…".into(),
@@ -1105,6 +1109,7 @@ pub fn palette() -> Vec<Command> {
         Command::JournalGroup(crate::wsdoc::JournalGroup::Accounts),
         Command::JournalGroup(crate::wsdoc::JournalGroup::Tags),
         Command::Studies,
+        Command::SeparateStudies,
         Command::TimeframeMenu,
         Command::TickBarsContinuous,
         Command::SaveAs,

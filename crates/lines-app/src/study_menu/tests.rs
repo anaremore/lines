@@ -15,6 +15,7 @@ fn sources() -> Vec<SourceInfo> {
 fn input<'a>(set: &'a StudySet, src: &'a [SourceInfo], templates: &'a [String]) -> MenuInput<'a> {
     MenuInput {
         set,
+        scope: StudyScope::Symbol("ES".into()),
         sources: src,
         templates,
         has_rth: true,
@@ -294,10 +295,11 @@ fn menu_lists_studies_catalog_and_templates() {
     assert_eq!(
         labels(&items),
         [
-            "# On this chart",
+            "# ES charts",
             "VWAP ETH",
             "Volume profile · session · ETH",
             "Levels · Demo levels",
+            "+ Use separate studies on this chart",
             "# Add",
             "+ VWAP · ETH",
             "+ VWAP · RTH",
@@ -315,7 +317,7 @@ fn menu_lists_studies_catalog_and_templates() {
             "+ Apply template \"scalp\"",
             "+ Save these studies as a template…",
             "+ Save as default for new charts",
-            "(Changes apply to this chart.)",
+            "(Changes apply to every ES chart.)",
         ]
     );
     // Typing filters the catalog, like the picker; the cursor follows the first match.
@@ -382,7 +384,7 @@ fn editor_controls_are_commands_and_keys_navigate() {
             "  Label: Show in legend *",
             "  Style: Style…",
             "Levels · Demo levels",
-            "# Add",
+            "+ Use separate studies on this chart",
         ]
     );
     // Down three times: Reset RTH → Week → ... ; Enter applies.

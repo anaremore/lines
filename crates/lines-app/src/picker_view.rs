@@ -84,7 +84,7 @@ impl AppSettings {
         }
     }
 
-    fn save(&self) {
+    pub(crate) fn save(&self) {
         if let (Some(p), Some(w)) = (&self.path, &self.writer) {
             w.write(p.clone(), self.settings.encode());
         }

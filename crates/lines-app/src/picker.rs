@@ -158,6 +158,11 @@ pub struct Settings {
     /// Named study templates, in save order. Optional.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub study_templates: Vec<crate::study_menu::StudyTemplate>,
+    /// Each product's studies, shared by every chart showing it (decision 0039,
+    /// `crate::symbol_studies`), keyed by the catalog product id. Optional: absent for a
+    /// product no chart has shown yet.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub symbol_studies: std::collections::BTreeMap<u32, crate::study_menu::StudySet>,
     /// The trader's guardrails per trading account, keyed by the account's name (or id)
     /// (roadmap 8b). Optional; no editor yet (the Settings window, decision 0021, will edit
     /// it). Read at start: tighter limits apply at once, looser ones from the next trade date.

@@ -417,6 +417,8 @@ pub enum MenuCmd {
     SaveTemplate(String),
     /// Save the chart's studies as the default for new charts.
     SaveDefault,
+    /// This chart's own studies (a copy of its symbol's) on or off (decision 0039).
+    ToggleSeparate,
     Close,
 }
 
@@ -438,6 +440,8 @@ pub struct SourceInfo {
 /// What the menu is built from.
 pub struct MenuInput<'a> {
     pub set: &'a StudySet,
+    /// Whose studies these are: the symbol's (every chart of it) or this chart's own.
+    pub scope: StudyScope,
     pub sources: &'a [SourceInfo],
     pub templates: &'a [String],
     /// The chart's product has RTH (else RTH choices are not offered).
@@ -445,6 +449,25 @@ pub struct MenuInput<'a> {
     /// When the product's ETH and RTH sessions open, from its sessions calendar
     /// ([`session_opens`]): "5:00 pm CT". `None`: no calendar, the choice names no time.
     pub opens: SessionOpens,
+}
+
+/// Whose studies a chart's menu edits (decision 0039).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StudyScope {
+    /// The product's set, shared by every chart of it: its symbol ("ES").
+    Symbol(String),
+    /// This chart's own (separate studies); its symbol, whose set it can take again.
+    Chart(String),
+}
+
+impl StudyScope {
+    /// The menu's header: "ES charts", or "This chart (separate)".
+    pub fn header(&self) -> String {
+        match self {
+            StudyScope::Symbol(s) => format!("{s} charts"),
+            StudyScope::Chart(_) => "This chart (separate)".into(),
+        }
+    }
 }
 
 /// The regular ETH and RTH opens a VWAP's session choice names.
@@ -523,7 +546,7 @@ pub enum Swatch {
 /// One line of the menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
-    Header(&'static str),
+    Header(std::borrow::Cow<'static, str>),
     /// Non-focusable text (scope, naming prompt).
     Note(String),
     /// A study on the chart: the eye and gear act on it.
@@ -1106,7 +1129,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
 impl StudyMenu {
     /// The menu's lines, top to bottom.
     pub fn items(&self, input: &MenuInput) -> Vec<Item> {
-        let mut v = vec![Item::Header("On this chart")];
+        let mut v = vec![Item::Header(input.scope.header().into())];
         let mut studies: Vec<(StudyRef, String, Swatch, bool)> = Vec::new();
         for (i, c) in input.set.indicators.iter().enumerate() {
             match c {
@@ -1199,7 +1222,16 @@ impl StudyMenu {
                 controls(input, &r, &mut v);
             }
         }
-        v.push(Item::Header("Add"));
+        // Whose studies these are, under them: this chart's own instead, or the symbol's again.
+        v.push(Item::Action {
+            label: match &input.scope {
+                StudyScope::Symbol(_) => "Use separate studies on this chart".into(),
+                StudyScope::Chart(s) => format!("Use {s}'s studies on this chart"),
+            },
+            cmd: MenuCmd::ToggleSeparate,
+            delete: None,
+        });
+        v.push(Item::Header("Add".into()));
         let mut any = false;
         for (label, cmd) in catalog(input) {
             if matches(&self.query, &label) {
@@ -1214,7 +1246,7 @@ impl StudyMenu {
         if !any {
             v.push(Item::Note(format!("No study matches \"{}\"", self.query)));
         }
-        v.push(Item::Header("Templates"));
+        v.push(Item::Header("Templates".into()));
         for t in input.templates {
             v.push(Item::Action {
                 label: format!("Apply template \"{t}\""),
@@ -1237,7 +1269,10 @@ impl StudyMenu {
             cmd: MenuCmd::SaveDefault,
             delete: None,
         });
-        v.push(Item::Note("Changes apply to this chart.".into()));
+        v.push(Item::Note(match &input.scope {
+            StudyScope::Symbol(s) => format!("Changes apply to every {s} chart."),
+            StudyScope::Chart(_) => "Changes apply to this chart only.".into(),
+        }));
         v
     }
 
@@ -1275,7 +1310,9 @@ impl StudyMenu {
 
     /// The first catalog entry (typing moves the cursor there, as in the picker).
     fn first_add(items: &[Item]) -> Option<usize> {
-        let add = items.iter().position(|i| *i == Item::Header("Add"))?;
+        let add = items
+            .iter()
+            .position(|i| *i == Item::Header("Add".into()))?;
         items[add..]
             .iter()
             .position(|i| matches!(i, Item::Action { .. }))
