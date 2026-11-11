@@ -316,6 +316,9 @@ pub struct Fixture {
     pub profile: ProfileConfig,
     /// Study labels / studies hidden from the start (screenshots of a clean chart).
     pub visibility: StudyVisibility,
+    /// The chart starts with separate studies (decision 0039; screenshots:
+    /// `--separate-studies`).
+    pub separate_studies: bool,
     /// Where study labels go, and the label column's width (CLI `--label-place`,
     /// `--label-column`). A pane's saved choice takes precedence.
     pub labels: Option<(LabelPlace, Option<u16>)>,
@@ -445,6 +448,25 @@ pub struct ChartView {
     pending_levels: crate::study_style::PendingLevels,
     /// `study_style::level_styles_generation()` this chart last read the app-wide styles at.
     level_styles_gen: u64,
+    /// This chart keeps its own studies (decision 0039 override), not its product's.
+    separate_studies: bool,
+    /// The studies as last synced with the product's set (render): a change from them was made
+    /// on this chart and is published; `None`: not synced yet (the next render does).
+    synced_studies: Option<Box<StudySet>>,
+    /// `symbol_studies::generation(product)` at the last sync.
+    studies_gen: u64,
+    /// Its separate studies for the other products it has shown (decision 0039 §5: kept until
+    /// turned off, so a switch away and back restores them); the current product's are what
+    /// it shows. Saved on the pane.
+    other_separate: std::collections::BTreeMap<u32, StudySet>,
+    /// Started with studies from the command line (`--vwap`, `--profile`, `--label-place`,
+    /// `--study-set`): a product that already has a set doesn't take them, so the chart keeps
+    /// them as separate studies instead (never overwriting the product's).
+    cli_studies: bool,
+    /// The app's settings are saved (`AppSettings::writable`): a shared chart's studies live
+    /// there. Not saved (a settings file that couldn't be backed up): the chart saves its own
+    /// too, so nothing is lost on a restart.
+    settings_saved: bool,
     /// This frame's price axis width (it grows to the widest level tag while study labels are
     /// tags in the axis) and label column width (0 unless they are in a column), px.
     axis_now: f32,
@@ -804,6 +826,11 @@ impl ChartView {
         pane::watch_store(cx);
         let mut studies = crate::studies::Studies::new(fixture.indicators.clone());
         studies.attach(feed_info(&store));
+        let separate_fixture = fixture.separate_studies;
+        let cli_studies = !fixture.indicators.is_empty()
+            || !fixture.profile.is_default()
+            || fixture.labels.is_some()
+            || fixture.studies.is_some();
         let mut levels = LevelsLayer::new(LevelsConfig::default());
         if let Some((place, column)) = fixture.labels {
             levels.config.label_place = place;
@@ -836,6 +863,14 @@ impl ChartView {
             styles_extra: serde_json::Map::new(),
             pending_levels: Default::default(),
             level_styles_gen: 0,
+            separate_studies: separate_fixture,
+            synced_studies: None,
+            studies_gen: 0,
+            other_separate: Default::default(),
+            cli_studies,
+            settings_saved: cx
+                .try_global::<crate::picker_view::AppSettings>()
+                .is_some_and(|s| s.writable()),
             axis_now: axis_w(),
             label_col: 0.0,
             column_drag: None,
@@ -1038,6 +1073,142 @@ impl ChartView {
 
     // ---- studies menu (crate::study_menu) ---------------------------------------------------
 
+    // ---- studies per symbol (decision 0039, crate::symbol_studies) ---------------------------
+
+    /// Whether this chart keeps its own studies rather than its product's.
+    pub fn separate_studies(&self) -> bool {
+        self.separate_studies
+    }
+
+    /// Take the product's set (restored, switched, or separate studies turned off). A product
+    /// without one: `switched`, the defaults for new charts (else nothing); otherwise the chart
+    /// keeps what it shows, and the next render gives the product that set.
+    pub fn join_symbol_studies(&mut self, switched: bool, cx: &mut Context<Self>) {
+        if self.separate_studies {
+            return;
+        }
+        let product = self.instrument.id.0;
+        // Studies from the command line (honored once, at the first join).
+        let cli = std::mem::take(&mut self.cli_studies);
+        let product_set = crate::symbol_studies::get(cx, product);
+        // On a product that has a set: the chart keeps them as its own, on top of the
+        // product's set (its other studies stay), never overwriting the product's.
+        if cli && let Some(mut own) = product_set.clone() {
+            let given = self.study_set();
+            own.indicators = merge_indicators(own.indicators, given.indicators);
+            if !given.profile.is_default() {
+                own.profile = given.profile;
+            }
+            if !given.levels.is_default() {
+                own.levels.label_place = given.levels.label_place;
+                own.levels.label_column = given.levels.label_column;
+            }
+            if !given.footprint.is_default() {
+                own.footprint = given.footprint;
+            }
+            if !given.styles.is_empty() {
+                own.styles = given.styles;
+            }
+            self.set_study_set(own);
+            self.separate_studies = true;
+            cx.notify();
+            return;
+        }
+        // A product without a set: a switch to it, or a restored chart that keeps none of its
+        // own (decision 0039 §4), starts from the defaults for new charts; command-line
+        // studies stay (and give the product its set).
+        // A restored chart that holds studies of its own (saved while settings weren't, or
+        // written by hand) keeps them and gives the product its set.
+        let own = !switched && self.study_set().has_studies();
+        let set = product_set.or_else(|| {
+            (switched || !(cli || own)).then(|| {
+                crate::picker_view::settings(cx)
+                    .chart_defaults
+                    .clone()
+                    .filter(StudySet::has_studies)
+                    .unwrap_or_default()
+            })
+        });
+        if let Some(set) = set {
+            let set = StudySet {
+                trades_off: false,
+                ..set
+            };
+            if set != self.study_set() {
+                self.set_study_set(set);
+            }
+        }
+        // The next render syncs (and, with no set yet, gives the product this chart's).
+        self.synced_studies = None;
+        self.studies_gen = 0;
+        cx.notify();
+    }
+
+    /// Render: a change made on this chart goes to its product's set; a change published from
+    /// another chart of the product is taken. Separate studies do neither.
+    fn sync_symbol_studies(&mut self, cx: &mut Context<Self>) {
+        // While the label column's edge is dragged: once, on release (not every move).
+        if self.separate_studies || self.column_drag.is_some() {
+            return;
+        }
+        let product = self.instrument.id.0;
+        let now = crate::symbol_studies::generation(product);
+        let mine = self.study_set();
+        match &self.synced_studies {
+            // Changed here since the last sync: every chart of the product follows.
+            Some(last) if **last != mine => {
+                crate::symbol_studies::publish(cx, product, mine.clone());
+                self.synced_studies = Some(Box::new(mine));
+            }
+            Some(_) if now == self.studies_gen => {}
+            // Not synced yet, or a set was published since: take the product's (or, with none
+            // yet, give it this chart's).
+            _ => match crate::symbol_studies::get(cx, product) {
+                Some(set) => {
+                    if set != mine {
+                        self.set_study_set(set);
+                    }
+                    // As this chart holds it (a set's form after applying), so it isn't taken
+                    // for a change made here.
+                    self.synced_studies = Some(Box::new(self.study_set()));
+                }
+                // (An option chain's view-only chart never gives its product a first set.)
+                None => {
+                    if !self.view_only {
+                        crate::symbol_studies::publish(cx, product, mine.clone());
+                    }
+                    self.synced_studies = Some(Box::new(mine));
+                }
+            },
+        }
+        self.studies_gen = crate::symbol_studies::generation(product);
+    }
+
+    /// "Use separate studies on this chart" (decision 0039 §5): on, the chart keeps a copy of
+    /// its product's set as its own; off, it takes its product's set again.
+    pub fn set_separate_studies(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.separate_studies {
+            return;
+        }
+        self.separate_studies = on;
+        self.synced_studies = None;
+        if !on {
+            self.join_symbol_studies(false, cx);
+        }
+        self.seen_levels = u64::MAX;
+        cx.notify();
+    }
+
+    /// The Studies menu's scope: whose studies an edit changes.
+    pub fn studies_scope(&self) -> crate::study_menu::StudyScope {
+        let symbol = self.instrument.symbol.to_string();
+        if self.separate_studies {
+            crate::study_menu::StudyScope::Chart(symbol)
+        } else {
+            crate::study_menu::StudyScope::Symbol(symbol)
+        }
+    }
+
     /// Every study on this chart, as one value (templates, defaults).
     pub fn study_set(&self) -> StudySet {
         StudySet {
@@ -1155,6 +1326,7 @@ impl ChartView {
         let has_rth = cal.is_none_or(|c| c.has_rth());
         menu.items(&MenuInput {
             set: &set,
+            scope: self.studies_scope(),
             sources: &sources,
             templates: &templates,
             has_rth,
@@ -1465,6 +1637,10 @@ impl ChartView {
                 let mut s = self.study_set();
                 s.apply(&a);
                 self.set_study_set(s);
+            }
+            Some(MenuCmd::ToggleSeparate) => {
+                let on = !self.separate_studies;
+                self.set_separate_studies(on, cx);
             }
             Some(MenuCmd::BeginAnchor(i)) => {
                 // Finished with the menu: no draft to come back to.
@@ -2604,6 +2780,9 @@ impl ChartView {
 
     /// Restore saved view state (time zoom, indicators).
     pub fn restore(&mut self, state: &ChartState) {
+        // (`--separate-studies` on the first chart holds too.)
+        self.separate_studies |= state.separate_studies || state.legacy_studies;
+        self.other_separate = state.other_separate.clone();
         self.drawings.hidden = state.hide_drawings;
         self.drawing_tools = state.drawing_tools;
         self.marks.set_hidden(state.hide_strategy_marks);
@@ -8835,7 +9014,17 @@ impl Pane for ChartView {
             styles: self.study_styles(),
             subpane: crate::subpane::saved(&self.subpane_ratios).0,
             subpanes: crate::subpane::saved(&self.subpane_ratios).1,
+            separate_studies: self.separate_studies,
+            legacy_studies: false,
+            other_separate: self.other_separate.clone(),
         });
+        // A chart sharing its product's set saves none of it (the app's settings hold it).
+        if !self.separate_studies
+            && self.settings_saved
+            && let Some(state) = doc.chart.as_mut()
+        {
+            crate::symbol_studies::clear(state);
+        }
         doc.trade = self.trade.doc();
     }
 
@@ -8846,7 +9035,26 @@ impl Pane for ChartView {
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
         self.picker.close();
         let follow = feed.sub.is_some();
+        let was = self.instrument.id;
         self.apply_feed(feed);
+        // Another symbol: its studies (decision 0039 §3). This chart's separate studies for the
+        // old one are kept (§5: until turned off) and come back with it.
+        if self.instrument.id != was {
+            if self.separate_studies {
+                self.other_separate.insert(was.0, self.study_set());
+            }
+            match self.other_separate.remove(&self.instrument.id.0) {
+                Some(own) => {
+                    self.separate_studies = true;
+                    self.set_study_set(own);
+                    self.synced_studies = None;
+                }
+                None => {
+                    self.separate_studies = false;
+                    self.join_symbol_studies(true, cx);
+                }
+            }
+        }
         self.drawings
             .set_data(crate::drawings_store::for_product(&self.instrument, cx));
         self.note_lines.clear();
@@ -8893,6 +9101,12 @@ impl Pane for ChartView {
     /// New indicator values (they arrive from the indicator thread after the store's), or new
     /// performance stats while shown (once a second). Hidden studies never ask for a repaint.
     fn changed(&mut self) -> bool {
+        // Another chart of this product changed its studies: render (which syncs).
+        let studies = !self.separate_studies
+            && crate::symbol_studies::generation(self.instrument.id.0) != self.studies_gen;
+        if studies {
+            return true;
+        }
         // A group's list follows its orders, on this tick, from the cache itself (a busy cache
         // waits for the next one; a frame's marks can be briefly empty), and closes if the
         // chart's account changed.
@@ -9559,6 +9773,7 @@ fn hud_compact(w: f32) -> bool {
 
 impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_symbol_studies(cx);
         self.sync_level_styles(cx);
         // Trade labels follow the P&L display (the poll that builds them has no app).
         let mode = cx
@@ -10290,5 +10505,199 @@ mod tests {
             quote_text("ask", Some(Price(600_025)), &f),
             ("ask 6000.25".to_owned(), false)
         );
+    }
+}
+
+/// Studies per symbol (decision 0039) on real charts: GPUI's test platform (`screenshot` builds
+/// it): `cargo test -p lines-app --features screenshot --lib chart_view::symbol_studies_tests`.
+#[cfg(all(test, feature = "screenshot"))]
+mod symbol_studies_tests {
+    use gpui::{AppContext, Entity, TestAppContext};
+    use lines_feed::catalog;
+    use lines_feed::cqg::mock::MockConfig;
+    use lines_feed::{FeedConfig, Source};
+    use lines_indicators::IndicatorConfig;
+
+    use super::*;
+    use crate::wsdoc::TargetDoc;
+
+    fn feed(product: lines_core::ProductId) -> PaneFeed {
+        let config = FeedConfig::new(Source::CqgMock(MockConfig::default()));
+        let avail = lines_feed::availability::availability(&config.source).unwrap();
+        let target = TargetDoc {
+            product: product.0,
+            symbol: None,
+            contract: None,
+        };
+        PaneFeed::unavailable_because(&config, &avail, Some(&target), "test".into())
+    }
+
+    fn chart(product: lines_core::ProductId, cx: &mut TestAppContext) -> Entity<ChartView> {
+        cx.new(|cx| {
+            let mut c = ChartView::new(
+                feed(product),
+                Theme::dark(Default::default()),
+                true,
+                Fixture::default(),
+                cx,
+            );
+            c.join_symbol_studies(false, cx);
+            c
+        })
+    }
+
+    fn vwap(reset: &str) -> IndicatorConfig {
+        serde_json::from_str(&format!(
+            r#"{{"kind": "vwap", "reset": "{reset}", "bands": 0}}"#
+        ))
+        .unwrap()
+    }
+
+    /// A render's sync (and whether the 8 ms poll asked for one first).
+    fn sync(c: &Entity<ChartView>, cx: &mut TestAppContext) -> bool {
+        c.update(cx, |c, cx| {
+            let asked = !c.separate_studies
+                && crate::symbol_studies::generation(c.instrument.id.0) != c.studies_gen;
+            c.sync_symbol_studies(cx);
+            asked
+        })
+    }
+
+    fn indicators(c: &Entity<ChartView>, cx: &mut TestAppContext) -> Vec<IndicatorConfig> {
+        c.read_with(cx, |c, _| c.study_set().indicators)
+    }
+
+    fn edit(c: &Entity<ChartView>, add: IndicatorConfig, cx: &mut TestAppContext) {
+        c.update(cx, |c, _| {
+            let mut s = c.study_set();
+            s.indicators.push(add);
+            c.set_study_set(s);
+        });
+    }
+
+    /// Studies from the command line on a product that has a set: that chart keeps them as
+    /// its own, on top of the product's, and can take the product's set again.
+    #[gpui::test]
+    fn command_line_studies_never_overwrite_a_symbols_set(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::picker_view::AppSettings::ephemeral());
+            crate::symbol_studies::publish(
+                cx,
+                catalog::MES.0,
+                StudySet {
+                    indicators: vec![vwap("rth")],
+                    ..Default::default()
+                },
+            );
+        });
+        let c = cx.new(|cx| {
+            let fixture = Fixture {
+                indicators: vec![vwap("eth")],
+                ..Default::default()
+            };
+            let mut c = ChartView::new(
+                feed(catalog::MES),
+                Theme::dark(Default::default()),
+                true,
+                fixture,
+                cx,
+            );
+            c.join_symbol_studies(false, cx);
+            c
+        });
+        sync(&c, cx);
+        assert!(c.read_with(cx, |c, _| c.separate_studies));
+        assert_eq!(indicators(&c, cx), vec![vwap("rth"), vwap("eth")]);
+        let set = cx
+            .update(|cx| crate::symbol_studies::get(cx, catalog::MES.0))
+            .unwrap();
+        assert_eq!(set.indicators, vec![vwap("rth")], "MES's untouched");
+        // Off: MES's set.
+        c.update(cx, |c, cx| c.set_separate_studies(false, cx));
+        sync(&c, cx);
+        assert!(!c.read_with(cx, |c, _| c.separate_studies));
+        assert_eq!(indicators(&c, cx), vec![vwap("rth")]);
+    }
+
+    #[gpui::test]
+    fn charts_of_a_symbol_share_swap_and_separate(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::picker_view::AppSettings::ephemeral()));
+        let a = chart(catalog::ES, cx);
+        let b = chart(catalog::ES, cx);
+        sync(&a, cx);
+        sync(&b, cx);
+
+        // An edit on one ES chart: the other asks to render and shows it.
+        edit(&a, vwap("eth"), cx);
+        sync(&a, cx);
+        assert!(sync(&b, cx), "the other chart's poll asks for a render");
+        assert_eq!(indicators(&b, cx), vec![vwap("eth")]);
+        assert!(!sync(&b, cx), "and then is quiet");
+
+        // B switches to NQ: NQ's set (none yet, no defaults: empty); ES's is kept.
+        b.update(cx, |c, cx| c.set_feed(feed(catalog::NQ), cx));
+        sync(&b, cx);
+        assert_eq!(indicators(&b, cx), vec![]);
+        edit(&b, vwap("rth"), cx);
+        sync(&b, cx);
+        assert_eq!(
+            indicators(&a, cx),
+            vec![vwap("eth")],
+            "ES untouched by NQ's"
+        );
+        // Back to ES: ES's exactly; and to NQ again: NQ's exactly.
+        b.update(cx, |c, cx| c.set_feed(feed(catalog::ES), cx));
+        sync(&b, cx);
+        assert_eq!(indicators(&b, cx), vec![vwap("eth")]);
+        b.update(cx, |c, cx| c.set_feed(feed(catalog::NQ), cx));
+        sync(&b, cx);
+        assert_eq!(indicators(&b, cx), vec![vwap("rth")]);
+        b.update(cx, |c, cx| c.set_feed(feed(catalog::ES), cx));
+        sync(&b, cx);
+
+        // Separate studies on A: its edits stay on A; B keeps ES's.
+        a.update(cx, |c, cx| c.set_separate_studies(true, cx));
+        edit(&a, vwap("weekly"), cx);
+        sync(&a, cx);
+        sync(&b, cx);
+        assert_eq!(indicators(&a, cx), vec![vwap("eth"), vwap("weekly")]);
+        assert_eq!(indicators(&b, cx), vec![vwap("eth")]);
+        // Saved: A with its own (separate).
+        let saved = |c: &Entity<ChartView>, cx: &mut TestAppContext| {
+            c.read_with(cx, |c, _| {
+                let mut d = PaneDoc::new(crate::layout::PaneKind::Chart, None, None);
+                c.save_state(&mut d);
+                d.chart.unwrap()
+            })
+        };
+        let (sa, sb) = (saved(&a, cx), saved(&b, cx));
+        assert!(sa.separate_studies && sa.indicators.len() == 2);
+        // B shares ES's. These settings are never saved (a test's, like a settings file that
+        // couldn't be backed up), so B keeps its studies on the pane too: nothing lost on a
+        // restart. (With saved settings the pane holds none: `settings_saved`.)
+        assert!(!sb.separate_studies);
+        assert_eq!(sb.indicators, vec![vwap("eth")]);
+        // Separate studies are kept per symbol: A to NQ shows NQ's, back to ES its own again.
+        a.update(cx, |c, cx| c.set_feed(feed(catalog::NQ), cx));
+        sync(&a, cx);
+        assert!(!a.read_with(cx, |c, _| c.separate_studies));
+        assert_eq!(indicators(&a, cx), vec![vwap("rth")], "NQ's set");
+        a.update(cx, |c, cx| c.set_feed(feed(catalog::ES), cx));
+        sync(&a, cx);
+        assert!(a.read_with(cx, |c, _| c.separate_studies));
+        assert_eq!(
+            indicators(&a, cx),
+            vec![vwap("eth"), vwap("weekly")],
+            "its own, kept"
+        );
+        // Off: ES's again.
+        a.update(cx, |c, cx| c.set_separate_studies(false, cx));
+        sync(&a, cx);
+        assert_eq!(indicators(&a, cx), vec![vwap("eth")]);
+        // The settings hold ES's set (what every ES chart shows).
+        let es = cx
+            .update(|cx| crate::symbol_studies::get(cx, catalog::ES.0))
+            .unwrap();
+        assert_eq!(es.indicators, vec![vwap("eth")]);
     }
 }

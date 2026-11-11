@@ -4,6 +4,7 @@
 //!   the executable as its window-class icon, so this also sets the runtime window and taskbar
 //!   icon (no extra API needed).
 //! - `VERSIONINFO`: product name "Lines", version from Cargo.
+//! - The main thread's stack: 8 MiB reserved (MSVC), as on Linux and macOS.
 //!
 //! Compiled with the MSVC resource compiler (`rc.exe`) through `embed-resource`, pinned to the
 //! version GPUI already uses. On non-Windows targets only the build revision is set.
@@ -20,6 +21,12 @@ fn main() {
     // Target, not host: the check works when cross-compiling too.
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
+    }
+    // The main thread's stack: 8 MiB reserved, as Linux and macOS give it (Windows' default is
+    // 1 MiB). A debug build's GPUI frames on the main thread run close to 1 MiB, so a little
+    // growth anywhere overflowed it; release builds never came close. Reserve only, MSVC.
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-link-arg-bins=/STACK:8388608");
     }
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("cargo sets this"));
     let icon = manifest_dir.join("../../assets/icon/lines.ico");

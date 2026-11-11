@@ -89,6 +89,7 @@ mod style_doc;
 mod style_editor;
 mod style_editor_view;
 mod subpane;
+mod symbol_studies;
 mod tabstate;
 mod tabstrip;
 mod tape_view;
@@ -537,6 +538,10 @@ struct Cli {
     /// Volume profile grouping in ticks per row (Alt+G); default: automatic.
     #[arg(long, value_parser = clap::value_parser!(u32).range(1..=10_000))]
     profile_grouping: Option<u32>,
+    /// Screenshot: the first chart starts with separate studies ("Use separate studies on
+    /// this chart", decision 0039), not its symbol's.
+    #[arg(long, requires = "screenshot")]
+    separate_studies: bool,
     /// The volume profile's label says where the counted trades have gaps (off by default;
     /// the studies menu's Label group in the app).
     #[arg(long)]
@@ -2095,6 +2100,7 @@ where
                 ..ProfileConfig::default()
             },
             labels: cli.label_place.map(|p| (p.into(), cli.label_column)),
+            separate_studies: cli.separate_studies,
             visibility: wsdoc::StudyVisibility {
                 hide_study_labels: cli.hide_study_labels,
                 hide_studies: cli.hide_studies,
@@ -2242,7 +2248,7 @@ where
     // The app: restore the autosaved workspace (or open the one asked for).
     let dir = persist::config_dir();
     let writer = persist::Writer::spawn();
-    let (settings, settings_report) = AppSettings::load(
+    let (mut settings, settings_report) = AppSettings::load(
         dir.as_ref().map(|d| d.join("settings.json")),
         Some(writer.clone()),
     );
@@ -2286,6 +2292,12 @@ where
     if let Err(e) = doc.normalise() {
         reports.push(format!("saved workspace: {e}; loaded the default"));
         doc = WorkspaceDoc::first_run(first_run);
+    }
+    // Charts saved before studies were per symbol (decision 0039): each product's set from its
+    // first chart, a differing later one kept as that chart's separate studies.
+    if symbol_studies::adopt_legacy(&mut doc, &mut settings.settings.symbol_studies) {
+        settings.save();
+        symbol_studies::bump();
     }
     if instrument.is_some() {
         doc.retarget_all(instrument);

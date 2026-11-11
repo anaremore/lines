@@ -109,6 +109,17 @@ fn v7_to_v8(v: serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
+/// Version 9 made studies per symbol (decision 0039): a chart pane's studies are its
+/// product's, kept in the app's settings, unless the chart has separate studies. Every chart
+/// pane of an older file is marked as carrying its own (`legacy_studies`); after loading,
+/// `symbol_studies::adopt_legacy` gives each product the first chart's set and keeps a
+/// differing later one as that chart's separate studies (an older build reports a version 9
+/// file as newer).
+fn v8_to_v9(mut v: serde_json::Value) -> Result<serde_json::Value, String> {
+    crate::symbol_studies::mark_legacy(&mut v);
+    Ok(v)
+}
+
 const MIGRATIONS: &[Migration] = &[
     v0_never_written,
     v1_to_v2,
@@ -118,11 +129,12 @@ const MIGRATIONS: &[Migration] = &[
     v5_to_v6,
     v6_to_v7,
     v7_to_v8,
+    v8_to_v9,
 ];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 8,
+    current: 9,
     migrations: MIGRATIONS,
 };
 
@@ -444,6 +456,21 @@ pub struct ChartState {
         skip_serializing_if = "crate::trade_marks::TradesConfig::is_default"
     )]
     pub trades: crate::trade_marks::TradesConfig,
+    /// This chart keeps its own studies (decision 0039: "Use separate studies on this chart"):
+    /// the study fields above are its own. Otherwise they are empty here and the chart shows
+    /// its product's set from the app's settings. Optional: written only when on.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub separate_studies: bool,
+    /// Set only by the format 9 migration on a chart pane saved before studies were per
+    /// symbol (its study fields are its own, not yet sorted out: `adopt_legacy`). Never
+    /// written.
+    #[serde(default, skip_serializing)]
+    pub legacy_studies: bool,
+    /// This chart's separate studies for the other products it has shown, by catalog product
+    /// id (decision 0039 §5: kept until turned off, back with a switch to that product).
+    /// Optional.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub other_separate: std::collections::BTreeMap<u32, crate::study_menu::StudySet>,
 }
 
 /// A chart timeframe in the workspace file, as its label (`"5m"`).
@@ -1117,6 +1144,9 @@ mod tests {
             styles: Default::default(),
             subpane: None,
             subpanes: Vec::new(),
+            separate_studies: false,
+            legacy_studies: false,
+            other_separate: Default::default(),
         };
         let json = serde_json::to_string(&state).unwrap();
         assert!(json.contains(r#""indicators""#), "{json}");
@@ -1140,6 +1170,9 @@ mod tests {
             subpane: None,
             subpanes: Vec::new(),
             trades: Default::default(),
+            separate_studies: false,
+            legacy_studies: false,
+            other_separate: Default::default(),
         })
         .unwrap();
         assert!(!none.contains("indicators"), "{none}");
@@ -1284,6 +1317,9 @@ mod tests {
                             subpane: None,
                             subpanes: Vec::new(),
                             trades: Default::default(),
+                            separate_studies: false,
+                            legacy_studies: false,
+                            other_separate: Default::default(),
                         }),
                         ..PaneDoc::new(PaneKind::Chart, None, None)
                     }),
@@ -1338,7 +1374,7 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 8"#), "{text}");
+        assert!(text.contains(r#""version": 9"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
@@ -1383,6 +1419,9 @@ mod tests {
             styles: Default::default(),
             subpane: None,
             subpanes: Vec::new(),
+            separate_studies: false,
+            legacy_studies: false,
+            other_separate: Default::default(),
         };
         let json = serde_json::to_string(&hidden).unwrap();
         assert!(
@@ -1538,6 +1577,9 @@ mod tests {
                 subpane: None,
                 subpanes: Vec::new(),
                 trades: Default::default(),
+                separate_studies: false,
+                legacy_studies: false,
+                other_separate: Default::default(),
             }),
             ..PaneDoc::new(PaneKind::Chart, None, None)
         };
@@ -1581,6 +1623,9 @@ mod tests {
             subpane: None,
             subpanes: Vec::new(),
             trades: Default::default(),
+            separate_studies: false,
+            legacy_studies: false,
+            other_separate: Default::default(),
         };
         let json = serde_json::to_string(&both).unwrap();
         assert_eq!(serde_json::from_str::<ChartState>(&json).unwrap(), both);
@@ -1661,6 +1706,9 @@ mod tests {
                 subpane: None,
                 subpanes: Vec::new(),
                 trades: Default::default(),
+                separate_studies: false,
+                legacy_studies: true,
+                other_separate: Default::default(),
             })
         );
         assert_eq!(
@@ -1890,7 +1938,7 @@ mod tests {
         }"#;
         let Decoded::Ok {
             value,
-            migrated_from: None,
+            migrated_from: Some(8),
         } = decode::<WorkspaceDoc>(&FORMAT, v8)
         else {
             panic!("v8 no longer reads")
@@ -2012,7 +2060,7 @@ mod tests {
             Target::Contract(ContractKey::spot(catalog::BTC_USD))
         );
         let text = String::from_utf8(encode(&FORMAT, &value).unwrap()).unwrap();
-        assert!(text.contains(r#""version": 8"#), "{text}");
+        assert!(text.contains(r#""version": 9"#), "{text}");
         assert!(
             text.contains(r#""monthly""#),
             "the futures shape is unchanged"
@@ -2052,8 +2100,8 @@ mod tests {
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 9, "windows": 7}"#),
-            Decoded::Newer { found: 9 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 10, "windows": 7}"#),
+            Decoded::Newer { found: 10 }
         );
     }
 

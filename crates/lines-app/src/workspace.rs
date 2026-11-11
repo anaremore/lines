@@ -668,6 +668,8 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
                     // A new chart: the studies saved as the default for new charts.
                     None => v.apply_new_chart_defaults(cx),
                 }
+                // Its product's studies (decision 0039), unless it keeps its own.
+                v.join_symbol_studies(false, cx);
                 v.restore_trade(doc.trade.as_ref(), cx);
                 v
             }))
@@ -1730,6 +1732,13 @@ impl WindowView {
                     chart.update(cx, |c, cx| c.toggle_studies_menu(cx));
                 }
             }
+            Command::SeparateStudies => match self.tab().focused_handle().cloned() {
+                Some(PaneHandle::Chart(chart)) => chart.update(cx, |c, cx| {
+                    let on = !c.separate_studies();
+                    c.set_separate_studies(on, cx);
+                }),
+                _ => self.refuse("Studies are on charts: focus a chart first", cx),
+            },
             // Per chart: linked charts keep their own timeframes (links share the market).
             Command::Timeframe(tf) => {
                 if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
@@ -2631,6 +2640,7 @@ impl WindowView {
                         lc.label_place,
                     )),
                     studies_shown: !v.hide_studies,
+                    separate_studies: c.separate_studies(),
                     volume: c.volume_overlay(),
                     study_labels_shown: !v.hide_study_labels,
                     strategy_marks_shown: !c.strategy_marks_hidden(),
@@ -5563,7 +5573,14 @@ fn load_named(name: &str, cx: &mut App) -> Result<WorkspaceDoc, String> {
             if let Some(r) = l.report {
                 cx.global_mut::<Workspace>().add_report(r.clone());
             }
-            return l.value.ok_or_else(|| format!("couldn't read {name}"));
+            let mut doc = l.value.ok_or_else(|| format!("couldn't read {name}"))?;
+            // Charts saved before studies were per symbol (decision 0039).
+            let mut sets = crate::picker_view::settings(cx).symbol_studies.clone();
+            if crate::symbol_studies::adopt_legacy(&mut doc, &mut sets) {
+                crate::picker_view::update_settings(cx, |s| s.symbol_studies = sets);
+                crate::symbol_studies::bump();
+            }
+            return Ok(doc);
         }
     }
     wsdoc::builtin(name).ok_or_else(|| format!("no workspace named {name:?}"))

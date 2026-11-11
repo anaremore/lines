@@ -39,6 +39,8 @@ pub struct ChartMenu {
     /// The chart has level sources: (levels shown, labels shown, where its labels go).
     pub levels: Option<(bool, bool, crate::levels_layer::LabelPlace)>,
     pub studies_shown: bool,
+    /// The chart keeps its own studies, not its symbol's (decision 0039).
+    pub separate_studies: bool,
     /// The chart's Volume: on the chart (`Some(true)`) or in a pane; `None`: no Volume.
     pub volume: Option<bool>,
     pub study_labels_shown: bool,
@@ -494,6 +496,12 @@ fn chart_show(c: &ChartMenu) -> MenuItem {
         Command::ToggleStudyLabels,
         c.study_labels_shown,
     ));
+    // Its own studies, not its symbol's (decision 0039).
+    sub.push(toggle(
+        "Separate studies",
+        Command::SeparateStudies,
+        c.separate_studies,
+    ));
     sub.push(toggle(
         "Strategy markers",
         Command::Strategy(StrategyCmd::ToggleMarks),
@@ -664,6 +672,7 @@ mod tests {
 
     fn chart() -> ChartMenu {
         ChartMenu {
+            separate_studies: false,
             trades: Default::default(),
             timeframe: Timeframe::Minutes(5),
             on_ticks: false,
@@ -880,6 +889,7 @@ mod tests {
                 "Level types…",
                 "Studies",
                 "Study labels",
+                "Separate studies",
                 "Strategy markers",
                 "Drawing tools",
                 "---",
