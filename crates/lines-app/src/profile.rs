@@ -52,6 +52,11 @@ const MAX_ROWS: usize = 4096;
 const AUTO_MIN_ROW_PX: f64 = 3.0;
 const LABEL_PX: f32 = 11.0;
 
+/// The label's text size at the UI zoom (`crate::zoom`).
+fn label_px() -> f32 {
+    crate::zoom::f(LABEL_PX)
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProfileMode {
@@ -339,6 +344,8 @@ impl VolumeProfileLayer {
             return;
         }
         let t = theme;
+        // At the UI zoom, as the level labels (`crate::zoom`).
+        let (chrome, pad) = (crate::zoom::f(12.0), crate::zoom::f(6.0));
         let scale = window.scale_factor();
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let ph = f32::from(plot.size.height);
@@ -359,7 +366,7 @@ impl VolumeProfileLayer {
         }
         if let Some((left, col_w)) = column {
             // In the label column: as much as its room holds, the rest cut with "…".
-            let room = (col_w - 2.0 * crate::levels_layer::COLUMN_PAD - 12.0).max(0.0);
+            let room = (col_w - 2.0 * crate::levels_layer::column_pad() - chrome).max(0.0);
             let fits = self
                 .shaped
                 .as_ref()
@@ -379,14 +386,17 @@ impl VolumeProfileLayer {
                 self.cut.as_ref().and_then(|(_, _, l)| l.as_ref())
             };
             if let Some(line) = line {
-                let w = f32::from(line.width) + 12.0;
-                let box_h = LABEL_PX * 1.6;
+                let w = f32::from(line.width) + chrome;
+                let box_h = label_px() * 1.6;
                 let x = snap(f64::from(left), scale);
-                let y = snap(f64::from((ph - box_h - 6.0).max(0.0)), scale);
+                let y = snap(f64::from((ph - box_h - pad).max(0.0)), scale);
                 paint(window, x, y, w, box_h, t.label_bg);
                 let _ = line.paint(
-                    point(px(ox + x + 6.0), px(oy + y + box_h * 0.5 - LABEL_PX * 0.65)),
-                    px(LABEL_PX * 1.3),
+                    point(
+                        px(ox + x + pad),
+                        px(oy + y + box_h * 0.5 - label_px() * 0.65),
+                    ),
+                    px(label_px() * 1.3),
                     TextAlign::Left,
                     None,
                     window,
@@ -396,14 +406,17 @@ impl VolumeProfileLayer {
             return;
         }
         if let Some((_, line)) = &self.shaped {
-            let w = f32::from(line.width) + 12.0;
-            let box_h = LABEL_PX * 1.6;
-            let x = snap(6.0, scale);
-            let y = snap(f64::from((ph - box_h - 6.0).max(0.0)), scale);
+            let w = f32::from(line.width) + chrome;
+            let box_h = label_px() * 1.6;
+            let x = snap(f64::from(pad), scale);
+            let y = snap(f64::from((ph - box_h - pad).max(0.0)), scale);
             paint(window, x, y, w, box_h, t.label_bg);
             let _ = line.paint(
-                point(px(ox + x + 6.0), px(oy + y + box_h * 0.5 - LABEL_PX * 0.65)),
-                px(LABEL_PX * 1.3),
+                point(
+                    px(ox + x + pad),
+                    px(oy + y + box_h * 0.5 - label_px() * 0.65),
+                ),
+                px(label_px() * 1.3),
                 TextAlign::Left,
                 None,
                 window,
@@ -444,7 +457,7 @@ fn shape_label(window: &mut Window, text: String, color: Hsla) -> ShapedLine {
     };
     window
         .text_system()
-        .shape_line(SharedString::from(text), px(LABEL_PX), &[run], None)
+        .shape_line(SharedString::from(text), px(label_px()), &[run], None)
 }
 
 /// `text` cut with "…" to fit `room` px, shaped in `color` (the longest head that fits);

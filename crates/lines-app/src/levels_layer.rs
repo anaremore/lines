@@ -89,6 +89,75 @@ pub const COLUMN_W_MAX: u16 = 320;
 /// A label on the chart under the pointer fades to this opacity, so the bars under it show.
 const HOVER_FADE: f32 = 0.25;
 
+/// The study labels' metrics at a UI zoom factor (`crate::zoom`, 1.0 at 100 %): every size,
+/// padding and step of a level label, chip and tag (the consts above are their 100 % values).
+/// Only the UI zoom changes them: the chart's time and price zoom never do.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct LabelMetrics {
+    /// Text size.
+    pub text: f32,
+    /// A chip's height (the stacking step between labels).
+    pub box_h: f32,
+    pub chrome: f32,
+    pub pad: f32,
+    pub gutter_pad: f32,
+    pub gutter_right: f32,
+    pub newest_gap: f32,
+    pub axis_leader: f32,
+    pub axis_edge: f32,
+    pub column_pad: f32,
+}
+
+impl LabelMetrics {
+    pub(crate) fn at(z: f32) -> LabelMetrics {
+        LabelMetrics {
+            text: LABEL_PX * z,
+            box_h: LABEL_PX * 1.6 * z,
+            chrome: LABEL_CHROME * z,
+            pad: LABEL_PAD * z,
+            gutter_pad: GUTTER_PAD * z,
+            gutter_right: GUTTER_RIGHT * z,
+            newest_gap: NEWEST_GAP * z,
+            axis_leader: AXIS_LEADER * z,
+            axis_edge: AXIS_EDGE * z,
+            column_pad: COLUMN_PAD * z,
+        }
+    }
+
+    /// At the UI zoom now.
+    fn now() -> LabelMetrics {
+        LabelMetrics::at(crate::zoom::get())
+    }
+}
+
+pub(crate) fn label_px() -> f32 {
+    LabelMetrics::now().text
+}
+pub(crate) fn label_chrome() -> f32 {
+    LabelMetrics::now().chrome
+}
+fn label_pad() -> f32 {
+    LabelMetrics::now().pad
+}
+pub(crate) fn gutter_pad() -> f32 {
+    LabelMetrics::now().gutter_pad
+}
+fn gutter_right() -> f32 {
+    LabelMetrics::now().gutter_right
+}
+fn newest_gap() -> f32 {
+    LabelMetrics::now().newest_gap
+}
+pub(crate) fn axis_leader() -> f32 {
+    LabelMetrics::now().axis_leader
+}
+pub(crate) fn axis_edge() -> f32 {
+    LabelMetrics::now().axis_edge
+}
+pub(crate) fn column_pad() -> f32 {
+    LabelMetrics::now().column_pad
+}
+
 /// Where a chart's study labels go (owner request; the level labels and the volume
 /// profile's tag). Saved per chart (`LevelsConfig::label_place`), leniently: a value this
 /// build doesn't know reads as the default, never a corrupt workspace.
@@ -324,7 +393,7 @@ struct Slot {
     /// Each level's label text color (by level index) for (theme name, map, looks revision):
     /// resolved when one of them changes (`Slot::label_colors`), not every frame.
     label_colors: Vec<Hsla>,
-    label_colors_key: Option<(&'static str, usize, u64, i32)>,
+    label_colors_key: Option<(&'static str, usize, u64, i32, u32)>,
     /// `label_colors`' buffers: the fixed zones (span, fill as drawn), the fills moving with
     /// the VWAP, and what is under one label.
     label_zones: Vec<((f64, f64), Paint)>,
@@ -488,7 +557,14 @@ impl Slot {
         } else {
             i32::MIN
         };
-        let key = (theme.name, Arc::as_ptr(map) as usize, self.rev, step);
+        // The UI zoom too: a label's box (its reach over zones) is its size.
+        let key = (
+            theme.name,
+            Arc::as_ptr(map) as usize,
+            self.rev,
+            step,
+            crate::zoom::generation(),
+        );
         if self.label_colors_key == Some(key) {
             return;
         }
@@ -516,7 +592,7 @@ impl Slot {
             }
         }
         // A label box and a row either way (a stacked label), in price.
-        let h = f64::from(LABEL_PX * 1.6);
+        let h = f64::from(label_px() * 1.6);
         let reach = if ppu_low > 0.0 {
             (h * 1.5) / ppu_low
         } else {
@@ -1125,7 +1201,7 @@ impl LevelsLayer {
             let blocked = self.blocked.filter(|_| on_edge);
             place_labels(
                 &mut s.placed,
-                LABEL_PX * 1.6,
+                label_px() * 1.6,
                 plot_h,
                 blocked,
                 &mut s.seen,
@@ -1204,8 +1280,8 @@ impl LevelsLayer {
                 // decides whether the shown labels fit).
                 let c = self.shortest.get(text).copied().unwrap_or_else(|| {
                     match text.rsplit_once(" : ") {
-                        Some((_, p)) => (p.chars().count() + 5) as f32 * LABEL_PX * 0.62,
-                        None => 2.0 * LABEL_PX * 0.62,
+                        Some((_, p)) => (p.chars().count() + 5) as f32 * label_px() * 0.62,
+                        None => 2.0 * label_px() * 0.62,
                     }
                 });
                 cut = cut.max(c);
@@ -1260,7 +1336,7 @@ impl LevelsLayer {
 
     /// A label's height (a tag's, a row of the column's), plot px.
     pub fn label_h() -> f32 {
-        LABEL_PX * 1.6
+        label_px() * 1.6
     }
 
     /// Measure the label set of every source shown with its labels on (in render, before
@@ -1488,14 +1564,14 @@ impl LevelsLayer {
         let beside = strip.newest_right.and_then(|r| {
             chart_label_x(
                 r,
-                self.label_need().0 + LABEL_CHROME,
+                self.label_need().0 + label_chrome(),
                 f32::from(plot.size.width),
             )
         });
         let scale = window.scale_factor();
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let (pw, ph) = (f32::from(plot.size.width), f32::from(plot.size.height));
-        let box_h = LABEL_PX * 1.6;
+        let box_h = label_px() * 1.6;
         let Some(room) = self.room.at(pw) else {
             return;
         };
@@ -1559,22 +1635,22 @@ impl LevelsLayer {
                         .unwrap_or(theme.text_main)
                 };
                 let w = f32::from(shaped_in(&mut self.shaped, text, color, window).width)
-                    + LABEL_CHROME;
+                    + label_chrome();
                 let top = snap(f64::from(y - box_h * 0.5), scale);
                 let (x, mut bg, mut ink) = match place {
                     // Just right of the newest bar, moving with it; pinned to the plot's edge
                     // when that doesn't fit (the newest bar off screen, or too near it).
                     LabelPlace::Chart => {
-                        let x = beside.unwrap_or((pw - w - GUTTER_RIGHT).max(0.0));
+                        let x = beside.unwrap_or((pw - w - gutter_right()).max(0.0));
                         (snap(f64::from(x), scale), theme.label_bg, color)
                     }
                     LabelPlace::Column => (
-                        snap(f64::from(strip.left + COLUMN_PAD), scale),
+                        snap(f64::from(strip.left + column_pad()), scale),
                         theme.label_bg,
                         color,
                     ),
                     LabelPlace::Axis => (
-                        snap(f64::from(strip.left + AXIS_LEADER), scale),
+                        snap(f64::from(strip.left + axis_leader()), scale),
                         theme.label_bg,
                         color,
                     ),
@@ -1618,14 +1694,15 @@ impl LevelsLayer {
                                     ink,
                                 ));
                             };
-                            let (lx, a, b) = (strip.left + 2.0, at.min(y), at.max(y));
-                            lead(window, strip.left, at - hair * 0.5, 2.0 + hair, hair);
+                            let stub = crate::zoom::f(2.0);
+                            let (lx, a, b) = (strip.left + stub, at.min(y), at.max(y));
+                            lead(window, strip.left, at - hair * 0.5, stub + hair, hair);
                             lead(window, lx, a, hair, b - a);
                             lead(window, lx, y - hair * 0.5, x - lx, hair);
                         }
                         window.paint_quad(gpui::quad(
                             Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
-                            px(2.0),
+                            px(crate::zoom::f(2.0)),
                             bg,
                             px(1.0),
                             ink,
@@ -1636,10 +1713,10 @@ impl LevelsLayer {
                 let line = shaped_in(&mut self.shaped, text, ink, window);
                 let _ = line.paint(
                     point(
-                        px(ox + x + LABEL_PAD),
-                        px(oy + top + box_h * 0.5 - LABEL_PX * 0.65),
+                        px(ox + x + label_pad()),
+                        px(oy + top + box_h * 0.5 - label_px() * 0.65),
                     ),
-                    px(LABEL_PX * 1.3),
+                    px(label_px() * 1.3),
                     TextAlign::Left,
                     None,
                     window,
@@ -1876,8 +1953,8 @@ pub(crate) fn around_last(
 /// right of it, if the widest of them (`widest`, with its chip) fits there in a plot `plot_w`
 /// wide; `None`: pinned to the plot's right edge instead.
 pub fn chart_label_x(newest_right: f32, widest: f32, plot_w: f32) -> Option<f32> {
-    let x = newest_right + NEWEST_GAP;
-    (x + widest <= plot_w - GUTTER_RIGHT).then_some(x)
+    let x = newest_right + newest_gap();
+    (x + widest <= plot_w - gutter_right()).then_some(x)
 }
 
 /// The label column's width this frame, px: the saved width at the UI zoom (`saved`), never
@@ -1906,7 +1983,7 @@ pub fn axis_fit(need: f32, cut: f32, base: f32, cap: f32) -> (f32, Option<f32>) 
     if need <= 0.0 {
         return (base, None);
     }
-    let frame = AXIS_LEADER + LABEL_CHROME + AXIS_EDGE;
+    let frame = axis_leader() + label_chrome() + axis_edge();
     let axis = (need + frame).clamp(base, cap.max(base)).ceil();
     let room = axis - frame;
     // Not even the shortest cut fits: no tags, and the axis keeps its own width.
@@ -1919,9 +1996,9 @@ pub fn axis_fit(need: f32, cut: f32, base: f32, cap: f32) -> (f32, Option<f32>) 
 /// The room for a label's text on the chart (`plot_w` px wide): the plot's width less its
 /// chip and margins, in 8 px steps (a pane resized by a pixel doesn't cut its labels again).
 pub(crate) fn plot_room(plot_w: f32) -> f32 {
-    const STEP: f32 = 8.0;
-    let r = plot_w - LABEL_CHROME - GUTTER_PAD;
-    (r / STEP).floor() * STEP
+    let step = crate::zoom::f(8.0);
+    let r = plot_w - label_chrome() - gutter_pad();
+    (r / step).floor() * step
 }
 
 /// The shortest text a label can show as (what `lines_core::levels::cut_label` can cut it to
@@ -1991,12 +2068,12 @@ pub(crate) fn label_can_show(w: f32, cut: Option<&(f32, String)>, room: f32) -> 
 
 /// A label's width from its length, on the wide side (before it was shaped).
 fn estimate(t: &str) -> f32 {
-    t.chars().count() as f32 * LABEL_PX * 0.62
+    t.chars().count() as f32 * label_px() * 0.62
 }
 
 /// `text`'s width as a label, shaped and not kept (a cut's candidates).
 pub(crate) fn measure(text: &str, theme: &Theme, window: &mut Window) -> f32 {
-    measure_at(text, LABEL_PX, theme, window)
+    measure_at(text, label_px(), theme, window)
 }
 
 /// `text`'s width at `size` px in the window's font, shaped and not kept.
@@ -2152,7 +2229,7 @@ fn shaped_in<'a>(
         };
         window.text_system().shape_line(
             SharedString::from(text.to_owned()),
-            px(LABEL_PX),
+            px(label_px()),
             &[run],
             None,
         )

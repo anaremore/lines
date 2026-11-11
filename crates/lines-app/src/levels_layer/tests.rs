@@ -1638,3 +1638,77 @@ fn stale_fills_and_edges_dim_with_their_map() {
     }
     assert!(zones > 0, "the demo has zones");
 }
+
+/// Every label metric scales with the UI zoom: at 150 % each is 1.5 times its 100 % value
+/// (the text, the chip, its paddings, the leader and the stacking step), and the level layer's
+/// metrics now are those at the zoom now (100 % in tests).
+#[test]
+fn label_metrics_scale_with_the_ui_zoom() {
+    let (a, b) = (LabelMetrics::at(1.0), LabelMetrics::at(1.5));
+    let pairs = [
+        (a.text, b.text),
+        (a.box_h, b.box_h),
+        (a.chrome, b.chrome),
+        (a.pad, b.pad),
+        (a.gutter_pad, b.gutter_pad),
+        (a.gutter_right, b.gutter_right),
+        (a.newest_gap, b.newest_gap),
+        (a.axis_leader, b.axis_leader),
+        (a.axis_edge, b.axis_edge),
+        (a.column_pad, b.column_pad),
+    ];
+    for (i, (x, y)) in pairs.into_iter().enumerate() {
+        assert!(
+            x > 0.0 && (y - x * 1.5).abs() < 1e-4,
+            "metric {i}: {x} → {y}"
+        );
+    }
+    assert_eq!(a.text, 11.0);
+    assert_eq!(label_px(), a.text);
+    assert_eq!(label_chrome(), a.chrome);
+    assert_eq!(column_pad(), a.column_pad);
+    // The axis frame and the chart room follow the metrics too.
+    let (axis, room) = axis_fit(80.0, 20.0, 60.0, 400.0);
+    assert_eq!(axis, (80.0 + a.axis_leader + a.chrome + a.axis_edge).ceil());
+    assert_eq!(room, Some(axis - (a.axis_leader + a.chrome + a.axis_edge)));
+}
+
+/// At 150 % labels stack a 150 % chip apart: levels closer than that never get overlapping
+/// labels (each shown label is at least a chip's height from the next).
+#[test]
+fn labels_never_overlap_at_150_percent() {
+    use lines_core::levels::{LabelSeen, Placed, place_labels};
+    let m = LabelMetrics::at(1.5);
+    let mut placed: Vec<Placed> = (0..8)
+        .map(|i| Placed {
+            index: i,
+            top: 200.0 + i as f32 * 9.0,
+            bottom: 200.0 + i as f32 * 9.0,
+            label_y: None,
+            vwap_relative: false,
+            anchor: lines_core::levels::LabelAt::Own,
+            on_edge: false,
+        })
+        .collect();
+    let mut seen = vec![LabelSeen::New; 8];
+    place_labels(&mut placed, m.box_h, 700.0, None, &mut seen, |_| true);
+    let mut ys: Vec<f32> = placed.iter().filter_map(|p| p.label_y).collect();
+    assert!(ys.len() >= 2, "some labels shown");
+    ys.sort_by(f32::total_cmp);
+    for w in ys.windows(2) {
+        assert!(w[1] - w[0] >= m.box_h - 1e-3, "{ys:?} at {}", m.box_h);
+    }
+    // At 100 % the same levels fit more labels: the step is the zoom's.
+    let mut placed_100 = placed.clone();
+    let mut seen = vec![LabelSeen::New; 8];
+    place_labels(
+        &mut placed_100,
+        LabelMetrics::at(1.0).box_h,
+        700.0,
+        None,
+        &mut seen,
+        |_| true,
+    );
+    let n_100 = placed_100.iter().filter(|p| p.label_y.is_some()).count();
+    assert!(n_100 >= ys.len());
+}

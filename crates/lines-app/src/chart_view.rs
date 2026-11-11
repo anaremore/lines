@@ -901,7 +901,7 @@ impl ChartView {
             cross_in_sub: None,
             fp_seen: Default::default(),
             trade_tip_seen: None,
-            legend_band: std::cell::Cell::new((8.0 + LEGEND_MAX_W, readout_bottom())),
+            legend_band: std::cell::Cell::new((8.0 + legend_max_w(), readout_bottom())),
             legend_fits: std::cell::RefCell::new(Vec::new()),
             visibility: fixture.visibility,
             picker,
@@ -2839,7 +2839,8 @@ impl ChartView {
     fn legend(&self, t: &Theme, window: &mut Window) -> Option<gpui::AnyElement> {
         if !self.visibility.draws_labels() {
             // The readout still shows over the plot's top-left.
-            self.legend_band.set((8.0 + LEGEND_MAX_W, readout_bottom()));
+            self.legend_band
+                .set((8.0 + legend_max_w(), readout_bottom()));
             return None;
         }
         let studies = self.studies.legend(t, &self.instrument);
@@ -2851,14 +2852,14 @@ impl ChartView {
             // The note (a state: why bars are candles, side-less volume) shrinks and truncates
             // itself: an ellipsis shows the cut (the label stays).
             div()
-                .max_w(px(LEGEND_MAX_W))
+                .max_w(px(legend_max_w()))
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .flex()
                 .flex_row()
                 .gap_2()
-                .px(px(8.0))
-                .py(px(4.0))
+                .px(crate::zoom::ui(8.0))
+                .py(crate::zoom::ui(4.0))
                 .bg(t.label_bg)
                 .text_size(crate::zoom::ui(12.0))
                 .child(div().flex_shrink_0().text_color(t.text_main).child(label))
@@ -2886,9 +2887,10 @@ impl ChartView {
         let row_h = crate::zoom::f(12.0 * 1.3 + 4.0);
         let bottom = crate::zoom::f(30.0 + boxes as f32 * 12.0 + 4.0) + text_rows as f32 * row_h;
         self.legend_band
-            .set((8.0 + LEGEND_MAX_W, bottom.max(readout_bottom())));
+            .set((8.0 + legend_max_w(), bottom.max(readout_bottom())));
         if studies.is_none() && rows.is_empty() && fp.is_none() {
-            self.legend_band.set((8.0 + LEGEND_MAX_W, readout_bottom()));
+            self.legend_band
+                .set((8.0 + legend_max_w(), readout_bottom()));
             return None;
         }
         // Level rows: the source's name, its legend title, then its state (none while current);
@@ -2902,7 +2904,7 @@ impl ChartView {
         let size = crate::zoom::f(12.0);
         let rem = f32::from(window.rem_size());
         // Inside the box's padding and its 1 px edges, a pixel spare for rounding.
-        let room = LEGEND_MAX_W - 2.0 * crate::zoom::f(8.0) - 2.0 - 1.0;
+        let room = legend_max_w() - 2.0 * crate::zoom::f(8.0) - 2.0 - 1.0;
         let levels = (!rows.is_empty()).then(|| {
             // Each row's fit is measured once per (row content, room, zoom, rem) and kept
             // (`legend_fits`): a frame that shows the same legend measures nothing.
@@ -2964,7 +2966,7 @@ impl ChartView {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .max_w(px(LEGEND_MAX_W))
+                .max_w(px(legend_max_w()))
                 .px(crate::zoom::ui(8.0))
                 .py(crate::zoom::ui(4.0))
                 // Opaque across its whole width, and nothing drawn past it; a 1 px edge in the
@@ -3079,7 +3081,7 @@ impl ChartView {
     /// keeps its own width (never more than 40 % of the chart beside the axis); on the chart,
     /// neither. Labels hidden: neither. From the whole level set, so a pan never moves them.
     fn label_strips(&mut self, w: f32) -> (f32, f32) {
-        use crate::levels_layer::{AXIS_TAG_CAP, COLUMN_PAD, LABEL_CHROME};
+        use crate::levels_layer::{AXIS_TAG_CAP, column_pad, label_chrome};
         let base = axis_w();
         let c = &self.levels.config;
         let shown = self.visibility.draws_studies()
@@ -3111,7 +3113,7 @@ impl ChartView {
                     0.0
                 };
                 let ends = if ends > 0.0 {
-                    (ends + crate::levels_layer::AXIS_LEADER)
+                    (ends + crate::levels_layer::axis_leader())
                         .clamp(base, cap.max(base))
                         .ceil()
                 } else {
@@ -3125,7 +3127,7 @@ impl ChartView {
                     return (base, 0.0);
                 }
                 let col = crate::levels_layer::column_px(crate::zoom::f(c.column_w()), w - base);
-                let room = col - 2.0 * COLUMN_PAD - LABEL_CHROME;
+                let room = col - 2.0 * column_pad() - label_chrome();
                 let (need, cut) = self.levels.label_need();
                 // Nothing to show (a missing source), or not even a short cut fits: no column
                 // (never an empty strip).
@@ -3168,10 +3170,11 @@ impl ChartView {
     /// Fit the label column to its widest label (a double-click on its edge), as the DOM's
     /// columns fit theirs; no labels: its default width.
     fn fit_label_column(&mut self, cx: &mut Context<Self>) {
-        use crate::levels_layer::{COLUMN_PAD, COLUMN_W_DEFAULT, LABEL_CHROME};
+        use crate::levels_layer::{COLUMN_W_DEFAULT, column_pad, label_chrome};
         let (need, _) = self.levels.label_need();
+        // Measured at the UI zoom; saved at 100 %.
         let w = if need > 0.0 {
-            (need + LABEL_CHROME + 2.0 * COLUMN_PAD) / crate::zoom::f(1.0)
+            (need + label_chrome() + 2.0 * column_pad()) / crate::zoom::f(1.0)
         } else {
             f32::from(COLUMN_W_DEFAULT)
         };
@@ -5801,7 +5804,7 @@ impl ChartView {
             let strip = self.label_strip();
             self.levels.paint_labels(self.plot, strip, &t, window, cx);
             if self.label_col > 0.0 {
-                let col = (pw + crate::levels_layer::COLUMN_PAD, self.label_col);
+                let col = (pw + crate::levels_layer::column_pad(), self.label_col);
                 self.profile
                     .paint_label(self.plot, Some(col), &t, window, cx);
             }
@@ -9803,6 +9806,11 @@ fn readout_bottom() -> f32 {
 
 /// Widest the level-source legend grows (logical px); longer text ends in an ellipsis.
 const LEGEND_MAX_W: f32 = 360.0;
+
+/// [`LEGEND_MAX_W`] at the UI zoom (`crate::zoom`): the legend's text and padding scale.
+fn legend_max_w() -> f32 {
+    crate::zoom::f(LEGEND_MAX_W)
+}
 
 /// What a level legend row's fit was measured for: its content, the room, the zoom and the
 /// window's rem.
