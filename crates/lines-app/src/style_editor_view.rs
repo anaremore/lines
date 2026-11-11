@@ -347,9 +347,18 @@ pub struct EditorScroll {
     /// The color picker's square, hue and opacity sliders as last painted (window px): where
     /// a press or drag lands in them.
     picker: Rc<RefCell<[gpui::Bounds<gpui::Pixels>; 3]>>,
+    /// The warnings box's height as last painted (logical px at 100 %, 0 with none): a press
+    /// in the picker fixes the warnings slot at it ([`EditorScroll::warnings_drawn`]).
+    warnings: Rc<std::cell::Cell<f32>>,
 }
 
 impl EditorScroll {
+    /// The warnings box's height as last painted (logical px at 100 %, rounded up; 0 with
+    /// none): what a picker drag fixes the slot at (`StyleEditor::warn_slot`).
+    pub fn warnings_drawn(&self) -> u32 {
+        self.warnings.get().ceil() as u32
+    }
+
     /// Scroll the editor's focus into view if a key moved it (row or column) since the last
     /// follow. The offset comes from the last frame's layout (a focus move doesn't move rows),
     /// so the scrollbar drawn at render shows it; a row that fits is also asked of GPUI
@@ -425,6 +434,16 @@ fn warnings_in(e: &StyleEditor, label: &str) -> bool {
     }
 }
 
+/// The warnings slot's height fixed by a picker drag in row `label` (logical px): `Some` only
+/// in the row that shows the warnings, while a press drags in the open picker
+/// ([`StyleEditor::warn_slot`]); [`render`] then draws the slot at exactly this height, with
+/// or without warnings, and [`content_height`] counts it.
+pub fn fixed_slot(e: &StyleEditor, label: &str) -> Option<f32> {
+    e.warn_slot
+        .filter(|_| e.custom.is_some() && warnings_in(e, label))
+        .map(|h| h as f32)
+}
+
 /// One color row's parts, top to bottom, as [`content_height`] counts them (logical px, from
 /// the row's top): where the open picker starts, where the warnings slot starts and how tall it
 /// is (fixed during a picker drag: [`StyleEditor::warn_slot`]), and the row's height.
@@ -459,13 +478,10 @@ fn color_row_layout(
         h += picker_height(p.opacity.is_some(), e.dropper, controls_w);
     }
     let warnings_top = h;
-    let warnings_h = if warnings_in(e, r.label) {
-        match (e.custom.is_some(), e.warn_slot) {
-            (true, Some(fixed)) => fixed as f32,
-            _ => warnings_height(warnings, w),
-        }
-    } else {
-        0.0
+    let warnings_h = match fixed_slot(e, r.label) {
+        Some(fixed) => fixed,
+        None if warnings_in(e, r.label) => warnings_height(warnings, w),
+        None => 0.0,
     };
     ColorRowLayout {
         picker_top,
@@ -1298,15 +1314,32 @@ pub fn render(
             // changes never move the square or a slider under the pointer); during a picker
             // drag in a slot fixed at its start, clipped, so nothing below moves either. They
             // stay in the row, so scrolling the row into view shows them.
-            if warnings_in(e, row.label) && !warnings.is_empty() {
-                let b = warning_box(t, warnings);
-                group = group.child(match e.warn_slot.filter(|_| e.custom.is_some()) {
-                    Some(fixed) => div()
-                        .h(crate::zoom::ui(fixed as f32))
-                        .overflow_hidden()
-                        .child(b),
-                    None => b,
-                });
+            // Its painted height is recorded for the next press (`EditorScroll::warnings_drawn`).
+            if warnings_in(e, row.label) {
+                let drawn = es.warnings.clone();
+                let probe = gpui::canvas(
+                    move |b, _, _| drawn.set(f32::from(b.size.height) / crate::zoom::f(1.0)),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full();
+                let b = (!warnings.is_empty()).then(|| warning_box(t, warnings));
+                match fixed_slot(e, row.label) {
+                    // A drag holds the slot at its height, empty too when the warnings go.
+                    Some(fixed) => {
+                        group = group.child(
+                            div()
+                                .flex_none()
+                                .h(crate::zoom::ui(fixed))
+                                .overflow_hidden()
+                                .children(b),
+                        );
+                    }
+                    None if b.is_none() => es.warnings.set(0.0),
+                    None => {
+                        group = group.child(div().relative().children(b).child(probe));
+                    }
+                }
             }
         }
         groups.push(group);
@@ -1451,8 +1484,15 @@ mod tests {
             held.windows(2).all(|p| p[0] == p[1]),
             "row and editor heights hold during the drag: {held:?}"
         );
+        // Render draws the fixed slot in the warnings' row only, the same height the layout
+        // counts, with no warnings left too.
+        let fixed = e.warn_slot.map(|h| h as f32);
+        assert_eq!(fixed_slot(&e, "Color"), fixed);
+        assert_eq!(layout(&e, &none).warnings_h, fixed.unwrap());
+        assert_eq!(fixed_slot(&e, "Line"), None);
         // Released: the slot settles to what is shown.
         e.warn_slot = None;
+        assert_eq!(fixed_slot(&e, "Color"), None);
         assert_eq!(layout(&e, &none).warnings_h, 0.0);
     }
 

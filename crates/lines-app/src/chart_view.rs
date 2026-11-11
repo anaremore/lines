@@ -635,9 +635,6 @@ pub struct ChartView {
     /// The area the style editor was last placed in (the chart's width and the height above
     /// its time axis; a new size places it again).
     editor_pane: (f32, f32),
-    /// The open editor's warnings slot height as last laid out
-    /// (`style_editor_view::warnings_height`): a picker drag fixes the slot at it.
-    warn_slot_now: f32,
     /// The style editor body's scroll state: its scrollbar, and the focus it last scrolled to
     /// show (a key that moves the focus scrolls again; a wheel scroll alone doesn't snap back).
     editor_scroll: crate::style_editor_view::EditorScroll,
@@ -940,7 +937,6 @@ impl ChartView {
             drawings,
             saved_styles,
             editor_pane: (0.0, 0.0),
-            warn_slot_now: 0.0,
             editor_scroll: Default::default(),
             dropper_hover: None,
             dropper_fixture: None,
@@ -6749,7 +6745,7 @@ impl ChartView {
     /// released (`false`): the warnings slot is fixed at its height for the drag, then settles
     /// (`StyleEditor::warn_slot`).
     pub fn picker_drag(&mut self, on: bool, cx: &mut Context<Self>) {
-        let now = self.warn_slot_now;
+        let now = self.editor_scroll.warnings_drawn();
         let e = match self.study_style.as_mut() {
             Some((_, e)) => Some(e),
             None => self.drawings.editor_mut(),
@@ -6758,7 +6754,7 @@ impl ChartView {
             return;
         };
         match (on, e.warn_slot) {
-            (true, None) if e.custom.is_some() => e.warn_slot = Some(now.ceil() as u32),
+            (true, None) if e.custom.is_some() => e.warn_slot = Some(now),
             (false, Some(_)) => e.warn_slot = None,
             _ => return,
         }
@@ -7187,7 +7183,6 @@ impl ChartView {
         self.editor_pane = area;
         let w = crate::style_editor_view::width(area.0);
         let names = crate::style_editor_view::names(&e, t);
-        self.warn_slot_now = crate::style_editor_view::warnings_height(&warnings, w);
         let h = crate::style_editor_view::content_height(&e, &warnings, w, names);
         let at = match target {
             Some(extent) => crate::style_editor_view::place(area, extent, h),

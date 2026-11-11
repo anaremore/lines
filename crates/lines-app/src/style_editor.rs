@@ -787,6 +787,7 @@ impl StyleEditor {
         if let Some((c, o)) = self.picked(fill) {
             self.custom = Some(crate::color_picker::Custom::open(fill, c, rgb, o));
             self.dropper = false;
+            self.warn_slot = None;
         }
     }
 
