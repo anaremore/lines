@@ -6943,12 +6943,12 @@ impl ChartView {
     /// zoom (again after a zoom change).
     fn measure_grid_space(&mut self, window: &mut Window) {
         let dim = self.theme.text_dim;
-        // In the time labels' font, the number font (`LabelKind::numeric`), which a UI font
-        // change leaves alone. Measured once, not kept.
+        // In the time labels' font, the number font (`LabelKind::numeric`), at the UI zoom now
+        // (measured again at another: `space_stale`).
         let mut w = |text: &str| f32::from(self.shape(text, dim, window).width) as f64;
         // Widest digits; a gap of two digits' width between labels.
         let (time, date_time) = (w("88:88"), w("88-88 88:88"));
-        let gap = time * 0.4 + 8.0;
+        let gap = time * 0.4 + f64::from(crate::zoom::f(8.0));
         self.scene.space = GridSpace {
             price_px: f64::from(label_px()) * 2.5,
             time_px: time + gap,

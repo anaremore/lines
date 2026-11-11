@@ -429,11 +429,6 @@ pub fn build_time_grid(
             continue;
         }
         let x = vp.index_to_x(i as f64);
-        if let Some((lx, room, _)) = last
-            && x - lx < room
-        {
-            continue;
-        }
         let day = local.0.div_euclid(DAY);
         let label = if last.is_some_and(|(_, _, d)| d == day) {
             if step < MIN {
@@ -451,6 +446,14 @@ pub fn build_time_grid(
             TimeLabel::TimeSeconds => space.time_px * 1.5,
             _ => space.time_px,
         };
+        // Each label's room is its width and a gap. The larger of the two neighbours' rooms
+        // keeps them apart whether labels start at their line or are centered on it (under
+        // footprint columns): a short label before a wide one never touches it.
+        if let Some((lx, prev, _)) = last
+            && x - lx < prev.max(room)
+        {
+            continue;
+        }
         out.push(TimeGridLine {
             time: t,
             x: slot_x(vp, i as f64, scale_factor),
@@ -820,13 +823,16 @@ mod tests {
         let mut out = Vec::with_capacity(MAX_GRID_LINES);
         build_time_grid(&b, &vp, 60_000, 1.0, &zoomed, &DisplayTz::utc(), &mut out);
         assert!(out.len() >= 2);
+        let room = |l: TimeLabel| match l {
+            TimeLabel::DateTime => zoomed.date_time_px,
+            TimeLabel::TimeSeconds => zoomed.time_px * 1.5,
+            _ => zoomed.time_px,
+        };
+        // Apart by the larger of the two rooms: labels centered on their line (under footprint
+        // columns) never touch either, a short one before a wide one included.
         for w in out.windows(2) {
-            let room = match w[0].label {
-                TimeLabel::DateTime => zoomed.date_time_px,
-                TimeLabel::TimeSeconds => zoomed.time_px * 1.5,
-                _ => zoomed.time_px,
-            };
-            assert!((w[1].x - w[0].x) as f64 >= room - 1.0, "{w:?}");
+            let need = room(w[0].label).max(room(w[1].label));
+            assert!((w[1].x - w[0].x) as f64 >= need - 1.0, "{w:?}");
         }
     }
 
