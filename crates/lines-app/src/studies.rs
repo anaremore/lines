@@ -200,6 +200,42 @@ pub struct TagRoom<'a> {
     pub column_blocked: &'a [(f32, f32)],
 }
 
+/// Where a VWAP tag `w` wide goes outside the plot under `place` (axis or column; a plot `pw`
+/// wide): its x and the rows it must keep clear of, or `None` when it doesn't fit that room.
+fn out_of_plot<'a>(
+    room: &TagRoom<'a>,
+    place: crate::levels_layer::LabelPlace,
+    pw: f32,
+    w: f32,
+) -> Option<(f32, &'a [(f32, f32)])> {
+    use crate::levels_layer::{AXIS_LEADER, COLUMN_PAD, LabelPlace};
+    let (x, room_w, rows) = match place {
+        LabelPlace::Axis => (
+            pw + room.column + AXIS_LEADER,
+            room.axis_w - room.column - AXIS_LEADER - 2.0,
+            room.blocked,
+        ),
+        LabelPlace::Column => (
+            pw + COLUMN_PAD,
+            room.column - 2.0 * COLUMN_PAD,
+            room.column_blocked,
+        ),
+        LabelPlace::Chart => return None,
+    };
+    (w <= room_w).then_some((x, rows))
+}
+
+/// The tops of the tags already moved out of the plot this frame (each `h` tall).
+fn taken_tops(marks: &[Option<AxisMark>]) -> ([f32; MAX_AXIS_MARKS], usize) {
+    let mut taken = [0.0f32; MAX_AXIS_MARKS];
+    let mut n = 0;
+    for m in marks.iter().flatten().take(MAX_AXIS_MARKS) {
+        taken[n] = m.at[1];
+        n += 1;
+    }
+    (taken, n)
+}
+
 /// The nearest free row for a tag `h` tall that wants top `want` on a plot `ph` tall: its own,
 /// else a row up or down, at most two rows away, clear of `blocked` and of `taken` (tops of
 /// tags already there, each `h` tall). `None`: none is free (the tag isn't drawn).
@@ -1166,7 +1202,27 @@ impl Studies {
                     ph - h - 2.0 - step
                 };
                 *row = row.saturating_add(1);
-                // In the end tags' gutter right of the newest bar; a line that runs on to the
+                // A line that runs on to the newest bar: where the chart's study labels go
+                // (a tag in the price axis or the label column at that edge, on the nearest
+                // free row) when it fits there.
+                if reaches
+                    && n_axis < MAX_AXIS_MARKS
+                    && let Some((x, rows)) = out_of_plot(&room, place, pw, w)
+                {
+                    let (taken, n_taken) = taken_tops(&axis_marks[..n_axis]);
+                    if let Some(ty) = free_row(y, h, ph, rows, &taken[..n_taken])
+                        && !covered(covers, ox + x, oy + ty, w, h)
+                    {
+                        axis_marks[n_axis] = Some(AxisMark {
+                            key: (k, Tag::Edge(above, band), v),
+                            color: colors[k],
+                            at: [x, ty, w, h],
+                        });
+                        n_axis += 1;
+                        continue;
+                    }
+                }
+                // Else right of the newest bar where there is room; a line that runs on to the
                 // newest bar (on the plot or panned past), else in the price axis column at
                 // that edge (never over the bars, nor the last-price tag); a line that ends
                 // mid-plot, at its end where no bar is there.
@@ -1325,29 +1381,13 @@ impl Studies {
             // at its price, or one in the label column, on its own row (never over the
             // last-price tag, a drawing's or a level's tag, or another tag there).
             if place != crate::levels_layer::LabelPlace::Chart {
-                let (x, room_w) = if place == crate::levels_layer::LabelPlace::Axis {
-                    (
-                        pw + room.column + crate::levels_layer::AXIS_LEADER,
-                        axis_w - room.column - crate::levels_layer::AXIS_LEADER - 2.0,
-                    )
-                } else {
-                    let pad = crate::levels_layer::COLUMN_PAD;
-                    (pw + pad, room.column - 2.0 * pad)
+                let Some((x, rows)) = out_of_plot(&room, place, pw, w) else {
+                    continue;
                 };
-                if w > room_w || n_axis >= MAX_AXIS_MARKS {
+                if n_axis >= MAX_AXIS_MARKS {
                     continue;
                 }
-                let mut taken = [0.0f32; MAX_AXIS_MARKS];
-                let mut n_taken = 0;
-                for m in axis_marks[..n_axis].iter().flatten() {
-                    taken[n_taken] = m.at[1];
-                    n_taken += 1;
-                }
-                let rows = if place == crate::levels_layer::LabelPlace::Axis {
-                    blocked
-                } else {
-                    room.column_blocked
-                };
+                let (taken, n_taken) = taken_tops(&axis_marks[..n_axis]);
                 let Some(ty) = free_row(y - h * 0.5, h, ph, rows, &taken[..n_taken]) else {
                     continue;
                 };
@@ -2361,6 +2401,32 @@ fn stroke(w: Pixels, dash: &([Pixels; 4], usize)) -> PathBuilder {
 mod tests {
     use super::*;
     use lines_indicators::{Bands, Reset, VwapSpec};
+
+    /// Out of the plot: in the axis right of the label column (past its leader) against the
+    /// axis's rows, in the column against the levels' rows only, never on the chart, and never
+    /// when the tag is wider than that room.
+    #[test]
+    fn vwap_tags_out_of_the_plot_follow_the_placement() {
+        use crate::levels_layer::{AXIS_LEADER, COLUMN_PAD, LabelPlace};
+        let axis_rows = [(10.0, 26.0)];
+        let level_rows = [(50.0, 66.0)];
+        let room = TagRoom {
+            axis_w: 120.0 + 90.0,
+            column: 120.0,
+            place: LabelPlace::Column,
+            blocked: &axis_rows,
+            column_blocked: &level_rows,
+        };
+        let (x, rows) = out_of_plot(&room, LabelPlace::Axis, 800.0, 60.0).unwrap();
+        assert_eq!((x, rows), (800.0 + 120.0 + AXIS_LEADER, &axis_rows[..]));
+        let (x, rows) = out_of_plot(&room, LabelPlace::Column, 800.0, 60.0).unwrap();
+        assert_eq!((x, rows), (800.0 + COLUMN_PAD, &level_rows[..]));
+        assert!(out_of_plot(&room, LabelPlace::Chart, 800.0, 60.0).is_none());
+        assert!(
+            out_of_plot(&room, LabelPlace::Column, 800.0, 140.0).is_none(),
+            "too wide"
+        );
+    }
 
     /// An end tag outside the plot takes its own row, else the nearest one up or down within
     /// two rows, clear of the blocked rows (the last-price tag, drawings' and levels' tags)
