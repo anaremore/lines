@@ -701,6 +701,14 @@ struct Cli {
     /// Screenshot: the order strip with a limit's price pick armed (`buy` or `sell`).
     #[arg(long, requires = "screenshot", value_parser = ["buy", "sell"])]
     strip_pick: Option<String>,
+    /// Screenshot: an order staged on the first chart as its menu's "…with bracket" row does
+    /// (nothing sent): "buy limit 6010.00 stop 6006.00 target 6018.00" (side, limit or stop,
+    /// price, then optional legs; none: the bracket preset's, or the "+T"/"+S" handles).
+    #[arg(long, requires = "screenshot")]
+    stage_order: Option<String>,
+    /// Screenshot: the first chart flashes this refusal (its top-left notice).
+    #[arg(long, requires = "screenshot")]
+    chart_flash: Option<String>,
     /// Screenshot: start the chart with these studies (a `StudySet` JSON file, as a template
     /// or the defaults for new charts hold them).
     #[arg(long, requires = "screenshot")]
@@ -1912,6 +1920,8 @@ where
                     crate::chart_trade::StripOrder::SellLimit
                 }
             }),
+            stage_order: cli.stage_order.clone(),
+            chart_flash: cli.chart_flash.clone(),
             timeframe: cli.timeframe.unwrap_or_default(),
             timeframe_menu: cli.timeframe_menu,
             order_group_menu: cli.order_group_menu,

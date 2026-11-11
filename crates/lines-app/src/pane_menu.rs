@@ -59,7 +59,9 @@ pub enum ChartOrders {
     /// The header ("At 6012.25 · 2 contracts · bracket 8/16") and the two orders.
     Rows {
         header: String,
-        rows: Vec<(String, crate::chart_trade::MenuOrder)>,
+        /// Each order's label, the order, and its "…with bracket" row's label (`None`: the
+        /// order reduces the position, so no bracket goes on it).
+        rows: Vec<(String, crate::chart_trade::MenuOrder, Option<String>)>,
         /// The contract and size they are offered with (checked again when one is chosen).
         offer: crate::chart_trade::Offer,
     },
@@ -250,8 +252,14 @@ pub fn order_items(o: &ChartOrders) -> Vec<MenuItem> {
             offer,
         } => {
             v.push(MenuItem::title(header));
-            for (label, o) in rows {
+            // Each order twice: sent at once, then staged on the chart with its bracket's legs
+            // (unsent until Place). A row whose order would reduce the position has no staged
+            // twin: no bracket goes on it.
+            for (label, o, stage) in rows {
                 v.push(row(label, Command::Order(OrderCmd::Place(*o, *offer))));
+                if let Some(staged) = stage {
+                    v.push(row(staged, Command::Order(OrderCmd::Stage(*o, *offer))));
+                }
             }
         }
         ChartOrders::Note(n) => v.push(MenuItem::title(n)),
@@ -263,9 +271,12 @@ pub fn order_items(o: &ChartOrders) -> Vec<MenuItem> {
 /// Whether a menu has a row that places an order: it opens with nothing highlighted, so a
 /// stray Enter never sends one (design.md §6 rule 5).
 pub fn places_orders(items: &[MenuItem]) -> bool {
-    items
-        .iter()
-        .any(|i| matches!(i.cmd, Some(Command::Order(OrderCmd::Place(..)))))
+    items.iter().any(|i| {
+        matches!(
+            i.cmd,
+            Some(Command::Order(OrderCmd::Place(..) | OrderCmd::Stage(..)))
+        )
+    })
 }
 
 /// A pane's menu.
@@ -753,8 +764,12 @@ mod tests {
         m.chart.as_mut().unwrap().orders = Some(ChartOrders::Rows {
             header: "At 6010.00 · 2 contracts".into(),
             rows: vec![
-                ("▲ Buy limit 2 @ 6010.00".into(), buy),
-                ("▼ Sell stop 2 @ 6010.00".into(), sell),
+                (
+                    "▲ Buy limit 2 @ 6010.00".into(),
+                    buy,
+                    Some("▲ Buy limit 2 @ 6010.00 with bracket".into()),
+                ),
+                ("▼ Sell stop 2 @ 6010.00".into(), sell, None),
             ],
             offer: k,
         });
@@ -762,10 +777,13 @@ mod tests {
         assert!(places_orders(&v), "it opens with nothing highlighted");
         assert!(!places_orders(&items(&pane_of(PaneKind::Chart))));
         assert!(v[0].title && v[0].cmd.is_none());
+        // Each order sends at once; one that may carry a bracket also stages, right below.
         assert_eq!(v[1].cmd, Some(Command::Order(OrderCmd::Place(buy, k))));
-        assert_eq!(v[2].cmd, Some(Command::Order(OrderCmd::Place(sell, k))));
-        assert!(v[3].is_sep());
-        assert_eq!(labels(&v[4..]), plain, "the rest unchanged");
+        assert_eq!(v[2].cmd, Some(Command::Order(OrderCmd::Stage(buy, k))));
+        assert_eq!(v[2].label, "▲ Buy limit 2 @ 6010.00 with bracket");
+        assert_eq!(v[3].cmd, Some(Command::Order(OrderCmd::Place(sell, k))));
+        assert!(v[4].is_sep());
+        assert_eq!(labels(&v[5..]), plain, "the rest unchanged");
         for note in [TRADING_OFF_ROW, NO_PRICE_ROW] {
             m.chart.as_mut().unwrap().orders = Some(ChartOrders::Note(note.into()));
             let v = items(&m);

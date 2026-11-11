@@ -228,6 +228,9 @@ pub enum OrderCmd {
     /// Place a limit or stop at the price right-clicked (the chart menu's order section).
     /// The contract is the one the row was offered on: a chart that switched since refuses it.
     Place(crate::chart_trade::MenuOrder, crate::chart_trade::Offer),
+    /// Stage that order on the chart with its bracket's legs, unsent until Place (the order
+    /// section's "…with bracket" row; `chart_trade::stage`).
+    Stage(crate::chart_trade::MenuOrder, crate::chart_trade::Offer),
 }
 
 /// Strategy controls. Stop all acts on every instance from anywhere and is never gated;
@@ -955,6 +958,7 @@ pub fn label(c: Command) -> String {
             OrderCmd::Resize(_) => "Change size…",
             OrderCmd::Cancel(_) => "Cancel order",
             OrderCmd::Place(..) => "Place order",
+            OrderCmd::Stage(..) => "Stage order with bracket",
         }
         .into(),
         Command::Trade(t) => match t {

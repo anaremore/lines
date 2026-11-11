@@ -237,7 +237,11 @@ impl PaneWindow {
             }
             Some(Command::Order(o)) => {
                 // The size field needs the chart's focus (it closes without it).
-                if matches!(o, crate::commands::OrderCmd::Resize(_)) {
+                // So does a staged order's Enter and Esc.
+                if matches!(
+                    o,
+                    crate::commands::OrderCmd::Resize(_) | crate::commands::OrderCmd::Stage(..)
+                ) {
                     self.handle.focus(window, cx);
                 }
                 if let PaneHandle::Chart(chart) = &self.handle {
