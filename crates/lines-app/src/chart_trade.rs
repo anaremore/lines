@@ -4,7 +4,7 @@
 //! `lines_core::geometry::order_tags` lays out and hit-tests.
 //!
 //! - **Tags**: role and what is left (`S1`, `T1`, `BUY LMT 2`), the price, and for an exit the
-//!   P&L if it fills there, as the P&L display shows it (`S1 · 5806.50 · -$175.00`).
+//!   P&L if it fills there, as the P&L display shows it (`S1 · 5806.50 · −$175.00`).
 //! - **Moving** an order (drag its tag) and **cancelling** it (×) need no arming, as on the DOM.
 //! - **Adding** a stop or target (drag a position handle) is a new order, so it needs trading
 //!   enabled; it is a reduce-only exit for the whole position (`Command::PlaceExit`), refused
@@ -365,7 +365,7 @@ pub struct TagText {
     pub id: u64,
     /// `Stop 1 @ 5806.50`.
     pub text: FixedStr<96>,
-    /// The P&L at its price (`-20.0 t  -$250.00`), drawn in its tone; empty: none.
+    /// The P&L at its price (`−20.0 t  −$250.00`), drawn in its tone; empty: none.
     pub pnl: FixedStr<48>,
     pub money: Option<Money>,
     pub mark: OrderMark,
@@ -1099,7 +1099,7 @@ pub fn leg_pnl(s: &Staged, at: Price, tick: i64, mpu: i128) -> (f64, Money) {
     (ticks, Money(units as i128 * s.offer.qty.0 as i128 * mpu))
 }
 
-/// The staged entry's tag: `▲ Buy limit 2 @ 7510.00`, then ` · risk -16.0 t  -$400.00` (the
+/// The staged entry's tag: `▲ Buy limit 2 @ 7510.00`, then ` · risk −16.0 t  −$400.00` (the
 /// stop's loss as the P&L display shows it; nothing when off) and ` · 1 : 2.0` (reward over
 /// risk, both legs there). No allocation.
 pub fn write_staged_entry(
@@ -2160,7 +2160,7 @@ mod tests {
         };
         assert_eq!(tag(&stop), "Stop 1 @ 5805.00");
         assert_eq!(tag(&target), "Target 1 @ 5820.00");
-        assert_eq!(pnl(&stop, PnlDisplay::Currency).0, "-$250.00");
+        assert_eq!(pnl(&stop, PnlDisplay::Currency).0, "−$250.00");
         assert_eq!(pnl(&target, PnlDisplay::Both).0, "+40.0 t  +$500.00");
         assert!(
             pnl(&target, PnlDisplay::Currency).1.unwrap().0 > 0,
@@ -2706,11 +2706,11 @@ mod tests {
         };
         assert_eq!(
             entry(&s, PnlDisplay::Both),
-            "▲ Buy limit 2 @ 6010.00 · risk -16.0 t  -$400.00 · 1 : 2.0"
+            "▲ Buy limit 2 @ 6010.00 · risk −16.0 t  −$400.00 · 1 : 2.0"
         );
         assert_eq!(
             entry(&s, PnlDisplay::Currency),
-            "▲ Buy limit 2 @ 6010.00 · risk -$400.00 · 1 : 2.0"
+            "▲ Buy limit 2 @ 6010.00 · risk −$400.00 · 1 : 2.0"
         );
         assert_eq!(
             entry(&s, PnlDisplay::Off),
@@ -2730,7 +2730,7 @@ mod tests {
                 Some(Money(800 * Money::UNITS_PER_WHOLE))
             )
         );
-        assert_eq!(leg(StagedPart::Stop, PnlDisplay::Ticks).1, "-16.0 t");
+        assert_eq!(leg(StagedPart::Stop, PnlDisplay::Ticks).1, "−16.0 t");
         assert_eq!(
             leg(StagedPart::Stop, PnlDisplay::Off),
             ("Stop 2 @ 6006.00".to_owned(), String::new(), None)
@@ -2740,7 +2740,7 @@ mod tests {
         one.target = None;
         assert_eq!(
             entry(&one, PnlDisplay::Ticks),
-            "▲ Buy limit 2 @ 6010.00 · risk -16.0 t"
+            "▲ Buy limit 2 @ 6010.00 · risk −16.0 t"
         );
     }
 

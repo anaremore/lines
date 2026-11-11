@@ -1688,7 +1688,7 @@ mod tests {
         // still reconcile: 4 contracts × 8.25 t × $12.50 is the +$412.50.
         assert_eq!(
             c(JournalCol::MaeMfe),
-            "-$87.50 / +$412.50  (-1.8 / +8.3 t/ct)"
+            "−$87.50 / +$412.50  (−1.8 / +8.3 t/ct)"
         );
         assert_eq!(c(JournalCol::Tags), "breakout, A+");
         assert_eq!(r.sign, 1);
@@ -1707,7 +1707,7 @@ mod tests {
         let cells = row(&t, PnlDisplay::Both).cells;
         assert_eq!(
             cells[JournalCol::MaeMfe.index()],
-            "-$87.50 / +$412.50  (— / —)"
+            "−$87.50 / +$412.50  (— / —)"
         );
         assert_eq!(cells[JournalCol::Ticks.index()], "—");
         assert_eq!(
@@ -1784,7 +1784,7 @@ mod tests {
         let ticks = cells(PnlDisplay::Ticks);
         assert_eq!(ticks[JournalCol::Pnl.index()], "+6.3 t/ct");
         assert_eq!(ticks[JournalCol::Ticks.index()], "+6.3");
-        assert_eq!(ticks[JournalCol::MaeMfe.index()], "-1.8 / +8.3 t/ct");
+        assert_eq!(ticks[JournalCol::MaeMfe.index()], "−1.8 / +8.3 t/ct");
         // In ticks mode the color follows the ticks shown, not the money after fees.
         let mut scratch = t.clone();
         scratch.exit_value = scratch.entry_value; // exit = entry: 0.0 t, a loss after fees
@@ -1794,7 +1794,7 @@ mod tests {
         let cur = cells(PnlDisplay::Currency);
         assert_eq!(cur[JournalCol::Pnl.index()], "+$310.02");
         assert_eq!(cur[JournalCol::Ticks.index()], "—");
-        assert_eq!(cur[JournalCol::MaeMfe.index()], "-$87.50 / +$412.50");
+        assert_eq!(cur[JournalCol::MaeMfe.index()], "−$87.50 / +$412.50");
     }
 
     #[test]
@@ -1852,10 +1852,10 @@ mod tests {
                 "Paper 50K eval",
                 "2",
                 "0%",
-                "-$4.96",
-                "-$2.48",
+                "−$4.96",
+                "−$2.48",
                 "0.00",
-                "-$4.96"
+                "−$4.96"
             ]
             .map(String::from)
         );

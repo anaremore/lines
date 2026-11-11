@@ -33,7 +33,7 @@ impl Estimate {
         PnlEstimate((self.0 - avg) * position as f64 * per_unit)
     }
 
-    /// [`Self::pnl`] as text: `+$40`, `-$15`.
+    /// [`Self::pnl`] as text: `+$40`, `−$15`.
     pub fn write_pnl(
         self,
         out: &mut impl Write,
@@ -51,12 +51,18 @@ impl Estimate {
 pub struct PnlEstimate(f64);
 
 impl PnlEstimate {
-    /// `+$40`, `-$15`.
+    /// `+$40`, `−$15`, `+$1,200`: as the journal's money (`pnl::write_money`), whole currency.
     pub fn write(self, out: &mut impl Write) -> fmt::Result {
         let rounded = self.0.round();
         // (-0.4 rounds to -0.0, which isn't below 0, and reads +$0.)
-        let sign = if rounded < 0.0 { '-' } else { '+' };
-        write!(out, "{sign}${}", rounded.abs() as i64)
+        let sign = if rounded < 0.0 {
+            crate::pnl::MINUS
+        } else {
+            '+'
+        };
+        out.write_char(sign)?;
+        out.write_char('$')?;
+        crate::pnl::write_grouped(out, rounded.abs() as u128)
     }
 
     pub fn is_loss(self) -> bool {
@@ -391,7 +397,7 @@ mod tests {
         };
         let gain = Estimate(282.0).pnl(1, 242.0, 1.0);
         let loss = Estimate(202.0).pnl(2, 242.0, 1.0);
-        assert_eq!((text(gain), text(loss)), ("+$40".into(), "-$80".into()));
+        assert_eq!((text(gain), text(loss)), ("+$40".into(), "−$80".into()));
         assert!(loss.is_loss() && !gain.is_loss());
         assert_eq!(loss.size(), 80.0);
         assert_eq!(gain.shade(40.0), 1.0);
@@ -416,8 +422,8 @@ mod tests {
             s
         };
         assert_eq!(pnl(282.0, 1), "+$40");
-        assert_eq!(pnl(202.0, 1), "-$40");
-        assert_eq!(pnl(282.0, -2), "-$80");
+        assert_eq!(pnl(202.0, 1), "−$40");
+        assert_eq!(pnl(282.0, -2), "−$80");
         assert_eq!(pnl(242.0, 1), "+$0");
     }
 }
