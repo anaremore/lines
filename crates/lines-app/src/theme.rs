@@ -1101,12 +1101,8 @@ mod tests {
         }
     }
 
-    /// A level label is in its level's color only where that is AA (4.5:1) on its box over
-    /// everything under it in the gutter (the chart, its grid and the source's zone fills as
-    /// drawn, alone and stacked), else the theme's text, for that label only: any color a user,
-    /// a source or a type picks (216 sampled), over zone fills of those colors, in every theme
-    /// and palette. Not a blanket fallback: the theme's text and bright colors on dark keep
-    /// their color.
+    /// A stale map's label text (dimmed) is AA (4.5:1) on its box over anything a chart can
+    /// draw under it in the gutter, in every theme and palette.
     #[test]
     fn stale_label_text_meets_aa_over_anything() {
         for t in Theme::all() {
@@ -1127,6 +1123,12 @@ mod tests {
         }
     }
 
+    /// A level label is in its level's color only where that is AA (4.5:1) on its box over
+    /// everything under it in the gutter (the chart, its grid and the source's zone fills as
+    /// drawn, alone and stacked), else the theme's text, for that label only: any color a user,
+    /// a source or a type picks (216 sampled), over zone fills of those colors, in every theme
+    /// and palette. Not a blanket fallback: the theme's text and bright colors on dark keep
+    /// their color.
     #[test]
     fn level_label_text_meets_aa_or_falls_back() {
         for t in Theme::all() {

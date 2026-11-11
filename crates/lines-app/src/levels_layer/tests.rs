@@ -1416,7 +1416,7 @@ fn same_text_labels_in_many_colors_are_shaped_once() {
         .collect();
     for _frame in 0..3 {
         for c in &colors {
-            cache.get_or_make("Bull Zone : 7555.00", *c, || {
+            cache.get_or_make("Demand Zone : 7555.00", *c, || {
                 made += 1;
                 made
             });
