@@ -143,7 +143,10 @@ limits a run to it. Live data is billed by Databento; what it asks for per contr
   "Top of book only", and leaves the other rows blank.
 
 Settings (environment, for now): `LINES_DATABENTO_REPLAY_HOURS` caps the trades replay (for
-example `1`; `0` = none); `LINES_DATABENTO_GATEWAY` overrides the gateway;
+example `1`; `0` = none). Unset, it is the gateway's whole window (about 23 h 40 min), which
+covers a normal session from its open, so its VWAP starts there; a longer session (after a
+holiday, say) starts its VWAP late and says so ("from HH:MM"). A cap you set stands, even when it
+cuts the session trading now (its VWAP then says "from HH:MM"). `LINES_DATABENTO_GATEWAY` overrides the gateway;
 `LINES_DATABENTO_DEPTH=mbp-10` asks for top-10 depth, which real-time needs Databento's CME Plus
 plan for. If the gateway refuses it (it says so and closes the connection), Lines reconnects with
 `mbp-1` and doesn't ask again this run. A refused `trades` or `definition` stops the feed with a

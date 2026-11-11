@@ -54,6 +54,7 @@ fn vwap_columns_do_not_allocate() {
             approx: i < 100,
             period: (i / 1380) as i64,
             forming: false,
+            from: None,
         })
         .collect();
     let mut vp = Viewport::default();

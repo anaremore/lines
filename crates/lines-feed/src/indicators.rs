@@ -219,6 +219,15 @@ impl EngineTap {
         }
     }
 
+    /// The local store's bar coverage (inclusive ms ranges): a history gap the provider
+    /// reports inside it isn't missing for the chart (`Input::Covered`).
+    pub fn covered(&mut self, ranges: Vec<(i64, i64)>) {
+        if !ranges.is_empty() {
+            self.engine
+                .send(Msg::Events(self.info.feed, vec![Input::Covered(ranges)]));
+        }
+    }
+
     /// Stored order flow replayed at startup (`disk::orderflow`): one trade date's trades and
     /// where they are complete.
     pub fn stored(&mut self, trades: Vec<lines_core::Print>, covered: Vec<(i64, i64)>) {
@@ -274,6 +283,10 @@ impl EventSink for EngineTap {
                 },
                 MarketEvent::HistoryComplete => Input::HistoryComplete,
                 MarketEvent::Gap { .. } => Input::Gap,
+                MarketEvent::HistoryGap { from, to } => Input::HistoryGap {
+                    from: *from,
+                    to: *to,
+                },
                 MarketEvent::ContractChanged(_) => Input::Reset,
                 _ => continue,
             });

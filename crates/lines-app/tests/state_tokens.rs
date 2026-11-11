@@ -36,6 +36,11 @@ const ALLOWED: &[(&str, &str, usize)] = &[
         1,
     ),
     (
+        "study_menu_view.rs",
+        "the studies menu's scroll cue: the panel, fully transparent, fading in over its last rows",
+        1,
+    ),
+    (
         "chart_draw.rs",
         "the temporary measure's fill in its direction color",
         1,
@@ -48,8 +53,8 @@ const ALLOWED: &[(&str, &str, usize)] = &[
     ),
     (
         "studies.rs",
-        "overlay and VWAP band fills, approximate (bar-derived) lines and candles, and a test's \
-         heavy fill",
+        "overlay and VWAP band fills, the fill's hairline edges, approximate (bar-derived) delta \
+         candles, and a test's heavy fill",
         5,
     ),
     ("study_style.rs", "a VWAP band's own fill translucency", 1),

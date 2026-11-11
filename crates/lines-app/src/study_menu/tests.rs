@@ -18,6 +18,7 @@ fn input<'a>(set: &'a StudySet, src: &'a [SourceInfo], templates: &'a [String]) 
         sources: src,
         templates,
         has_rth: true,
+        opens: SessionOpens::default(),
     }
 }
 
@@ -283,14 +284,14 @@ fn menu_lists_studies_catalog_and_templates() {
             "Volume profile · session · ETH",
             "Levels · Demo levels",
             "# Add",
-            "+ VWAP · ETH session",
-            "+ VWAP · RTH session",
-            "+ VWAP · weekly",
-            "+ VWAP · monthly",
-            "+ Anchored VWAP (click a bar)",
+            "+ VWAP · ETH",
+            "+ VWAP · RTH",
+            "+ VWAP · week",
+            "+ VWAP · month",
+            "+ VWAP · from a bar…",
             "+ Volume",
-            "+ Cumulative delta · ETH session",
-            "+ Cumulative delta · RTH session",
+            "+ Cumulative delta · ETH",
+            "+ Cumulative delta · RTH",
             "+ Cumulative delta · no reset",
             "+ Footprint · sell × buy",
             "+ Footprint · delta",
@@ -311,9 +312,9 @@ fn menu_lists_studies_catalog_and_templates() {
     m.follow_query(&items);
     let adds: Vec<_> = labels(&items)
         .into_iter()
-        .filter(|l| l.starts_with("+ VWAP") || l.starts_with("+ Anchored"))
+        .filter(|l| l.starts_with("+ VWAP"))
         .collect();
-    assert_eq!(adds, ["+ VWAP · RTH session"]);
+    assert_eq!(adds, ["+ VWAP · RTH"]);
     assert_eq!(
         m.activate(&items, m.cursor),
         Some(MenuCmd::Set(StudyAction::AddVwap(Reset::Rth)))
@@ -347,11 +348,11 @@ fn editor_controls_are_commands_and_keys_navigate() {
         &l[1..22],
         [
             "VWAP ETH",
-            "  Reset: ETH *",
-            "  Reset: RTH",
-            "  Reset: Week",
-            "  Reset: Month",
-            "  Reset: Anchored…",
+            "  Anchor: ETH *",
+            "  Anchor: RTH",
+            "  Anchor: Week",
+            "  Anchor: Month",
+            "  Anchor: From a bar…",
             "  Bands: 1σ",
             "  Bands: 2σ",
             "  Bands: 3σ",
@@ -599,7 +600,7 @@ fn a_closed_menu_reopens_with_its_draft() {
     again.clamp(&again.items(&input(&set, &src, &[])));
     assert_eq!(again, before);
     let l = labels(&again.items(&input(&set, &src, &[])));
-    assert_eq!(l[2], "  Reset: ETH *", "the editor is open again");
+    assert_eq!(l[2], "  Anchor: ETH *", "the editor is open again");
     // Once reopened the draft is used up: closing a finished menu starts fresh next time.
     assert_eq!(draft, None);
 }
@@ -736,4 +737,76 @@ fn trades_off_is_optional_and_not_a_study() {
         ..off.clone()
     };
     assert!(profile.has_studies());
+}
+
+/// The session choices name their opens from the product's calendar (ES: CME's 17:00 and
+/// 08:30 Chicago) on the chart's clock, in the Add catalog and the VWAP editor ("Anchor").
+#[test]
+fn session_choices_name_the_calendars_opens() {
+    let cal = lines_feed::catalog::sessions(lines_feed::catalog::ES);
+    use lines_core::display_tz::{DisplayTz, ZoneChoice};
+    // Tuesday 09:00 CST: RTH trading (its open named), ETH's next open this evening.
+    let now = lines_core::UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap();
+    let chicago = DisplayTz::resolve(&ZoneChoice::Named("America/Chicago".into())).unwrap();
+    let opens = session_opens(cal, &chicago, now);
+    assert_eq!(opens.eth.as_deref(), Some("5:00 pm CST"));
+    assert_eq!(opens.rth.as_deref(), Some("8:30 am CST"));
+    // The default chart clock (New York): the same opens, an hour later.
+    let opens = session_opens(cal, &DisplayTz::exchange(), now);
+    assert_eq!(opens.eth.as_deref(), Some("6:00 pm ET"));
+    assert_eq!(opens.rth.as_deref(), Some("9:30 am ET"));
+    let mut set = StudySet::default();
+    set.apply(&StudyAction::AddVwap(Reset::Eth));
+    let src = sources();
+    let mut inp = input(&set, &src, &[]);
+    inp.opens = opens;
+    let mut m = StudyMenu {
+        editing: Some(StudyRef::Vwap(0)),
+        ..StudyMenu::default()
+    };
+    let l = labels(&m.items(&inp));
+    assert!(
+        l.contains(&"  Anchor: ETH (6:00 pm ET open) *".to_owned()),
+        "{l:#?}"
+    );
+    assert!(
+        l.contains(&"  Anchor: RTH (9:30 am ET open)".to_owned()),
+        "{l:#?}"
+    );
+    m.editing = None;
+    let l = labels(&m.items(&inp));
+    assert!(
+        l.contains(&"+ VWAP · RTH (9:30 am ET open)".to_owned()),
+        "{l:#?}"
+    );
+    // A 24/7 product: its day start, no RTH; no calendar: no time named.
+    let btc = lines_feed::catalog::sessions(lines_feed::catalog::BTC_USD);
+    assert_eq!(session_opens(btc, &chicago, now).rth, None);
+    assert!(session_opens(btc, &chicago, now).eth.is_some());
+    assert_eq!(session_opens(None, &chicago, now), SessionOpens::default());
+}
+
+/// A replay opened before its first frame names its sessions on its own first recorded frame,
+/// never the wall clock; the feed's clock, then the trading core's, come first.
+#[test]
+fn session_opens_go_by_the_replay_before_its_first_frame() {
+    let t = |s: &str| lines_core::UtcMillis::parse_iso(s).unwrap();
+    // A manual wall clock: read only live.
+    let wall = t("2026-11-10T18:00:00Z");
+    let unread = || -> lines_core::UtcMillis { panic!("the wall clock was read") };
+    let first = t("2026-11-05T14:00:00Z");
+    assert_eq!(opens_clock(None, None, Some(Some(first)), unread), first);
+    let feed = t("2026-11-05T15:00:00Z");
+    assert_eq!(
+        opens_clock(Some(feed), None, Some(Some(first)), unread),
+        feed
+    );
+    let core = t("2026-11-05T16:00:00Z");
+    assert_eq!(
+        opens_clock(None, Some(core), Some(Some(first)), unread),
+        core
+    );
+    // Live (or a replay with no frame yet): the wall clock.
+    assert_eq!(opens_clock(None, None, None, || wall), wall);
+    assert_eq!(opens_clock(None, None, Some(None), || wall), wall);
 }

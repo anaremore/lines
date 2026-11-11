@@ -23,7 +23,10 @@
 //!   before any market
 //!   record is applied; records before it are held.
 //! - `trades` replayed from the newest stored bar (the feed's `history_from`, a bar boundary),
-//!   at most 24 hours back. The replayed trades are history, not live trades: they become bars,
+//!   at most the gateway's ~23 h 40 min window back ([`REPLAY_WINDOW_MS`], the default, which
+//!   covers a normal session from its open; a [`ReplayLimit`] the trader set stands, and a
+//!   longer session, e.g. after a holiday, starts its VWAP late, "from HH:MM"). The replayed
+//!   trades are history, not live trades: they become bars,
 //!   sent as one `History` snapshot whose closed `as_of` is the newest replayed millisecond
 //!   (inclusive). `lines_core::stitch` then replaces the stored bars and drops re-delivered
 //!   live trades, so a restart or reconnect never counts a trade twice. Should the switch from
@@ -158,7 +161,16 @@ pub struct ReplayLimit {
     pub max_ms: i64,
 }
 
+impl ReplayLimit {
+    /// A cap the trader set (`LINES_DATABENTO_REPLAY_HOURS`): kept as it is, even when it cuts
+    /// the session trading now (its VWAP then says "from HH:MM").
+    pub fn cap(max_ms: i64) -> Self {
+        ReplayLimit { max_ms }
+    }
+}
+
 impl Default for ReplayLimit {
+    /// The gateway's whole window (~23 h 40 min): a normal session from its open.
     fn default() -> Self {
         ReplayLimit {
             max_ms: REPLAY_WINDOW_MS,
@@ -398,6 +410,8 @@ impl DatabentoSession {
             .expect("floors")
             .get(&contract)
             .map(|ns| (*ns / 1_000_000) as i64);
+        // Unset, the whole window: it covers a normal session from its open (its studies,
+        // VWAP and delta, start there). A cap the trader set stands (its VWAP says "from").
         let reach = self.limit.max_ms.min(REPLAY_WINDOW_MS);
         let start = if reach <= 0 {
             None

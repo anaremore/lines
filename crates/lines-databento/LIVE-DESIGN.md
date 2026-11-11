@@ -100,7 +100,9 @@ replay is **history**, the public stitch rule every provider follows:
 
 - Every connection replays `trades` from the feed's `history_from` (the newest stored bar's
   start, a bar boundary), at most 23 h 40 min back (`REPLAY_WINDOW_MS`;
-  `LINES_DATABENTO_REPLAY_HOURS` caps it lower), aligned up to a bar boundary when the window
+  `LINES_DATABENTO_REPLAY_HOURS` caps it lower, and a cap set there stands; unset, the whole
+  window covers a normal session from its open, so its VWAP starts there, and a longer one, after
+  a holiday say, starts late and says "from HH:MM"), aligned up to a bar boundary when the window
   cuts it. The gateway's window starts at the next 10-minute mark after 24 hours ago (at 17:01
   it took 17:10 the day before at the earliest), so asking for the full 24 hours is refused.
 - The replayed trades become bars and go out as one `History` snapshot whose closed `as_of` is

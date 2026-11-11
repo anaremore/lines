@@ -207,6 +207,12 @@ pub trait ProviderSession: Send {
         None
     }
 
+    /// The connection ended (closed, failed or shut down) at `now`: report what is still
+    /// open, e.g. a hole whose end only a later trade would have told (`HistoryGap` through
+    /// `now`), so the store and its writer never claim coverage over it. Once per connection,
+    /// after the last frame. Must not block or do I/O.
+    fn on_end(&mut self, _now: UtcMillis, _events: &mut Vec<MarketEvent>) {}
+
     /// The last [`ProviderSession::on_frame`] delivered back-fill (a snapshot of past
     /// trades), not live trades: the latency HUD leaves its trades out (roadmap 6b). HTTP
     /// frames always count as back-fill; this is for streamed snapshots.

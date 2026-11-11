@@ -100,6 +100,16 @@ pub fn write_es_day(out: &Path, day: usize, depth: bool, transit: bool) -> io::R
     write(out, depth, transit, Some(day), None)
 }
 
+/// What [`write_es_day`] (`only_day`) or [`write_es_sessions_from`] (`from`) records: from
+/// the first written day's open, or `from` when later, to the last written day's close.
+pub fn span(only_day: Option<usize>, from: Option<UtcMillis>) -> (UtcMillis, UtcMillis) {
+    let ms = |s: &str| UtcMillis::parse_iso(s).expect("time");
+    let first = &DAYS[only_day.map_or(0, |d| d.clamp(1, DAYS.len()) - 1)];
+    let last = &DAYS[only_day.map_or(DAYS.len() - 1, |d| d.clamp(1, DAYS.len()) - 1)];
+    let open = ms(first.open);
+    (from.map_or(open, |f| f.max(open)), ms(last.close))
+}
+
 /// The trades of `only_day` (else every day), recorded from `from` on (else from the first
 /// written day's open).
 fn write(
@@ -256,3 +266,25 @@ fn write(
 
 /// The last trade time of the sessions (an `--at` that shows everything).
 pub const END: &str = "2026-11-05T21:59:00Z";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The span printed for what was written: both days, one day, or from a later time.
+    #[test]
+    fn span_is_what_is_recorded() {
+        let at = |s: &str| UtcMillis::parse_iso(s).unwrap();
+        let (open1, close2) = (at("2026-11-03T23:00:00Z"), at("2026-11-05T22:00:00Z"));
+        assert_eq!(span(None, None), (open1, close2));
+        assert_eq!(span(Some(2), None), (at("2026-11-04T23:00:00Z"), close2));
+        assert_eq!(span(Some(1), None), (open1, at("2026-11-04T22:00:00Z")));
+        let mid = at("2026-11-05T17:34:00Z");
+        assert_eq!(span(None, Some(mid)), (mid, close2));
+        assert_eq!(
+            span(None, Some(at("2026-11-01T00:00:00Z"))),
+            (open1, close2),
+            "before the first open: from it"
+        );
+    }
+}

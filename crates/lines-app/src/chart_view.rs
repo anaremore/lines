@@ -176,7 +176,7 @@ enum LabelKind {
     /// (its own kind: the label cache keys by kind and value, and the colors differ).
     SubValue,
     SubLast,
-    /// The sub-pane's title (keyed by its reset) and its "≈ from bars" note.
+    /// The sub-pane's title (keyed by its reset) and its "≈ est. from bars" note.
     SubTitle,
     SubNote,
     /// The crosshair's value tag on the sub-pane's axis.
@@ -300,6 +300,8 @@ pub struct Fixture {
     /// Zoom the auto-fitted price range by this factor around the plot's centre, as Ctrl+wheel
     /// would (turns auto-scale off).
     pub price_zoom: Option<f64>,
+    /// Pan this many bars back from the newest, as a drag would (`--pan-bars N`).
+    pub pan_bars: Option<f64>,
     /// Render with the symbol picker open on this query.
     pub picker: Option<String>,
     /// Indicators to start with (screenshots, `--vwap`).
@@ -410,6 +412,8 @@ pub struct ChartView {
     seen_studies: u64,
     /// The studies menu (Ctrl+I, "Studies…"), while open.
     study_menu: Option<StudyMenu>,
+    /// The studies menu's scroll (its fade shows while more is below).
+    study_menu_scroll: gpui::ScrollHandle,
     /// The studies menu as it was when last closed without finishing (an editor open, a
     /// template name half typed): reopening restores it (the popover rule).
     study_draft: Option<StudyMenu>,
@@ -505,8 +509,14 @@ pub struct ChartView {
     reported: (Option<UtcMillis>, Option<Price>),
     /// Screenshot fixture: price zoom to apply once, after the first auto-fit.
     pending_price_zoom: Option<f64>,
+    /// Screenshot fixture: bars to pan back once, with the price zoom.
+    pending_pan_bars: Option<f64>,
     /// Screenshot fixture: open the first group tag's list once tags are laid out.
     pending_group_menu: bool,
+    /// The VWAPs' end tags changed in the last paint (`Studies::paint`): render again.
+    end_tags_moved: bool,
+    /// This chart's style editor was laid out this frame (its tags stay clear of it).
+    editor_open: std::cell::Cell<bool>,
     /// The plot a group's list was last placed for (a resize re-renders it, placed anew).
     group_plot: Bounds<Pixels>,
     /// Pointer position in plot-local logical px, while it is over the plot.
@@ -787,6 +797,8 @@ impl ChartView {
 
         let mut view = ChartView {
             study_menu: None,
+            study_menu_scroll: gpui::ScrollHandle::new(),
+            editor_open: std::cell::Cell::new(false),
             study_style: None,
             styles_extra: serde_json::Map::new(),
             pending_levels: Default::default(),
@@ -846,7 +858,9 @@ impl ChartView {
             reported: (None, None),
             hover: fixture.cursor,
             pending_price_zoom: fixture.price_zoom,
+            pending_pan_bars: fixture.pan_bars,
             pending_group_menu: fixture.order_group_menu,
+            end_tags_moved: false,
             group_plot: Bounds::default(),
             cross: None,
             cross_bar: None,
@@ -1090,12 +1104,31 @@ impl ChartView {
             .iter()
             .map(|t| t.name.clone())
             .collect();
-        let has_rth = lines_feed::catalog::sessions(self.instrument.id).is_none_or(|c| c.has_rth());
+        let cal = lines_feed::catalog::sessions(self.instrument.id);
+        let has_rth = cal.is_none_or(|c| c.has_rth());
         menu.items(&MenuInput {
             set: &set,
             sources: &sources,
             templates: &templates,
             has_rth,
+            // Named on the chart's clock, for the session trading at the feed's time; before
+            // any data, the time as the trading core reads it, else (this chart's source the
+            // replay) the replay's own clock or first frame; the wall clock only live.
+            opens: crate::study_menu::session_opens(
+                cal,
+                &self.zone,
+                crate::study_menu::opens_clock(
+                    self.store.feed_clock(),
+                    crate::trading::Trading::try_global(cx).and_then(|t| t.now(&self.store)),
+                    cx.try_global::<crate::replay_bar::Replay>()
+                        .filter(|_| crate::sources::on_replay(&self.feed, cx))
+                        .map(|r| {
+                            let s = r.control.snapshot();
+                            s.clock.or(s.first)
+                        }),
+                    lines_feed::now_utc,
+                ),
+            ),
         })
     }
 
@@ -3620,8 +3653,12 @@ impl ChartView {
             // the prices fit with it applied.
             let labels_on = self.visibility.draws_studies() && self.visibility.draws_labels();
             let (need, min_cut) = if labels_on {
-                // Label widths were measured in render (`measure_labels`).
-                self.levels.gutter_need()
+                // Label widths were measured in render (`measure_labels`). The VWAPs' end tags
+                // ("ETH 6004.50", measured in render) share the gutter (never over the
+                // forming bar); they can't be cut.
+                let (levels, cut) = self.levels.gutter_need();
+                let vwap = self.studies.end_tags_need();
+                (levels.max(vwap), if levels > 0.0 { cut } else { vwap })
             } else {
                 (0.0, 0.0)
             };
@@ -3666,6 +3703,11 @@ impl ChartView {
                 && let Some(f) = self.pending_price_zoom.take()
             {
                 self.vp.zoom_price_at(self.vp.height * 0.5, f, fmt.tick);
+            }
+            if !self.vp.visible_range(bars.len()).is_empty()
+                && let Some(n) = self.pending_pan_bars.take()
+            {
+                self.vp.pan(n * self.vp.bar_px, 0.0, bars.len());
             }
             // The inset again for the settled view (a new bar while following moves it).
             self.vp.right_inset =
@@ -3858,6 +3900,10 @@ impl ChartView {
             if self.dropper_hover.is_some() {
                 self.dropper_fixture = None;
             }
+        }
+        // The VWAPs' end tags changed in this paint: their room is measured in render.
+        if std::mem::take(&mut self.end_tags_moved) {
+            cx.notify();
         }
 
         // Crosshair sync: report this frame's time and price under the pointer when changed.
@@ -5029,7 +5075,55 @@ impl ChartView {
                     l.paint(plot, &self.vp, &t, window, cx);
                 }
                 self.footprint.paint(plot, &self.vp, &t, window, cx);
-                self.studies.paint((ox, oy), &self.vp, &t, window);
+                let fmt = self.instrument.price;
+                // This chart's open panels (laid out before this paint): no tag is drawn
+                // partly under one.
+                let covers = [
+                    self.study_menu
+                        .as_ref()
+                        .and_then(|_| popover::placed(popover::Panel::Studies)),
+                    self.editor_open
+                        .get()
+                        .then(|| popover::placed(popover::Panel::StyleEditor))
+                        .flatten(),
+                ];
+                // Off-scale markers with no room right of the newest bar go to the price axis
+                // column, clear of the last-price tag and the drawings' price tags (painted after the
+                // axis below; fixed arrays, allocation-free).
+                let mut blocked = [(0.0f32, 0.0f32); 1 + MAX_DRAWING_TAGS];
+                let mut n_blocked = 0;
+                let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
+                if let Some(y) = last_y {
+                    blocked[0] = (y - tag_h() * 0.5, y + tag_h() * 0.5);
+                    n_blocked = 1;
+                }
+                if !self.drawings.hidden {
+                    let mut lines = [0.0f32; MAX_DRAWING_TAGS];
+                    let mut n = 0;
+                    for (slot, (_, y, _)) in lines.iter_mut().zip(self.drawings.axis_tags(ph)) {
+                        *slot = y;
+                        n += 1;
+                    }
+                    let mut at = [0.0f32; MAX_DRAWING_TAGS];
+                    drawing_tag_ys(&lines[..n], last_y, ph, &mut at[..n]);
+                    for y in &at[..n] {
+                        blocked[n_blocked] = (y - DRAWING_TAG_H * 0.5, y + DRAWING_TAG_H * 0.5);
+                        n_blocked += 1;
+                    }
+                }
+                // Their end tags changed: render measures their room again (`paint_chart`).
+                self.end_tags_moved |= self.studies.paint(
+                    (ox, oy),
+                    &self.vp,
+                    &t,
+                    &fmt,
+                    label_px(),
+                    labels,
+                    (axis_w(), &blocked[..n_blocked]),
+                    &covers,
+                    window,
+                    cx,
+                );
                 self.levels.paint_front(plot, &t, window);
                 self.footprint.paint_numbers(plot, &self.vp, &t, window, cx);
                 // In the gutter right of the newest bar (no bar under a label), under the
@@ -5118,6 +5212,9 @@ impl ChartView {
         window.paint_quad(fill(rect(0.0, ph, pw, hair), t.axis_line));
 
         let line_h = px(label_px() * 1.3);
+        // The VWAPs' off-scale markers this frame moved to the price axis (none while studies
+        // or their labels are hidden: paint didn't run them).
+        let axis_marks = self.visibility.draws_studies() && self.visibility.draws_labels();
         // The tags drawn over the price axis below; a label any of them would cover isn't
         // drawn at all (a half-covered number reads as another price).
         let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
@@ -5175,7 +5272,13 @@ impl ChartView {
                 continue;
             }
             let span = Span::around(l.y, label_px() * 0.65);
-            if !label_clear_of_tags(span, &tags) || !label_clear_of_tags(span, &drawing_tags) {
+            if !label_clear_of_tags(span, &tags)
+                || !label_clear_of_tags(span, &drawing_tags)
+                || (axis_marks
+                    && self
+                        .studies
+                        .axis_marks_cover(l.y - label_px() * 0.65, l.y + label_px() * 0.65))
+            {
                 continue;
             }
             let origin = point(px(ox + pw + 8.0), px(oy + l.y - label_px() * 0.65));
@@ -5305,6 +5408,10 @@ impl ChartView {
                     let _ = fmt.write(p, s);
                 },
             );
+        }
+        if axis_marks {
+            self.studies
+                .paint_axis_marks((ox, oy), &t, label_px(), window, cx);
         }
         // Order and position tags at the UI zoom, one size for layout, paint and (through the
         // boxes they store) hit tests. Hit targets: never under their 100 % size.
@@ -5519,7 +5626,7 @@ impl ChartView {
                 let _ = write!(b, "Cumulative delta · {}", reset.label());
             };
             let note = |b: &mut FixedStr<32>| {
-                let _ = b.write_str("≈ from bars");
+                let _ = b.write_str("≈ est. from bars");
             };
             let tw = f32::from(
                 self.label(LabelKind::SubTitle, key, t.text_main, window, title)
@@ -9030,6 +9137,9 @@ impl Render for ChartView {
             let theme = self.theme;
             self.levels
                 .measure_labels(|t| crate::levels_layer::measure(t, &theme, window));
+            let fmt = self.instrument.price;
+            self.studies
+                .measure_end_tags(&fmt, label_px(), &theme, window);
         }
         let today = pane::today(self.frozen, &self.store);
         // The list stays off the price axis.
@@ -9123,7 +9233,13 @@ impl Render for ChartView {
                     .when_some(
                         self.study_menu.as_ref().map(|m| {
                             let items = self.menu_items(m, cx);
-                            let menu = crate::study_menu_view::render(m, &items, &t, cx);
+                            let menu = crate::study_menu_view::render(
+                                m,
+                                &items,
+                                &t,
+                                &self.study_menu_scroll,
+                                cx,
+                            );
                             // Over the window with a backdrop under it (`crate::popover`).
                             let dismiss: popover::OnDismiss =
                                 Box::new(cx.listener(|v, _: &MouseDownEvent, _, cx| {
@@ -9146,7 +9262,14 @@ impl Render for ChartView {
                             },
                         ))
                     })
-                    .when_some(self.style_editor_layer(&t, cx), |d, e| d.child(e))
+                    .when_some(
+                        {
+                            let e = self.style_editor_layer(&t, cx);
+                            self.editor_open.set(e.is_some());
+                            e
+                        },
+                        |d, e| d.child(e),
+                    )
                     .when_some(self.dropper_layer(&t), |d, e| d.child(e))
                     .when_some(overlay, |d, overlay| d.child(overlay))
                     .when_some(self.timeframe_entry(&t), |d, e| d.child(e))

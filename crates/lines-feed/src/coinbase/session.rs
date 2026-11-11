@@ -136,6 +136,11 @@ pub struct CoinbaseSession {
     fill_in_flight: bool,
     complete_sent: bool,
     last_ws_time: UtcMillis,
+    /// When the websocket's boundary trade happened (the hole before it ends there).
+    boundary_time: Option<UtcMillis>,
+    /// A hole too wide to fetch whose end isn't known yet (a heartbeat's jump): missing from
+    /// here to the next trade the websocket delivers.
+    open_gap: Option<UtcMillis>,
     /// The queue head has been sent.
     head_issued: bool,
     /// REST trades in the forming bar, collected across pages.
@@ -253,6 +258,8 @@ impl CoinbaseSession {
             fill_in_flight: false,
             complete_sent: false,
             last_ws_time: UtcMillis(i64::MIN),
+            boundary_time: None,
+            open_gap: None,
             head_issued: false,
             forming: Vec::new(),
             unfetched: None,
@@ -290,6 +297,17 @@ impl CoinbaseSession {
         }
     }
 
+    /// Where a websocket hole begins: after the last websocket trade with a time; before any,
+    /// the connection's start (the websocket delivers nothing older), never `i64::MIN` (a
+    /// gap from the epoch would mark all history missing).
+    fn hole_from(&self) -> UtcMillis {
+        if self.last_ws_time.0 == i64::MIN {
+            self.cutoff
+        } else {
+            self.last_ws_time
+        }
+    }
+
     /// Issue the head request unless it is already in flight.
     fn issue_head(&mut self, out: &mut Vec<Outgoing>) {
         if !self.head_issued
@@ -300,8 +318,14 @@ impl CoinbaseSession {
         }
     }
 
-    /// Track websocket trade ids: returns false for duplicates; reports gaps.
-    fn sequence(&mut self, trade_id: u64, events: &mut Vec<MarketEvent>) -> bool {
+    /// Track websocket trade ids: returns false for duplicates; reports gaps. `time`: the
+    /// trade's (a hole before it ends there).
+    fn sequence(
+        &mut self,
+        trade_id: u64,
+        time: Option<UtcMillis>,
+        events: &mut Vec<MarketEvent>,
+    ) -> bool {
         if self.rest_max_id.is_some_and(|m| trade_id <= m) {
             return false; // already delivered by the REST back-fill
         }
@@ -313,7 +337,13 @@ impl CoinbaseSession {
                 events.push(MarketEvent::Gap {
                     missed: trade_id - last - 1,
                 });
-                self.add_hole(last + 1, trade_id - 1, false, self.last_ws_time, events);
+                self.add_hole(
+                    last + 1,
+                    trade_id - 1,
+                    false,
+                    (self.hole_from(), time),
+                    events,
+                );
             }
             _ => {}
         }
@@ -325,24 +355,31 @@ impl CoinbaseSession {
         true
     }
 
-    /// Fetch ids `lo..=hi` from REST, unless no number of fills could: then it is a gap now.
+    /// Fetch ids `lo..=hi` from REST, unless no number of fills could: then it is a gap now,
+    /// over the time it spans, `span`: from the last trade before it to the first after it
+    /// (exclusive), when known; not yet known (a heartbeat's jump), it is reported when the
+    /// next trade arrives (`open_gap`).
     fn add_hole(
         &mut self,
         lo: u64,
         hi: u64,
         boundary: bool,
-        when: UtcMillis,
+        span: (UtcMillis, Option<UtcMillis>),
         events: &mut Vec<MarketEvent>,
     ) {
+        let when = span.0;
         if lo > hi {
             return;
         }
         if hi - lo >= MAX_HOLE {
             tracing::warn!("trades {lo}..={hi}: too many to fetch; reporting a gap");
-            events.push(MarketEvent::HistoryGap {
-                from: when,
-                to: when,
-            });
+            match span.1 {
+                Some(to) => events.push(MarketEvent::HistoryGap {
+                    from: when,
+                    to: to.max(when),
+                }),
+                None => self.open_gap = Some(self.open_gap.map_or(when, |g| g.min(when))),
+            }
             return;
         }
         self.holes.push(Hole {
@@ -377,7 +414,8 @@ impl CoinbaseSession {
         let Some(b) = self.boundary else { return };
         self.boundary_checked = true;
         if let Some(r) = self.rest_newest_seen {
-            self.add_hole(r.saturating_add(1), b, true, self.cutoff, events);
+            let span = (self.cutoff, self.boundary_time);
+            self.add_hole(r.saturating_add(1), b, true, span, events);
             self.maybe_fill(out);
         }
         self.maybe_complete(events);
@@ -410,11 +448,13 @@ impl CoinbaseSession {
                 events.push(MarketEvent::Rejected { count: 1 })
             }
             WsMsg::Match(m) => {
-                if !self.sequence(m.trade_id, events) {
+                let at = UtcMillis::parse_iso(&m.time);
+                if !self.sequence(m.trade_id, at, events) {
                     return Ok(());
                 }
                 if self.boundary.is_none() {
                     self.boundary = Some(m.trade_id - 1);
+                    self.boundary_time = at;
                     self.check_boundary(events, out);
                 }
                 match (
@@ -424,6 +464,13 @@ impl CoinbaseSession {
                 ) {
                     (Some(time), Some(price), Some(qty)) => {
                         self.last_ws_time = time;
+                        // A hole too wide to fetch ends at this trade.
+                        if let Some(from) = self.open_gap.take() {
+                            events.push(MarketEvent::HistoryGap {
+                                from,
+                                to: time.max(from),
+                            });
+                        }
                         events.push(MarketEvent::Trade {
                             time,
                             price,
@@ -440,6 +487,8 @@ impl CoinbaseSession {
                 // must come from REST; the websocket starts after it.
                 if self.boundary.is_none() {
                     self.boundary = Some(m.trade_id);
+                    // The hole includes this trade: it ends just after it.
+                    self.boundary_time = UtcMillis::parse_iso(&m.time).map(|t| UtcMillis(t.0 + 1));
                     self.check_boundary(events, out);
                 }
                 match self.price(&m.price) {
@@ -510,7 +559,8 @@ impl CoinbaseSession {
                     events.push(MarketEvent::Gap {
                         missed: h.last_trade_id - last,
                     });
-                    self.add_hole(last + 1, h.last_trade_id, false, self.last_ws_time, events);
+                    let span = (self.hole_from(), None);
+                    self.add_hole(last + 1, h.last_trade_id, false, span, events);
                     self.last_trade_id = Some(h.last_trade_id);
                     self.maybe_fill(out);
                 }
@@ -815,6 +865,17 @@ impl ProviderSession for CoinbaseSession {
         self.queue.push_back(r);
         self.head_issued = true;
         Some(get)
+    }
+
+    /// A hole too wide to fetch whose end no trade told yet is missing through the
+    /// connection's end.
+    fn on_end(&mut self, now: UtcMillis, events: &mut Vec<MarketEvent>) {
+        if let Some(from) = self.open_gap.take() {
+            events.push(MarketEvent::HistoryGap {
+                from,
+                to: now.max(from),
+            });
+        }
     }
 
     fn start(&mut self, ctx: StartContext, out: &mut Vec<Outgoing>) {
@@ -1244,6 +1305,61 @@ mod tests {
     /// Audit finding 2: a heartbeat jumping far ahead is a gap at once, never a hole to fill
     /// (filling it used to walk the whole id range and freeze the feed).
     #[test]
+    fn a_huge_jump_open_when_the_connection_ends_is_a_gap_through_its_end() {
+        let mut s = live();
+        let big: u64 = 1 << 40;
+        let (ev, _) = feed(
+            &mut s,
+            Frame::text(format!(r#"{{"type":"heartbeat","last_trade_id":{big}}}"#)),
+        );
+        assert_eq!(ev, [MarketEvent::Gap { missed: big - 100 }]);
+        // No trade after it: the connection ends with the hole still open.
+        let mut ev = Vec::new();
+        s.on_end(iso("2026-11-06T14:06:00Z"), &mut ev);
+        assert_eq!(
+            ev,
+            [MarketEvent::HistoryGap {
+                from: iso("2026-11-06T14:05:31Z"),
+                to: iso("2026-11-06T14:06:00Z"),
+            }]
+        );
+        // Reported once.
+        let mut ev = Vec::new();
+        s.on_end(iso("2026-11-06T14:07:00Z"), &mut ev);
+        assert!(ev.is_empty());
+    }
+
+    /// A hole before any websocket trade with a time begins at the connection's start, never
+    /// at `i64::MIN` (a gap from the epoch would mark all history missing).
+    #[test]
+    fn a_hole_before_any_timed_trade_starts_at_the_connection() {
+        let mut s = session();
+        let f = reply(&s, "[]");
+        feed(&mut s, f);
+        // A match whose time doesn't parse: its id counts, its time doesn't.
+        text(
+            &mut s,
+            r#"{"type":"match","trade_id":100,"size":"1","price":"1","time":"later"}"#,
+        );
+        assert_eq!(s.last_ws_time, UtcMillis(i64::MIN));
+        let big: u64 = 1 << 40;
+        text(
+            &mut s,
+            &format!(r#"{{"type":"heartbeat","last_trade_id":{big}}}"#),
+        );
+        let mut ev = Vec::new();
+        s.on_end(iso("2026-11-06T14:06:00Z"), &mut ev);
+        assert_eq!(
+            ev,
+            [MarketEvent::HistoryGap {
+                from: s.cutoff,
+                to: iso("2026-11-06T14:06:00Z").max(s.cutoff),
+            }]
+        );
+        assert!(s.cutoff.0 > i64::MIN);
+    }
+
+    #[test]
     fn a_huge_id_jump_is_a_gap_not_a_hole() {
         let mut s = live();
         let big: u64 = 1 << 40;
@@ -1251,16 +1367,26 @@ mod tests {
             &mut s,
             Frame::text(format!(r#"{{"type":"heartbeat","last_trade_id":{big}}}"#)),
         );
-        assert_eq!(ev[0], MarketEvent::Gap { missed: big - 100 });
-        assert!(matches!(ev[1], MarketEvent::HistoryGap { .. }), "{ev:?}");
+        assert_eq!(ev, [MarketEvent::Gap { missed: big - 100 }]);
         assert!(out.is_empty() && s.holes.is_empty(), "nothing requested");
         assert_eq!(s.keepalive(UtcMillis(0)), None);
-        // The stream carries on after it.
+        // The stream carries on after it, and the gap is reported over its real span: from
+        // the last trade before it to the first after it (a zero-width gap would be dropped).
         let m = format!(
             r#"{{"type":"match","trade_id":{},"size":"1","price":"1","time":"2026-11-06T14:05:33Z"}}"#,
             big + 1
         );
-        assert_eq!(text(&mut s, &m).len(), 1);
+        let ev = text(&mut s, &m);
+        assert_eq!(
+            ev[0],
+            MarketEvent::HistoryGap {
+                from: iso("2026-11-06T14:05:31Z"),
+                to: iso("2026-11-06T14:05:33Z"),
+            },
+            "{ev:?}"
+        );
+        assert!(matches!(ev[1], MarketEvent::Trade { .. }), "{ev:?}");
+        assert_eq!(ev.len(), 2);
         // The REST-to-websocket hole too: a gap at once, and history completes.
         let mut s = session();
         let f = reply(&s, "[]");
@@ -1273,10 +1399,14 @@ mod tests {
         );
         let f = reply(&s, &trade_rows(&[99]));
         let (ev, out) = feed(&mut s, f);
-        assert!(
-            ev.iter()
-                .any(|e| matches!(e, MarketEvent::HistoryGap { .. }))
-        );
+        // Through the last match (its trade included).
+        let gap = ev.iter().find_map(|e| match e {
+            MarketEvent::HistoryGap { from, to } => Some((*from, *to)),
+            _ => None,
+        });
+        let (from, to) = gap.expect("a gap");
+        assert_eq!(to, UtcMillis(iso("2026-11-06T14:05:20Z").0 + 1), "{ev:?}");
+        assert!(from < to, "{ev:?}");
         assert_eq!(ev.last(), Some(&MarketEvent::HistoryComplete));
         assert!(out.is_empty() && s.holes.is_empty());
     }
@@ -1310,8 +1440,12 @@ mod tests {
             )),
         );
         assert!(
-            ev.iter()
-                .any(|e| matches!(e, MarketEvent::HistoryGap { .. }))
+            ev.iter().any(|e| matches!(
+                e,
+                MarketEvent::HistoryGap { from, to }
+                    if *from == iso("2026-11-06T14:05:31Z") && *to == iso("2026-11-06T14:05:33Z")
+            )),
+            "{ev:?}"
         );
         assert!(out.is_empty() && s.holes.is_empty());
     }

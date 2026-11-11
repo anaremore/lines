@@ -563,6 +563,10 @@ struct Cli {
     /// (as Ctrl+wheel would), which switches the price axis to manual scale.
     #[arg(long, requires = "screenshot", value_parser = parse_zoom)]
     price_zoom: Option<f64>,
+    /// Screenshot: pan the charts N bars back from the newest, as a drag would (the
+    /// view stops following live).
+    #[arg(long, requires = "screenshot", value_parser = parse_bars)]
+    pan_bars: Option<f64>,
     /// Screenshot: render with the symbol picker open on this query (e.g. "nq").
     #[arg(long, requires = "screenshot")]
     picker: Option<String>,
@@ -1030,6 +1034,14 @@ fn parse_zoom(s: &str) -> Result<f64, String> {
     match s.parse::<f64>() {
         Ok(f) if f.is_finite() && f > 0.0 => Ok(f),
         _ => Err("expected a positive factor, e.g. 1.5 (>1 zooms in)".into()),
+    }
+}
+
+/// A finite, non-negative bar count (`--pan-bars`).
+fn parse_bars(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(f) if f.is_finite() && f >= 0.0 => Ok(f),
+        _ => Err("expected a number of bars, e.g. 60".into()),
     }
 }
 
@@ -1965,6 +1977,7 @@ where
             shift_drag: cli.shift_drag,
             move_measure: cli.move_measure,
             price_zoom: cli.price_zoom,
+            pan_bars: cli.pan_bars,
             picker: cli.picker.clone(),
             indicators: cli
                 .vwap

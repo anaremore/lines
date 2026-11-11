@@ -62,8 +62,12 @@ impl Rig {
     }
 
     fn node(&mut self, spec: Spec) -> usize {
+        self.node_max(spec, 10_000)
+    }
+
+    fn node_max(&mut self, spec: Spec, max_buckets: usize) -> usize {
         let cal = self.cal;
-        let mut f = |k: &SeriesKey| make_builtin(k, Some(cal), 10_000);
+        let mut f = |k: &SeriesKey| make_builtin(k, Some(cal), max_buckets);
         self.g.acquire(SeriesKey { feed: 1, spec }, &mut f).unwrap()
     }
 
@@ -499,4 +503,346 @@ fn rth_from_history_bars_is_approximate_too() {
     let p = r.points(rth);
     assert_eq!(p.len(), 3);
     assert!(p.iter().all(|p| p.approx), "{p:?}");
+}
+
+// Session anchors and late starts (owner report 2026-11-10: a VWAP that began at 11:34 CT, after
+// a hole in the data, read as the session's).
+
+fn bar(iso: &str, price: i64, volume: i64) -> Bar {
+    Bar {
+        time: at(iso),
+        open: Price(price),
+        high: Price(price),
+        low: Price(price),
+        close: Price(price),
+        volume: Qty(volume),
+    }
+}
+
+/// A replay that starts before Tuesday 2026-11-10's 17:00 CT open: everything after it is known.
+fn from_before_the_open(r: &mut Rig) {
+    r.push(&[
+        Input::Connect {
+            expect_history: false,
+        },
+        Input::TradesFrom(at("2026-11-10T22:30:00Z")),
+    ]);
+}
+
+#[test]
+fn eth_anchors_at_the_5_pm_ct_open_and_resets_at_the_next() {
+    let mut r = Rig::new();
+    let eth = r.vwap(Reset::Eth, Bands(0b001));
+    from_before_the_open(&mut r);
+    r.push(&[
+        trade("2026-11-10T22:59:00Z", 5990.00, 7), // 16:59 CT: closed (the daily halt)
+        trade("2026-11-10T23:00:00Z", 6000.00, 1), // 17:00 CT: Wednesday's session opens
+        trade("2026-11-11T15:00:00Z", 6006.00, 2), // 09:00 CT Wednesday
+        trade("2026-11-11T21:59:00Z", 6003.00, 3), // 15:59 CT: the session's last minute
+        trade("2026-11-11T23:00:00Z", 6100.00, 1), // 17:00 CT: Thursday's session
+    ]);
+    let e = r.points(eth);
+    assert_eq!(e.len(), 4, "nothing while closed");
+    assert_eq!(
+        e[0].time,
+        at("2026-11-10T23:00:00Z"),
+        "anchored at 17:00 CT"
+    );
+    assert!(e.iter().all(|p| p.from.is_none()), "whole sessions: {e:?}");
+    // (600000 + 2·600600 + 3·600300) / 6
+    assert!(close(e[2].vwap, 3_602_100.0 / 6.0));
+    assert!(e[2].sd > 0.0, "the bands follow the same run");
+    assert!(close(e[3].vwap, 610_000.0), "the 17:00 CT rollover resets");
+    assert_eq!(e[3].sd, 0.0);
+    assert_ne!(e[3].period, e[2].period, "the line breaks at the reset");
+    assert_eq!(e[0].period, e[2].period);
+}
+
+#[test]
+fn rth_anchors_at_the_8_30_am_ct_open() {
+    let mut r = Rig::new();
+    let rth = r.vwap(Reset::Rth, Bands::NONE);
+    from_before_the_open(&mut r);
+    r.push(&[
+        trade("2026-11-10T23:30:00Z", 5990.00, 9), // 17:30 CT: ETH only
+        trade("2026-11-11T14:29:00Z", 5995.00, 4), // 08:29 CT: ETH only
+        trade("2026-11-11T14:30:00Z", 6000.00, 1), // 08:30 CT: RTH opens
+        trade("2026-11-11T16:00:00Z", 6010.00, 1),
+    ]);
+    let p = r.points(rth);
+    assert_eq!(p.len(), 2, "{p:?}");
+    assert_eq!(
+        p[0].time,
+        at("2026-11-11T14:30:00Z"),
+        "anchored at 08:30 CT"
+    );
+    assert!(close(p[1].vwap, 600_500.0));
+    assert!(
+        p.iter().all(|x| x.from.is_none()),
+        "the data reaches back to 08:30"
+    );
+}
+
+/// The owner's case: stored bars for the session's first minutes, then nothing the provider
+/// could deliver until 11:34 CT (a history gap), then trades. The VWAP starts over at 11:34 and
+/// says so; when the store holds the missing minutes, the whole session is back.
+#[test]
+fn a_hole_mid_session_starts_the_vwap_late_until_the_store_fills_it() {
+    let mut r = Rig::new();
+    let eth = r.vwap(Reset::Eth, Bands(0b001));
+    r.push(&[
+        // Stored bars from the evening before: 17:00–17:02 CT (Wednesday's session).
+        Input::Cached(vec![
+            bar("2026-11-10T23:00:00Z", 600_000, 10),
+            bar("2026-11-10T23:01:00Z", 600_100, 10),
+            bar("2026-11-10T23:02:00Z", 600_200, 10),
+        ]),
+        Input::Covered(vec![(
+            at("2026-11-10T22:00:00Z").0,
+            at("2026-11-10T23:02:59.999Z").0,
+        )]),
+        Input::Connect {
+            expect_history: true,
+        },
+        // The replay reached back only to 11:34 CT: the rest of the window is missing.
+        Input::HistoryGap {
+            from: at("2026-11-07T17:00:00Z"),
+            to: at("2026-11-11T17:34:00Z"),
+        },
+        Input::History {
+            bars: vec![bar("2026-11-11T17:34:00Z", 601_000, 5)],
+            as_of: Some(at("2026-11-11T17:34:59.999Z")),
+        },
+        Input::HistoryComplete,
+        trade("2026-11-11T17:35:00Z", 6012.00, 5),
+    ]);
+    let e = r.points(eth);
+    let late = e
+        .iter()
+        .find(|p| p.time == at("2026-11-11T17:34:00Z"))
+        .unwrap();
+    assert_eq!(
+        late.from,
+        Some(at("2026-11-11T17:34:00Z")),
+        "VWAP from 11:34 CT"
+    );
+    let newest = *e.last().unwrap();
+    assert_eq!(newest.from, Some(at("2026-11-11T17:34:00Z")));
+    // Only what it covers: (5·601000 + 5·601200) / 10, never the stored minutes before the hole.
+    assert!(close(newest.vwap, 601_100.0), "{}", newest.vwap);
+    assert_ne!(newest.period, e[0].period, "the line breaks at the hole");
+    assert!(e[0].from.is_none(), "the stored minutes start at the open");
+
+    // The store holds the rest of the session (bars and their coverage): the hole closes.
+    let mut fill = Vec::new();
+    let mut t = at("2026-11-10T23:03:00Z").0;
+    while t < at("2026-11-11T17:34:00Z").0 {
+        if r.cal.is_open(UtcMillis(t)) {
+            fill.push(Bar {
+                time: UtcMillis(t),
+                ..bar("2026-11-10T23:00:00Z", 601_000, 1)
+            });
+        }
+        t += MIN;
+    }
+    r.push(&[
+        Input::Cached(fill),
+        Input::Covered(vec![(
+            at("2026-11-10T23:03:00Z").0,
+            at("2026-11-11T17:33:59.999Z").0,
+        )]),
+    ]);
+    let e = r.points(eth);
+    let newest = *e.last().unwrap();
+    assert_eq!(newest.from, None, "the whole session again");
+    assert!(newest.approx, "partly from bars");
+    assert_eq!(newest.period, e[0].period, "one run since the open");
+}
+
+/// A replay whose recording starts after the open: the VWAP covers only from its first frame.
+#[test]
+fn data_that_starts_after_the_open_is_a_late_vwap() {
+    let mut r = Rig::new();
+    let eth = r.vwap(Reset::Eth, Bands::NONE);
+    r.push(&[
+        Input::Connect {
+            expect_history: false,
+        },
+        Input::TradesFrom(at("2026-11-11T16:00:00Z")), // 10:00 CT
+        trade("2026-11-11T16:00:05Z", 6000.00, 1),
+        trade("2026-11-11T23:00:00Z", 6010.00, 1), // Thursday's session: whole
+    ]);
+    let e = r.points(eth);
+    assert_eq!(e[0].from, Some(at("2026-11-11T16:00:00Z")));
+    assert_eq!(e[1].from, None, "the next session is whole");
+}
+
+/// The calendar's early close (the day after Thanksgiving, 12:15 CT) and the week's next open
+/// (Sunday 17:00 CT): no VWAP between them, and the next session is whole.
+#[test]
+fn early_close_and_the_next_open_come_from_the_calendar() {
+    let mut r = Rig::new();
+    let eth = r.vwap(Reset::Eth, Bands::NONE);
+    r.push(&[
+        Input::Connect {
+            expect_history: false,
+        },
+        Input::TradesFrom(at("2026-11-27T17:00:00Z")), // Fri 11:00 CT
+        trade("2026-11-27T17:00:00Z", 6000.00, 1),
+        trade("2026-11-27T18:20:00Z", 6050.00, 1), // 12:20 CT: after the early close
+        trade("2026-11-29T23:00:00Z", 6100.00, 1), // Sun 17:00 CT: Monday's session
+    ]);
+    let e = r.points(eth);
+    assert_eq!(
+        e.iter().map(|p| p.time).collect::<Vec<_>>(),
+        vec![at("2026-11-27T17:00:00Z"), at("2026-11-29T23:00:00Z")]
+    );
+    assert!(e[0].from.is_some(), "Friday's data starts at 11:00 CT");
+    assert_eq!(e[1].from, None);
+    assert!(close(e[1].vwap, 610_000.0));
+}
+
+/// A replay's first frame that arrives after the buckets it precedes (the engine was told
+/// late): the run already built is rebuilt, its late start moving back to the frame.
+#[test]
+fn trades_from_after_the_buckets_rebuilds_the_late_start() {
+    let mut r = Rig::new();
+    let eth = r.vwap(Reset::Eth, Bands::NONE);
+    r.push(&[
+        Input::Connect {
+            expect_history: false,
+        },
+        trade("2026-11-11T17:34:00Z", 6000.00, 1),
+        trade("2026-11-11T17:40:00Z", 6002.00, 1),
+    ]);
+    let e = r.points(eth);
+    assert_eq!(e[0].from, Some(at("2026-11-11T17:34:00Z")), "{e:?}");
+    // Told afterwards that the data is known from 11:00 CT: still late, from there.
+    r.push(&[Input::TradesFrom(at("2026-11-11T17:00:00Z"))]);
+    let e = r.points(eth);
+    assert!(
+        e.iter().all(|p| p.from == Some(at("2026-11-11T17:00:00Z"))),
+        "{e:?}"
+    );
+    // From before the open: the whole session.
+    r.push(&[Input::TradesFrom(at("2026-11-10T22:30:00Z"))]);
+    let e = r.points(eth);
+    assert!(e.iter().all(|p| p.from.is_none()), "{e:?}");
+}
+
+/// The series keeps a bounded number of buckets: a trim from the front that cuts a session
+/// rebuilds it from the new front, a late run (its sums lose the dropped buckets), the same as
+/// any later recompute would give.
+#[test]
+fn a_front_trim_that_cuts_a_session_makes_it_late() {
+    let mut r = Rig {
+        g: Graph::new(),
+        cal: es_calendar(),
+    };
+    r.node_max(Spec::Market { period_ms: MIN }, 100);
+    let eth = r.node_max(
+        Spec::Vwap {
+            period_ms: MIN,
+            vwap: VwapSpec {
+                reset: Reset::Eth,
+                bands: Bands::NONE,
+            },
+        },
+        100,
+    );
+    from_before_the_open(&mut r);
+    let open = at("2026-11-10T23:00:00Z").0;
+    let mut inputs = Vec::new();
+    for k in 0..120i64 {
+        inputs.push(Input::Trade {
+            time: UtcMillis(open + k * MIN),
+            price: Price(600_000 + k),
+            qty: Qty(1),
+            aggressor: None,
+        });
+    }
+    r.push(&inputs);
+    let e = r.points(eth);
+    assert!(e.iter().all(|p| p.from.is_none()), "no trim yet");
+    // Past the bound and its slack: the oldest buckets go.
+    let mut more = Vec::new();
+    for k in 120..130i64 {
+        more.push(Input::Trade {
+            time: UtcMillis(open + k * MIN),
+            price: Price(600_000 + k),
+            qty: Qty(1),
+            aggressor: None,
+        });
+    }
+    r.push(&more);
+    let e = r.points(eth);
+    assert!(e.len() < 120, "trimmed: {}", e.len());
+    let first = e[0].time;
+    assert!(first.0 > open, "the session's start was trimmed");
+    assert!(e.iter().all(|p| p.from == Some(first)), "{:?}", e[0]);
+    // Only what is held: the mean of the remaining prices.
+    let k0 = (first.0 - open) / MIN;
+    let mean = (k0..130).map(|k| (600_000 + k) as f64).sum::<f64>() / (130 - k0) as f64;
+    assert!(close(e.last().unwrap().vwap, mean));
+}
+
+/// The store covers months back, but the chart holds only its bounded cached bars, which
+/// start mid-week (Wednesday 10:00 CT): the session's, the week's and the month's runs are
+/// late from the first held bar, never whole, and stay so (from the new front) after a trim.
+#[test]
+fn store_coverage_before_the_held_bars_is_not_a_whole_period() {
+    let mut r = Rig {
+        g: Graph::new(),
+        cal: es_calendar(),
+    };
+    r.node_max(Spec::Market { period_ms: MIN }, 100);
+    let ids: Vec<usize> = [Reset::Eth, Reset::Weekly, Reset::Monthly]
+        .into_iter()
+        .map(|reset| {
+            r.node_max(
+                Spec::Vwap {
+                    period_ms: MIN,
+                    vwap: VwapSpec {
+                        reset,
+                        bands: Bands::NONE,
+                    },
+                },
+                100,
+            )
+        })
+        .collect();
+    let start = at("2026-11-11T16:00:00Z").0; // Wed 10:00 CT
+    let cached = |from: i64, n: i64| -> Vec<Bar> {
+        (from..from + n)
+            .map(|k| Bar {
+                time: UtcMillis(start + k * MIN),
+                ..bar("2026-11-11T16:00:00Z", 600_000 + k, 1)
+            })
+            .collect()
+    };
+    r.push(&[
+        Input::Cached(cached(0, 60)),
+        // The store's bar coverage: from September to the newest cached bar.
+        Input::Covered(vec![(at("2026-09-01T00:00:00Z").0, start + 60 * MIN - 1)]),
+    ]);
+    for &id in &ids {
+        let p = r.points(id);
+        assert_eq!(p.len(), 60);
+        assert!(
+            p.iter().all(|x| x.from == Some(UtcMillis(start))),
+            "{:?}",
+            p[0]
+        );
+    }
+    // More bars than the series holds: the front goes; still late, from the new front.
+    r.push(&[
+        Input::Cached(cached(60, 80)),
+        Input::Covered(vec![(start + 60 * MIN, start + 140 * MIN - 1)]),
+    ]);
+    for &id in &ids {
+        let p = r.points(id);
+        let first = p[0].time;
+        assert!(first.0 > start, "trimmed");
+        assert!(p.iter().all(|x| x.from == Some(first)), "{:?}", p[0]);
+    }
 }

@@ -400,6 +400,49 @@ async fn coinbase_reconnect_mid_bar() {
     assert_eq!(d.history, HistoryState::Complete);
 }
 
+/// A hole still open when a connection ends (a heartbeat's jump too wide to fetch, no trade
+/// after it) is reported through its end by the connection driver (`ProviderSession::on_end`
+/// in `run_connection`), and a recording read as events (`RecordedEvents`, backtests) reports
+/// it the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hole_open_at_the_connection_end_is_reported_live_and_recorded() {
+    let tape = tape();
+    let c1 = at("14:05:30");
+    let rest1 = id_at(&tape, c1);
+    let mut f = vec![
+        subscribed(),
+        candles(&tape, at("14:00:00"), at("14:05:00")),
+        rest_trades(&tape, rest1, 1000),
+    ];
+    f.extend(
+        ids(&tape, rest1 + 1, id_at(&tape, at("14:05:40")))
+            .iter()
+            .map(ws_match),
+    );
+    f.push(Frame::text(format!(
+        r#"{{"type":"heartbeat","last_trade_id":{}}}"#,
+        1u64 << 40
+    )));
+    let path = record("open-at-end.lfr", c1, &f);
+    let store = replay(path.clone()).await;
+    assert!(
+        matches!(store.read().history, HistoryState::Incomplete { .. }),
+        "{:?}",
+        store.read().history
+    );
+    let mut r = lines_feed::recorded::RecordedEvents::open(&path).unwrap();
+    let mut gaps = Vec::new();
+    while let Some((_, events)) = r.next_batch().unwrap() {
+        gaps.extend(
+            events
+                .into_iter()
+                .filter(|e| matches!(e, lines_feed::provider::MarketEvent::HistoryGap { .. })),
+        );
+    }
+    assert_eq!(gaps.len(), 1, "{gaps:?}");
+    assert!(r.next_batch().unwrap().is_none(), "the end is given once");
+}
+
 /// Reconnect inside the same minute (backoff starts at 0.5 s): no candles are due, and REST
 /// trades rebuild the forming bar. They must replace it, not add to the trades connection 1
 /// already applied (regression: the bar's early volume was counted twice).

@@ -460,7 +460,7 @@ fn market_data_waits_for_the_checked_definition() {
 /// completes with the definitions' replay; trades are live from the start.
 #[test]
 fn without_a_replay_the_missing_history_is_a_gap() {
-    let mut s = session(&Floors::default(), ReplayLimit { max_ms: 0 });
+    let mut s = session(&Floors::default(), ReplayLimit::cap(0));
     let body = dbn(|e| {
         e.encode_record(&def(TICK)).unwrap();
         e.encode_record(&replay_done(T0)).unwrap();
@@ -481,6 +481,60 @@ fn without_a_replay_the_missing_history_is_a_gap() {
     );
     assert!(events.contains(&MarketEvent::HistoryComplete));
     assert!(matches!(events.last(), Some(MarketEvent::Trade { .. })));
+}
+
+/// A cap the trader set (`LINES_DATABENTO_REPLAY_HOURS`) stands: an hour's cap at 09:40 CT on
+/// Thursday 2026-11-12 replays one hour, though that session opened Wednesday 17:00 CT (its
+/// VWAP says "from"). Unset, the whole window (~23 h 40 min) reaches back past that open (no
+/// calendar involved), and with the store's newest bar after the open it starts at that bar. With
+/// the market closed (the tests' usual Saturday clock) a set cap stands too.
+#[test]
+fn a_set_replay_cap_stands_and_unset_reaches_the_open() {
+    let at = |iso: &str| UtcMillis::parse_iso(iso).unwrap();
+    let thursday = at("2026-11-12T15:40:00Z");
+    let open = at("2026-11-11T23:00:00Z").0;
+    let trades_start = |limit: ReplayLimit, c: StartContext| {
+        let mut s = session(&Floors::default(), limit);
+        let body = dbn(|e| {
+            e.encode_record(&def(TICK)).unwrap();
+        });
+        let frames = connection(body);
+        let timed: Vec<(&[u8], UtcMillis)> = frames.iter().map(|f| (f.as_slice(), c.now)).collect();
+        let (_, out, _) = run_at(&mut s, c, &timed);
+        out
+    };
+    let cold = |now| StartContext { now, ..ctx(None) };
+    // Set: an hour back, the open not reached.
+    let out = trades_start(ReplayLimit::cap(3_600_000), cold(thursday));
+    assert!(
+        out.contains(&trades_line(thursday.0 - 3_600_000)),
+        "{out:?}"
+    );
+    // Set further back than the open: kept.
+    let out = trades_start(ReplayLimit::cap(20 * 3_600_000), cold(thursday));
+    assert!(
+        out.contains(&trades_line(thursday.0 - 20 * 3_600_000)),
+        "{out:?}"
+    );
+    // Unset: the whole window, which reaches back past the open.
+    let out = trades_start(ReplayLimit::default(), cold(thursday));
+    let window = UtcMillis(thursday.0 - REPLAY_WINDOW_MS + MIN - 1)
+        .floor_to(MIN)
+        .0;
+    assert!(window <= open);
+    assert!(out.contains(&trades_line(window)), "{out:?}");
+    // Unset, with the store's newest bar after the open: the replay starts at that bar (the
+    // store holds the session before it), never earlier.
+    let stored = at("2026-11-12T13:00:00Z");
+    let c = StartContext {
+        now: thursday,
+        ..ctx(Some(stored))
+    };
+    let out = trades_start(ReplayLimit::default(), c);
+    assert!(out.contains(&trades_line(stored.0)), "{out:?}");
+    // Closed (Saturday): nothing is trading, a set cap stands.
+    let out = trades_start(ReplayLimit::cap(3_600_000), ctx(None));
+    assert!(out.contains(&trades_line(now().0 - 3_600_000)), "{out:?}");
 }
 
 /// The trades replay is decided by the recorded plan, not this machine's setting: a session
@@ -513,10 +567,7 @@ fn a_recording_decodes_the_same_whatever_the_replay_setting() {
         }
         events
     };
-    assert_eq!(
-        replay(ReplayLimit { max_ms: 0 }),
-        replay(ReplayLimit::default())
-    );
+    assert_eq!(replay(ReplayLimit::cap(0)), replay(ReplayLimit::default()));
 }
 
 /// One completion for two replays: history completes once replay activity has been quiet for
@@ -671,7 +722,7 @@ fn the_display_factor_never_refuses_a_definition() {
             e.encode_record(&d).unwrap();
             e.encode_record(&trade(T0 + 3_000, PX, 1, b'A')).unwrap();
         });
-        let mut s = session(&Floors::default(), ReplayLimit { max_ms: 0 });
+        let mut s = session(&Floors::default(), ReplayLimit::cap(0));
         run_conn(&mut s, &connection(body))
     };
     let (events, _, err) = with(10_000_000);
@@ -693,7 +744,7 @@ fn the_default_book_is_the_inside_and_says_so() {
         &es(),
         Some(z6()),
         Floors::default(),
-        ReplayLimit { max_ms: 0 },
+        ReplayLimit::cap(0),
         "t",
     )
     .unwrap();
@@ -753,8 +804,7 @@ fn the_default_book_is_the_inside_and_says_so() {
 fn a_refused_depth_schema_falls_back_to_the_inside() {
     for code in [None, Some(ErrorCode::InvalidSubscription)] {
         let plan = BookPlan::new(true);
-        let new =
-            || session(&Floors::default(), ReplayLimit { max_ms: 0 }).with_book_plan(plan.clone());
+        let new = || session(&Floors::default(), ReplayLimit::cap(0)).with_book_plan(plan.clone());
         let body = dbn(|e| {
             e.encode_record(&mapping()).unwrap();
             e.encode_record(&def(TICK)).unwrap();
@@ -795,7 +845,7 @@ fn a_refused_depth_schema_falls_back_to_the_inside() {
 fn the_book_note_follows_the_recording() {
     let body = || dbn(|e| e.encode_record(&def(TICK)).unwrap());
     for want_depth in [false, true] {
-        let mut s = session(&Floors::default(), ReplayLimit { max_ms: 0 })
+        let mut s = session(&Floors::default(), ReplayLimit::cap(0))
             .with_book_plan(BookPlan::new(want_depth));
         let frames: Vec<Vec<u8>> = vec![
             CONNECTION_MARKER.to_vec(),
@@ -832,7 +882,7 @@ fn the_book_note_follows_the_recording() {
     }
     // A recorded mbp-10 connection: no note, whatever this machine wants.
     let mut s =
-        session(&Floors::default(), ReplayLimit { max_ms: 0 }).with_book_plan(BookPlan::new(false));
+        session(&Floors::default(), ReplayLimit::cap(0)).with_book_plan(BookPlan::new(false));
     let mut events = Vec::new();
     s.start(ctx(None), &mut Vec::new());
     for f in [
@@ -891,8 +941,7 @@ fn refusal_wordings_and_auth_errors() {
 #[test]
 fn a_refused_inside_leaves_the_trades() {
     let plan = Arc::new(BookPlan::default());
-    let new =
-        || session(&Floors::default(), ReplayLimit { max_ms: 0 }).with_book_plan(plan.clone());
+    let new = || session(&Floors::default(), ReplayLimit::cap(0)).with_book_plan(plan.clone());
     let body = dbn(|e| e.encode_record(&refusal("mbp-1", None)).unwrap());
     let (events, _, err) = run_conn(&mut new(), &connection(body));
     assert_eq!(err, None);

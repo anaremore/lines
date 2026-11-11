@@ -60,6 +60,13 @@ const fn line(color: Color, width: u8, opacity: u8) -> PartStyle {
     })
 }
 
+const LINE_OWN_HALF: LineStyle = LineStyle {
+    color: Color::Own,
+    line: LineType::Solid,
+    width: 1,
+    opacity: 50,
+};
+
 const fn fill(opacity: u8) -> PartStyle {
     PartStyle::Fill(FillStyle {
         color: Color::Own,
@@ -102,7 +109,11 @@ pub const VWAP: [PartDef; 3] = [
         ..part(
             "bands",
             "Band edges",
-            line(Color::Own, 1, 50),
+            // Dashed, at half the line's strength: an edge is never read as the VWAP.
+            PartStyle::Line(LineStyle {
+                line: LineType::Dashed,
+                ..LINE_OWN_HALF
+            }),
             true,
             own("Line color", OwnToken::Line),
         )
