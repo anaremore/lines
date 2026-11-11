@@ -184,8 +184,10 @@ fn volume_is_a_study_with_its_options() {
         panic!("volume")
     };
     assert!(spec.color_by_candle && spec.average && spec.split && spec.overlay);
+    // On the chart already: placing it there keeps it (and its options), one Volume.
     set.apply(&StudyAction::PlaceVolume(true));
     assert_eq!(set.indicators.len(), 2);
+    assert!(matches!(set.indicators[0], IndicatorConfig::Volume { spec: s, .. } if s == spec));
     assert_eq!(spec.average_len, 20, "20 when first turned on");
     assert!(
         !set.indicators[0].in_subpane(),
