@@ -521,6 +521,13 @@ impl Theme {
         }
     }
 
+    /// A stale map's level label text: the theme's dim text, AA (4.5:1) on the label's box
+    /// over any chart content in every theme and palette (the box is 90 % opaque:
+    /// `stale_label_text_meets_aa_over_anything`).
+    pub fn stale_label_text(&self) -> Hsla {
+        self.text_dim
+    }
+
     /// Whether `color` is close to the last price's (and the accent's) color: within the
     /// style editor's "close to a color with a meaning" distance (CIEDE2000 under
     /// `NEAR_MEANING`), so text in it could be read as the last price.
@@ -1100,6 +1107,26 @@ mod tests {
     /// a source or a type picks (216 sampled), over zone fills of those colors, in every theme
     /// and palette. Not a blanket fallback: the theme's text and bright colors on dark keep
     /// their color.
+    #[test]
+    fn stale_label_text_meets_aa_over_anything() {
+        for t in Theme::all() {
+            let text = t.stale_label_text();
+            // The gutter, every sampled color as a zone fill up to 45 % over the chart, and
+            // pure black and white under the box: anything a chart can draw there.
+            let fills = any_user_color()
+                .flat_map(|c| [0.15, 0.3, 0.45].map(|a| t.zones_over_chart([c.opacity(a)])));
+            let worst = t
+                .label_gutter_underlays()
+                .into_iter()
+                .chain(fills)
+                .chain([gpui::black(), gpui::white()])
+                .map(|u| contrast(text, over(t.label_bg, u)))
+                .fold(f64::INFINITY, f64::min);
+            println!("{}: stale label text worst {worst:.2}", t.name);
+            assert!(worst >= 4.5, "{}: {worst:.2}", t.name);
+        }
+    }
+
     #[test]
     fn level_label_text_meets_aa_or_falls_back() {
         for t in Theme::all() {

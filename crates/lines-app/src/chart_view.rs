@@ -2633,8 +2633,8 @@ impl ChartView {
         // zone, band or line shows through it.
         let size = crate::zoom::f(12.0);
         let rem = f32::from(window.rem_size());
-        // Inside the box's padding, a pixel spare for rounding.
-        let room = LEGEND_MAX_W - 2.0 * crate::zoom::f(8.0) - 1.0;
+        // Inside the box's padding and its 1 px edges, a pixel spare for rounding.
+        let room = LEGEND_MAX_W - 2.0 * crate::zoom::f(8.0) - 2.0 - 1.0;
         let levels = (!rows.is_empty()).then(|| {
             // Each row's fit is measured once per (row content, room, zoom, rem) and kept
             // (`legend_fits`): a frame that shows the same legend measures nothing.
@@ -2661,7 +2661,7 @@ impl ChartView {
                     }
                     let mut m = |s: &str| crate::levels_layer::measure_at(s, size, t, window);
                     let head = m(r.label) + 0.5 * rem + m("· ");
-                    // The state ("stale", "missing · …") keeps its room and gap: the title
+                    // The state ("· stale", "missing · …") keeps its room and gap: the title
                     // is cut first.
                     let status = if r.text.is_empty() {
                         0.0
@@ -2699,9 +2699,12 @@ impl ChartView {
                 .max_w(px(LEGEND_MAX_W))
                 .px(crate::zoom::ui(8.0))
                 .py(crate::zoom::ui(4.0))
-                // Opaque across its whole width, and nothing drawn past it.
+                // Opaque across its whole width, and nothing drawn past it; a 1 px edge in the
+                // theme's line color.
                 .overflow_hidden()
                 .bg(t.legend_box())
+                .border_1()
+                .border_color(t.axis_line)
                 .text_size(crate::zoom::ui(12.0))
                 .children(rows.into_iter().map(|(r, fit)| {
                     let head = div()
@@ -5192,6 +5195,8 @@ impl ChartView {
                     crate::eyedropper::rect(rect(bx, c.body_top, bw, bh.max(hair)), color, body);
                 }
             }
+            // Painted labels this frame only (the last-price line breaks around them).
+            self.levels.clear_chips();
             if studies {
                 // Footprint cells' fills, then the study and level lines over them (visible
                 // across the cells), then the cells' numbers on tight boxes of their cell's
@@ -5255,7 +5260,7 @@ impl ChartView {
                     self.last_trade
                         .map(|p| self.vp.price_to_y(p.0 as f64) as f32),
                 );
-                self.levels.paint_front(plot, &t, window);
+                self.levels.paint_front(plot, &t, &self.footprint, window);
                 self.footprint.paint_numbers(plot, &self.vp, &t, window, cx);
                 // In the gutter right of the newest bar (no bar under a label), under the
                 // drawings and the strategy markers as study labels always were.
@@ -5287,15 +5292,15 @@ impl ChartView {
                     window.paint_quad(fill(rect(a, y, b - a, hair), color));
                 });
             };
+            // The last-price line never runs through a level label's chip (nor a footprint
+            // number).
             if let Some(p) = self.last_trade {
                 let y = self.vp.price_to_y(p.0 as f64) as f32;
-                hline(
-                    window,
-                    y,
-                    0.0,
-                    pw,
-                    t.last.opacity(crate::theme::LAST_LINE_ALPHA),
-                );
+                let c = t.last.opacity(crate::theme::LAST_LINE_ALPHA);
+                let chips = self.levels.label_chips();
+                crate::levels_layer::around_chips(chips, y, hair, 0.0, pw, |a, b| {
+                    hline(window, y, a, b, c);
+                });
             }
             // The open position: a dashed line at its average price (never the last price's
             // solid violet).
@@ -8816,7 +8821,7 @@ fn prepare_studies(
 }
 
 /// The level labels' gutter's widest (logical px at 100 % zoom): a whole 8 px step with room
-/// (124 px) for a 22-character label with a five-digit price ("Yellow Line : 27932.00") in
+/// (124 px) for a 22-character label with a five-digit price ("Prior Close : 27932.00") in
 /// the UI font (IBM Plex Sans, decision 0034) at 1400 px.
 const GUTTER_CAP: f32 = 144.0;
 

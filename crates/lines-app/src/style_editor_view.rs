@@ -1743,6 +1743,50 @@ mod tests {
         assert!(e.rows().iter().any(|r| r.label == "Fill opacity"));
     }
 
+    /// "Fill opacity" always shows what is drawn: the current choice checked, or (a value it
+    /// doesn't offer, such as a source's 88 %) a checked "Custom 88%" after the choices.
+    #[test]
+    fn fill_opacity_shows_a_custom_value_checked() {
+        use crate::study_style::level_editor;
+        use lines_core::levels::LabelMode;
+        let mut e = level_editor(
+            "Levels · Demo style".into(),
+            &Default::default(),
+            &lines_feed::levels::demo::TYPES,
+            LabelMode::Name,
+            None,
+            |_| None,
+        );
+        let tab = e.parts.iter().position(|p| p.title == "Zone").unwrap();
+        e.select_tab(tab);
+        let row = |e: &crate::style_editor::StyleEditor| {
+            let r = e
+                .rows()
+                .into_iter()
+                .find(|r| r.label == "Fill opacity")
+                .unwrap();
+            r.controls
+                .iter()
+                .map(|&(c, on)| (crate::style_editor::control_label(c, &[]), on))
+                .collect::<Vec<_>>()
+        };
+        for (o, custom) in [(50u8, false), (88, true)] {
+            if let Some((f, _)) = e.parts[tab].fill.as_mut() {
+                f.opacity = o;
+            }
+            let got = row(&e);
+            let checked: Vec<_> = got.iter().filter(|(_, on)| *on).collect();
+            assert_eq!(checked.len(), 1, "{o}: one checked: {got:?}");
+            let want = if custom {
+                format!("Custom {o}%")
+            } else {
+                format!("{o}%")
+            };
+            assert_eq!(checked[0].0, want);
+            assert_eq!(got.len(), 4 + usize::from(custom));
+        }
+    }
+
     /// Focus moved to a row out of view scrolls the least that shows it; a row taller than
     /// the body shows from its top; a row in view doesn't scroll.
     #[test]

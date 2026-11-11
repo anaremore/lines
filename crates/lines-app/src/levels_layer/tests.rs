@@ -201,7 +201,7 @@ fn layer_places_filters_and_reports_freshness() {
     let rows = layer.legend();
     assert_eq!(
         (rows[i].text.as_str(), rows[i].warn, rows[i].dim),
-        ("stale", false, true),
+        ("· stale", false, true),
         "stale: said in words, dimmed, never the map's time"
     );
     assert!(!rows[i].stats.is_empty(), "its stats, dimmed with it");
@@ -1388,9 +1388,9 @@ fn a_stale_legend_row_keeps_stale_beside_a_long_title() {
     // The legend's room inside its padding (360 px, 8 px a side, a pixel spare).
     let room = 360.0 - 16.0 - 1.0;
     let gap = 6.0;
-    let head = mono("RS Levels") + gap + mono("· ");
-    let status = gap + mono("stale");
-    let title = "Map BLD with a forty character long title";
+    let head = mono("Acme Levels") + gap + mono("· ");
+    let status = gap + mono("· stale");
+    let title = "Map ABC with a forty character long title";
     assert!(title.chars().count() >= 40);
     let f = fit_legend(room, head, status, Some(title), &[], 12.0, mono);
     let t = f.title.expect("a cut title");
@@ -1441,4 +1441,102 @@ fn level_strokes_leave_the_last_price_row_clear() {
     assert_eq!(parts(10.0, 1.0, Some(10.0)), []);
     assert_eq!(parts(10.0, 3.0, Some(11.0)), [(10.0, 1.0), (12.0, 1.0)]);
     assert_eq!(parts(10.0, 2.0, Some(9.5)), [(10.5, 1.5)]);
+}
+
+/// In footprint mode the last-price line breaks at drawn cells, so a level stroke keeps its
+/// last-price gap only where that line is drawn: whole across a cell, split beside it.
+#[test]
+fn level_strokes_gap_only_where_the_last_price_line_is_drawn() {
+    use crate::footprint::{FootprintConfig, FootprintLayer};
+    let mut fp = FootprintLayer::new(FootprintConfig::default());
+    let quads = |fp: &FootprintLayer, last| {
+        let mut v = Vec::new();
+        stroke_around_last(0.0, 100.0, 10.0, 3.0, last, 1.0, fp, &mut |a, b, t, h| {
+            v.push((a, b, t, h))
+        });
+        v
+    };
+    // No footprint: split around the row across the whole stroke.
+    assert_eq!(
+        quads(&fp, Some(11.0)),
+        [(0.0, 100.0, 10.0, 1.0), (0.0, 100.0, 12.0, 1.0)]
+    );
+    // Away from the row: whole.
+    assert_eq!(quads(&fp, Some(40.0)), [(0.0, 100.0, 10.0, 3.0)]);
+    // A cell across the row at 40..60: the stroke is whole there.
+    fp.set_drawn(vec![[40.0, 60.0, 0.0, 20.0]]);
+    assert_eq!(
+        quads(&fp, Some(11.0)),
+        [
+            (0.0, 40.0, 10.0, 1.0),
+            (0.0, 40.0, 12.0, 1.0),
+            (40.0, 60.0, 10.0, 3.0),
+            (60.0, 100.0, 10.0, 1.0),
+            (60.0, 100.0, 12.0, 1.0),
+        ]
+    );
+}
+
+/// The last-price line never runs through a level label's chip: it breaks at each chip on its
+/// row and runs whole past the others.
+#[test]
+fn the_last_price_line_breaks_at_label_chips() {
+    let segs = |chips: &[[f32; 4]], y| {
+        let mut v = Vec::new();
+        around_chips(chips, y, 1.0, 0.0, 500.0, |a, b| v.push((a, b)));
+        v
+    };
+    let chips = [[420.0, 496.0, 100.0, 116.0], [400.0, 496.0, 140.0, 156.0]];
+    assert_eq!(segs(&chips, 50.0), [(0.0, 500.0)]);
+    assert_eq!(segs(&chips, 108.0), [(0.0, 420.0), (496.0, 500.0)]);
+    assert_eq!(segs(&chips, 150.0), [(0.0, 400.0), (496.0, 500.0)]);
+    // A row touching a chip's edge only: a hair above its top is clear.
+    assert_eq!(segs(&chips, 99.0), [(0.0, 500.0)]);
+    // Two sources' chips overlapping on one row: one gap across both.
+    let both = [[420.0, 496.0, 100.0, 116.0], [380.0, 450.0, 104.0, 120.0]];
+    assert_eq!(segs(&both, 110.0), [(0.0, 380.0), (496.0, 500.0)]);
+    assert_eq!(segs(&[], 110.0), [(0.0, 500.0)]);
+}
+
+/// A stale map's zone fills, zone edges and lines dim with it, whatever their color: a type's
+/// fixed color (the demo's) and the source's own alike, in every theme.
+#[test]
+fn stale_fills_and_edges_dim_with_their_map() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let (layer, _store, i) = demo_layer();
+    let slot = &layer.slots[i];
+    let map = slot.map.clone().expect("a demo map");
+    let mut zones = 0;
+    for t in Theme::all() {
+        for l in &map.levels {
+            let zone = matches!(l.shape, LevelShape::Zone { .. });
+            let pairs = [
+                (
+                    slot.stroke(&t, l, 1.0, false, 1.0).color,
+                    slot.stroke(&t, l, 0.4, false, 1.0).color,
+                ),
+                (
+                    slot.stroke(&t, l, 1.0, zone, 1.0).color,
+                    slot.stroke(&t, l, 0.4, zone, 1.0).color,
+                ),
+            ];
+            for (now, stale) in pairs {
+                assert!(
+                    (stale.a - now.a * 0.4).abs() < 1e-5,
+                    "{}: {:?} {:?}",
+                    t.name,
+                    now,
+                    stale
+                );
+            }
+            if zone {
+                zones += 1;
+                let (now, stale) = (slot.zone_fill(&t, l, 1.0), slot.zone_fill(&t, l, 0.4));
+                assert!(now.a > 0.0);
+                assert!((stale.a - now.a * 0.4).abs() < 1e-5, "{}: fill", t.name);
+                assert_eq!((stale.h, stale.s, stale.l), (now.h, now.s, now.l));
+            }
+        }
+    }
+    assert!(zones > 0, "the demo has zones");
 }

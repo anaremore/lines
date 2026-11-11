@@ -249,14 +249,17 @@ impl Slot {
     /// override, else the source's Zones, else the type's own, with its light-theme
     /// counterpart), else the source's Zones look over the level's own color.
     fn zone_fill(&self, theme: &Theme, l: &Level, dim: f32) -> Paint {
-        match self.type_look(l) {
+        let mut c = match self.type_look(l) {
             Some(t) => theme.part_color(
                 t.fill_color(theme.is_dark()),
-                source_colour(l.style.rgba, study_style::LEVEL_ZONE_ALPHA * dim),
+                source_colour(l.style.rgba, study_style::LEVEL_ZONE_ALPHA),
                 t.fill.opacity,
             ),
-            None => theme.level_zone(&self.looks, l.style.rgba, dim),
-        }
+            None => theme.level_zone(&self.looks, l.style.rgba, 1.0),
+        };
+        // Dimmed after the color resolves: a type's or a user's color dims with its map too.
+        c.a *= dim;
+        c
     }
 
     /// A line's (or, `edge`, a zone edge's) color, width (logical px) and dash at `dim`.
@@ -267,27 +270,28 @@ impl Slot {
                 // A zone's edges take the source's Zones color at 60 % (decision 0026) when
                 // the chart set one and not the type's own line color.
                 let (c, a) = match t.edge {
-                    Some(z) if edge => (z, 0.6 * dim),
-                    _ => (t.line_color(theme.is_dark()), dim),
+                    Some(z) if edge => (z, 0.6),
+                    _ => (t.line_color(theme.is_dark()), 1.0),
                 };
+                // Dimmed after the color resolves: a type's or a user's color dims too.
+                let mut color = theme.part_color(c, source_colour(l.style.rgba, a), t.line.opacity);
+                color.a *= dim;
                 Stroke {
-                    color: theme.part_color(c, source_colour(l.style.rgba, a), t.line.opacity),
+                    color,
                     width: w,
                     dash: drawing_dash(t.line.line, w),
                 }
             }
             _ => {
-                let (color, weight) = if edge {
-                    (
-                        theme.level_zone_edge(&self.looks, l.style.rgba, 0.6 * dim),
-                        1,
-                    )
+                let (mut color, weight) = if edge {
+                    (theme.level_zone_edge(&self.looks, l.style.rgba, 0.6), 1)
                 } else {
                     (
-                        theme.level_line(&self.looks, l.style.rgba, dim),
+                        theme.level_line(&self.looks, l.style.rgba, 1.0),
                         l.style.weight,
                     )
                 };
+                color.a *= dim;
                 Stroke {
                     color,
                     // The source's weight is in device pixels.
@@ -605,6 +609,10 @@ pub struct LevelsLayer {
     /// The last-price line's y this frame (plot px; `None`: no last price), kept clear of
     /// level lines and zone edges ([`Self::set_last_y`]).
     last_y: Option<f32>,
+    /// The label chips painted this frame (plot px: left, right, top, bottom), so the
+    /// last-price line breaks around them ([`Self::label_chips`]); capacity kept, so steady
+    /// frames don't allocate.
+    chips: Vec<[f32; 4]>,
 }
 
 /// Columns kept for the VWAP that VWAP-relative levels follow.
@@ -659,6 +667,7 @@ impl LevelsLayer {
             chart: None,
             serving_gen: 0,
             last_y: None,
+            chips: Vec::new(),
         }
     }
 
@@ -1185,6 +1194,17 @@ impl LevelsLayer {
         });
     }
 
+    /// The label chips painted this frame ([`Self::paint_labels`]), for the last-price line
+    /// to break around ([`around_chips`]).
+    pub fn label_chips(&self) -> &[[f32; 4]] {
+        &self.chips
+    }
+
+    /// No label chips this frame (labels not painted).
+    pub fn clear_chips(&mut self) {
+        self.chips.clear();
+    }
+
     /// The last-price line's y this frame (plot px), before [`Self::paint_front`]: level
     /// lines and zone edges leave its row clear, so the last price always draws above them.
     pub fn set_last_y(&mut self, y: Option<f32>) {
@@ -1192,15 +1212,35 @@ impl LevelsLayer {
     }
 
     /// Lines and zone edges (above the candles), leaving the last-price line's row clear.
-    pub fn paint_front(&self, plot: Bounds<Pixels>, theme: &Theme, window: &mut Window) {
+    pub fn paint_front(
+        &self,
+        plot: Bounds<Pixels>,
+        theme: &Theme,
+        fp: &crate::footprint::FootprintLayer,
+        window: &mut Window,
+    ) {
         let scale = window.scale_factor();
         let hair = 1.0 / scale;
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let pw = f32::from(plot.size.width);
         // The last-price line's row (drawn later, translucent): left clear of level lines
-        // and zone edges, so the last price always reads above them.
+        // and zone edges where that line is drawn (it breaks at footprint cells, as
+        // `hline_segments` says), so the last price always reads above them.
         let last = self.last_y;
+        let row = |window: &mut Window, a: f32, b: f32, y: f32, w: f32, c: Hsla| {
+            let mut quad = |x0: f32, x1: f32, top: f32, h: f32| {
+                window.paint_quad(fill(
+                    Bounds::new(point(px(ox + x0), px(oy + top)), size(px(x1 - x0), px(h))),
+                    c,
+                ));
+            };
+            stroke_around_last(a, b, y, w, last, hair, fp, &mut quad);
+        };
+        // A stroke at 0 % (a fill-only zone's edges) draws nothing at all.
         let line = |window: &mut Window, y: f32, st: Stroke| {
+            if st.color.a <= 0.0 {
+                return;
+            }
             let w = st.width.max(hair);
             let y = snap(f64::from(y - w * 0.5), scale);
             crate::eyedropper::rect(
@@ -1209,20 +1249,17 @@ impl LevelsLayer {
                 "Level",
             );
             // Across the bars to the plot's edge; in the labels' gutter the chip covers it.
-            st.dash.segments(pw, |a, b| {
-                for (top, h) in around_last(y, w, last, hair) {
-                    window.paint_quad(fill(
-                        Bounds::new(point(px(ox + a), px(oy + top)), size(px(b - a), px(h))),
-                        st.color,
-                    ));
-                }
-            });
+            st.dash
+                .segments(pw, |a, b| row(window, a, b, y, w, st.color));
         };
         let ppu = self.px_per_unit;
         let cols = &self.vwap_cols;
         // A VWAP-relative edge: a segment across each bar at VWAP + offset, joined to the
         // previous bar of the same session; dashed draws every other bar.
         let along = |window: &mut Window, offset: f64, st: Stroke| {
+            if st.color.a <= 0.0 {
+                return;
+            }
             let (w, dashed, c) = (st.width.max(hair), !st.dash.is_solid(), st.color);
             let dy = offset as f32 * ppu;
             let mut prev: Option<f32> = None;
@@ -1234,15 +1271,7 @@ impl LevelsLayer {
                 );
                 crate::eyedropper::rect(seg, c, "Level");
                 if !(dashed && i % 2 == 1) {
-                    for (top, h) in around_last(y - w * 0.5, w, last, hair) {
-                        window.paint_quad(fill(
-                            Bounds::new(
-                                point(px(ox + col.left), px(oy + top)),
-                                size(px(col.right - col.left), px(h)),
-                            ),
-                            c,
-                        ));
-                    }
+                    row(window, col.left, col.right, y - w * 0.5, w, c);
                 }
                 if let (true, Some(py)) = (col.joins && !dashed, prev) {
                     let (a, b) = (py.min(y), py.max(y));
@@ -1284,6 +1313,7 @@ impl LevelsLayer {
         window: &mut Window,
         cx: &mut App,
     ) {
+        self.chips.clear();
         if self.config.hide_labels {
             return;
         }
@@ -1345,7 +1375,7 @@ impl LevelsLayer {
                 };
                 // Its color (stale: dim text, as the whole map is dimmed).
                 let color = if dim {
-                    theme.text_dim
+                    theme.stale_label_text()
                 } else {
                     self.slots[si]
                         .label_colors
@@ -1357,6 +1387,7 @@ impl LevelsLayer {
                 let w = f32::from(line.width) + LABEL_CHROME;
                 let x = snap(f64::from((pw - w - GUTTER_RIGHT).max(0.0)), scale);
                 let top = snap(f64::from(y - box_h * 0.5), scale);
+                self.chips.push([x, x + w, top, top + box_h]);
                 window.paint_quad(fill(
                     Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
                     theme.label_bg,
@@ -1480,7 +1511,7 @@ impl LevelsLayer {
             .filter(|s| self.config.source_shown(s.handle.source()))
             .map(|s| {
                 // A map's time is never shown in the legend (it says nothing a trader acts on
-                // while current); a stale map says the word "stale", dimmed with its levels.
+                // while current); a stale map says "· stale" (after its title), dimmed with its levels.
                 let (text, warn, dim) = match s.status {
                     LevelStatus::Missing => (
                         match &s.error {
@@ -1490,7 +1521,7 @@ impl LevelsLayer {
                         true,
                         false,
                     ),
-                    LevelStatus::Stale { .. } => ("stale".to_owned(), false, true),
+                    LevelStatus::Stale { .. } => ("· stale".to_owned(), false, true),
                     LevelStatus::Current => (String::new(), false, false),
                 };
                 // The source's own legend content, from a map it has drawn (not while missing).
@@ -1509,6 +1540,74 @@ impl LevelsLayer {
                 }
             })
             .collect()
+    }
+}
+
+/// A stroke across `[a, b)` from `y`, `w` px tall, less the last-price line's row (`last`,
+/// `hair` tall) only where that line is drawn: `fp.hline_segments` (it breaks at footprint
+/// cells, and a level stroke there stays whole). `quad(x0, x1, top, h)` paints. No allocation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stroke_around_last(
+    a: f32,
+    b: f32,
+    y: f32,
+    w: f32,
+    last: Option<f32>,
+    hair: f32,
+    fp: &crate::footprint::FootprintLayer,
+    quad: &mut impl FnMut(f32, f32, f32, f32),
+) {
+    let Some(ly) = last.filter(|&ly| ly < y + w && y < ly + hair) else {
+        quad(a, b, y, w);
+        return;
+    };
+    let mut cur = a;
+    fp.hline_segments(ly, a, b, |s, e| {
+        if s > cur {
+            quad(cur, s, y, w);
+        }
+        for (top, h) in around_last(y, w, Some(ly), hair) {
+            quad(s, e, top, h);
+        }
+        cur = e;
+    });
+    if cur < b {
+        quad(cur, b, y, w);
+    }
+}
+
+/// The label chips (`[left, right, top, bottom]`, plot px) the last-price line at `y`
+/// (`hair` tall) crosses, as gaps cut from `[x0, x1)`: `f(a, b)` for each part left drawn.
+/// Chips are right-aligned in the gutter, so the parts are found in one pass from the right
+/// edge's chips leftwards without sorting (no allocation).
+pub(crate) fn around_chips(
+    chips: &[[f32; 4]],
+    y: f32,
+    hair: f32,
+    x0: f32,
+    x1: f32,
+    mut f: impl FnMut(f32, f32),
+) {
+    let mut cur = x0;
+    loop {
+        // The leftmost chip on this row whose right edge is past `cur`.
+        let next = chips
+            .iter()
+            .filter(|c| c[2] < y + hair && y < c[3] && c[1] > cur && c[0] < x1)
+            .min_by(|p, q| p[0].total_cmp(&q[0]));
+        let Some(c) = next else {
+            break;
+        };
+        if c[0] > cur {
+            f(cur, c[0]);
+        }
+        cur = cur.max(c[1]);
+        if cur >= x1 {
+            return;
+        }
+    }
+    if cur < x1 {
+        f(cur, x1);
     }
 }
 

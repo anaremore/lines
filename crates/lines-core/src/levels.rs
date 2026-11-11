@@ -727,8 +727,9 @@ impl LabelColor {
     }
 }
 
-/// Where a level's label sits (a level type's option, decision 0026). Labels that clash give
-/// way by being dropped, never by moving to another edge ([`place_labels`]).
+/// Where a level's label sits (a level type's option, decision 0026). A label that clashes
+/// stacks one row away, and is dropped only when no row is free; it never moves to another
+/// edge ([`place_labels`]).
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub enum LabelAt {
     /// Centered on its own price: a line's, a zone's high edge.

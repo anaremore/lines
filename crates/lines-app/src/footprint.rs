@@ -693,6 +693,13 @@ impl FootprintLayer {
         self.drawn.clear();
     }
 
+    /// Cells drawn as given, active (other layers' tests of `hline_segments`).
+    #[cfg(test)]
+    pub(crate) fn set_drawn(&mut self, cells: Vec<[f32; 4]>) {
+        self.drawn = cells;
+        self.active = true;
+    }
+
     /// Horizontal line segments across `[x0, x1)` at plot-local `y` that don't cross a drawn
     /// cell (price and crosshair lines break where they would strike through numbers).
     pub fn hline_segments(&self, y: f32, x0: f32, x1: f32, mut f: impl FnMut(f32, f32)) {
