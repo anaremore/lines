@@ -190,8 +190,8 @@ pub struct TagRoom<'a> {
     pub axis_w: f32,
     /// The label column's width (0: none).
     pub column: f32,
-    /// Where end tags go: tags in the price axis, in the label column, or on the chart (a
-    /// column placement without a column draws them on the chart).
+    /// Where end tags and off-scale markers go: tags in the price axis, in the label column,
+    /// or on the chart (a column placement without a column draws them on the chart).
     pub place: crate::levels_layer::LabelPlace,
     /// Rows (top, bottom, plot px) no tag in the price axis may cover: the last-price tag, the
     /// drawings' and the levels' tags.
@@ -971,8 +971,9 @@ impl Studies {
         labels && self.paint_tags(origin, vp, theme, fmt, label_px, room, covers, window, cx)
     }
 
-    /// After the price axis's labels and last-price tag (outside the plot's mask): the
-    /// off-scale markers this frame's paint moved to the axis column, whole, on `label_bg`.
+    /// After the price axis's labels and last-price tag (outside the plot's mask): the tags
+    /// this frame's paint moved out of the plot (off-scale markers and end tags, in the price
+    /// axis or the label column), whole, on `label_bg`.
     pub fn paint_axis_marks(
         &self,
         origin: (f32, f32),
