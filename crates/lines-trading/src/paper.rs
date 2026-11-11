@@ -21,8 +21,8 @@
 //!   With no book on that side they fill at the last trade price; with neither a market
 //!   order is cancelled (nothing would ever show it a price).
 //! - **Past the visible book, slippage is modelled** (issue #94): a market order or triggered
-//!   stop on a future or equity that takes every visible level goes on one tick at a time past
-//!   the deepest ([`SLIPPAGE_TICKS`]), so it always fills whole at once: a Flatten never leaves a
+//!   stop on anything but an option that takes every visible level goes on past the deepest
+//!   ([`SLIPPAGE_TICKS`], [`slippage_ticks`]), so it always fills whole at once: a Flatten never leaves a
 //!   remainder, and a stop shows slippage instead of filling at its trigger print.
 //! - **An option's market order works on** (decision 0028: a missing side or a stale quote never
 //!   fills): it stays Working, visible with its remaining quantity, and takes later liquidity at
@@ -93,9 +93,34 @@ pub struct PaperConfig {
 
 /// Modelled depth past the book a feed shows (issue #94): a market order or triggered stop that
 /// takes every visible level goes on one tick at a time beyond the deepest, each tick holding as
-/// much as the thinnest visible level on that side; whatever is left after this many ticks fills
-/// at the last of them. So it always fills whole at once, never better than the book.
+/// much as the thinnest visible level on that side; whatever is left after the cap fills at the
+/// last modelled tick. So it always fills whole at once, never better than the book.
+///
+/// The cap ([`slippage_ticks`]): this many ticks for futures and equities; for spot and
+/// perpetual products (crypto: tiny ticks) [`SPOT_SLIPPAGE_BP`] of the reference price, rounded
+/// up to whole ticks and never under this. Never more than this many modelled fills: a longer
+/// cap walks in steps of several ticks, each holding that many ticks' worth of the thinnest
+/// level, at its worst price.
 pub const SLIPPAGE_TICKS: i64 = 20;
+
+/// A spot or perpetual product's slippage cap, in basis points of the reference price
+/// ([`slippage_ticks`]).
+pub const SPOT_SLIPPAGE_BP: i64 = 10;
+
+/// How many ticks the modelled walk past the book goes before the rest fills at its last tick:
+/// [`SLIPPAGE_TICKS`] for futures and equities; for a spot or perpetual product (`spot`),
+/// [`SPOT_SLIPPAGE_BP`] of `reference` (the best price on the side the order takes from; the
+/// walk runs only with a book there) in whole ticks of `tick`, rounded up, never under
+/// [`SLIPPAGE_TICKS`] (nor without a reference). Exact integer arithmetic.
+pub fn slippage_ticks(spot: bool, reference: Option<Price>, tick: i64) -> i64 {
+    let Some(r) = reference.filter(|_| spot && tick > 0) else {
+        return SLIPPAGE_TICKS;
+    };
+    let num = i128::from(r.0).abs() * i128::from(SPOT_SLIPPAGE_BP);
+    let den = 10_000 * i128::from(tick);
+    let ticks = (num + den - 1) / den;
+    i64::try_from(ticks).unwrap_or(i64::MAX).max(SLIPPAGE_TICKS)
+}
 
 /// A quote side's size in the one-level book: quotes carry none, so it never runs out.
 const QUOTE_SIZE: i64 = 1 << 40;
@@ -487,7 +512,9 @@ impl PaperBroker {
         let Some(contract) = self.orders.get(&id).map(|p| p.order.contract) else {
             return;
         };
-        let tick = self.spec(contract).map(|s| s.product.price.tick);
+        let spec = self.spec(contract);
+        let tick = spec.as_ref().map(|s| s.product.price.tick);
+        let spot = spec.as_ref().is_some_and(|s| s.product.is_spot());
         let Some(po) = self.orders.get(&id) else {
             return;
         };
@@ -558,16 +585,24 @@ impl PaperBroker {
                     (Side::Buy, Some(f)) => deepest.0.max(f.0 - tick),
                     _ => deepest.0,
                 };
-                for n in 1..=SLIPPAGE_TICKS {
-                    if left == 0 {
-                        break;
-                    }
-                    p += step;
+                // The cap: 20 ticks, or 10 bp of the price for crypto (`slippage_ticks`).
+                // The reference: the best price on the side it takes from (the walk runs only
+                // with a book there).
+                let cap = slippage_ticks(spot, levels.first().map(|l| l.0), tick);
+                // At most `SLIPPAGE_TICKS` modelled fills: a long cap (crypto) walks in steps of
+                // several ticks, each holding that many ticks' worth of the thinnest level, at
+                // its worst price (never better than one tick at a time would have filled).
+                let per = (cap + SLIPPAGE_TICKS - 1) / SLIPPAGE_TICKS;
+                let mut walked = 0;
+                while walked < cap && left > 0 {
+                    let n = per.min(cap - walked);
+                    walked += n;
+                    p += step * n;
                     let taken = m.taken.entry((is_bid, p)).or_insert(0);
-                    let q = if n == SLIPPAGE_TICKS {
+                    let q = if walked == cap {
                         left
                     } else {
-                        (thinnest - *taken).max(0).min(left)
+                        (thinnest.saturating_mul(n) - *taken).max(0).min(left)
                     };
                     if q == 0 {
                         continue;
