@@ -763,6 +763,39 @@ fn labels_stack_off_the_blocked_span() {
     assert_eq!(out[0].label_y, Some(a_y));
 }
 
+/// A last price sweeping across tags in the axis, half a px a frame: at every step no tag
+/// covers it and no two tags overlap.
+#[test]
+fn a_sweeping_last_price_never_covers_a_tag() {
+    let m = LevelMap::builder("demo", ES, UtcMillis(0))
+        .line("a", LevelValue::Raw(600_100.0), Some("A"), style())
+        .line("a", LevelValue::Raw(600_000.0), Some("B"), style())
+        .line("a", LevelValue::Raw(599_950.0), Some("C"), style())
+        .build(TICK)
+        .unwrap();
+    let mut out = Vec::with_capacity(4);
+    place(&m, &vp(), None, |_| true, &mut out);
+    let (h, tag_h) = (16.0, 18.0);
+    let mut seen = [LabelSeen::New; 3];
+    let at = |out: &mut Vec<Placed>, seen: &mut [LabelSeen; 3], b: f32| {
+        place_labels(out, h, 400.0, Some((b, tag_h)), seen, |_| true);
+        let ys: Vec<f32> = out.iter().filter_map(|p| p.label_y).collect();
+        for y in &ys {
+            assert!((y - b).abs() >= (h + tag_h) * 0.5 - 1e-3, "{y} under {b}");
+        }
+        for (i, y) in ys.iter().enumerate() {
+            for z in &ys[i + 1..] {
+                assert!((y - z).abs() >= h - 1e-3, "{y} {z} at {b}");
+            }
+        }
+    };
+    let mut b = 150.0;
+    while b < 260.0 {
+        at(&mut out, &mut seen, b);
+        b += 0.5;
+    }
+}
+
 /// A type's label edge: just under a zone's low edge (with the low edge's price), just above
 /// its high edge, or on its own price (a zone's high edge, as before).
 #[test]

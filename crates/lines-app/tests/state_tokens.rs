@@ -16,6 +16,11 @@
 /// (file under `src/`, what it fades and why that is data, how many fades the file has).
 const ALLOWED: &[(&str, &str, usize)] = &[
     (
+        "levels_layer.rs",
+        "a level label on the chart under the pointer, faded (box and text) so the bars under it show",
+        2,
+    ),
+    (
         "pane.rs",
         "the stale veil: the chart's background over a stale pane's content",
         1,

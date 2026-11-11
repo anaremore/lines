@@ -1252,6 +1252,12 @@ impl LevelsLayer {
         }
     }
 
+    /// Whether any level source serves this chart (a label column only for a chart that has
+    /// labels to put in it).
+    pub fn has_sources(&self) -> bool {
+        !self.slots.is_empty()
+    }
+
     /// A label's height (a tag's, a row of the column's), plot px.
     pub fn label_h() -> f32 {
         LABEL_PX * 1.6
@@ -1477,6 +1483,15 @@ impl LevelsLayer {
             return;
         }
         let place = self.config.label_place;
+        // On the chart, the set decides together: beside the newest bar only if its widest
+        // label fits there, else all pinned to the plot's edge (never split in two columns).
+        let beside = strip.newest_right.and_then(|r| {
+            chart_label_x(
+                r,
+                self.label_need().0 + LABEL_CHROME,
+                f32::from(plot.size.width),
+            )
+        });
         let scale = window.scale_factor();
         let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
         let (pw, ph) = (f32::from(plot.size.width), f32::from(plot.size.height));
@@ -1550,11 +1565,7 @@ impl LevelsLayer {
                     // Just right of the newest bar, moving with it; pinned to the plot's edge
                     // when that doesn't fit (the newest bar off screen, or too near it).
                     LabelPlace::Chart => {
-                        let x = strip
-                            .newest_right
-                            .map(|r| r + NEWEST_GAP)
-                            .filter(|x| x + w <= pw - GUTTER_RIGHT)
-                            .unwrap_or((pw - w - GUTTER_RIGHT).max(0.0));
+                        let x = beside.unwrap_or((pw - w - GUTTER_RIGHT).max(0.0));
                         (snap(f64::from(x), scale), theme.label_bg, color)
                     }
                     LabelPlace::Column => (
@@ -1857,6 +1868,27 @@ pub(crate) fn around_last(
         _ => [Some((y, w)), None],
     };
     parts.into_iter().flatten()
+}
+
+/// Where labels on the chart go when the newest bar's right edge is at `newest_right`: just
+/// right of it, if the widest of them (`widest`, with its chip) fits there in a plot `plot_w`
+/// wide; `None`: pinned to the plot's right edge instead.
+pub fn chart_label_x(newest_right: f32, widest: f32, plot_w: f32) -> Option<f32> {
+    let x = newest_right + NEWEST_GAP;
+    (x + widest <= plot_w - GUTTER_RIGHT).then_some(x)
+}
+
+/// The label column's width this frame, px: the saved width at the UI zoom (`saved`), never
+/// more than 40 % of the chart beside the price axis (`beside`), in whole px.
+pub fn column_px(saved: f32, beside: f32) -> f32 {
+    saved.min((beside * 0.4).max(0.0)).round()
+}
+
+/// The label column's width (px at 100 % zoom) after its edge was dragged from window x
+/// `from` to `x`, starting `w0` wide at a UI zoom of `zoom`: the edge is the column's left
+/// side, so dragged left it widens; the edge follows the pointer.
+pub fn dragged_column(w0: f32, from: f32, x: f32, zoom: f32) -> f32 {
+    w0 + (from - x) / zoom.max(0.01)
 }
 
 /// The price axis's width for level tags: the widest label's text `need` (0: none) with its

@@ -532,7 +532,7 @@ struct Cli {
     #[arg(long, value_enum)]
     label_place: Option<LabelPlaceArg>,
     /// The label column's width, logical px at 100 % zoom (with `--label-place column`).
-    #[arg(long, value_parser = clap::value_parser!(u16).range(48..=320))]
+    #[arg(long, requires = "label_place", value_parser = clap::value_parser!(u16).range(48..=320))]
     label_column: Option<u16>,
     /// Screenshot mode (decision 0009): replay --replay up to --at at full speed, render one
     /// frame at --size/--theme with a frozen clock, write this PNG, exit.

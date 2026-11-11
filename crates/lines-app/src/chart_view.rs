@@ -2852,6 +2852,8 @@ impl ChartView {
             && self.visibility.draws_labels()
             && !c.hidden
             && !c.hide_labels;
+        // A column only for a chart with level sources (never an empty strip).
+        let column_ok = shown && self.levels.has_sources();
         match c.label_place {
             LabelPlace::Chart => {
                 self.levels.set_room_plot();
@@ -2870,13 +2872,11 @@ impl ChartView {
                 (axis, 0.0)
             }
             LabelPlace::Column => {
-                if !shown {
+                if !column_ok {
                     self.levels.set_room(None);
                     return (base, 0.0);
                 }
-                let col = crate::zoom::f(c.column_w())
-                    .min(((w - base) * 0.4).max(0.0))
-                    .round();
+                let col = crate::levels_layer::column_px(crate::zoom::f(c.column_w()), w - base);
                 let room = col - 2.0 * COLUMN_PAD - LABEL_CHROME;
                 let (_, cut) = self.levels.label_need();
                 self.levels
@@ -3005,8 +3005,12 @@ impl ChartView {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.column_drag = None;
             } else {
-                // The edge is the column's left side: dragged left, the column widens.
-                let w = w0 + (from - f32::from(ev.position.x)) / crate::zoom::f(1.0);
+                let w = crate::levels_layer::dragged_column(
+                    w0,
+                    from,
+                    f32::from(ev.position.x),
+                    crate::zoom::f(1.0),
+                );
                 self.set_label_column(w, cx);
                 return;
             }
@@ -5420,7 +5424,7 @@ impl ChartView {
             self.trade_marks.paint(plot, labels, &t, window, cx);
             self.marks.paint(plot, &t, window, cx);
             // The profile's tag: in the plot's corner, unless the labels have a column.
-            if labels && self.levels.config.label_place != LabelPlace::Column {
+            if labels && self.label_col <= 0.0 {
                 self.profile.paint_label(plot, None, &t, window, cx);
             }
             if let Some((from, x)) = self.tick_from {
@@ -5498,7 +5502,7 @@ impl ChartView {
         if study_labels && place != LabelPlace::Chart {
             let strip = self.label_strip();
             self.levels.paint_labels(self.plot, strip, &t, window, cx);
-            if place == LabelPlace::Column {
+            if self.label_col > 0.0 {
                 let col = (pw + crate::levels_layer::COLUMN_PAD, self.label_col);
                 self.profile
                     .paint_label(self.plot, Some(col), &t, window, cx);
@@ -7375,7 +7379,7 @@ impl ChartView {
                     Some((StudyRef::Profile, _))
                         if pc.mode != crate::profile::ProfileMode::Off && !pc.hidden =>
                     {
-                        (area.0 - axis_w()).max(0.0) * pc.width()
+                        (area.0 - self.axis_now - self.label_col).max(0.0) * pc.width()
                     }
                     _ => 0.0,
                 };
@@ -9022,9 +9026,10 @@ fn prepare_studies(
 }
 
 /// Whether a pointer at `x` from the plot's right edge and `y` from its top is on the label
-/// column's edge (the plot's right edge, above the time axis): a few px either side.
+/// column's edge (the plot's right edge, above the time axis): its first few px, on the
+/// column's side only, so the plot keeps every press it had.
 fn column_edge_hit(x: f32, y: f32, above_axis: f32) -> bool {
-    (-4.0..=4.0).contains(&x) && (0.0..above_axis).contains(&y)
+    (0.0..=4.0).contains(&x) && (0.0..above_axis).contains(&y)
 }
 
 /// Where a measure's readout goes (plot-local top-left): on the far side of the measured
@@ -9691,6 +9696,17 @@ fn recent_colors(cx: &App) -> Vec<lines_core::style::Rgb> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The label column's edge is its own first few px, above the time axis: the plot's
+    /// rightmost px stay the plot's (order tags, drawings, a lower pane's ×).
+    #[test]
+    fn the_column_edge_is_on_the_columns_side() {
+        assert!(column_edge_hit(0.0, 10.0, 500.0));
+        assert!(column_edge_hit(4.0, 10.0, 500.0));
+        assert!(!column_edge_hit(-1.0, 10.0, 500.0), "the plot's");
+        assert!(!column_edge_hit(5.0, 10.0, 500.0), "the column's body");
+        assert!(!column_edge_hit(2.0, 500.0, 500.0), "the time axis");
+    }
 
     /// A price label shows only clear of the plot's top: one whose line is within its half
     /// height of the top would reach into the header row (and under header text there).

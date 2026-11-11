@@ -813,6 +813,34 @@ fn the_axis_grows_to_its_widest_tag() {
     assert_eq!(axis_fit(400.0, 300.0, base, cap).1, None);
 }
 
+/// On the chart the labels sit just right of the newest bar while their widest fits there,
+/// else they all pin to the plot's edge; the column never takes more than 40 % of the chart
+/// beside the axis; its edge follows the pointer (dragged left, it widens), at any zoom.
+#[test]
+fn chart_x_column_width_and_drag() {
+    // Newest bar's right edge at 600 in an 800 px plot: a 120 px label fits beside it.
+    assert_eq!(chart_label_x(600.0, 120.0, 800.0), Some(606.0));
+    // Near the edge (the live view's small margin): pinned.
+    assert_eq!(chart_label_x(760.0, 120.0, 800.0), None);
+    // Exactly to the edge's margin: still beside.
+    assert_eq!(chart_label_x(668.0, 120.0, 800.0), Some(674.0));
+    assert_eq!(column_px(120.0, 1000.0), 120.0);
+    assert_eq!(column_px(180.0, 300.0), 120.0, "40 % of the chart");
+    assert_eq!(column_px(120.0, -5.0), 0.0);
+    assert_eq!(
+        dragged_column(120.0, 500.0, 470.0, 1.0),
+        150.0,
+        "left: wider"
+    );
+    assert_eq!(
+        dragged_column(120.0, 500.0, 530.0, 1.0),
+        90.0,
+        "right: narrower"
+    );
+    // At 150 % a 30 px drag is 20 px of the saved (100 %) width.
+    assert_eq!(dragged_column(120.0, 500.0, 470.0, 1.5), 140.0);
+}
+
 /// The placement saves only when it isn't the default (tags in the axis), reads a value from a
 /// newer build as the default (never a corrupt workspace), and the column's width stays in its
 /// limits.

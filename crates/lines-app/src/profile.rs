@@ -268,8 +268,8 @@ pub struct VolumeProfileLayer {
     label: FixedStr<96>,
     shaped: Option<(FixedStr<96>, ShapedLine)>,
     /// The label cut with "…" to the label column's room (its text, the room in whole px,
-    /// the cut shaped): made once per label and room.
-    cut: Option<(FixedStr<96>, u32, ShapedLine)>,
+    /// the cut shaped, or `None` when not even one letter fits): made once per label and room.
+    cut: Option<(FixedStr<96>, u32, Option<ShapedLine>)>,
     /// User styles (decision 0026), as saved, and resolved for paint.
     style: PartStyles,
     looks: [Look; 4],
@@ -354,21 +354,7 @@ impl VolumeProfileLayer {
             .as_ref()
             .is_none_or(|(s, _)| s.as_str() != self.label.as_str())
         {
-            let text = self.label.as_str();
-            let run = TextRun {
-                len: text.len(),
-                font: crate::fonts::ui(),
-                color: t.text_dim,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let line = window.text_system().shape_line(
-                SharedString::from(text.to_owned()),
-                px(LABEL_PX),
-                &[run],
-                None,
-            );
+            let line = shape_label(window, self.label.as_str().to_owned(), t.text_dim);
             self.shaped = Some((self.label, line));
         }
         if let Some((left, col_w)) = column {
@@ -384,13 +370,13 @@ impl VolumeProfileLayer {
                     .as_ref()
                     .is_none_or(|(s, r, _)| s.as_str() != self.label.as_str() || *r != room as u32)
             {
-                self.cut = cut_to(self.label.as_str(), room, t.text_dim, window)
-                    .map(|line| (self.label, room as u32, line));
+                let line = cut_to(self.label.as_str(), room, t.text_dim, window);
+                self.cut = Some((self.label, room as u32, line));
             }
             let line = if fits {
                 self.shaped.as_ref().map(|(_, l)| l)
             } else {
-                self.cut.as_ref().map(|(_, _, l)| l)
+                self.cut.as_ref().and_then(|(_, _, l)| l.as_ref())
             };
             if let Some(line) = line {
                 let w = f32::from(line.width) + 12.0;
@@ -446,26 +432,28 @@ impl VolumeProfileLayer {
     }
 }
 
+/// The label's text shaped in `color` (the label, and its cuts).
+fn shape_label(window: &mut Window, text: String, color: Hsla) -> ShapedLine {
+    let run = TextRun {
+        len: text.len(),
+        font: crate::fonts::ui(),
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line(SharedString::from(text), px(LABEL_PX), &[run], None)
+}
+
 /// `text` cut with "…" to fit `room` px, shaped in `color` (the longest head that fits);
 /// `None` when not even one letter does. Allocates: only when the label or the room changes.
 fn cut_to(text: &str, room: f32, color: Hsla, window: &mut Window) -> Option<ShapedLine> {
-    let shape = |window: &mut Window, s: String| {
-        let run = TextRun {
-            len: s.len(),
-            font: crate::fonts::ui(),
-            color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        window
-            .text_system()
-            .shape_line(SharedString::from(s), px(LABEL_PX), &[run], None)
-    };
     let n = text.chars().count();
     for k in (1..n).rev() {
         let head: String = text.chars().take(k).collect();
-        let line = shape(window, format!("{}…", head.trim_end()));
+        let line = shape_label(window, format!("{}…", head.trim_end()), color);
         if f32::from(line.width) <= room {
             return Some(line);
         }
