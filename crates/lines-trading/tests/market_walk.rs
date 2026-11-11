@@ -854,3 +854,64 @@ fn a_stop_fired_before_the_book_catches_up_never_beats_the_print() {
     assert_eq!(r.fills(stop), want);
     assert_eq!(r.pos(es()), 0);
 }
+
+/// The slippage cap per product: 20 ticks for futures and equities; for spot and perpetual
+/// products 10 bp of the reference price in whole ticks, rounded up, never under 20.
+#[test]
+fn the_slippage_cap_is_ten_basis_points_on_crypto() {
+    use lines_trading::paper::slippage_ticks;
+    // ES (a quarter-point tick, 25 units): 20 ticks whatever the price.
+    assert_eq!(slippage_ticks(false, Some(px(6000.25)), 25), SLIPPAGE_TICKS);
+    // BTC/USD.KR at 70,000.0 (a 0.1 tick: one unit): 10 bp is $70, 700 ticks.
+    assert_eq!(slippage_ticks(true, Some(Price(700_000)), 1), 700);
+    // Rounded up to whole ticks.
+    assert_eq!(slippage_ticks(true, Some(Price(700_001)), 1), 701);
+    // Never under 20 ticks: a cheap product, or no reference price yet.
+    assert_eq!(slippage_ticks(true, Some(Price(1_000)), 1), SLIPPAGE_TICKS);
+    assert_eq!(slippage_ticks(true, None, 1), SLIPPAGE_TICKS);
+}
+
+/// A BTC/USD.KR market buy past a one-unit ask walks 700 ticks (10 bp of 70,000.0), the rest at
+/// the last of them: the whole quantity, never more, never a better price as it goes.
+#[test]
+fn a_crypto_market_order_slips_ten_basis_points() {
+    let btc = ContractKey::spot(catalog::BTC_USD_KR);
+    let mut r = Rig::new(CME_OPEN);
+    r.market(
+        btc,
+        &[
+            MarketInput::BookClear,
+            MarketInput::Book {
+                side: BookSide::Bid,
+                price: Price(699_990),
+                qty: Qty(5),
+            },
+            MarketInput::Book {
+                side: BookSide::Ask,
+                price: Price(700_000),
+                qty: Qty(1),
+            },
+        ],
+    );
+    let id = r
+        .cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: btc,
+            side: Side::Buy,
+            qty: Qty(1_000),
+            kind: OrderKind::Market,
+        }))
+        .unwrap()[0];
+    r.wait(LAT);
+    let f = r.fills(id);
+    assert_eq!(f.iter().map(|x| x.1).sum::<i64>(), 1_000);
+    assert_eq!(f.first(), Some(&(Price(700_000), 1)));
+    assert_eq!(
+        f.last(),
+        Some(&(Price(700_700), 1_000 - 700)),
+        "the 700th tick: $70 up"
+    );
+    assert_eq!(f.len(), 701);
+    assert!(f.windows(2).all(|w| w[1].0 > w[0].0));
+    assert_eq!(r.pos(btc), 1_000);
+}

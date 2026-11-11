@@ -93,9 +93,32 @@ pub struct PaperConfig {
 
 /// Modelled depth past the book a feed shows (issue #94): a market order or triggered stop that
 /// takes every visible level goes on one tick at a time beyond the deepest, each tick holding as
-/// much as the thinnest visible level on that side; whatever is left after this many ticks fills
-/// at the last of them. So it always fills whole at once, never better than the book.
+/// much as the thinnest visible level on that side; whatever is left after the cap fills at the
+/// last modelled tick. So it always fills whole at once, never better than the book.
+///
+/// The cap ([`slippage_ticks`]): this many ticks for futures and equities; for spot and
+/// perpetual products (crypto: tiny ticks) [`SPOT_SLIPPAGE_BP`] of the reference price, rounded
+/// up to whole ticks and never under this.
 pub const SLIPPAGE_TICKS: i64 = 20;
+
+/// A spot or perpetual product's slippage cap, in basis points of the reference price
+/// ([`slippage_ticks`]).
+pub const SPOT_SLIPPAGE_BP: i64 = 10;
+
+/// How many ticks the modelled walk past the book goes before the rest fills at its last tick:
+/// [`SLIPPAGE_TICKS`] for futures and equities; for a spot or perpetual product (`spot`),
+/// [`SPOT_SLIPPAGE_BP`] of `reference` (the best price on the side the order takes from, else
+/// the last trade) in whole ticks of `tick`, rounded up, never under [`SLIPPAGE_TICKS`]. Exact
+/// integer arithmetic.
+pub fn slippage_ticks(spot: bool, reference: Option<Price>, tick: i64) -> i64 {
+    let Some(r) = reference.filter(|_| spot && tick > 0) else {
+        return SLIPPAGE_TICKS;
+    };
+    let num = i128::from(r.0).abs() * i128::from(SPOT_SLIPPAGE_BP);
+    let den = 10_000 * i128::from(tick);
+    let ticks = (num + den - 1) / den;
+    i64::try_from(ticks).unwrap_or(i64::MAX).max(SLIPPAGE_TICKS)
+}
 
 /// A quote side's size in the one-level book: quotes carry none, so it never runs out.
 const QUOTE_SIZE: i64 = 1 << 40;
@@ -487,7 +510,9 @@ impl PaperBroker {
         let Some(contract) = self.orders.get(&id).map(|p| p.order.contract) else {
             return;
         };
-        let tick = self.spec(contract).map(|s| s.product.price.tick);
+        let spec = self.spec(contract);
+        let tick = spec.as_ref().map(|s| s.product.price.tick);
+        let spot = spec.as_ref().is_some_and(|s| s.product.is_spot());
         let Some(po) = self.orders.get(&id) else {
             return;
         };
@@ -558,13 +583,16 @@ impl PaperBroker {
                     (Side::Buy, Some(f)) => deepest.0.max(f.0 - tick),
                     _ => deepest.0,
                 };
-                for n in 1..=SLIPPAGE_TICKS {
+                // The cap: 20 ticks, or 10 bp of the price for crypto (`slippage_ticks`).
+                let reference = levels.first().map(|l| l.0).or(m.last);
+                let cap = slippage_ticks(spot, reference, tick);
+                for n in 1..=cap {
                     if left == 0 {
                         break;
                     }
                     p += step;
                     let taken = m.taken.entry((is_bid, p)).or_insert(0);
-                    let q = if n == SLIPPAGE_TICKS {
+                    let q = if n == cap {
                         left
                     } else {
                         (thinnest - *taken).max(0).min(left)
