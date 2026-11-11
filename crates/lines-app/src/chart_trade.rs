@@ -2160,7 +2160,7 @@ mod tests {
         };
         assert_eq!(tag(&stop), "Stop 1 @ 5805.00");
         assert_eq!(tag(&target), "Target 1 @ 5820.00");
-        assert_eq!(pnl(&stop, PnlDisplay::Currency).0, "-$250.00");
+        assert_eq!(pnl(&stop, PnlDisplay::Currency).0, "−$250.00");
         assert_eq!(pnl(&target, PnlDisplay::Both).0, "+40.0 t  +$500.00");
         assert!(
             pnl(&target, PnlDisplay::Currency).1.unwrap().0 > 0,

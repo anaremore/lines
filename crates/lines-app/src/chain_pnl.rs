@@ -147,9 +147,9 @@ mod tests {
         let (risk, reward) = (pnl(-72.0), pnl(308.0));
         assert_eq!(
             say(Some(risk), Some(reward)),
-            "Risk ≈ -$72  ·  Reward ≈ +$308  ·  1 : 4.3"
+            "Risk ≈ −$72  ·  Reward ≈ +$308  ·  1 : 4.3"
         );
-        assert_eq!(say(Some(risk), None), "Risk ≈ -$72");
+        assert_eq!(say(Some(risk), None), "Risk ≈ −$72");
         assert_eq!(say(None, Some(reward)), "Reward ≈ +$308");
         assert_eq!(say(None, None), "");
     }
@@ -175,14 +175,14 @@ mod tests {
     fn a_tiny_ratio_is_left_out() {
         assert_eq!(
             say(Some(pnl(-99.0)), Some(pnl(40.0))),
-            "Risk ≈ -$99  ·  Reward ≈ +$40  ·  1 : 0.4"
+            "Risk ≈ −$99  ·  Reward ≈ +$40  ·  1 : 0.4"
         );
         assert_eq!(
             say(
                 Some(test_estimate(0.0).pnl(10, 100.0, 1.0)),
                 Some(pnl(40.0))
             ),
-            "Risk ≈ -$1000  ·  Reward ≈ +$40"
+            "Risk ≈ −$1,000  ·  Reward ≈ +$40"
         );
     }
 

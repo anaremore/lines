@@ -7,9 +7,11 @@
 //! Formatting is pure and allocation-free (it writes into a caller's buffer, so chart and DOM
 //! paint can use it):
 //! - **ticks**: per contract, from the average price, one decimal and always signed (`+2.5 t`,
-//!   `-1.0 t`, `0.0 t`);
+//!   `−1.0 t`, `0.0 t`; the same true minus as currency);
 //! - **currency**: exact from [`Money`] (integer arithmetic, rounded to cents only for display),
-//!   always signed (`+$125.00`, `-$4.00`, `$0.00`).
+//!   always signed, with thousands separators and a true minus (U+2212, as wide as the plus and
+//!   never read as a dash or a separator): `+$1,312.50`, `−$175.00`, `$0.00`. Display only:
+//!   files and exports (the journal CSV) write their own plain numbers.
 //!
 //! Colour follows the sign through the up/down tokens ([`Tone`]), and the sign is always
 //! written: never colour alone (docs/design.md §4).
@@ -101,31 +103,47 @@ pub fn tone(m: Money) -> Tone {
     }
 }
 
-/// `+2.5 t`, `-1.0 t`, `0.0 t` (never `-0.0`).
+/// `+2.5 t`, `−1.0 t`, `0.0 t` (never `−0.0`): the same true minus as money, so a cell holding
+/// both reads one way.
 pub fn write_ticks(out: &mut impl Write, ticks: f64) -> fmt::Result {
     let tenths = (ticks * 10.0).round() as i64;
     let sign = match tenths.signum() {
         1 => "+",
-        -1 => "-",
+        -1 => "\u{2212}",
         _ => "",
     };
     let a = tenths.unsigned_abs();
     write!(out, "{sign}{}.{} t", a / 10, a % 10)
 }
 
-/// `+$125.00`, `-$4.00`, `$0.00`: exact from `Money` (1e-10 units), rounded half away from
-/// zero to cents for display, in integers.
+/// The minus sign money is shown with (U+2212): as wide as `+` in the number font, and never
+/// read as a hyphen or a dash beside a `·`.
+pub const MINUS: char = '\u{2212}';
+
+/// `1,234,567`: a whole amount with thousands separators, written without allocating.
+pub fn write_grouped(out: &mut impl Write, n: u128) -> fmt::Result {
+    if n < 1000 {
+        return write!(out, "{n}");
+    }
+    write_grouped(out, n / 1000)?;
+    write!(out, ",{:03}", n % 1000)
+}
+
+/// `+$1,312.50`, `−$4.00`, `$0.00`: exact from `Money` (1e-10 units), rounded half away from
+/// zero to cents for display, in integers; thousands separated, a loss with a true minus.
 pub fn write_money(out: &mut impl Write, m: Money) -> fmt::Result {
     const PER_CENT: i128 = 100_000_000; // Money is 1e-10 of the currency
     let neg = m.0 < 0;
     let a = m.0.unsigned_abs();
     let cents = (a + (PER_CENT as u128) / 2) / PER_CENT as u128;
-    let sign = match (neg, cents) {
-        (_, 0) => "",
-        (true, _) => "-",
-        (false, _) => "+",
-    };
-    write!(out, "{sign}${}.{:02}", cents / 100, cents % 100)
+    match (neg, cents) {
+        (_, 0) => {}
+        (true, _) => out.write_char(MINUS)?,
+        (false, _) => out.write_char('+')?,
+    }
+    out.write_char('$')?;
+    write_grouped(out, cents / 100)?;
+    write!(out, ".{:02}", cents % 100)
 }
 
 /// An open position's P&L as `mode` shows it: ticks (when known), currency, or both
@@ -254,8 +272,8 @@ mod tests {
     fn ticks_have_one_decimal_and_a_sign() {
         // Long 2 @ 5999.625 (an average between ticks) marked at 6000.25: +2.5 ticks.
         assert_eq!(s(|o| write_ticks(o, 2.5)), "+2.5 t");
-        assert_eq!(s(|o| write_ticks(o, -1.0)), "-1.0 t");
-        assert_eq!(s(|o| write_ticks(o, 0.04)), "0.0 t", "never -0.0 or +0.0");
+        assert_eq!(s(|o| write_ticks(o, -1.0)), "−1.0 t");
+        assert_eq!(s(|o| write_ticks(o, 0.04)), "0.0 t", "never −0.0 or +0.0");
         assert_eq!(s(|o| write_ticks(o, -0.04)), "0.0 t");
         assert_eq!(
             s(|o| write_ticks(o, 1.25)),
@@ -268,10 +286,22 @@ mod tests {
     #[test]
     fn currency_is_exact_from_money() {
         assert_eq!(s(|o| write_money(o, Money::whole(125))), "+$125.00");
-        assert_eq!(s(|o| write_money(o, -Money::cents(400))), "-$4.00");
+        assert_eq!(s(|o| write_money(o, -Money::cents(400))), "\u{2212}$4.00");
         assert_eq!(s(|o| write_money(o, Money::ZERO)), "$0.00");
         // ES: one tick is exactly $12.50; 3 ticks short −$37.50.
-        assert_eq!(s(|o| write_money(o, -Money::cents(3750))), "-$37.50");
+        assert_eq!(s(|o| write_money(o, -Money::cents(3750))), "\u{2212}$37.50");
+        // Thousands separated, at every boundary.
+        assert_eq!(s(|o| write_money(o, Money::cents(131_250))), "+$1,312.50");
+        assert_eq!(
+            s(|o| write_money(o, -Money::whole(1_000))),
+            "\u{2212}$1,000.00"
+        );
+        assert_eq!(s(|o| write_money(o, Money::whole(999))), "+$999.00");
+        assert_eq!(s(|o| write_money(o, Money::whole(100_000))), "+$100,000.00");
+        assert_eq!(
+            s(|o| write_money(o, Money::whole(1_000_001))),
+            "+$1,000,001.00"
+        );
         // Sub-cent amounts (crypto): half a cent rounds away from zero; never via floats.
         assert_eq!(
             s(|o| write_money(o, Money(500_000_000 + 50_000_000))),
@@ -285,8 +315,10 @@ mod tests {
         // Large values stay exact (i128 Money; no float rounding).
         assert_eq!(
             s(|o| write_money(o, Money::whole(123_456_789))),
-            "+$123456789.00"
+            "+$123,456,789.00"
         );
+        // The minus is one char, never an ASCII hyphen: nothing here reads "· −$".
+        assert!(!s(|o| write_money(o, -Money::whole(175))).contains('-'));
     }
 
     #[test]
@@ -315,8 +347,8 @@ mod tests {
             write_day(&mut out, mode, -Money::whole(25)).unwrap();
             out
         };
-        assert_eq!(d(PnlDisplay::Both), "Day -$25.00");
-        assert_eq!(d(PnlDisplay::Currency), "Day -$25.00");
+        assert_eq!(d(PnlDisplay::Both), "Day −$25.00");
+        assert_eq!(d(PnlDisplay::Currency), "Day −$25.00");
         assert_eq!(d(PnlDisplay::Ticks), "");
         assert_eq!(d(PnlDisplay::Off), "");
     }
