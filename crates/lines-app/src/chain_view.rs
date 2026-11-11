@@ -3648,7 +3648,7 @@ impl ChainView {
         }
     }
 
-    /// A line's tag: `Stop SPY 682.75 684C ≈ 1.25 -$40`. The value and P&L are estimates, always
+    /// A line's tag: `Stop SPY 682.75 684C ≈ 1.25 −$40`. The value and P&L are estimates, always
     /// marked ≈, and text only (`option_estimate`); a line that can't fire says that first.
     fn write_tag(
         &self,
@@ -5093,7 +5093,7 @@ impl ChainView {
         )
     }
 
-    /// `684C  Risk ≈ -$72  ·  Reward ≈ +$308  ·  1 : 4.3`: for a position beside the chart with a
+    /// `684C  Risk ≈ −$72  ·  Reward ≈ +$308  ·  1 : 4.3`: for a position beside the chart with a
     /// Stop or Target on it, armed or not, with the P&L display showing money.
     fn summary_text(&self) -> Option<String> {
         let traded = self

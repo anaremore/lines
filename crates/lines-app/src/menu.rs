@@ -124,7 +124,7 @@ impl MenuItem {
         }
     }
 
-    /// An object menu's first row: what the menu acts on ("Stop 2 @ 7562.00 · -8.0 t").
+    /// An object menu's first row: what the menu acts on ("Stop 2 @ 7562.00 · −8.0 t").
     pub fn title(label: &str) -> MenuItem {
         MenuItem {
             title: true,

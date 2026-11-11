@@ -221,7 +221,8 @@ pub fn redact_amounts(message: &str) -> Cow<'_, str> {
             skip -= 1;
             continue;
         }
-        if w.starts_with('$') || w.starts_with("-$") || w.starts_with("+$") {
+        if w.starts_with('$') || w.starts_with("-$") || w.starts_with("+$") || w.starts_with("−$")
+        {
             continue;
         }
         // "limit of 1000": the amount and its "of" go; a trailing comma stays.
@@ -376,6 +377,11 @@ mod tests {
 
     #[test]
     fn amounts_are_redacted_but_the_reason_stays() {
+        // As this formatter writes a loss (U+2212), too.
+        assert_eq!(
+            redact_amounts("at a loss of −$1,250.00 today"),
+            "at a loss of today"
+        );
         assert_eq!(
             redact_amounts(
                 "daily loss limit reached (-600.00 today, limit 500); only Flatten and Cancel All"

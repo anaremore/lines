@@ -26,7 +26,7 @@ pub fn other_side(right: Right) -> Right {
     }
 }
 
-/// `Risk ≈ -$72  ·  Reward ≈ +$308  ·  1 : 4.3`, for whichever exits are set.
+/// `Risk ≈ −$72  ·  Reward ≈ +$308  ·  1 : 4.3`, for whichever exits are set.
 pub fn write_summary(
     out: &mut impl Write,
     risk: Option<PnlEstimate>,

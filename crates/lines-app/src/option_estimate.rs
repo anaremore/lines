@@ -33,7 +33,7 @@ impl Estimate {
         PnlEstimate((self.0 - avg) * position as f64 * per_unit)
     }
 
-    /// [`Self::pnl`] as text: `+$40`, `-$15`.
+    /// [`Self::pnl`] as text: `+$40`, `−$15`.
     pub fn write_pnl(
         self,
         out: &mut impl Write,

@@ -4422,7 +4422,7 @@ impl ChartView {
     }
 
     /// The chart's working and held orders (roadmap 8, phase 1): a line at each price (solid
-    /// working, dashed held or pending), a tag at the right edge (`S1 · 5806.50 · -$175.00`,
+    /// working, dashed held or pending), a tag at the right edge (`S1 · 5806.50 · −$175.00`,
     /// × cancels; drag to move), edge markers for orders off the plot (click: scroll there),
     /// the position tag's add-stop / add-target handles, the dragged order, ghosts and the
     /// exit being added, and the newest refusal. Laid out by

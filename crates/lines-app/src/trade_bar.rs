@@ -2604,10 +2604,12 @@ fn fields_w(
 /// else 13, else 12. Neither is ever cut: the average gives way first ([`card_line_fit`]).
 pub fn card_big_px(width: f32, side: &str, pnl: Option<&str>) -> f32 {
     let room = card_inner(width);
-    [15.0, 13.0]
+    // 11 px last (the DOM's small text): a six-figure P&L beside a three-digit position, with its
+    // thousands separators, still fits the narrowest DOM whole.
+    [15.0, 13.0, 12.0]
         .into_iter()
         .find(|&s| text_w(side, s) + 8.0 + pnl.map_or(0.0, |p| text_w(p, s)) <= room)
-        .unwrap_or(12.0)
+        .unwrap_or(11.0)
 }
 
 /// The room inside the position card at `width`.
@@ -6949,7 +6951,7 @@ mod tests {
             r
         };
         for width in WIDTHS {
-            for day in ["$0.00", "+$125.00", "−$13408.75"] {
+            for day in ["$0.00", "+$125.00", "−$13,408.75"] {
                 let rooms = rooms_at(width, day);
                 let place = card_place(&rooms, &items);
                 assert!(place[3].is_some(), "{width} {day}: the working count shows");
@@ -6989,9 +6991,10 @@ mod tests {
     fn the_card_keeps_side_and_pnl_whole() {
         for width in WIDTHS {
             for (side, pnl) in [
-                ("▲ 200", "+$50000.00"),
-                ("▼ 2", "−$13408.75"),
+                ("▲ 200", "+$50,000.00"),
+                ("▼ 2", "−$13,408.75"),
                 ("▲ 10", "+$0.00"),
+                ("▲ 200", "−$123,408.75"),
             ] {
                 let px = card_big_px(width, side, Some(pnl));
                 assert!(
@@ -7006,24 +7009,24 @@ mod tests {
                 }
             }
         }
-        assert_eq!(card_big_px(420.0, "▲ 200", Some("−$13408.75")), 15.0);
-        assert!(card_big_px(MIN_DOM_WIDTH, "▲ 200", Some("−$13408.75")) < 15.0);
+        assert_eq!(card_big_px(420.0, "▲ 200", Some("−$13,408.75")), 15.0);
+        assert!(card_big_px(MIN_DOM_WIDTH, "▲ 200", Some("−$13,408.75")) < 15.0);
         assert!(card_avg_fits(
             420.0,
             "▲ 200",
             "@ 7567.00",
-            Some("+$50000.00"),
+            Some("+$50,000.00"),
             15.0
         ));
         assert!(!card_avg_fits(
             MIN_DOM_WIDTH,
             "▲ 200",
             "@ 7567.00",
-            Some("+$50000.00"),
+            Some("+$50,000.00"),
             13.0
         ));
-        assert!(flat_day_on_first_line(420.0, "−$13408.75"));
-        assert!(!flat_day_on_first_line(MIN_DOM_WIDTH, "−$13408.75"));
+        assert!(flat_day_on_first_line(420.0, "−$13,408.75"));
+        assert!(!flat_day_on_first_line(MIN_DOM_WIDTH, "−$13,408.75"));
     }
 
     /// The Qty and Bracket fields always show their values, a size over the account's maximum
