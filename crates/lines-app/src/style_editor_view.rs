@@ -29,7 +29,7 @@ use gpui::{
 
 use crate::chart_view::{ChartView, axis_w};
 use crate::style_editor::{
-    Control, Row, StyleEditor, Warning, color_name, control_label, is_toggle,
+    Control, Row, StyleEditor, WarnSlot, Warning, color_name, control_label, is_toggle,
 };
 use crate::theme::{Theme, user_color};
 use lines_core::style::Color;
@@ -347,9 +347,19 @@ pub struct EditorScroll {
     /// The color picker's square, hue and opacity sliders as last painted (window px): where
     /// a press or drag lands in them.
     picker: Rc<RefCell<[gpui::Bounds<gpui::Pixels>; 3]>>,
+    /// The warnings box's height as last painted and as the layout last counted it (logical
+    /// px at 100 %, 0 with none): a press in the picker fixes the warnings slot at them
+    /// ([`EditorScroll::warn_slot`]).
+    warnings: Rc<std::cell::Cell<(f32, f32)>>,
 }
 
 impl EditorScroll {
+    /// The warnings slot as last drawn: what a picker drag fixes (`StyleEditor::warn_slot`).
+    pub fn warn_slot(&self) -> WarnSlot {
+        let (drawn, room) = self.warnings.get();
+        WarnSlot { drawn, room }
+    }
+
     /// Scroll the editor's focus into view if a key moved it (row or column) since the last
     /// follow. The offset comes from the last frame's layout (a focus move doesn't move rows),
     /// so the scrollbar drawn at render shows it; a row that fits is also asked of GPUI
@@ -399,6 +409,88 @@ impl EditorScroll {
     }
 }
 
+/// The warnings box's height for `warnings` in an editor `w` wide (an upper bound, as
+/// [`content_height`]; 0 for none): its margins, border, padding, the bar and the marker, and
+/// each warning's wrapped lines.
+pub fn warnings_height(warnings: &[Warning], w: f32) -> f32 {
+    if warnings.is_empty() {
+        return 0.0;
+    }
+    let inner = (w - 2.0 - 24.0).max(1.0);
+    let text_w = (inner - 2.0 - 16.0 - 3.0 - 8.0 - 16.0 - 8.0).max(1.0);
+    let mut h = 8.0 + 2.0 + 8.0 + 4.0 * (warnings.len() as f32 - 1.0);
+    for wn in warnings {
+        h += text_lines(wn.text.chars().count(), 12.0, text_w) * line_h(12.0);
+    }
+    h
+}
+
+/// Where the warnings go: under the open picker, in its row, after all its controls (owner,
+/// 2026-11-10: nothing above or around an active picker changes size during a drag); with no
+/// picker open, under the Color row's swatches.
+fn warnings_in(e: &StyleEditor, label: &str) -> bool {
+    match &e.custom {
+        Some(p) => picker_row(p.fill) == label,
+        None => label == "Color",
+    }
+}
+
+/// The warnings slot a picker drag holds in row `label`: `Some` only in the row that shows the
+/// warnings, while a press drags in the open picker ([`StyleEditor::warn_slot`]); [`render`]
+/// then draws it `drawn` high, with or without warnings, and [`content_height`] counts its
+/// `room` (as it counted the warnings at the press, so the editor's height and place hold).
+pub fn fixed_slot(e: &StyleEditor, label: &str) -> Option<WarnSlot> {
+    e.warn_slot
+        .filter(|_| e.custom.is_some() && warnings_in(e, label))
+}
+
+/// One color row's parts, top to bottom, as [`content_height`] counts them (logical px, from
+/// the row's top): where the open picker starts, where the warnings slot starts and how tall it
+/// is (fixed during a picker drag: [`StyleEditor::warn_slot`]), and the row's height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ColorRowLayout {
+    pub picker_top: Option<f32>,
+    pub warnings_top: f32,
+    pub warnings_h: f32,
+    pub height: f32,
+}
+
+fn color_row_layout(
+    e: &StyleEditor,
+    r: &Row,
+    warnings: &[Warning],
+    w: f32,
+    names: &[&'static str],
+) -> ColorRowLayout {
+    let inner = (w - 2.0 - 24.0).max(1.0);
+    let controls_w = (inner - LABEL_W).max(1.0);
+    let widths = r.controls.iter().map(|&(c, on)| control_w(c, on, names));
+    let main = r.label == "Color";
+    let lines = wrapped_lines(widths, controls_w);
+    let mut h = 4.0 + line_h(12.0) + lines * 24.0 + (lines - 1.0) * 4.0 + 2.0;
+    if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note).filter(|_| main) {
+        h += 4.0 + text_lines(note.chars().count(), 11.0, inner) * line_h(11.0);
+    }
+    // Under its own row: the color's under Color, a fill's under Fill (never Recent).
+    let mut picker_top = None;
+    if let Some(p) = e.custom.as_ref().filter(|p| picker_row(p.fill) == r.label) {
+        picker_top = Some(h);
+        h += picker_height(p.opacity.is_some(), e.dropper, controls_w);
+    }
+    let warnings_top = h;
+    let warnings_h = match fixed_slot(e, r.label) {
+        Some(slot) => slot.room,
+        None if warnings_in(e, r.label) => warnings_height(warnings, w),
+        None => 0.0,
+    };
+    ColorRowLayout {
+        picker_top,
+        warnings_top,
+        warnings_h,
+        height: h + warnings_h,
+    }
+}
+
 /// How tall the editor draws at width `w` (logical px), as an upper bound: rows that wrap,
 /// warnings that wrap, the hex entry, header and footer. [`place`] places this height and the
 /// box never grows past it; when the area is shorter the body scrolls.
@@ -417,24 +509,7 @@ pub fn content_height(
         }
         let widths = r.controls.iter().map(|&(c, on)| control_w(c, on, names));
         if is_color_row(&r) {
-            let main = r.label == "Color";
-            let lines = wrapped_lines(widths, controls_w);
-            h += 4.0 + line_h(12.0) + lines * 24.0 + (lines - 1.0) * 4.0 + 2.0;
-            if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note).filter(|_| main) {
-                h += 4.0 + text_lines(note.chars().count(), 11.0, inner) * line_h(11.0);
-            }
-            // Under its own row: the color's under Color, a fill's under Fill (never Recent).
-            if let Some(p) = e.custom.as_ref().filter(|p| picker_row(p.fill) == r.label) {
-                h += picker_height(p.opacity.is_some(), e.dropper, controls_w);
-            }
-            if main && !warnings.is_empty() {
-                // Inside the box: margins, border, padding, the bar and the marker.
-                let text_w = (inner - 2.0 - 16.0 - 3.0 - 8.0 - 16.0 - 8.0).max(1.0);
-                h += 8.0 + 2.0 + 8.0 + 4.0 * (warnings.len() as f32 - 1.0);
-                for wn in warnings {
-                    h += text_lines(wn.text.chars().count(), 12.0, text_w) * line_h(12.0);
-                }
-            }
+            h += color_row_layout(e, &r, warnings, w, names).height;
         } else {
             let lines = wrapped_lines(widths, controls_w);
             h += 4.0 + lines * 24.0 + (lines - 1.0) * 4.0;
@@ -500,18 +575,34 @@ fn picker(
                 MouseButton::Left,
                 cx.listener(move |view: &mut ChartView, ev: &MouseDownEvent, _, cx| {
                     cx.stop_propagation();
+                    view.picker_drag(true, cx);
                     let (x, y) = frac(down.borrow()[k], ev.position);
                     view.picker_at(part, x, y, cx);
                 }),
             )
-            .on_mouse_move(cx.listener(
-                move |view: &mut ChartView, ev: &MouseMoveEvent, _, cx| {
+            .on_mouse_move(
+                cx.listener(move |view: &mut ChartView, ev: &MouseMoveEvent, _, cx| {
                     if ev.pressed_button == Some(MouseButton::Left) {
                         let (x, y) = frac(moved.borrow()[k], ev.position);
                         view.picker_at(part, x, y, cx);
+                    } else {
+                        // A release this part never saw (outside the window): the drag ended.
+                        view.picker_drag(false, cx);
                     }
-                },
-            ))
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|view: &mut ChartView, _: &gpui::MouseUpEvent, _, cx| {
+                    view.picker_drag(false, cx)
+                }),
+            )
+            .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|view: &mut ChartView, _: &gpui::MouseUpEvent, _, cx| {
+                    view.picker_drag(false, cx)
+                }),
+            )
         };
     let on_square = matches!(p.zone, Zone::Saturation | Zone::Brightness);
     let square = div()
@@ -1199,8 +1290,8 @@ pub fn render(
             );
         }
         if is_color {
-            // A study part's note (how its colors apply), the readability warnings, then the
-            // custom color picker, right under the colors.
+            // A study part's note (how its colors apply), the custom color picker right under
+            // the colors, then the readability warnings.
             if let Some(note) = e.parts.get(e.tab).and_then(|p| p.note).filter(|_| main) {
                 group = group.child(
                     div()
@@ -1212,17 +1303,46 @@ pub fn render(
                         .child(note),
                 );
             }
-            // The warnings come before the picker: a tall picker (high UI zoom, a short pane)
-            // would scroll them out of view, and they follow its preview live.
-            if main && !warnings.is_empty() {
-                group = group.child(warning_box(t, warnings));
-            }
             if let Some(p) = e
                 .custom
                 .as_ref()
                 .filter(|p| picker_row(p.fill) == row.label)
             {
                 group = group.child(picker(e, p, t, es, cx));
+            }
+            // The warnings after every control of the open picker (owner, 2026-11-10: their
+            // changes never move the square or a slider under the pointer); during a picker
+            // drag in a slot fixed at its start, clipped, so nothing below moves either. They
+            // stay in the row, so scrolling the row into view shows them.
+            // Its painted height is recorded for the next press (`EditorScroll::warn_slot`).
+            if warnings_in(e, row.label) {
+                let drawn = es.warnings.clone();
+                let room = warnings_height(warnings, at.w);
+                let probe = gpui::canvas(
+                    move |b, _, _| {
+                        drawn.set((f32::from(b.size.height) / crate::zoom::f(1.0), room))
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full();
+                let b = (!warnings.is_empty()).then(|| warning_box(t, warnings));
+                match fixed_slot(e, row.label) {
+                    // A drag holds the slot at its height, empty too when the warnings go.
+                    Some(slot) => {
+                        group = group.child(
+                            div()
+                                .flex_none()
+                                .h(crate::zoom::ui(slot.drawn))
+                                .overflow_hidden()
+                                .children(b),
+                        );
+                    }
+                    None if b.is_none() => es.warnings.set((0.0, 0.0)),
+                    None => {
+                        group = group.child(div().relative().children(b).child(probe));
+                    }
+                }
             }
         }
         groups.push(group);
@@ -1312,6 +1432,105 @@ pub fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Owner, 2026-11-10: nothing above or around an active picker changes size during a drag.
+    /// The square and the sliders start at the same y with 0, 1 or 2 warnings (the warnings go
+    /// under the picker), and during a drag the row's height holds while the warnings cross a
+    /// threshold (the slot is fixed at the drag's start), so nothing below moves either; the
+    /// editor's height holds with it. On release the slot settles.
+    #[test]
+    fn warnings_never_move_the_picker_or_resize_its_row_during_a_drag() {
+        use lines_core::drawings::{Style, Tool};
+        use lines_core::style::Rgb;
+        let names = &["a", "b", "c", "d"];
+        let w = 320.0;
+        let warning = |text: &str| Warning {
+            text: text.to_owned(),
+            swatch: None,
+        };
+        let none: Vec<Warning> = Vec::new();
+        let one = vec![warning(
+            "Looks like the up color in every theme and palette; may be misread as up.",
+        )];
+        let two = vec![
+            one[0].clone(),
+            warning("Low contrast in the dark theme, both palettes (1.3:1); lines need 3:1."),
+        ];
+        let mut e = StyleEditor::for_drawing(Tool::Trend, &Style::DEFAULT);
+        e.open_custom(false, Rgb::hex(0x808080));
+        let rows = e.rows();
+        let color = rows.iter().find(|r| r.label == "Color").unwrap();
+        let layout = |e: &StyleEditor, ws: &[Warning]| color_row_layout(e, color, ws, w, names);
+        // The picker and every control of it start at one y whatever the warnings.
+        let tops: Vec<_> = [&none, &one, &two]
+            .iter()
+            .map(|ws| {
+                let l = layout(&e, ws);
+                (l.picker_top, l.warnings_top)
+            })
+            .collect();
+        assert!(tops[0].0.is_some());
+        assert!(tops.windows(2).all(|p| p[0] == p[1]), "{tops:?}");
+        assert!(
+            tops[0].0.unwrap() < tops[0].1,
+            "the warnings come after the picker"
+        );
+        // Not dragging: the slot follows the warnings (it settles).
+        assert!(layout(&e, &two).height > layout(&e, &one).height);
+        // A drag that starts with one warning and crosses to none and to two: nothing moves.
+        // The box paints shorter than the estimate (text wraps less than counted): the drag
+        // draws that, while the layout keeps counting the estimate it counted at the press.
+        let room = warnings_height(&one, w);
+        let before = content_height(&e, &one, w, names);
+        // Taller, too (a UI zoom wraps the text more than counted): the layout still counts
+        // what it did. The slot comes from what the editor last drew (`EditorScroll`).
+        for drawn in [room * 0.7, room + 30.0] {
+            let es = EditorScroll::default();
+            es.warnings.set((drawn, room));
+            e.warn_slot = Some(es.warn_slot());
+            assert_eq!(e.warn_slot.unwrap().drawn, drawn);
+            let during = content_height(&e, &one, w, names);
+            assert_eq!(
+                during, before,
+                "the editor's height, so its place (`place`), holds at the press"
+            );
+        }
+        let held: Vec<_> = [&none, &one, &two]
+            .iter()
+            .map(|ws| (layout(&e, ws), content_height(&e, ws, w, names)))
+            .collect();
+        assert!(
+            held.windows(2).all(|p| p[0] == p[1]),
+            "row and editor heights hold during the drag: {held:?}"
+        );
+        // Render draws the fixed slot in the warnings' row only, the same height the layout
+        // counts, with no warnings left too.
+        assert_eq!(fixed_slot(&e, "Color"), e.warn_slot);
+        assert_eq!(layout(&e, &none).warnings_h, e.warn_slot.unwrap().room);
+        assert_eq!(fixed_slot(&e, "Line"), None);
+        // Released: the slot settles to what is shown.
+        e.warn_slot = None;
+        assert_eq!(fixed_slot(&e, "Color"), None);
+        assert_eq!(layout(&e, &none).warnings_h, 0.0);
+    }
+
+    /// With no picker open, the warnings stay right under the Color row's swatches.
+    #[test]
+    fn without_a_picker_the_warnings_sit_under_the_swatches() {
+        use lines_core::drawings::{Style, Tool};
+        let names = &["a", "b", "c", "d"];
+        let e = StyleEditor::for_drawing(Tool::Trend, &Style::DEFAULT);
+        let rows = e.rows();
+        let color = rows.iter().find(|r| r.label == "Color").unwrap();
+        let ws = vec![Warning {
+            text: "Low contrast".to_owned(),
+            swatch: None,
+        }];
+        let l = color_row_layout(&e, color, &ws, 320.0, names);
+        assert_eq!(l.picker_top, None);
+        assert!(l.warnings_h > 0.0);
+        assert_eq!(l.height, l.warnings_top + l.warnings_h);
+    }
 
     /// P4: a study's editor names its focused swatch and, apart, the selected one, as a
     /// drawing's does ("Teal · selected: Theme").

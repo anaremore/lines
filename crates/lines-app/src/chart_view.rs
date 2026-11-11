@@ -6741,6 +6741,26 @@ impl ChartView {
         );
     }
 
+    /// A press starts a drag in the picker's square or a slider (`true`), or the button is
+    /// released (`false`): the warnings slot is fixed at its height for the drag, then settles
+    /// (`StyleEditor::warn_slot`).
+    pub fn picker_drag(&mut self, on: bool, cx: &mut Context<Self>) {
+        let now = self.editor_scroll.warn_slot();
+        let e = match self.study_style.as_mut() {
+            Some((_, e)) => Some(e),
+            None => self.drawings.editor_mut(),
+        };
+        let Some(e) = e else {
+            return;
+        };
+        match (on, e.warn_slot) {
+            (true, None) if e.custom.is_some() => e.warn_slot = Some(now),
+            (false, Some(_)) => e.warn_slot = None,
+            _ => return,
+        }
+        cx.notify();
+    }
+
     /// A press on the color picker's square, hue or opacity slider (fractions of its size), or
     /// a drag over it with the button down.
     pub fn picker_at(&mut self, part: PickerPart, x: f32, y: f32, cx: &mut Context<Self>) {

@@ -226,6 +226,10 @@ pub struct StyleEditor {
     pub recent: Vec<Rgb>,
     /// `recent` changed since the host saved it.
     pub recent_changed: bool,
+    /// While a press drags in the picker's square or a slider: the warnings slot, fixed when
+    /// the drag began, so nothing around the picker changes size or place under the pointer;
+    /// the warnings show live inside it and the slot settles on release. `None` otherwise.
+    pub warn_slot: Option<WarnSlot>,
     /// The current tab's style was just saved as the default (until the next change).
     pub saved: bool,
     /// A study's editor: theme colors are the study colors, every part offers the line
@@ -356,6 +360,20 @@ pub(crate) fn where_phrase(ctxs: &[ThemeCtx], hit: &[bool]) -> String {
     }
 }
 
+/// The warnings slot a picker drag holds (logical px at 100 %): `drawn`, the box's painted
+/// height, is what is drawn (clipped); `room`, the layout's estimate at the press
+/// (`style_editor_view::warnings_height`, whole px), is what the editor's height and place
+/// count, as they did before the press, so neither the editor nor anything in it moves when
+/// the press starts.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WarnSlot {
+    pub drawn: f32,
+    pub room: f32,
+}
+
+/// Painted sizes, never NaN: equality is total.
+impl Eq for WarnSlot {}
+
 impl StyleEditor {
     pub fn new(title: String, parts: Vec<Part>, palette: u8) -> StyleEditor {
         StyleEditor {
@@ -371,6 +389,7 @@ impl StyleEditor {
             dropper: false,
             recent: Vec::new(),
             recent_changed: false,
+            warn_slot: None,
             saved: false,
             study: false,
         }
@@ -781,6 +800,7 @@ impl StyleEditor {
         if let Some((c, o)) = self.picked(fill) {
             self.custom = Some(crate::color_picker::Custom::open(fill, c, rgb, o));
             self.dropper = false;
+            self.warn_slot = None;
         }
     }
 
@@ -820,6 +840,7 @@ impl StyleEditor {
             return false;
         };
         self.dropper = false;
+        self.warn_slot = None;
         if keep {
             if let Some((Color::Custom(rgb), _)) = self.picked(p.fill)
                 && (Color::Custom(rgb), p.opacity) != p.initial
