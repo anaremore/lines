@@ -336,6 +336,12 @@ pub struct Fixture {
     /// Open the style editor on this drawing (screenshots: `--style-editor
     /// ID[:TAB[:COL[:ROW]]]`), on tab `TAB` (0 = first), the focus on (row, col).
     pub style_editor: Option<StyleEditorAt>,
+    /// With `style_editor`: the color picker open, set to this hex (`--color-picker`).
+    pub color_picker: Option<String>,
+    /// The color picker's recent colors (`--recent-colors`).
+    pub recent_colors: Vec<String>,
+    /// The eyedropper armed, the pointer at plot (x, y) (`--dropper`).
+    pub dropper: Option<(f32, f32)>,
     /// Tick bars run across sessions (`--tick-continuous`). A mode saved with the pane wins.
     pub tick_continuous: bool,
 }
@@ -619,6 +625,12 @@ pub struct ChartView {
     /// The style editor body's scroll state: its scrollbar, and the focus it last scrolled to
     /// show (a key that moves the focus scrolls again; a wheel scroll alone doesn't snap back).
     editor_scroll: crate::style_editor_view::EditorScroll,
+    /// The eyedropper over the plot: where (plot-local), the color under the pointer and what
+    /// it is (`crate::eyedropper`).
+    dropper_hover: Option<(f32, f32, lines_core::style::Rgb, &'static str)>,
+    /// Screenshots (`--dropper`): the pointer's plot point, read each frame until something
+    /// is under it.
+    dropper_fixture: Option<(f32, f32)>,
     /// The UI zoom generation the shaped text below was made at (`crate::zoom`).
     zoom_generation: u32,
     measure_lines: HashMap<
@@ -769,6 +781,9 @@ impl ChartView {
         let saved_styles = saved_tool_styles(cx);
         drawings.defaults = saved_styles;
         let fixture_style_editor = fixture.style_editor;
+        let fixture_picker = fixture.color_picker.clone();
+        let fixture_recent = fixture.recent_colors.clone();
+        let fixture_dropper = fixture.dropper;
 
         let mut view = ChartView {
             study_menu: None,
@@ -905,6 +920,8 @@ impl ChartView {
             saved_styles,
             editor_pane: (0.0, 0.0),
             editor_scroll: Default::default(),
+            dropper_hover: None,
+            dropper_fixture: None,
             note_lines: HashMap::new(),
             note_entry_line: None,
             zoom_generation: crate::zoom::generation(),
@@ -936,6 +953,23 @@ impl ChartView {
                 }
                 crate::style_editor::Outcome::Nothing
             });
+            if !fixture_recent.is_empty() {
+                crate::picker_view::update_settings(cx, |s| s.recent_colors = fixture_recent);
+            }
+            if let Some(hex) = fixture_picker
+                .as_deref()
+                .and_then(lines_core::style::Rgb::parse)
+            {
+                view.style_edit(
+                    |_| crate::style_editor::Outcome::OpenCustom { fill: false },
+                    cx,
+                );
+                view.style_edit(|e| e.take_color(hex), cx);
+                if let Some(at) = fixture_dropper {
+                    view.style_edit(|e| e.arm_dropper(), cx);
+                    view.dropper_fixture = Some(at);
+                }
+            }
         }
         view
     }
@@ -1088,11 +1122,18 @@ impl ChartView {
             }
             Kind::Account => return crate::trade_bar::close_account_menu(self, cx),
             Kind::StyleEditor => {
+                // Closed by a click outside or another popover: the picker's color is kept.
+                if self.styling() {
+                    self.style_edit(|e| e.keep_custom(), cx);
+                }
                 let drawing = self.drawings.close_editor();
                 let study = self.study_style.take().is_some();
                 if !drawing && !study {
                     return;
                 }
+                // Its eyedropper goes with it (and the buffers it reserved).
+                crate::eyedropper::arm(false);
+                self.dropper_hover = None;
             }
             Kind::OrderGroup => {
                 if self.ct.group_menu.take().is_none() {
@@ -3398,6 +3439,40 @@ impl ChartView {
 
     fn paint_chart(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         let t0 = Instant::now();
+        if self.dropping() {
+            // Over the editor's backdrop: every move shows the color under the pointer, a
+            // press on the plot takes it (and isn't a press outside the editor).
+            let view = cx.entity().downgrade();
+            let on_plot = self.plot;
+            // The editor itself (inside the plot) keeps its own presses: its controls, and the
+            // armed button that cancels.
+            let on_editor = |at: Point<Pixels>| {
+                popover::placed(popover::Panel::StyleEditor)
+                    .is_some_and(|r| r.contains(f32::from(at.x), f32::from(at.y)))
+            };
+            window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture {
+                    // Over the editor: no color under the pointer (what it covers isn't seen).
+                    let at = if on_editor(ev.position) {
+                        point(px(-1e4), px(-1e4))
+                    } else {
+                        ev.position
+                    };
+                    let _ = view.update(cx, |v, cx| v.dropper_move(at, cx));
+                }
+            });
+            let view = cx.entity().downgrade();
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
+                if phase == gpui::DispatchPhase::Capture
+                    && ev.button == MouseButton::Left
+                    && on_plot.contains(&ev.position)
+                    && !on_editor(ev.position)
+                {
+                    cx.stop_propagation();
+                    let _ = view.update(cx, |v, cx| v.dropper_take(ev.position, cx));
+                }
+            });
+        }
         // Screenshot fixture: the first group tag's list, once a frame has laid tags out.
         if self.pending_group_menu {
             if let Some(g) = self.ct.groups[..self.ct.n_groups]
@@ -3726,6 +3801,13 @@ impl ChartView {
         }
 
         self.draw(bounds, window, cx);
+        // Each frame until the pointer is over something (the first frames have no bars yet).
+        if let Some((x, y)) = self.dropper_fixture {
+            self.dropper_move(self.plot.origin + point(px(x), px(y)), cx);
+            if self.dropper_hover.is_some() {
+                self.dropper_fixture = None;
+            }
+        }
 
         // Crosshair sync: report this frame's time and price under the pointer when changed.
         let now = (
@@ -4797,6 +4879,9 @@ impl ChartView {
                     }
                 }
             }
+            // The eyedropper notes what this chart paints while its editor's dropper is armed.
+            let picking = self.dropping();
+            crate::eyedropper::begin(picking);
             let fp_first = self.footprint.first_bar();
             let fp_on = studies && self.footprint.is_active();
             for (k, c) in self.scene.candles.iter().enumerate() {
@@ -4865,6 +4950,25 @@ impl ChartView {
                     ));
                     window.paint_quad(fill(rect(bx, c.body_top, bw, bh), color));
                 }
+                // The eyedropper (armed only): the wick, then the body over it.
+                if crate::eyedropper::armed() {
+                    let (wick, body) = if c.up {
+                        ("Up candle wick", "Up candle body")
+                    } else {
+                        ("Down candle wick", "Down candle body")
+                    };
+                    crate::eyedropper::rect(
+                        rect(
+                            c.x - hair,
+                            c.wick_top,
+                            2.0 * hair,
+                            c.wick_bottom - c.wick_top,
+                        ),
+                        color,
+                        wick,
+                    );
+                    crate::eyedropper::rect(rect(bx, c.body_top, bw, bh.max(hair)), color, body);
+                }
             }
             if studies {
                 // Footprint cells' fills, then the study and level lines over them (visible
@@ -4889,6 +4993,7 @@ impl ChartView {
                 self.drawings.paint((ox, oy), hair, &t, window);
                 self.paint_drawing_text((ox, oy), window, cx);
             }
+            crate::eyedropper::end();
             // Trade history, then strategy markers: above studies and drawings, under the
             // crosshair.
             self.trade_marks.paint(plot, labels, &t, window, cx);
@@ -6198,15 +6303,71 @@ impl ChartView {
         f: impl FnOnce(&mut crate::style_editor::StyleEditor) -> crate::style_editor::Outcome,
         cx: &mut Context<Self>,
     ) {
+        use crate::style_editor::Outcome;
+        // The recent custom colors (settings) in the editor; "Custom…" opens the picker on the
+        // color as this theme shows it; a color kept goes back to the settings.
+        let recent = recent_colors(cx);
+        let t = self.theme;
+        let remembered = std::cell::RefCell::new(None);
+        let f = |e: &mut crate::style_editor::StyleEditor| {
+            if !e.recent_changed {
+                e.recent = recent;
+            }
+            let out = match f(e) {
+                Outcome::OpenCustom { fill } => {
+                    if let Some(c) = e.picked_color(fill) {
+                        let shown = if fill {
+                            t.fill_swatch_color(e, c)
+                        } else {
+                            t.swatch_color(e, c)
+                        };
+                        e.open_custom(fill, crate::theme::rgb_of(shown));
+                    }
+                    Outcome::Nothing
+                }
+                o => o,
+            };
+            if std::mem::take(&mut e.recent_changed) {
+                *remembered.borrow_mut() = Some(e.recent.clone());
+            }
+            out
+        };
+        self.style_edit_inner(f, cx);
+        // The eyedropper's buffers while it is armed (one style editor app-wide).
+        let dropping = self.dropping();
+        crate::eyedropper::arm(dropping);
+        if !dropping {
+            self.dropper_hover = None;
+        }
+        if let Some(r) = remembered.into_inner() {
+            crate::picker_view::update_settings(cx, |s| {
+                s.recent_colors = r
+                    .iter()
+                    .map(|c| {
+                        let mut h = String::with_capacity(7);
+                        let _ = c.write_hex(&mut h);
+                        h
+                    })
+                    .collect();
+            });
+        }
+    }
+
+    fn style_edit_inner(
+        &mut self,
+        f: impl FnOnce(&mut crate::style_editor::StyleEditor) -> crate::style_editor::Outcome,
+        cx: &mut Context<Self>,
+    ) {
         if let Some((r, mut e)) = self.study_style.take() {
             // A study's editor: each change restyles the study (a `StudyAction`); Esc steps
-            // back to the studies menu, as it was left.
+            // back to the studies menu, as it was left. The picker's previews apply as changes
+            // (a study has no undo steps to spare).
             match f(&mut e) {
                 crate::style_editor::Outcome::Close => {
                     popover::closed(cx, Kind::StyleEditor);
                     self.toggle_studies_menu(cx);
                 }
-                crate::style_editor::Outcome::Changed => {
+                crate::style_editor::Outcome::Changed | crate::style_editor::Outcome::Preview => {
                     if let StudyRef::Levels(id) = &r {
                         // App-wide, by source: every chart of it (any product) takes it.
                         let edit = match self.levels.source_types(id) {
@@ -6275,8 +6436,110 @@ impl ChartView {
     pub fn style_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         self.style_edit(
             |e| {
-                e.select_tab(i);
-                crate::style_editor::Outcome::Nothing
+                if e.select_tab(i) {
+                    crate::style_editor::Outcome::Changed
+                } else {
+                    crate::style_editor::Outcome::Nothing
+                }
+            },
+            cx,
+        );
+    }
+
+    /// A press on the color picker's square, hue or opacity slider (fractions of its size), or
+    /// a drag over it with the button down.
+    pub fn picker_at(&mut self, part: PickerPart, x: f32, y: f32, cx: &mut Context<Self>) {
+        self.style_edit(
+            |e| match part {
+                PickerPart::Square => e.custom_square(x, y),
+                PickerPart::Hue => e.custom_hue(x),
+                PickerPart::Opacity => e.custom_opacity(x),
+            },
+            cx,
+        );
+    }
+
+    /// The open style editor's eyedropper is armed.
+    fn dropping(&self) -> bool {
+        self.drawings.dropping() || self.study_style.as_ref().is_some_and(|(_, e)| e.dropper)
+    }
+
+    /// The pointer over the window while the eyedropper is armed: the color under it on the
+    /// plot, from this chart's last paint.
+    fn dropper_move(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        let (x, y) = self.local(at);
+        let hover = crate::eyedropper::pick(at).map(|(rgb, what)| (x as f32, y as f32, rgb, what));
+        if hover != self.dropper_hover {
+            self.dropper_hover = hover;
+            cx.notify();
+        }
+    }
+
+    /// A press on the plot while the eyedropper is armed: take the color under it (nothing
+    /// there: keep picking).
+    fn dropper_take(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+        if let Some((rgb, _)) = crate::eyedropper::pick(at) {
+            self.style_edit(|e| e.take_color(rgb), cx);
+        }
+    }
+
+    /// The color under the eyedropper, beside the pointer. (How to cancel is on the picker's
+    /// own button: the editor can sit over any part of the plot, a banner's place included.)
+    fn dropper_layer(&self, t: &Theme) -> Option<AnyElement> {
+        if !self.dropping() {
+            return None;
+        }
+        let mut layer = div().absolute().top_0().left_0().size_full();
+        if let Some((x, y, rgb, what)) = self.dropper_hover {
+            let mut hex = String::with_capacity(7);
+            let _ = rgb.write_hex(&mut hex);
+            let pw = f32::from(self.plot.size.width);
+            let left = if x + 16.0 + 180.0 < pw {
+                x + 16.0
+            } else {
+                (x - 196.0).max(0.0)
+            };
+            layer = layer.child(
+                div()
+                    .absolute()
+                    .left(px(left))
+                    .top(px(y + 16.0))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(crate::zoom::ui(8.0))
+                    .px(crate::zoom::ui(8.0))
+                    .py(crate::zoom::ui(4.0))
+                    .rounded_sm()
+                    .bg(t.panel)
+                    .border_1()
+                    .border_color(t.axis_line)
+                    .text_size(crate::zoom::ui(12.0))
+                    .text_color(t.text_main)
+                    .child(
+                        div()
+                            .size(crate::zoom::ui(16.0))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(t.control_edge)
+                            .bg(crate::theme::user_color(rgb, 100)),
+                    )
+                    .child(what)
+                    .child(div().text_color(t.text_dim).child(hex.to_ascii_uppercase())),
+            );
+        }
+        Some(layer.into_any_element())
+    }
+
+    /// A click on a zone of the color picker (the hex field, the dropper).
+    pub fn picker_zone(&mut self, z: crate::color_picker::Zone, cx: &mut Context<Self>) {
+        self.style_edit(
+            |e| {
+                if z == crate::color_picker::Zone::Dropper {
+                    e.arm_dropper()
+                } else {
+                    e.custom_zone(z)
+                }
             },
             cx,
         );
@@ -6566,6 +6829,19 @@ impl ChartView {
     /// placed beside its drawing (a study's under the study legend), inside the pane; its
     /// warnings checked in every theme and palette.
     fn style_editor_layer(&mut self, t: &Theme, cx: &mut Context<Self>) -> Option<AnyElement> {
+        // The recent colors as drawn are the rows a click on this frame acts on (`style_edit`
+        // fills them the same way before each input).
+        let recent = recent_colors(cx);
+        let open = match self.study_style.as_mut() {
+            Some((_, e)) => Some(e),
+            None => self.drawings.editor_mut(),
+        };
+        if let Some(e) = open
+            && !e.recent_changed
+            && e.recent != recent
+        {
+            e.recent = recent;
+        }
         // A study's editor sits at the plot's left under the study legend, away from the
         // newest bars; a drawing's beside its drawing. Warnings name theme and palette.
         let (e, target, warnings) = match &self.study_style {
@@ -8794,6 +9070,7 @@ impl Render for ChartView {
                         ))
                     })
                     .when_some(self.style_editor_layer(&t, cx), |d, e| d.child(e))
+                    .when_some(self.dropper_layer(&t), |d, e| d.child(e))
                     .when_some(overlay, |d, overlay| d.child(overlay))
                     .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
                     .when_some(self.drawing_banner(&t), |d, b| d.child(b))
@@ -8834,6 +9111,24 @@ fn needs_shaping<K: Eq + std::hash::Hash, T>(
     cache
         .get(&key)
         .is_none_or(|(shaped_in, _)| *shaped_in != color)
+}
+
+/// The color picker's parts a pointer sets (`ChartView::picker_at`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PickerPart {
+    Square,
+    Hue,
+    Opacity,
+}
+
+/// The color picker's recent custom colors, from the settings (newest first).
+fn recent_colors(cx: &App) -> Vec<lines_core::style::Rgb> {
+    crate::picker_view::settings(cx)
+        .recent_colors
+        .iter()
+        .filter_map(|h| lines_core::style::Rgb::parse(h))
+        .take(crate::color_picker::RECENT)
+        .collect()
 }
 
 #[cfg(test)]

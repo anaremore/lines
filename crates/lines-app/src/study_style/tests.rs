@@ -438,7 +438,9 @@ fn readability_warnings_per_part() {
             // The dark standard palette's up color, typed in.
             let row = e.rows().iter().position(|r| r.label == "Color").unwrap();
             let col = e.rows()[row].controls.len() - 1;
-            e.click(row, col);
+            assert_eq!(e.click(row, col), Outcome::OpenCustom { fill: false });
+            e.open_custom(false, lines_core::style::Rgb::hex(0x808080));
+            e.custom.as_mut().unwrap().zone = crate::color_picker::Zone::Hex;
             for ch in "3fcf9a".chars() {
                 e.key(&ch.to_string(), false, Some(&ch.to_string()));
             }
@@ -1015,6 +1017,48 @@ fn unknown_type_fields_are_kept() {
     assert_eq!(read_type(&m, t), look);
 }
 
+/// With recent colors, a zone fill's picker opens once, under Fill (the Recent row is a
+/// named row, not a second place for it), and a kept custom fill that becomes a recent color
+/// is still checked in the Fill row.
+#[test]
+fn a_fill_picker_opens_once_beside_recent_colors() {
+    use lines_core::style::Rgb;
+    let mut e = level_editor(
+        "Levels · Demo style".into(),
+        &PartStyles::default(),
+        &TYPES,
+        LabelMode::NamePrice,
+        None,
+        |_| None,
+    );
+    e.select_tab(2);
+    let names = &["a", "b", "c", "d"];
+    let grows = |e: &mut crate::style_editor::StyleEditor| {
+        let closed = crate::style_editor_view::content_height(e, &[], 400.0, names);
+        e.open_custom(true, Rgb::hex(0x808080));
+        assert!(e.custom.is_some());
+        let open = crate::style_editor_view::content_height(e, &[], 400.0, names);
+        e.key("escape", false, None);
+        assert!(e.custom.is_none());
+        open - closed
+    };
+    let alone = grows(&mut e);
+    e.recent = vec![Rgb::hex(0x123456)];
+    assert_eq!(grows(&mut e), alone, "one picker, recent colors or not");
+    // Keep a custom fill: remembered, and still checked under Fill.
+    e.open_custom(true, Rgb::hex(0x808080));
+    e.take_color(Rgb::hex(0xf719cb));
+    e.key("enter", false, None);
+    assert!(e.custom.is_none());
+    assert!(e.recent.contains(&Rgb::hex(0xf719cb)));
+    let rows = e.rows();
+    let fill = rows.iter().find(|r| r.label == "Fill").unwrap();
+    assert!(
+        fill.controls.iter().any(|(_, on)| *on),
+        "the kept fill is checked"
+    );
+}
+
 /// The editor shows what is saved and saves what it shows: grouped tabs after the source's
 /// own, each type's look (a zone's fill too) and the label option, round-tripped.
 #[test]
@@ -1103,8 +1147,10 @@ fn the_level_editor_round_trips() {
     let rows = e.rows();
     let fill = rows.iter().position(|r| r.label == "Fill").unwrap();
     let custom = rows[fill].controls.len() - 1;
-    e.click(fill, custom);
-    assert!(e.hex.is_some() && e.hex_fill);
+    assert_eq!(e.click(fill, custom), Outcome::OpenCustom { fill: true });
+    e.open_custom(true, lines_core::style::Rgb::hex(0x808080));
+    assert!(e.custom.as_ref().is_some_and(|c| c.fill));
+    e.custom.as_mut().unwrap().zone = crate::color_picker::Zone::Hex;
     for ch in ["f", "7", "1", "9", "c", "b"] {
         e.key(ch, false, Some(ch));
     }

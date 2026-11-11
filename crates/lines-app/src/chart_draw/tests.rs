@@ -976,3 +976,65 @@ fn measure_parts_toggle_and_save_by_name() {
     let partial: MeasureShow = serde_json::from_str(r#"{"bars": false}"#).unwrap();
     assert!(!partial.bars && partial.ticks, "missing parts stay on");
 }
+
+/// The picker's previews are painted, not saved; the color is kept (one undo step) however
+/// the picker ends but Esc: a click on "Save as default" (which then saves the new color), the
+/// editor closing from outside, the drawings hidden. Esc puts it back with no undo step.
+#[test]
+fn a_previewed_color_is_kept_by_every_way_out_but_esc() {
+    use lines_core::style::Rgb;
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::HLine);
+    r.down(100.0, 100.0);
+    r.frame(400.0, 100.0);
+    let id = r.d.hit_at(400.0, 100.0).expect("on the line");
+    let open = |r: &mut Rig| {
+        assert!(r.d.open_editor(id));
+        r.d.edit_style(|e| {
+            e.open_custom(false, Rgb::hex(0x808080));
+            e.custom_square(1.0, 0.0)
+        })
+        .0
+    };
+    let saved = |r: &Rig| r.items()[0].style;
+
+    // Previewed: not saved yet.
+    assert_eq!(open(&mut r), Outcome::Preview);
+    assert_eq!(saved(&r), Style::DEFAULT);
+    // "Save as default": the drawing and the default both take the previewed color.
+    let (out, default) = r.d.edit_style(|e| {
+        let last = e.rows().len() - 1;
+        e.click(last, 0)
+    });
+    assert_eq!(out, Outcome::SaveDefault);
+    let kept = saved(&r);
+    assert_ne!(kept, Style::DEFAULT);
+    assert_eq!(default.map(|(_, s)| s), Some(kept));
+    // One undo step.
+    assert!(r.d.undo());
+    assert_eq!(saved(&r), Style::DEFAULT);
+
+    // Closed from outside (a click off it, another popover): kept.
+    assert_eq!(open(&mut r), Outcome::Preview);
+    assert!(r.d.close_editor());
+    assert_eq!(saved(&r), kept);
+    assert!(r.d.undo());
+
+    // The drawings hidden: kept.
+    assert_eq!(open(&mut r), Outcome::Preview);
+    r.d.set_hidden(true);
+    r.d.set_hidden(false);
+    assert_eq!(saved(&r), kept);
+    assert!(r.d.undo());
+    assert_eq!(saved(&r), Style::DEFAULT);
+
+    // Esc puts it back, with no undo step: the next undo is the line's drawing.
+    assert_eq!(open(&mut r), Outcome::Preview);
+    let (out, _) = r.d.edit_style(|e| e.key("escape", false, None));
+    assert_eq!(out, Outcome::Changed);
+    assert_eq!(saved(&r), Style::DEFAULT);
+    assert!(r.d.close_editor());
+    assert_eq!(saved(&r), Style::DEFAULT);
+    assert!(r.d.undo());
+    assert!(r.items().is_empty(), "no step for a revert");
+}

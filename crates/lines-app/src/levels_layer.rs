@@ -1004,6 +1004,11 @@ impl LevelsLayer {
         let line = |window: &mut Window, y: f32, st: Stroke| {
             let w = st.width.max(hair);
             let y = snap(f64::from(y - w * 0.5), scale);
+            crate::eyedropper::rect(
+                Bounds::new(point(px(ox), px(oy + y)), size(px(pw), px(w))),
+                st.color,
+                "Level",
+            );
             // Across the bars to the plot's edge; in the labels' gutter the chip covers it.
             st.dash.segments(pw, |a, b| {
                 window.paint_quad(fill(
@@ -1022,14 +1027,13 @@ impl LevelsLayer {
             let mut prev: Option<f32> = None;
             for (i, col) in cols.iter().enumerate() {
                 let y = col.y - dy;
+                let seg = Bounds::new(
+                    point(px(ox + col.left), px(oy + y - w * 0.5)),
+                    size(px(col.right - col.left), px(w)),
+                );
+                crate::eyedropper::rect(seg, c, "Level");
                 if !(dashed && i % 2 == 1) {
-                    window.paint_quad(fill(
-                        Bounds::new(
-                            point(px(ox + col.left), px(oy + y - w * 0.5)),
-                            size(px(col.right - col.left), px(w)),
-                        ),
-                        c,
-                    ));
+                    window.paint_quad(fill(seg, c));
                 }
                 if let (true, Some(py)) = (col.joins && !dashed, prev) {
                     let (a, b) = (py.min(y), py.max(y));

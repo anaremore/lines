@@ -106,6 +106,9 @@ pub struct ChartDrawings {
     pub defaults: ToolStyles,
     /// The style editor, open on a drawing.
     editor: Option<(DrawingId, StyleEditor)>,
+    /// The drawing as the color picker previews it (painted in place of the saved one; saved,
+    /// one undo step, when the color is kept).
+    restyled: Option<Drawing>,
     /// "Delete all for <product>" waiting for Enter.
     pub confirm_clear: bool,
     /// The pointer, plot-local (for previews and drags; set by the chart each frame).
@@ -139,6 +142,7 @@ impl ChartDrawings {
             note: None,
             defaults: [Style::DEFAULT; Tool::ALL.len()],
             editor: None,
+            restyled: None,
             confirm_clear: false,
             pointer: None,
             drawn: Vec::with_capacity(64),
@@ -153,6 +157,8 @@ impl ChartDrawings {
     /// Another product's drawings (the chart switched markets): anything in progress ends.
     pub fn set_data(&mut self, data: Arc<ProductDrawings>) {
         if !Arc::ptr_eq(&data, &self.data) {
+            // A color the picker previews is kept, on the product it was chosen for.
+            self.close_editor();
             *self = ChartDrawings {
                 hidden: self.hidden,
                 defaults: self.defaults,
@@ -235,7 +241,7 @@ impl ChartDrawings {
             self.drag = None;
             self.dragged = None;
             self.confirm_clear = false;
-            self.editor = None;
+            self.close_editor();
         }
         self.hidden = hidden;
     }
@@ -379,8 +385,27 @@ impl ChartDrawings {
         true
     }
 
+    /// Close the editor. A color the picker still previews is kept (saved, one undo step):
+    /// closing it any way but Esc keeps the color. (The chart keeps it through the editor
+    /// first, so it is also remembered among the recent colors; this is the backstop.)
     pub fn close_editor(&mut self) -> bool {
+        // (The lock is released before the change takes it again.)
+        let saved = self
+            .restyled
+            .take()
+            .and_then(|r| Some((self.data.lock().get(r.id).cloned()?, r.style)));
+        if let Some((mut d, style)) = saved
+            && d.style != style
+        {
+            d.style = style;
+            self.data.change(|s| (s.edit(d), ()));
+        }
         self.editor.take().is_some()
+    }
+
+    /// The open editor, to update in place (the recent colors).
+    pub fn editor_mut(&mut self) -> Option<&mut StyleEditor> {
+        self.editor.as_mut().map(|(_, e)| e)
     }
 
     /// The open editor, kept in step with its drawing (an undo or another chart may change
@@ -390,17 +415,25 @@ impl ChartDrawings {
         let d = self.data.lock().get(*id).cloned();
         match d {
             Some(d) if !self.hidden => {
+                let previewing = self.restyled.is_some();
                 let (_, e) = self.editor.as_mut()?;
-                if e.drawing_style(&d.style) != d.style {
+                // (Not while the picker previews: the drawing is saved when it is kept.)
+                if !previewing && e.drawing_style(&d.style) != d.style {
                     e.sync_drawing(&d.style);
                 }
                 Some(&*e)
             }
             _ => {
                 self.editor = None;
+                self.restyled = None;
                 None
             }
         }
+    }
+
+    /// The editor's eyedropper is armed.
+    pub fn dropping(&self) -> bool {
+        self.editor.as_ref().is_some_and(|(_, e)| e.dropper)
     }
 
     /// The drawing the editor is open on.
@@ -422,28 +455,47 @@ impl ChartDrawings {
             return (Outcome::Nothing, None);
         };
         let id = *id;
+        let was_picking = e.custom.is_some();
         let out = f(e);
         let Some(mut d) = self.data.lock().get(id).cloned() else {
             self.editor = None;
+            self.restyled = None;
             return (Outcome::Close, None);
         };
-        match out {
-            Outcome::Changed => {
-                if let Some((_, e)) = &self.editor {
-                    d.style = e.drawing_style(&d.style);
-                }
-                self.data.change(|s| (s.edit(d), ()));
-                (Outcome::Changed, None)
+        let (style, picking) = match &self.editor {
+            Some((_, e)) => (e.drawing_style(&d.style), e.custom.is_some()),
+            None => (d.style, false),
+        };
+        if out == Outcome::Preview {
+            // Painted in place of the saved drawing until the color is kept.
+            d.style = style;
+            self.restyled = Some(d);
+            return (Outcome::Preview, None);
+        }
+        // With the picker closed the editor holds the style to keep, whatever the input was
+        // (a click on "Save as default" or another row keeps the previewed color first).
+        // Saved only when it differs: one undo step, none for a revert.
+        // Only a change, or the input that closed the picker (keeping its color), writes: a
+        // plain move never saves the editor's copy over another chart's newer edit.
+        if out == Outcome::Changed || (was_picking && !picking) {
+            self.restyled = None;
+            if style != d.style {
+                d.style = style;
+                let edited = d.clone();
+                self.data.change(|s| (s.edit(edited), ()));
             }
+        }
+        match out {
             Outcome::SaveDefault => {
                 self.defaults[tool_index(d.tool)] = d.style;
                 (Outcome::SaveDefault, Some((d.tool, d.style)))
             }
             Outcome::Close => {
                 self.editor = None;
+                self.restyled = None;
                 (Outcome::Close, None)
             }
-            Outcome::Nothing => (Outcome::Nothing, None),
+            o => (o, None),
         }
     }
 
@@ -763,6 +815,7 @@ impl ChartDrawings {
             return false;
         };
         self.editor = None;
+        self.restyled = None;
         self.drag = None;
         self.dragged = None;
         self.data.change(|s| {
@@ -902,8 +955,9 @@ impl ChartDrawings {
                 .collect();
         }
         for d in set.items() {
-            let d = match &self.dragged {
-                Some(x) if x.id == d.id => x,
+            let d = match (&self.dragged, &self.restyled) {
+                (Some(x), _) if x.id == d.id => x,
+                (_, Some(x)) if x.id == d.id => x,
                 _ => d,
             };
             if let Some(p) = project(d, axis, vp) {
@@ -1370,6 +1424,14 @@ fn paint_line(
         return;
     }
     let (ux, uy) = (dx / len, dy / len);
+    // The eyedropper sees the whole line, gaps of a dash included.
+    crate::eyedropper::segment(
+        (origin.0 + a.0, origin.1 + a.1),
+        (origin.0 + b.0, origin.1 + b.1),
+        width,
+        color,
+        "Drawing",
+    );
     if dy.abs() < 0.01 || dx.abs() < 0.01 {
         // Crisp at every DPI: a whole number of device pixels wide, on device-pixel edges.
         let horizontal = dy.abs() < 0.01;

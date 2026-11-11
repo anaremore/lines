@@ -692,6 +692,17 @@ fn saved_place(panel: Panel, cx: &App) -> Option<(f32, f32)> {
 
 type Dismisser = std::rc::Rc<dyn Fn(&MouseDownEvent, &mut Window, &mut App)>;
 
+thread_local! {
+    /// Where each floating panel was last drawn (window px).
+    static PLACED: std::cell::RefCell<Vec<(Panel, Rect)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Where `panel` was last drawn (window px), if it has been.
+pub fn placed(panel: Panel) -> Option<Rect> {
+    PLACED.with_borrow(|p| p.iter().find(|(q, _)| *q == panel).map(|(_, r)| *r))
+}
+
 /// `content` in a panel frame: a title bar above it (a grip and `title`, draggable; a × that
 /// closes it with `dismiss`), drawn over the window at `dropdown::PRIORITY` with
 /// [`defer_backdrop`] under it, so a press outside closes it too and does nothing else. A drag
@@ -854,6 +865,11 @@ impl Element for Floating {
             PANEL_DRAG.with(|c| c.set(Some(d)));
         }
         let rect = Rect::new(at.0, at.1, w, h + title_h());
+        let placed = self.panel;
+        PLACED.with_borrow_mut(|p| {
+            p.retain(|(q, _)| *q != placed);
+            p.push((placed, rect));
+        });
         let close = dismiss.clone();
         let panel = self.panel;
         let close: OnDismiss = Box::new(move |ev, window, cx| {

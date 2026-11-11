@@ -106,38 +106,86 @@ fn a_zone_recolored_keeps_its_fill_in_step() {
 }
 
 #[test]
-fn custom_colors_are_typed_in_hex() {
+fn the_custom_picker_previews_keeps_and_puts_back() {
+    use crate::color_picker::Zone;
     let mut e = trend();
-    assert_eq!(click(&mut e, Control::Custom), Outcome::Nothing);
-    assert_eq!(e.hex.as_deref(), Some(""));
-    for ch in ["1", "2", "z", "a", "b", "C", "d", "9"] {
-        e.key(ch, false, Some(ch));
+    let before = e.drawing_style(&Style::DEFAULT);
+    // "Custom…" asks the host to open the picker on the color as the theme shows it.
+    assert_eq!(
+        click(&mut e, Control::Custom),
+        Outcome::OpenCustom { fill: false }
+    );
+    e.open_custom(false, Rgb::hex(0x808080));
+    assert!(e.custom.is_some());
+    // Every change previews; the hex field types six digits.
+    assert_eq!(e.key("right", true, None), Outcome::Preview);
+    e.custom.as_mut().unwrap().zone = Zone::Hex;
+    for ch in ["1", "2", "a", "b", "c"] {
+        assert_eq!(e.key(ch, false, Some(ch)), Outcome::Nothing);
     }
-    // Non-hex is ignored, and it stops at six digits.
-    assert_eq!(e.hex.as_deref(), Some("12abcd"));
-    assert_eq!(e.key("enter", false, None), Outcome::Changed);
-    assert_eq!(e.hex, None);
+    assert_eq!(
+        e.key("d", false, Some("d")),
+        Outcome::Preview,
+        "six digits apply"
+    );
     let c = Color::Custom(Rgb::hex(0x12abcd));
     assert_eq!(e.drawing_style(&Style::DEFAULT).line.color, c);
-    // Shown as its own chip, current.
-    assert!(e.rows()[0].controls.contains(&(Control::Color(c), true)));
-    // Reopening the entry starts from it; Esc leaves the entry, not the editor.
+    // Enter keeps it, and it joins the recent colors (a row of its own, current there).
+    assert_eq!(e.key("enter", false, None), Outcome::Changed);
+    assert!(e.custom.is_none());
+    assert_eq!(e.recent, vec![Rgb::hex(0x12abcd)]);
+    assert!(e.recent_changed);
+    let recent = e.rows().iter().position(|r| r.label == "Recent").unwrap();
+    assert!(
+        e.rows()[recent]
+            .controls
+            .contains(&(Control::Color(c), true))
+    );
+    assert!(
+        !e.rows()[0].controls.contains(&(Control::Color(c), true)),
+        "not shown twice"
+    );
+    // Esc puts back the color it opened with, and leaves the picker, not the editor.
     click(&mut e, Control::Custom);
-    assert_eq!(e.hex.as_deref(), Some("12abcd"));
-    e.key("backspace", false, None);
-    assert_eq!(e.key("enter", false, None), Outcome::Nothing, "five digits");
-    assert_eq!(e.key("escape", false, None), Outcome::Nothing);
-    assert_eq!(e.hex, None);
+    e.open_custom(false, Rgb::hex(0x12abcd));
+    e.custom.as_mut().unwrap().zone = Zone::Hue;
+    assert_eq!(e.key("right", true, None), Outcome::Preview);
+    assert_ne!(e.drawing_style(&Style::DEFAULT).line.color, c);
+    assert_eq!(e.key("escape", false, None), Outcome::Changed);
+    assert!(e.custom.is_none());
+    assert_eq!(e.drawing_style(&Style::DEFAULT).line.color, c);
     assert_eq!(e.key("escape", false, None), Outcome::Close);
-    // A click on any other control ends the entry: the keys move again.
+    // A click on any other control keeps the picker's color: the keys move again.
+    let mut e = trend();
     click(&mut e, Control::Custom);
-    assert!(e.hex.is_some());
+    e.open_custom(false, Rgb::hex(0x808080));
+    e.custom_square(1.0, 0.0);
     let line = e.rows().iter().position(|r| r.label == "Line").unwrap();
     e.click(line, 0);
-    assert_eq!(e.hex, None);
+    assert!(e.custom.is_none());
+    assert_ne!(
+        e.drawing_style(&Style::DEFAULT).line.color,
+        before.line.color
+    );
     let row = e.row;
     e.key("down", false, None);
     assert_eq!(e.row, row + 1, "arrows reach the controls");
+    // The eyedropper: armed from the picker, Esc ends it; a color taken previews.
+    click(&mut e, Control::Custom);
+    e.open_custom(false, Rgb::hex(0x808080));
+    assert_eq!(e.arm_dropper(), Outcome::Dropper);
+    assert_eq!(e.key("escape", false, None), Outcome::Nothing);
+    assert!(
+        !e.dropper && e.custom.is_some(),
+        "Esc ends the dropper only"
+    );
+    e.arm_dropper();
+    assert_eq!(e.take_color(Rgb::hex(0x3fcf9a)), Outcome::Preview);
+    assert!(!e.dropper);
+    assert_eq!(
+        e.drawing_style(&Style::DEFAULT).line.color,
+        Color::Custom(Rgb::hex(0x3fcf9a))
+    );
 }
 
 #[test]
@@ -188,10 +236,12 @@ fn ctxs() -> Vec<ThemeCtx> {
 }
 
 fn type_hex(e: &mut StyleEditor, hex: &str) {
-    click(e, Control::Custom);
-    for _ in 0..6 {
-        e.key("backspace", false, None);
-    }
+    assert_eq!(
+        click(e, Control::Custom),
+        Outcome::OpenCustom { fill: false }
+    );
+    e.open_custom(false, Rgb::hex(0x808080));
+    e.custom.as_mut().unwrap().zone = crate::color_picker::Zone::Hex;
     for ch in hex.chars() {
         let t = ch.to_string();
         e.key(&t, false, Some(&t));
@@ -330,4 +380,63 @@ fn swatches_are_named_and_not_duplicated() {
     // On/off options are checkboxes.
     assert!(is_toggle(Control::TextBox) && is_toggle(Control::ExtendLeft));
     assert!(!is_toggle(Control::Width(2)));
+}
+
+/// Keeping a custom color adds a Recent row under Color; the click that kept it still lands on
+/// the control it was on (here "Dotted", in the row under Color as drawn), not the row that moved
+/// into its place.
+#[test]
+fn a_click_that_keeps_the_picker_lands_where_it_was_drawn() {
+    let mut e = StyleEditor::for_drawing(Tool::Trend, &Style::DEFAULT);
+    e.open_custom(false, Rgb::hex(0x808080));
+    assert_eq!(e.custom_square(1.0, 0.0), Outcome::Preview);
+    let rows = e.rows();
+    let line = rows.iter().position(|r| r.label == "Line").unwrap();
+    assert!(rows.iter().all(|r| r.label != "Recent"));
+    let dotted = rows[line]
+        .controls
+        .iter()
+        .position(|(c, _)| *c == Control::LineType(LineType::Dotted))
+        .unwrap();
+    assert_eq!(e.click(line, dotted), Outcome::Changed);
+    assert!(
+        e.rows().iter().any(|r| r.label == "Recent"),
+        "kept: remembered"
+    );
+    assert_eq!(
+        e.drawing_style(&Style::DEFAULT).line.line,
+        LineType::Dotted,
+        "the clicked control, not the Recent swatch now in its row"
+    );
+    assert_ne!(
+        e.drawing_style(&Style::DEFAULT).line.color,
+        Style::DEFAULT.line.color
+    );
+}
+
+/// Tab keeps the picker's color (as Enter and a click elsewhere do), on a one-tab editor too.
+#[test]
+fn tab_keeps_the_picker_color() {
+    let mut e = StyleEditor::for_drawing(Tool::Trend, &Style::DEFAULT);
+    e.open_custom(false, Rgb::hex(0x808080));
+    assert_eq!(e.custom_square(1.0, 0.0), Outcome::Preview);
+    let previewed = e.drawing_style(&Style::DEFAULT);
+    assert_eq!(e.key("tab", false, None), Outcome::Changed);
+    assert!(e.custom.is_none());
+    assert_eq!(e.drawing_style(&Style::DEFAULT), previewed);
+}
+
+/// The eyedropper has a pointer way out: its button pressed again cancels it, as does using
+/// any other part of the picker.
+#[test]
+fn the_dropper_button_toggles_and_the_picker_disarms_it() {
+    let mut e = StyleEditor::for_drawing(Tool::Trend, &Style::DEFAULT);
+    e.open_custom(false, Rgb::hex(0x808080));
+    assert_eq!(e.arm_dropper(), Outcome::Dropper);
+    assert!(e.dropper);
+    assert_eq!(e.arm_dropper(), Outcome::Nothing);
+    assert!(!e.dropper, "pressed again: cancelled");
+    assert_eq!(e.arm_dropper(), Outcome::Dropper);
+    e.custom_hue(0.5);
+    assert!(!e.dropper, "the hue slider used: cancelled");
 }
