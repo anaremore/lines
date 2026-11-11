@@ -2127,6 +2127,8 @@ impl SettingsWindow {
                             .id(("choice", i * 64 + j))
                             .flex_none()
                             .whitespace_nowrap()
+                            .relative()
+                            .children(crate::layout_rec::text_marker(name))
                             .px_2()
                             .cursor_pointer()
                             .when(on && !idle, |d| {
@@ -2499,6 +2501,9 @@ impl SettingsWindow {
             div()
                 .text_size(crate::zoom::ui(11.5))
                 .text_color(color)
+                // The layout lint sees each line of text a row draws (screenshot builds).
+                .relative()
+                .children(crate::layout_rec::text_marker(&text))
                 .child(if data {
                     self.words(&text, color, &paths)
                 } else {
@@ -2519,7 +2524,13 @@ impl SettingsWindow {
                     .flex_wrap()
                     .items_baseline()
                     .gap_x_2()
-                    .child(div().text_color(t.text_main).child(label.to_owned()))
+                    .child(
+                        div()
+                            .text_color(t.text_main)
+                            .relative()
+                            .children(crate::layout_rec::text_marker(label))
+                            .child(label.to_owned()),
+                    )
                     // Where the value applies when that isn't the app (decision 0021: no
                     // hidden inheritance): "New panes", "This workspace". Rows under an
                     // account picker have it there.
@@ -2553,15 +2564,27 @@ impl SettingsWindow {
                     .child(now),
             );
         }
-        let mut right = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .ml_auto()
-            .min_w_0()
-            .max_w_full();
+        // A long choice (Bar period's 21 chips) takes its own full-width line under the label,
+        // in a column: its chips wrap at a width the column gives them, so the row's height is
+        // measured with them wrapped. A wrapping chip group as an item of the wrapping row (and
+        // of a wrapping control group) could be measured on one line and then shrunk, painting
+        // its wrapped chips over the description and the next row.
+        let long_choice = idx
+            .iter()
+            .any(|&k| matches!(schema::all()[k].kind, Kind::Choice(c) if long_choice(c)));
+        let mut right = if long_choice {
+            div().flex().flex_col().items_end().w_full().min_w_0()
+        } else {
+            div()
+                .flex()
+                .flex_row()
+                .flex_wrap()
+                .items_center()
+                .gap_2()
+                .ml_auto()
+                .min_w_0()
+                .max_w_full()
+        };
         let mut dot = false;
         let mut resettable: Option<usize> = None;
         // A part hidden while its guardrail is off: the line shows its first control alone
@@ -3646,6 +3669,15 @@ fn inline_text(s: &str) -> bool {
     !s.contains('\n') && s.chars().count() <= 40
 }
 
+/// Chips past which a choice is "long": it always takes its own line under its label
+/// (`row`), never beside it.
+const LONG_CHOICE: usize = 6;
+
+/// Whether a choice's chips take their own line (more than [`LONG_CHOICE`] of them).
+fn long_choice(chips: &[&str]) -> bool {
+    chips.len() > LONG_CHOICE
+}
+
 /// Editors whose summary sits beside their button ("8/16, 12/24 ticks  Edit…"); the rest
 /// (the data folder's path, the reset's account, the rollback) go under the label.
 fn summary_beside(key: &str) -> bool {
@@ -3668,6 +3700,18 @@ mod tests {
     }
 
     use super::*;
+
+    /// Which rows' chips take their own line: every choice with more chips than fit beside a
+    /// label at the narrowest window. Named here, so a new long choice is a decision.
+    #[test]
+    fn long_choices_take_their_own_line() {
+        let long: Vec<&str> = schema::all()
+            .iter()
+            .filter(|s| matches!(s.kind, Kind::Choice(c) if long_choice(c)))
+            .map(|s| s.key)
+            .collect();
+        assert_eq!(long, ["charts.timeframe"]);
+    }
 
     /// At its smallest the window leaves a row's label column its full width, and the widest
     /// line's controls (the news window: two numbers and their words) fit their own line

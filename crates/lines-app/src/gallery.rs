@@ -282,6 +282,30 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     }
     // The trading panel's Qty and Bracket lists: anchored under their field, as wide as their
     // content (never the window's width).
+    // Settings › Charts at the narrowest window: Bar period's 21 chips wrap on their own line
+    // under the label, and the row grows to hold them (never over its description or the next
+    // row). Dark at 100 %, light at 150 % (tall enough that the page needs no scrolling, so
+    // nothing is cut at its edge).
+    let mut set = s(
+        "settings-charts-narrow",
+        false,
+        end,
+        args(
+            "--layout chart --size 1000x700 --theme dark --settings charts --settings-size 640x420",
+        ),
+    );
+    set.windows = 2;
+    v.push(set);
+    let mut set = s(
+        "settings-charts-narrow-light-150",
+        false,
+        end,
+        args(
+            "--layout chart --size 1000x700 --theme light --ui-zoom 150 --settings charts --settings-size 640x900",
+        ),
+    );
+    set.windows = 2;
+    v.push(set);
     v.push(s(
         "panel-qty-list",
         true,
@@ -1637,6 +1661,11 @@ pub fn run(dir: &Path, full: bool) -> Result<i32> {
 /// The lint reports a scene wrote: its main window and any popped-out panes.
 fn reports(dir: &Path, name: &str) -> Vec<PathBuf> {
     let mut v = vec![dir.join(format!("{name}.lint.txt"))];
+    // The Settings window (`--settings`) reports beside the main one.
+    let settings = dir.join(format!("{name}-settings.lint.txt"));
+    if settings.exists() {
+        v.push(settings);
+    }
     for n in 1.. {
         let p = dir.join(format!("{name}-pane-{n}.lint.txt"));
         if !p.exists() {
