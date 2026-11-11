@@ -1,6 +1,6 @@
 # 0022: External level sources: a public levels layer, private adapters
 
-**Status:** Accepted (implements 0007 and 0020)
+**Status:** Accepted (implements 0007 and 0020). Superseded in part by 0037 (owner, 2026-11-10): labels may use their level's color when it meets AA.
 
 **Context:** The owner wants levels from external services on charts: levels and zones from a private, locally running level service (localhost, display-only plugin contract), and option-structure levels on SPY/QQQ from a private, authenticated level API (translated onto ES/MES and NQ/MNQ by that service's documented anchor rule). Both adapters are private; the display machinery should be reusable for any future level source.
 

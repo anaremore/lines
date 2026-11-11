@@ -27,7 +27,7 @@ Format: Status · Context · Decision · Consequences.
 | 0019 | Local market-data store |
 | 0020 | Official builds wrap the public app; connectors register through an extension point |
 | 0021 | Settings: in context first, one searchable Settings window, settings as data (Accepted) |
-| 0022 | External level sources: a public levels layer, private adapters |
+| 0022 | External level sources: a public levels layer, private adapters (Accepted; label-color clause superseded by 0037) |
 | 0023 | Trade execution via Sierra Chart's DTC server |
 | 0024 | Contract alignment for live orders, amends 0023 |
 | 0025 | Strategies: pure state machines behind the trading core, backtested on replays (Accepted; amended by 0027) |
@@ -41,3 +41,4 @@ Format: Status · Context · Decision · Consequences.
 | 0036 | A UI font setting (Accepted; supersedes 0034's deferred font setting and §2's fallback-only clause) |
 | 0034 | Bundled fonts: IBM Plex Sans for the UI, IBM Plex Mono for numbers (Accepted; font setting superseded by 0036) |
 | 0035 | A saved key is never shown again (Accepted; supersedes the Show clause of 0030 §4) |
+| 0037 | Level labels may use the level's color when it meets AA (Accepted; supersedes 0022's theme-text label clause) |
