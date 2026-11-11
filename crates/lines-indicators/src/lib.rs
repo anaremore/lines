@@ -128,6 +128,16 @@ impl VolumeSpec {
     pub fn window(&self) -> usize {
         usize::from(self.average_len.clamp(1, Self::MAX_LEN))
     }
+
+    /// A Volume study added now: on the chart, along the plot's bottom (owner, 2026-11-10).
+    /// A saved Volume without the field stays in its pane ([`Default`] keeps `overlay` off:
+    /// never flip it, or every saved chart's pane volume would move onto the chart).
+    pub fn added() -> Self {
+        VolumeSpec {
+            overlay: true,
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for VolumeSpec {
@@ -397,6 +407,26 @@ mod tests {
             unreachable!()
         };
         assert_eq!(spec.window(), 1);
+    }
+
+    /// A Volume added now is an overlay and says so in its file; one saved before (no
+    /// `overlay` field) still loads in its pane.
+    #[test]
+    fn new_volumes_are_overlays_and_old_ones_stay_in_their_pane() {
+        let old: IndicatorConfig = serde_json::from_str(r#"{"kind":"volume"}"#).unwrap();
+        let IndicatorConfig::Volume { spec, .. } = old else {
+            unreachable!()
+        };
+        assert!(!spec.overlay, "an old Volume stays in its pane");
+        assert!(old.in_subpane());
+        let new = IndicatorConfig::Volume {
+            spec: VolumeSpec::added(),
+            display: Default::default(),
+            style: Default::default(),
+        };
+        let json = serde_json::to_string(&new).unwrap();
+        assert_eq!(json, r#"{"kind":"volume","overlay":true}"#);
+        assert_eq!(serde_json::from_str::<IndicatorConfig>(&json).unwrap(), new);
     }
 
     /// Styles are an optional nested field: a config without them writes none and loads as
