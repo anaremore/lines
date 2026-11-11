@@ -93,7 +93,7 @@ fn tab_x0() -> f32 {
     crate::zoom::f(TAB_X0_100)
 }
 /// Width of a divider's grab handle (the visible line is one pixel).
-const GRAB: f32 = 6.0;
+const GRAB: f32 = crate::layout::DIVIDER_GRAB;
 /// A tab drag starts after this much movement.
 const DRAG_START: f32 = 6.0;
 /// Closed tabs kept for "Reopen closed tab".

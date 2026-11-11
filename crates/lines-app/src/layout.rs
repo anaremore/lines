@@ -201,6 +201,10 @@ impl Divider {
     }
 }
 
+/// Width of a divider's grab band (logical px; the visible line is one pixel), centred on the
+/// line: it reaches half of this into the panes on both sides.
+pub const DIVIDER_GRAB: f32 = 6.0;
+
 /// Whether a left press at (`x`, `y`) starts dragging the pane at `pane` out by its header:
 /// inside the header's own row (`header_h` px tall from the pane's top) and outside every
 /// divider's grab band (`grabs`, `Divider::handle`), which always takes the press first. A
@@ -819,7 +823,7 @@ mod tests {
     #[test]
     fn a_divider_takes_the_press_over_the_header_under_it() {
         use super::*;
-        const GRAB: f32 = 6.0;
+        const GRAB: f32 = DIVIDER_GRAB;
         let area = Rect::new(0.0, 0.0, 400.0, 600.0);
         for header_h in [27.0f32, 27.0 * 1.5] {
             // DOM above, T&S below: the T&S header sits right under the line.
