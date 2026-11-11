@@ -149,10 +149,10 @@ fn adopt(p: &mut PaneDoc, sets: &mut BTreeMap<u32, StudySet>) -> bool {
 pub fn mark_legacy(v: &mut serde_json::Value) {
     match v {
         serde_json::Value::Object(o) => {
-            if o.get("kind").and_then(|k| k.as_str()) == Some("chart") {
-                if let Some(serde_json::Value::Object(c)) = o.get_mut("chart") {
-                    c.insert("legacy_studies".into(), serde_json::Value::Bool(true));
-                }
+            if o.get("kind").and_then(|k| k.as_str()) == Some("chart")
+                && let Some(serde_json::Value::Object(c)) = o.get_mut("chart")
+            {
+                c.insert("legacy_studies".into(), serde_json::Value::Bool(true));
             }
             for (_, child) in o.iter_mut() {
                 mark_legacy(child);
