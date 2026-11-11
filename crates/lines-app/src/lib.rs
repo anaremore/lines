@@ -352,6 +352,15 @@ pub enum LayoutKind {
 pub enum ThemeKind {
     Dark,
     Light,
+    /// Follow the OS appearance (screenshots: `--appearance`, else dark).
+    System,
+}
+
+/// `--appearance`: the OS appearance a screenshot pretends to have (Theme: System).
+#[derive(Copy, Clone, Debug, ValueEnum, PartialEq, Eq)]
+pub enum OsAppearanceKind {
+    Dark,
+    Light,
 }
 
 /// Lines: futures charting terminal.
@@ -444,6 +453,10 @@ struct Cli {
     /// Color theme (default: Settings › Appearance, else dark). For this run only.
     #[arg(long, value_enum)]
     theme: Option<ThemeKind>,
+    /// Screenshot: the OS appearance Theme: System follows (default dark; screenshots never
+    /// ask the OS, so they stay the same on every machine).
+    #[arg(long, value_enum, requires = "screenshot")]
+    appearance: Option<OsAppearanceKind>,
     /// Up/down color preset (`--palette cb` for the colorblind-safe one; default: Settings ›
     /// Appearance, else standard). Rising candle bodies are hollow in every preset, so
     /// direction never relies on color alone.
@@ -1867,21 +1880,30 @@ where
     // never saved.
     let look_flags = {
         use settings_schema::{HollowName, PaletteName, ThemeName};
+        let palette_name = |p: PaletteKind| match p {
+            PaletteKind::Standard => PaletteName::Standard,
+            PaletteKind::Colorblind => PaletteName::Colorblind,
+        };
         settings_schema::Appearance {
-            theme: cli.theme.map(|t| match t {
-                ThemeKind::Dark => ThemeName::Dark,
-                ThemeKind::Light => ThemeName::Light,
+            theme: cli.theme.and_then(|t| match t {
+                ThemeKind::Dark => Some(ThemeName::Dark),
+                ThemeKind::Light => Some(ThemeName::Light),
+                ThemeKind::System => None,
             }),
-            palette: cli.palette.map(|p| match p {
-                PaletteKind::Standard => PaletteName::Standard,
-                PaletteKind::Colorblind => PaletteName::Colorblind,
-            }),
+            // A theme flag holds over a saved System too.
+            follow_os: cli.theme.map(|t| t == ThemeKind::System),
+            palette: cli.palette.map(palette_name),
+            // `--palette` is both appearances' palette.
+            light_palette: cli.palette.map(palette_name),
             hollow: cli.hollow.map(|h| match h {
                 HollowKind::Up => HollowName::Up,
                 HollowKind::Down => HollowName::Down,
             }),
         }
     };
+    if let Some(a) = cli.appearance {
+        settings_schema::set_os_dark(a == OsAppearanceKind::Dark);
+    }
     let theme =
         settings_schema::theme_for(&settings_schema::Appearance::default().with_flags(look_flags));
     // The display time zone: `--time-zone` for this run, else (below) Settings › General.
@@ -2206,9 +2228,8 @@ where
     let mut ws = Workspace::new(env);
     // Settings › Appearance, under any look flag given; the UI zoom (`ui_zoom`).
     zoom::set(settings.settings.ui_zoom.unwrap_or(zoom::DEFAULT));
-    ws.env.theme.set(settings_schema::theme_for(
-        &settings.settings.appearance.with_flags(look_flags),
-    ));
+    let look = settings.settings.appearance.with_flags(look_flags);
+    ws.env.theme.set(settings_schema::theme_for(&look));
     // The journal's trade snapshots take the same look.
     journal_shots::set_theme(ws.env.theme.get());
     journal_shots::set_pnl(settings.settings.pnl_display);
@@ -2286,6 +2307,20 @@ where
             Some(Err(e)) => Some(format!("--ui-font: {e}")),
             None => fonts::apply(&fonts::UiFont::from_saved(saved_ui_font.as_deref())),
         };
+        // Theme: System starts in the OS appearance (windows then report changes).
+        let dark = workspace::is_dark(cx.window_appearance());
+        let known = settings_schema::os_dark();
+        match settings_schema::os_report(ws.env.frozen, known, dark, look.theme_choice()) {
+            settings_schema::OsReport::Ignore => {}
+            settings_schema::OsReport::Remember => {
+                settings_schema::set_os_dark(dark);
+            }
+            settings_schema::OsReport::Apply => {
+                settings_schema::set_os_dark(dark);
+                ws.env.theme.set(settings_schema::theme_for(&look));
+                journal_shots::set_theme(ws.env.theme.get());
+            }
+        }
         cx.set_global(download_env);
         cx.set_global(Feeds(registry));
         cx.set_global(trading);

@@ -306,6 +306,15 @@ pub struct Appearance {
     pub palette: Option<PaletteName>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hollow: Option<HollowName>,
+    /// Theme: System. Follow the OS appearance (`Some(true)`); `theme` keeps the last explicit
+    /// choice, which a build without System still reads. A separate field rather than a third
+    /// `theme` value, so an older build loads the file unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follow_os: Option<bool>,
+    /// The light appearance's palette; absent: `palette`'s (one palette for both, as before
+    /// there were two). `palette` is the dark appearance's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_palette: Option<PaletteName>,
 }
 
 impl Appearance {
@@ -313,13 +322,55 @@ impl Appearance {
         *self == Appearance::default()
     }
 
-    /// `self` (what is saved) with this run's look flags over it.
+    /// `self` (what is saved) with this run's look flags over it. A theme flag sets both
+    /// `theme` and `follow_os`, so it holds over a saved System too.
     pub fn with_flags(self, flags: Appearance) -> Appearance {
         Appearance {
             theme: flags.theme.or(self.theme),
             palette: flags.palette.or(self.palette),
             hollow: flags.hollow.or(self.hollow),
+            follow_os: flags.follow_os.or(self.follow_os),
+            // `--palette` sets both; with no light palette of its own saved, light shows as
+            // "Same as dark" (the same colors, and what the trader set).
+            light_palette: match flags.light_palette {
+                Some(l) if flags.palette == Some(l) && self.light_palette.is_none() => None,
+                Some(l) => Some(l),
+                None => self.light_palette,
+            },
         }
+    }
+
+    /// The Theme setting's choice: System when following the OS, else the saved theme.
+    pub fn theme_choice(&self) -> ThemeChoice {
+        if self.follow_os == Some(true) {
+            return ThemeChoice::System;
+        }
+        match self.theme.unwrap_or_default() {
+            ThemeName::Dark => ThemeChoice::Dark,
+            ThemeName::Light => ThemeChoice::Light,
+        }
+    }
+
+    /// Set the Theme choice. System keeps `theme` (the last explicit choice); the defaults
+    /// are stored as absent.
+    pub fn set_theme_choice(&mut self, c: ThemeChoice) {
+        match c {
+            ThemeChoice::System => self.follow_os = Some(true),
+            ThemeChoice::Dark | ThemeChoice::Light => {
+                self.follow_os = None;
+                self.theme = (c == ThemeChoice::Light).then_some(ThemeName::Light);
+            }
+        }
+    }
+
+    /// The palette the dark or the light appearance shows.
+    pub fn palette_for(&self, dark: bool) -> PaletteName {
+        if dark {
+            self.palette
+        } else {
+            self.light_palette.or(self.palette)
+        }
+        .unwrap_or_default()
     }
 
     /// After a change from `before` to `after` (both as shown, flags included): what to save
@@ -335,17 +386,33 @@ impl Appearance {
         // flag shows changes nothing, so it never writes over what is saved.
         let mut s = saved;
         let mut f = flags;
-        if after.theme.unwrap_or_default() != before.theme.unwrap_or_default() {
-            s.theme = after.theme;
-            f.theme = None;
+        if after.theme_choice() != before.theme_choice() {
+            // System keeps what is saved as the explicit theme (never a flag's).
+            if after.theme_choice() == ThemeChoice::System {
+                s.follow_os = Some(true);
+            } else {
+                s.theme = after.theme;
+                s.follow_os = None;
+            }
+            (f.theme, f.follow_os) = (None, None);
         }
         if after.palette.unwrap_or_default() != before.palette.unwrap_or_default() {
             s.palette = after.palette;
             f.palette = None;
+            // `--palette` holds over both palettes; with no light palette of its own saved,
+            // light follows the dark one the trader just set ("Same as dark").
+            if s.light_palette.is_none() {
+                f.light_palette = None;
+            }
         }
         if after.hollow.unwrap_or_default() != before.hollow.unwrap_or_default() {
             s.hollow = after.hollow;
             f.hollow = None;
+        }
+        // Absent ("same as dark") and an explicit palette differ, so compared as stored.
+        if after.light_palette != before.light_palette {
+            s.light_palette = after.light_palette;
+            f.light_palette = None;
         }
         (s, f)
     }
@@ -359,7 +426,13 @@ impl Appearance {
     ) -> (Appearance, Appearance) {
         let ((mut s, mut f), (s0, f0)) = (now, then);
         match field {
-            LookField::Theme => (s.theme, f.theme) = (s0.theme, f0.theme),
+            LookField::Theme => {
+                (s.theme, f.theme) = (s0.theme, f0.theme);
+                (s.follow_os, f.follow_os) = (s0.follow_os, f0.follow_os);
+            }
+            LookField::LightPalette => {
+                (s.light_palette, f.light_palette) = (s0.light_palette, f0.light_palette);
+            }
             LookField::Palette => (s.palette, f.palette) = (s0.palette, f0.palette),
             LookField::Hollow => (s.hollow, f.hollow) = (s0.hollow, f0.hollow),
         }
@@ -372,18 +445,26 @@ impl Appearance {
 pub enum LookField {
     Theme,
     Palette,
+    LightPalette,
     Hollow,
 }
 
 impl LookField {
     #[cfg_attr(not(test), allow(dead_code))]
-    pub const ALL: [LookField; 3] = [LookField::Theme, LookField::Palette, LookField::Hollow];
+    pub const ALL: [LookField; 4] = [
+        LookField::Theme,
+        LookField::Palette,
+        LookField::LightPalette,
+        LookField::Hollow,
+    ];
 
     /// Whether `a` sets this field.
     pub fn set_in(self, a: &Appearance) -> bool {
         match self {
-            LookField::Theme => a.theme.is_some(),
+            // `--theme system` sets `follow_os`, not `theme`.
+            LookField::Theme => a.theme.is_some() || a.follow_os.is_some(),
             LookField::Palette => a.palette.is_some(),
+            LookField::LightPalette => a.light_palette.is_some(),
             LookField::Hollow => a.hollow.is_some(),
         }
     }
@@ -393,6 +474,7 @@ impl LookField {
         match key {
             "appearance.theme" => Some(LookField::Theme),
             "appearance.palette" => Some(LookField::Palette),
+            "appearance.light_palette" => Some(LookField::LightPalette),
             "appearance.hollow" => Some(LookField::Hollow),
             _ => None,
         }
@@ -405,6 +487,99 @@ pub enum ThemeName {
     #[default]
     Dark,
     Light,
+}
+
+/// The Theme setting (Settings › Appearance, its palette commands, `--theme`): stored as
+/// `Appearance::theme` and `Appearance::follow_os`, never itself.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ThemeChoice {
+    Dark,
+    Light,
+    /// Follow the OS appearance, live.
+    System,
+}
+
+impl ThemeChoice {
+    pub const ALL: [ThemeChoice; 3] = [ThemeChoice::Dark, ThemeChoice::Light, ThemeChoice::System];
+}
+
+/// What a report of the OS appearance does (a window's report, or the one read at startup).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OsReport {
+    /// Not taken: a screenshot (it never follows the OS), or nothing changed.
+    Ignore,
+    /// Remembered for when System is chosen; nothing shown changes.
+    Remember,
+    /// Remembered, and every window changes to it (Theme: System).
+    Apply,
+}
+
+/// The decision for an OS appearance report: `frozen` (screenshot mode) never takes one; a
+/// report of the appearance already known changes nothing; otherwise it is remembered, and
+/// applied when the choice (flags included) is System.
+pub fn os_report(frozen: bool, known_dark: bool, dark: bool, choice: ThemeChoice) -> OsReport {
+    if frozen || known_dark == dark {
+        OsReport::Ignore
+    } else if choice == ThemeChoice::System {
+        OsReport::Apply
+    } else {
+        OsReport::Remember
+    }
+}
+
+/// Under Theme: System, what is in effect ("Now: Dark · Standard"); nothing for Dark or Light.
+pub fn system_now(a: &Appearance, os_dark: bool) -> Option<String> {
+    (a.theme_choice() == ThemeChoice::System).then(|| {
+        format!(
+            "Now: {} · {}",
+            if os_dark { "Dark" } else { "Light" },
+            PALETTES[a.palette_for(os_dark) as usize]
+        )
+    })
+}
+
+/// For the palette rows (`appearance.palette`, `appearance.light_palette`): whether the
+/// row's value is the one shown now. Dark's is in use in dark, and in light while Light
+/// palette is Same as dark; light's only in light. `None` for any other setting.
+pub fn palette_in_use(key: &str, a: &Appearance, os_dark: bool) -> Option<bool> {
+    let dark = match a.theme_choice() {
+        ThemeChoice::Dark => true,
+        ThemeChoice::Light => false,
+        ThemeChoice::System => os_dark,
+    };
+    match key {
+        "appearance.palette" => Some(dark || a.light_palette.is_none()),
+        "appearance.light_palette" => Some(!dark),
+        _ => None,
+    }
+}
+
+/// A choice's label as shown: Light palette's "Same as dark" names what that is now.
+pub fn choice_label(
+    key: &str,
+    j: usize,
+    name: &'static str,
+    a: &Appearance,
+) -> std::borrow::Cow<'static, str> {
+    if key == "appearance.light_palette" && j == 0 {
+        format!("{name} ({})", PALETTES[a.palette_for(true) as usize]).into()
+    } else {
+        name.into()
+    }
+}
+
+/// What the OS appearance is, as far as the app knows: dark until a window reports it
+/// (screenshots never ask, so System resolves to dark there unless `--appearance` says).
+static OS_DARK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// The OS appearance the app last heard (see [`set_os_dark`]).
+pub fn os_dark() -> bool {
+    OS_DARK.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Record the OS appearance; true if it changed.
+pub fn set_os_dark(dark: bool) -> bool {
+    OS_DARK.swap(dark, std::sync::atomic::Ordering::Relaxed) != dark
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -423,16 +598,29 @@ pub enum HollowName {
     Down,
 }
 
-/// The theme an appearance asks for.
+/// The theme an appearance asks for, System resolved by the OS appearance the app last
+/// heard ([`os_dark`]).
 pub fn theme_for(a: &Appearance) -> crate::theme::Theme {
+    resolve(a, os_dark())
+}
+
+/// The theme an appearance asks for when the OS appearance is dark (`os_dark`) or light:
+/// the choice picks the appearance, the appearance its own palette.
+pub fn resolve(a: &Appearance, os_dark: bool) -> crate::theme::Theme {
     use crate::theme::{HollowBodies, Palette, Theme};
-    let palette = match a.palette.unwrap_or_default() {
+    let dark = match a.theme_choice() {
+        ThemeChoice::Dark => true,
+        ThemeChoice::Light => false,
+        ThemeChoice::System => os_dark,
+    };
+    let palette = match a.palette_for(dark) {
         PaletteName::Standard => Palette::Standard,
         PaletteName::Colorblind => Palette::Colorblind,
     };
-    let mut t = match a.theme.unwrap_or_default() {
-        ThemeName::Dark => Theme::dark(palette),
-        ThemeName::Light => Theme::light(palette),
+    let mut t = if dark {
+        Theme::dark(palette)
+    } else {
+        Theme::light(palette)
     };
     t.hollow = match a.hollow.unwrap_or_default() {
         HollowName::Up => HollowBodies::Up,
@@ -874,8 +1062,9 @@ use Kind::*;
 use Safety::{Normal, Trading};
 use Section as Sec;
 
-const THEMES: &[&str] = &["Dark", "Light"];
+const THEMES: &[&str] = &["Dark", "Light", "System"];
 const PALETTES: &[&str] = &["Standard", "Colorblind"];
+const LIGHT_PALETTES: &[&str] = &["Same as dark", "Standard", "Colorblind"];
 const HOLLOWS: &[&str] = &["Up candles", "Down candles"];
 const PNL: &[&str] = &["Off", "Ticks", "Currency", "Both"];
 const UNITS: &[&str] = &["Ticks", "Points"];
@@ -918,19 +1107,14 @@ fn table() -> Vec<Setting> {
                 "appearance.theme",
                 Sec::Appearance,
                 "Theme",
-                "Colors for every window.",
+                "System follows the OS light or dark mode.",
                 Scope::App,
                 Normal,
                 Choice(THEMES),
-                |p, _, _| Value::Choice(p.app.appearance.theme.unwrap_or_default() as usize),
+                |p, _, _| Value::Choice(p.app.appearance.theme_choice() as usize),
                 Some(|p, _, v| {
-                    let i = want_choice(v, 2)?;
-                    p.app.appearance.theme = Some(if i == 0 {
-                        ThemeName::Dark
-                    } else {
-                        ThemeName::Light
-                    })
-                    .filter(|t| *t != ThemeName::default());
+                    let i = want_choice(v, ThemeChoice::ALL.len())?;
+                    p.app.appearance.set_theme_choice(ThemeChoice::ALL[i]);
                     Ok(())
                 }),
             ),
@@ -940,8 +1124,8 @@ fn table() -> Vec<Setting> {
             s(
                 "appearance.palette",
                 Sec::Appearance,
-                "Palette",
-                "Up and down colors. Colorblind uses blue and orange; direction also shows by shape.",
+                "Dark palette",
+                "Up and down colors in the dark theme. Colorblind uses blue and orange; direction also shows by shape.",
                 Scope::App,
                 Normal,
                 Choice(PALETTES),
@@ -949,6 +1133,34 @@ fn table() -> Vec<Setting> {
                 Some(|p, _, v| {
                     let i = want_choice(v, 2)?;
                     p.app.appearance.palette = (i == 1).then_some(PaletteName::Colorblind);
+                    Ok(())
+                }),
+            ),
+            Value::Choice(0),
+        ),
+        with_default(
+            s(
+                "appearance.light_palette",
+                Sec::Appearance,
+                "Light palette",
+                "Up and down colors in the light theme.",
+                Scope::App,
+                Normal,
+                Choice(LIGHT_PALETTES),
+                |p, _, _| {
+                    Value::Choice(match p.app.appearance.light_palette {
+                        None => 0,
+                        Some(PaletteName::Standard) => 1,
+                        Some(PaletteName::Colorblind) => 2,
+                    })
+                },
+                Some(|p, _, v| {
+                    let i = want_choice(v, LIGHT_PALETTES.len())?;
+                    p.app.appearance.light_palette = [
+                        None,
+                        Some(PaletteName::Standard),
+                        Some(PaletteName::Colorblind),
+                    ][i];
                     Ok(())
                 }),
             ),
@@ -2604,6 +2816,7 @@ const APPEARANCE: &[Group] = &[group(
     &[
         line!("appearance.theme"),
         line!("appearance.palette"),
+        line!("appearance.light_palette"),
         line!("appearance.ui_zoom"),
         line!(crate::fonts::KEY),
     ],
@@ -3104,9 +3317,10 @@ mod tests {
         for (k, sec) in want {
             assert_eq!(by_key(k).map(|s| s.section), Some(*sec), "{k}");
         }
-        // Keys added since, in window order: the UI font (decision 0036, on Appearance), trade
-        // history on new charts (Charts), and the only key the regrouping adds, the prop values
-        // line the overrides fold behind (a button, nothing saved).
+        // Keys added since, in window order: the light palette (Appearance), the UI font
+        // (decision 0036, on Appearance), trade history on new charts (Charts), and the only key
+        // the regrouping adds, the prop values line the overrides fold behind (a button, nothing
+        // saved).
         let new: Vec<&str> = all()
             .iter()
             .map(|s| s.key)
@@ -3114,9 +3328,18 @@ mod tests {
             .collect();
         assert_eq!(
             new,
-            ["appearance.ui_font", "charts.trades", PROP_OVERRIDES_KEY]
+            [
+                "appearance.light_palette",
+                "appearance.ui_font",
+                "charts.trades",
+                PROP_OVERRIDES_KEY
+            ]
         );
         assert_eq!(by_key("charts.trades").map(|s| s.section), Some(S::Charts));
+        assert_eq!(
+            by_key("appearance.light_palette").map(|s| s.section),
+            Some(S::Appearance)
+        );
         assert_eq!(
             by_key("appearance.ui_font").map(|s| s.section),
             Some(S::Appearance)
@@ -3433,6 +3656,311 @@ mod tests {
         assert_eq!((s.theme, f.theme), (Some(ThemeName::Dark), None));
     }
 
+    /// Theme: System and the per-appearance palettes resolve to a theme as a pure function of
+    /// (choice, OS appearance, palettes).
+    #[test]
+    fn system_theme_and_palettes_resolve() {
+        use crate::theme::{Palette, Theme};
+        let system = |light_palette, palette| Appearance {
+            follow_os: Some(true),
+            palette,
+            light_palette,
+            ..Default::default()
+        };
+        // System follows the OS; Dark and Light ignore it.
+        let a = system(None, None);
+        assert_eq!(resolve(&a, true), Theme::dark(Palette::Standard));
+        assert_eq!(resolve(&a, false), Theme::light(Palette::Standard));
+        let light = Appearance {
+            theme: Some(ThemeName::Light),
+            ..Default::default()
+        };
+        for os in [true, false] {
+            assert_eq!(
+                resolve(&Appearance::default(), os),
+                Theme::dark(Palette::Standard)
+            );
+            assert_eq!(resolve(&light, os), Theme::light(Palette::Standard));
+        }
+        // One saved palette (as before there were two) is both appearances'.
+        let a = system(None, Some(PaletteName::Colorblind));
+        assert_eq!(resolve(&a, true), Theme::dark(Palette::Colorblind));
+        assert_eq!(resolve(&a, false), Theme::light(Palette::Colorblind));
+        // Dark colorblind, light standard.
+        let a = system(Some(PaletteName::Standard), Some(PaletteName::Colorblind));
+        assert_eq!(resolve(&a, true), Theme::dark(Palette::Colorblind));
+        assert_eq!(resolve(&a, false), Theme::light(Palette::Standard));
+        // Light colorblind, dark standard; a saved explicit theme under System is kept.
+        let a = Appearance {
+            theme: Some(ThemeName::Light),
+            ..system(Some(PaletteName::Colorblind), None)
+        };
+        assert_eq!(a.theme_choice(), ThemeChoice::System);
+        assert_eq!(resolve(&a, true), Theme::dark(Palette::Standard));
+        assert_eq!(resolve(&a, false), Theme::light(Palette::Colorblind));
+        // A theme flag holds over a saved System, and `--theme system` over a saved Light.
+        let dark_flag = Appearance {
+            theme: Some(ThemeName::Dark),
+            follow_os: Some(false),
+            ..Default::default()
+        };
+        assert_eq!(a.with_flags(dark_flag).theme_choice(), ThemeChoice::Dark);
+        let system_flag = Appearance {
+            follow_os: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            light.with_flags(system_flag).theme_choice(),
+            ThemeChoice::System
+        );
+    }
+
+    /// The Theme setting: System is its third choice, choosing it keeps the explicit theme
+    /// saved (an older build reads that), and choosing Dark or Light again stops following.
+    #[test]
+    fn theme_setting_stores_system_apart() {
+        let st = by_key("appearance.theme").unwrap();
+        assert!(matches!(st.kind, Kind::Choice(c) if c == ["Dark", "Light", "System"]));
+        let (t, f) = (Target::default(), Facts::default());
+        let mut p = Prefs::default();
+        st.apply(&mut p, &t, Value::Choice(1)).unwrap();
+        st.apply(&mut p, &t, Value::Choice(2)).unwrap();
+        assert_eq!((st.get)(&p, &t, &f), Value::Choice(2));
+        assert_eq!(p.app.appearance.theme, Some(ThemeName::Light));
+        assert_eq!(p.app.appearance.follow_os, Some(true));
+        let json = String::from_utf8(p.app.encode()).unwrap();
+        assert!(json.contains("\"theme\": \"light\""), "{json}");
+        assert!(json.contains("\"follow_os\": true"), "{json}");
+        st.apply(&mut p, &t, Value::Choice(0)).unwrap();
+        assert_eq!(
+            p.app.appearance,
+            Appearance::default(),
+            "Dark: nothing saved"
+        );
+        assert!(st.apply(&mut p, &t, Value::Choice(3)).is_err());
+
+        // A change to System through the window's path saves System, never a flag's theme.
+        let saved = Appearance::default();
+        let flags = Appearance {
+            theme: Some(ThemeName::Light),
+            follow_os: Some(false),
+            ..Default::default()
+        };
+        let shown = saved.with_flags(flags);
+        let mut after = shown;
+        after.set_theme_choice(ThemeChoice::System);
+        let (s, f) = Appearance::changed(saved, flags, shown, after);
+        assert_eq!((s.theme, s.follow_os), (None, Some(true)));
+        assert_eq!((f.theme, f.follow_os), (None, None), "the flag drops");
+        // And an undo puts both back.
+        let (s2, f2) = Appearance::undo_field(LookField::Theme, (s, f), (saved, flags));
+        assert_eq!((s2, f2), (saved, flags));
+    }
+
+    /// Light palette: "Same as dark" (absent) until set; set apart, it is saved as given
+    /// (Standard included), and the dark palette no longer changes it.
+    #[test]
+    fn light_palette_is_apart_once_set() {
+        let dark = by_key("appearance.palette").unwrap();
+        let light = by_key("appearance.light_palette").unwrap();
+        assert!(
+            matches!(light.kind, Kind::Choice(c) if c == ["Same as dark", "Standard", "Colorblind"])
+        );
+        let (t, f) = (Target::default(), Facts::default());
+        let mut p = Prefs::default();
+        dark.apply(&mut p, &t, Value::Choice(1)).unwrap();
+        assert_eq!(p.app.appearance.palette_for(false), PaletteName::Colorblind);
+        light.apply(&mut p, &t, Value::Choice(1)).unwrap();
+        assert_eq!((light.get)(&p, &t, &f), Value::Choice(1));
+        assert_eq!(p.app.appearance.palette_for(true), PaletteName::Colorblind);
+        assert_eq!(p.app.appearance.palette_for(false), PaletteName::Standard);
+        let json = String::from_utf8(p.app.encode()).unwrap();
+        assert!(json.contains("\"light_palette\": \"standard\""), "{json}");
+        dark.apply(&mut p, &t, Value::Choice(0)).unwrap();
+        assert_eq!(p.app.appearance.palette_for(false), PaletteName::Standard);
+        light.apply(&mut p, &t, Value::Choice(0)).unwrap();
+        assert_eq!(p.app.appearance, Appearance::default());
+    }
+
+    /// A settings file from before System and the light palette loads unchanged (the new
+    /// fields are absent), and saves without them.
+    #[test]
+    fn old_appearance_loads_unchanged() {
+        let old = r#"{"version": 1, "appearance": {"theme": "light", "palette": "colorblind"}}"#;
+        let dir = std::env::temp_dir().join(format!("lines-settings-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, old).unwrap();
+        let (s, report, writable) = Settings::load(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            (report, writable),
+            (None, true),
+            "read as is, safe to save over"
+        );
+        assert_eq!(s.appearance.theme, Some(ThemeName::Light));
+        assert_eq!(s.appearance.palette, Some(PaletteName::Colorblind));
+        assert_eq!(
+            (s.appearance.follow_os, s.appearance.light_palette),
+            (None, None)
+        );
+        assert_eq!(s.appearance.theme_choice(), ThemeChoice::Light);
+        assert_eq!(
+            resolve(&s.appearance, true),
+            crate::theme::Theme::light(crate::theme::Palette::Colorblind)
+        );
+        let json = String::from_utf8(s.encode()).unwrap();
+        assert!(
+            !json.contains("follow_os") && !json.contains("light_palette"),
+            "{json}"
+        );
+    }
+
+    /// An OS report: a screenshot never takes one, the same appearance changes nothing, and a
+    /// change is applied only under System (remembered otherwise). The startup read is the
+    /// same decision.
+    #[test]
+    fn os_reports_apply_only_under_system_and_never_in_screenshots() {
+        use OsReport::*;
+        for choice in ThemeChoice::ALL {
+            for (known, now) in [(true, false), (false, true), (true, true), (false, false)] {
+                assert_eq!(os_report(true, known, now, choice), Ignore, "screenshot");
+                let want = if known == now {
+                    Ignore
+                } else if choice == ThemeChoice::System {
+                    Apply
+                } else {
+                    Remember
+                };
+                assert_eq!(os_report(false, known, now, choice), want, "{choice:?}");
+            }
+        }
+    }
+
+    /// System says what is in effect; the palette rows say which one is in use; Same as dark
+    /// names its palette.
+    #[test]
+    fn system_now_and_palette_in_use() {
+        let mut a = Appearance {
+            palette: Some(PaletteName::Colorblind),
+            ..Default::default()
+        };
+        assert_eq!(system_now(&a, true), None, "nothing for an explicit theme");
+        a.set_theme_choice(ThemeChoice::System);
+        assert_eq!(system_now(&a, true).unwrap(), "Now: Dark · Colorblind");
+        assert_eq!(system_now(&a, false).unwrap(), "Now: Light · Colorblind");
+        let use_ = |a: &Appearance, os| {
+            (
+                palette_in_use("appearance.palette", a, os),
+                palette_in_use("appearance.light_palette", a, os),
+            )
+        };
+        // Light follows dark: dark's row is in use either way.
+        assert_eq!(use_(&a, true), (Some(true), Some(false)));
+        assert_eq!(use_(&a, false), (Some(true), Some(true)));
+        a.light_palette = Some(PaletteName::Standard);
+        assert_eq!(system_now(&a, false).unwrap(), "Now: Light · Standard");
+        assert_eq!(use_(&a, true), (Some(true), Some(false)));
+        assert_eq!(use_(&a, false), (Some(false), Some(true)));
+        assert_eq!(palette_in_use("appearance.hollow", &a, true), None);
+        assert_eq!(
+            choice_label("appearance.light_palette", 0, "Same as dark", &a),
+            "Same as dark (Colorblind)"
+        );
+        assert_eq!(
+            choice_label("appearance.light_palette", 1, "Standard", &a),
+            "Standard"
+        );
+    }
+
+    /// `--palette cb`, then the trader sets Dark palette: Standard with no light palette of
+    /// their own saved: light follows (the flag's light override drops too).
+    #[test]
+    fn dark_palette_change_drops_the_flags_light_override() {
+        let saved = Appearance::default();
+        let flags = Appearance {
+            palette: Some(PaletteName::Colorblind),
+            light_palette: Some(PaletteName::Colorblind),
+            ..Default::default()
+        };
+        let shown = saved.with_flags(flags);
+        let after = Appearance {
+            palette: None,
+            ..shown
+        };
+        let (s, f) = Appearance::changed(saved, flags, shown, after);
+        assert_eq!((f.palette, f.light_palette), (None, None));
+        assert_eq!(s.with_flags(f).palette_for(false), PaletteName::Standard);
+        // A saved light palette of its own: the flag's light override stays for the run.
+        let saved = Appearance {
+            light_palette: Some(PaletteName::Standard),
+            ..Default::default()
+        };
+        let shown = saved.with_flags(flags);
+        let after = Appearance {
+            palette: None,
+            ..shown
+        };
+        let (_, f) = Appearance::changed(saved, flags, shown, after);
+        assert_eq!(f.light_palette, Some(PaletteName::Colorblind));
+    }
+
+    /// `--palette cb` with no light palette saved shows Light palette as Same as dark (still
+    /// colorblind in light); with one saved, the flag shows over it for the run.
+    #[test]
+    fn palette_flag_shows_light_as_same_as_dark() {
+        let flags = Appearance {
+            palette: Some(PaletteName::Colorblind),
+            light_palette: Some(PaletteName::Colorblind),
+            ..Default::default()
+        };
+        let shown = Appearance::default().with_flags(flags);
+        assert_eq!(shown.light_palette, None);
+        assert_eq!(shown.palette_for(false), PaletteName::Colorblind);
+        let saved = Appearance {
+            light_palette: Some(PaletteName::Standard),
+            ..Default::default()
+        };
+        let shown = saved.with_flags(flags);
+        assert_eq!(shown.light_palette, Some(PaletteName::Colorblind));
+        // Setting it apart from there saves it and drops the flag's override.
+        let shown = Appearance::default().with_flags(flags);
+        let after = Appearance {
+            light_palette: Some(PaletteName::Standard),
+            ..shown
+        };
+        let (s, f) = Appearance::changed(Appearance::default(), flags, shown, after);
+        assert_eq!(
+            (s.light_palette, f.light_palette),
+            (Some(PaletteName::Standard), None)
+        );
+        assert_eq!(s.with_flags(f).palette_for(false), PaletteName::Standard);
+    }
+
+    /// Every theme entry point offers System: the Settings choice, its palette commands and
+    /// the `--theme` flag (no key binds a theme).
+    #[test]
+    fn every_theme_entry_point_lists_system() {
+        let i = all()
+            .iter()
+            .position(|s| s.key == "appearance.theme")
+            .unwrap();
+        let cmds: Vec<_> = palette()
+            .into_iter()
+            .filter(|c| c.index as usize == i)
+            .map(|c| c.value)
+            .collect();
+        assert_eq!(cmds, vec![0, 1, 2], "palette: Theme: Dark, Light, System");
+        assert!(search("system").contains(&i));
+        use clap::ValueEnum;
+        let names: Vec<_> = crate::ThemeKind::value_variants()
+            .iter()
+            .filter_map(|v| v.to_possible_value())
+            .map(|v| v.get_name().to_owned())
+            .collect();
+        assert_eq!(names, ["dark", "light", "system"]);
+    }
+
     /// Absent means the default, and the defaults are exactly the app's look when nothing is
     /// saved and no flag is given (the old `--theme dark --palette standard --hollow up`): the
     /// as-shown compare in `Appearance::changed` relies on it.
@@ -3492,6 +4020,10 @@ mod tests {
                 LookField::Palette => {
                     then_s.palette = Some(PaletteName::Colorblind);
                     then_f.palette = Some(PaletteName::Standard);
+                }
+                LookField::LightPalette => {
+                    then_s.light_palette = Some(PaletteName::Colorblind);
+                    then_f.light_palette = Some(PaletteName::Standard);
                 }
                 LookField::Hollow => {
                     then_s.hollow = Some(HollowName::Down);
@@ -3559,6 +4091,8 @@ mod tests {
                 theme: shown.theme.filter(|t| *t != ThemeName::default()),
                 palette: shown.palette.filter(|p| *p != PaletteName::default()),
                 hollow: shown.hollow.filter(|h| *h != HollowName::default()),
+                follow_os: shown.follow_os.filter(|f| *f),
+                light_palette: shown.light_palette,
             };
             let (s, f) = Appearance::changed(saved, flags, shown, picked);
             assert_eq!((s, f), (saved, flags), "{saved:?} {flags:?}");
@@ -3569,6 +4103,8 @@ mod tests {
             theme: Some(ThemeName::Dark),
             palette: Some(PaletteName::Standard),
             hollow: Some(HollowName::Up),
+            follow_os: Some(false),
+            light_palette: None,
         };
         assert_eq!(
             Appearance::changed(none, none, none, explicit),

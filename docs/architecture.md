@@ -119,12 +119,15 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 #   lines --replay recordings/synth.lfr --layout chart --timeframe 500t --vwap "eth/1,2" --demo-levels --shift-drag 840,570:990,300 --size 1200x700 --theme dark --screenshot tick.png
 #   then quantize each (hero → chart-orders-footprint.png, light → light.png, tick → tick-chart.png):
 #   magick hero.png -strip +dither -colors 256 PNG8:docs/img/chart-orders-footprint.png
-# Colours: --theme dark|light, --palette standard|cb (colourblind: blue up, orange down),
-# --hollow up|down (which direction's candle bodies are hollow; default up). Also for the live app, where
-# they win over Settings › Appearance (Charts for --hollow) for that run. --time-zone exchange|system|utc|<IANA name> (the zone times
-# show in; default Settings › General, else exchange = ET; screenshots without it show ET). --ui-font
-# plex|system|<installed family> (the UI font; default Settings › Appearance, else plex; screenshots without it
-# use plex, whatever is saved; numbers are always IBM Plex Mono).
+# Colours: --theme dark|light|system, --palette standard|cb (colourblind: blue up, orange down; both the dark
+# and the light palette for that run), --hollow up|down (which direction's candle bodies are hollow; default up).
+# Also for the live app, where they win over Settings › Appearance (Charts for --hollow) for that run. --theme
+# system follows the OS appearance live in the app; a screenshot never asks the OS: System resolves to
+# --appearance dark|light (screenshots only; default dark), so screenshots stay the same on every machine.
+# --time-zone exchange|system|utc|<IANA name> (the zone times show in; default Settings › General, else
+# exchange = ET; screenshots without it show ET). --ui-font plex|system|<installed family> (the UI font; default
+# Settings › Appearance, else plex; screenshots without it use plex, whatever is saved; numbers are always IBM
+# Plex Mono).
 #   --settings SECTION (also render the Settings window into <out stem>-settings.png; general, appearance, keys,
 #   charts, dom, order-entry, accounts, connections, data-folder, about, or the old names risk, trading,
 #   diagnostics, data), --settings-search TEXT,
