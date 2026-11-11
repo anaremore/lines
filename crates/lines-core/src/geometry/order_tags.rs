@@ -6,7 +6,10 @@
 //! - **Lines** sit at their price's y. **Tags** (role, side, quantity, price, P&L at that price,
 //!   and a `×` box) are right-aligned at the plot's right edge, centred on their line; tags that
 //!   would overlap are pushed apart vertically (in price order) and kept inside the band left
-//!   between the edge markers, so every tag stays readable and clickable.
+//!   between the edge markers, so every tag stays readable and clickable. On the left
+//!   ([`TagSide::Left`], the trader's choice) they start at the plot's left edge in the position
+//!   tag's column, mirrored (`×` at the outer, left end), below the top-left legend block and
+//!   never over the position tag or its handles ([`Column`]).
 //! - **Edge markers**: orders whose price is above or below the plot get one marker at that
 //!   edge (the nearest such order, with how many there are); clicking it scrolls that price
 //!   into view.
@@ -102,6 +105,46 @@ impl Default for Metrics {
     }
 }
 
+/// Which edge of the plot order tags (and their edge markers) sit at.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum TagSide {
+    /// Beside the price axis (the default).
+    #[default]
+    Right,
+    /// At the plot's left edge, in the position tag's column, mirrored.
+    Left,
+}
+
+/// The tag column: its side and, on the left, what it keeps clear of. On the right both are
+/// ignored (nothing else lives there).
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct Column {
+    pub side: TagSide,
+    /// The top-left block's bottom (the readout and legends, plot-local): tags and the top edge
+    /// marker stay below it.
+    pub top_clear: f32,
+    /// A span `(top, bottom)` of the column already taken (the position tag with its handles):
+    /// tags step around it.
+    pub taken: Option<(f32, f32)>,
+}
+
+impl Column {
+    pub const RIGHT: Column = Column {
+        side: TagSide::Right,
+        top_clear: 0.0,
+        taken: None,
+    };
+
+    fn left(&self) -> bool {
+        self.side == TagSide::Left
+    }
+
+    /// The left column's x: the position tag's (`chart_view::draw_position_tag`).
+    pub fn left_x(m: &Metrics) -> f32 {
+        (4.0 * m.scale).round()
+    }
+}
+
 /// One line to tag: an id the caller chooses (order id; the position uses its own), its
 /// price, and the tag's text width (measured by the caller, logical px).
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -124,13 +167,51 @@ pub struct TagBox {
     pub w: f32,
     /// Its height ([`Metrics::tag_h`] when laid out).
     pub h: f32,
-    /// Where the `×` box starts (it runs to `left + w`).
+    /// Where the `×` box starts, and its width: the tag's right end, or its left end when
+    /// `mirrored`.
     pub close_left: f32,
+    pub close_w: f32,
+    /// Laid out on the left ([`TagSide::Left`]): `×` at the left (outer) end, the text after
+    /// it, and controls that sit beside a tag (the resize control, a staged entry's handles)
+    /// on its right (inner) side.
+    pub mirrored: bool,
 }
 
 impl TagBox {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.left && x < self.left + self.w && y >= self.top && y < self.top + self.h
+    }
+
+    /// Whether `x` (inside the tag) is on its `×` box.
+    pub fn on_close(&self, x: f32) -> bool {
+        x >= self.close_left && x < self.close_left + self.close_w
+    }
+
+    /// Where the text part starts (after the `×` box when mirrored).
+    pub fn body_left(&self) -> f32 {
+        if self.mirrored {
+            self.left + self.close_w
+        } else {
+            self.left
+        }
+    }
+
+    /// The `×` box's divider: the edge it shares with the text part.
+    pub fn divider_x(&self) -> f32 {
+        if self.mirrored {
+            self.close_left + self.close_w
+        } else {
+            self.close_left
+        }
+    }
+
+    /// The inner end (toward the candles): the left end on the right, the right end mirrored.
+    pub fn inner_x(&self) -> f32 {
+        if self.mirrored {
+            self.left + self.w
+        } else {
+            self.left
+        }
     }
 }
 
@@ -185,14 +266,16 @@ pub enum TagHit {
 }
 
 /// Edge markers for `lines` whose price is off the plot `[0, plot_h]`: `[top, bottom]`, the
-/// nearest off-plot order at each edge, right-aligned at `plot_w` with the width the caller
-/// measured for each marker's text (`text_w`), sized by `m`. Allocation-free.
+/// nearest off-plot order at each edge, on the column's side (right-aligned at `plot_w`, or at
+/// the left column's x below its top-left block) with the width the caller measured for each
+/// marker's text (`text_w`), sized by `m`. Allocation-free.
 pub fn edge_markers(
     vp: &Viewport,
     lines: &[LineIn],
     plot_w: f32,
     plot_h: f32,
     text_w: [f32; 2],
+    col: &Column,
     m: &Metrics,
 ) -> [Option<EdgeMarker>; 2] {
     let mut out: [Option<EdgeMarker>; 2] = [None, None];
@@ -238,9 +321,13 @@ pub fn edge_markers(
         if let Some(e) = e {
             e.w = (text_w[k] + m.text_pad).min(plot_w);
             e.h = m.tag_h;
-            e.left = plot_w - m.tag_gap - e.w;
+            e.left = if col.left() {
+                Column::left_x(m).min((plot_w - e.w).max(0.0))
+            } else {
+                plot_w - m.tag_gap - e.w
+            };
             e.top = if k == 0 {
-                m.tag_gap
+                top_floor(col, m)
             } else {
                 plot_h - m.tag_gap - m.tag_h
             };
@@ -249,12 +336,28 @@ pub fn edge_markers(
     out
 }
 
-/// The band tags may use, leaving room for the edge markers: `(top, bottom)`.
-pub fn tag_band(markers: &[Option<EdgeMarker>; 2], plot_h: f32, m: &Metrics) -> (f32, f32) {
-    let top = if markers[0].is_some() {
-        m.tag_gap + m.tag_h + m.tag_gap
+/// The highest a top edge marker goes in the column: the left one stays below its top-left
+/// block.
+fn top_floor(col: &Column, m: &Metrics) -> f32 {
+    if col.left() && col.top_clear > 0.0 {
+        col.top_clear + m.tag_gap
     } else {
-        0.0
+        m.tag_gap
+    }
+}
+
+/// The band tags may use, leaving room for the edge markers (and, on the left, the top-left
+/// block): `(top, bottom)`.
+pub fn tag_band(
+    markers: &[Option<EdgeMarker>; 2],
+    plot_h: f32,
+    col: &Column,
+    m: &Metrics,
+) -> (f32, f32) {
+    let top = match markers[0] {
+        Some(e) => e.top + e.h + m.tag_gap,
+        None if col.left() && col.top_clear > 0.0 => col.top_clear + m.tag_gap,
+        None => 0.0,
     };
     let bottom = if markers[1].is_some() {
         plot_h - m.tag_gap - m.tag_h - m.tag_gap
@@ -264,12 +367,15 @@ pub fn tag_band(markers: &[Option<EdgeMarker>; 2], plot_h: f32, m: &Metrics) -> 
     (top, bottom.max(top))
 }
 
-/// Lay out the tags of `lines` on a plot `plot_w` × `plot_h`, right-aligned at `plot_w`, inside
-/// the band `band` (`(top, bottom)`, from [`tag_band`]), into `out`; returns how many (at most
-/// `out.len()`, [`MAX_TAGS`] and what the band holds). Every order on the plot gets a tag,
-/// clamped into the band (off the plot: the edge markers stand for them). Overlapping tags are
-/// pushed down in price order (highest price first), then the stack is pulled back up if it
-/// ran off the bottom; it never leaves the band. Sized by `m`. Allocation-free.
+/// Lay out the tags of `lines` on a plot `plot_w` × `plot_h`, on the column's side (right-aligned
+/// at `plot_w`, or mirrored at the left column's x), inside the band `band` (`(top, bottom)`,
+/// from [`tag_band`]), into `out`; returns how many (at most `out.len()`, [`MAX_TAGS`] and what
+/// the band holds, [`tags_fit_in`]). Every order on the plot gets a tag, clamped into the band
+/// (off the plot: the edge markers stand for them). Overlapping tags are pushed down in price
+/// order (highest price first), then the stack is pulled back up if it ran off the bottom; it
+/// never leaves the band. On the left, a tag that would meet the column's taken span (the
+/// position tag) steps past it, below on the way down and above on the way back up. Sized by
+/// `m`. Allocation-free.
 #[allow(clippy::too_many_arguments)]
 pub fn layout_tags(
     vp: &Viewport,
@@ -278,12 +384,16 @@ pub fn layout_tags(
     plot_h: f32,
     band: (f32, f32),
     scale_factor: f32,
+    col: &Column,
     m: &Metrics,
     out: &mut [TagBox],
 ) -> usize {
     let (lo, hi) = band;
     let (tag_h, gap) = (m.tag_h, m.tag_gap);
-    let cap = out.len().min(tags_fit(band, m));
+    let cap = out.len().min(tags_fit_in(band, col, m));
+    let taken = col.taken.filter(|_| col.left());
+    // Whether a tag at `top` would meet the taken span (a gap kept on each side).
+    let meets = |top: f32| taken.is_some_and(|(a, b)| top < b + gap && top + tag_h + gap > a);
     let mut n = 0;
     for l in lines {
         if n == cap {
@@ -295,15 +405,23 @@ pub fn layout_tags(
         }
         let line_y = snap(y, scale_factor);
         let w = (l.text_w + m.text_pad + m.close_w).min(plot_w);
+        let (left, close_left) = if col.left() {
+            let left = Column::left_x(m).min((plot_w - w).max(0.0));
+            (left, left)
+        } else {
+            (plot_w - gap - w, plot_w - gap - m.close_w)
+        };
         out[n] = TagBox {
             id: l.id,
             price: l.price,
             line_y,
-            left: plot_w - gap - w,
+            left,
             top: line_y - tag_h * 0.5,
             w,
             h: tag_h,
-            close_left: plot_w - gap - m.close_w,
+            close_left,
+            close_w: m.close_w,
+            mirrored: col.left(),
         };
         n += 1;
     }
@@ -327,6 +445,18 @@ pub fn layout_tags(
             tags[i - 1].top + tag_h + gap
         };
         tags[i].top = tags[i].top.max(floor);
+        // Past the taken span: above it for a line above its middle when there is room under
+        // the tag before, else below it.
+        if meets(tags[i].top)
+            && let Some((a, b)) = taken
+        {
+            let above = a - gap - tag_h;
+            tags[i].top = if tags[i].line_y < (a + b) * 0.5 && above >= floor {
+                above
+            } else {
+                b + gap
+            };
+        }
     }
     // (`cap` keeps the stack within the band, so the pull-up below never passes `lo`, but for
     // the one tag a band too short for it still gets.)
@@ -334,16 +464,26 @@ pub fn layout_tags(
     for t in tags.iter_mut().rev() {
         if t.top + tag_h > ceiling {
             t.top = (ceiling - tag_h).max(0.0);
+            if meets(t.top)
+                && let Some((a, _)) = taken
+            {
+                t.top = (a - gap - tag_h).max(0.0);
+            }
         }
         ceiling = t.top - gap;
     }
     n
 }
 
-/// The position tag's handles: `want[0]` above it, `want[1]` below, at the tag's left end,
-/// sized by `m`.
+/// A tag's handles (the position's, a staged entry's): `want[0]` above it, `want[1]` below, at
+/// the tag's inner end (its left end; a mirrored tag's right end), sized by `m`.
 pub fn handles(tag: &TagBox, want: [bool; 2], m: &Metrics) -> [Option<Handle>; 2] {
-    let (left, w, h) = (tag.left, m.handle_w, m.handle_h);
+    let (w, h) = (m.handle_w, m.handle_h);
+    let left = if tag.mirrored {
+        tag.left + tag.w - w
+    } else {
+        tag.left
+    };
     [
         want[0].then_some(Handle {
             above: true,
@@ -378,7 +518,7 @@ pub fn hit(
         return Some(TagHit::Edge(m.price));
     }
     let t = tags.iter().find(|t| t.contains(x, y))?;
-    Some(if x >= t.close_left {
+    Some(if t.on_close(x) {
         TagHit::Close(t.id)
     } else {
         TagHit::Body(t.id)
@@ -492,7 +632,21 @@ pub fn tags_fit(band: (f32, f32), m: &Metrics) -> usize {
     fits.clamp(1, MAX_TAGS)
 }
 
-/// The tags for the orders on the plot, at most `cap` (from [`tags_fit`]) and `out.len()`: every
+/// How many tags the column holds in `band`: [`tags_fit`], less the slots its taken span
+/// (left only) uses.
+pub fn tags_fit_in(band: (f32, f32), col: &Column, m: &Metrics) -> usize {
+    let fit = tags_fit(band, m);
+    match col.taken.filter(|_| col.left()) {
+        Some((a, b)) if b > band.0 && a < band.1 => {
+            let span = b.min(band.1) - a.max(band.0) + 2.0 * m.tag_gap;
+            let slots = (span / (m.tag_h + m.tag_gap)).ceil() as usize;
+            fit.saturating_sub(slots).max(1)
+        }
+        _ => fit,
+    }
+}
+
+/// The tags for the orders on the plot, at most `cap` (from [`tags_fit_in`]) and `out.len()`: every
 /// order is in exactly one, so none is hidden. Orders of one kind whose tags can't both sit at
 /// their own levels (`m.tag_h + m.tag_gap` apart) share a tag; zooming in splits them back. When that
 /// leaves too many tags for the band, the distance grows until it fits; if one tag per kind
@@ -595,6 +749,7 @@ mod tests {
             100.0,
             FULL,
             1.0,
+            &Column::RIGHT,
             &M,
             &mut out,
         );
@@ -613,6 +768,7 @@ mod tests {
                 100.0,
                 FULL,
                 1.0,
+                &Column::RIGHT,
                 &M,
                 &mut out
             ),
@@ -632,7 +788,17 @@ mod tests {
             line(4, 600_000),
         ];
         let band = (16.0, 84.0);
-        let n = layout_tags(&v, &lines, 400.0, 100.0, band, 1.0, &M, &mut out);
+        let n = layout_tags(
+            &v,
+            &lines,
+            400.0,
+            100.0,
+            band,
+            1.0,
+            &Column::RIGHT,
+            &M,
+            &mut out,
+        );
         // The order at the very bottom (y 100) is outside the band: an edge marker's job.
         assert_eq!(n, 3);
         let tags = &out[..n];
@@ -667,6 +833,7 @@ mod tests {
             100.0,
             (16.0, 84.0),
             1.0,
+            &Column::RIGHT,
             &M,
             &mut out,
         );
@@ -674,7 +841,17 @@ mod tests {
         assert!(out[0].top >= 16.0);
         // Twelve orders in a band that holds three: three tags, all inside.
         let many: Vec<LineIn> = (0..12).map(|i| line(i, 605_000 + i as i64 * 25)).collect();
-        let n = layout_tags(&v, &many, 400.0, 100.0, (16.0, 84.0), 1.0, &M, &mut out);
+        let n = layout_tags(
+            &v,
+            &many,
+            400.0,
+            100.0,
+            (16.0, 84.0),
+            1.0,
+            &Column::RIGHT,
+            &M,
+            &mut out,
+        );
         assert_eq!(n, 3);
         for t in &out[..n] {
             assert!(t.top >= 16.0 && t.top + TAG_H <= 84.0, "{t:?}");
@@ -692,7 +869,7 @@ mod tests {
             line(3, 605_000), // on the plot
             line(4, 595_000), // below
         ];
-        let m = edge_markers(&v, &lines, 400.0, 100.0, [90.0, 90.0], &M);
+        let m = edge_markers(&v, &lines, 400.0, 100.0, [90.0, 90.0], &Column::RIGHT, &M);
         let top = m[0].unwrap();
         assert_eq!(
             (top.id, top.price, top.n, top.above),
@@ -704,10 +881,18 @@ mod tests {
         assert_eq!((bottom.id, bottom.n, bottom.above), (4, 1, false));
         assert_eq!(bottom.top + TAG_H, 100.0 - TAG_GAP);
         // Tags keep clear of the markers.
-        let (lo, hi) = tag_band(&m, 100.0, &M);
+        let (lo, hi) = tag_band(&m, 100.0, &Column::RIGHT, &M);
         assert!(lo >= top.top + TAG_H && hi <= bottom.top);
         assert_eq!(
-            edge_markers(&v, &lines[2..3], 400.0, 100.0, [90.0; 2], &M),
+            edge_markers(
+                &v,
+                &lines[2..3],
+                400.0,
+                100.0,
+                [90.0; 2],
+                &Column::RIGHT,
+                &M
+            ),
             [None, None]
         );
         // Clicking a marker centres its price, keeping the span.
@@ -726,6 +911,7 @@ mod tests {
             100.0,
             FULL,
             1.0,
+            &Column::RIGHT,
             &M,
             &mut out,
         );
@@ -758,7 +944,15 @@ mod tests {
             hit(&out[..n], &none, &h, down.left + 1.0, down.top + 1.0),
             Some(TagHit::Handle(false))
         );
-        let m = edge_markers(&v, &[line(5, 612_000)], 400.0, 100.0, [60.0, 60.0], &M);
+        let m = edge_markers(
+            &v,
+            &[line(5, 612_000)],
+            400.0,
+            100.0,
+            [60.0, 60.0],
+            &Column::RIGHT,
+            &M,
+        );
         let mk = m[0].unwrap();
         assert_eq!(
             hit(&out[..n], &m, &no_h, mk.left + 1.0, mk.top + 1.0),
@@ -968,6 +1162,7 @@ mod tests {
             100.0,
             FULL,
             1.0,
+            &Column::RIGHT,
             &z,
             &mut out,
         );
@@ -1010,14 +1205,22 @@ mod tests {
             Some(TagHit::Handle(false))
         );
         // Edge markers: 30 px tall, padding scaled, the band leaves room for them.
-        let m = edge_markers(&v, &[line(5, 612_000)], 400.0, 100.0, [60.0, 60.0], &z);
+        let m = edge_markers(
+            &v,
+            &[line(5, 612_000)],
+            400.0,
+            100.0,
+            [60.0, 60.0],
+            &Column::RIGHT,
+            &z,
+        );
         let mk = m[0].unwrap();
         assert_eq!((mk.top, mk.h, mk.w), (3.0, 30.0, 60.0 + 18.0));
         assert_eq!(
             hit(tags, &m, &no_h, mk.left + 1.0, mk.top + 29.0),
             Some(TagHit::Edge(Price(612_000)))
         );
-        assert_eq!(tag_band(&m, 100.0, &z).0, 3.0 + 30.0 + 3.0);
+        assert_eq!(tag_band(&m, 100.0, &Column::RIGHT, &z).0, 3.0 + 30.0 + 3.0);
         // Fewer tags per band; orders group sooner.
         assert_eq!(tags_fit((0.0, 100.0), &M), 4);
         assert_eq!(tags_fit((0.0, 100.0), &z), 3);
@@ -1032,5 +1235,187 @@ mod tests {
             group_orders(&zoom(1.0), &mut orders, 400.0, 4, &z, &mut g),
             1
         );
+    }
+
+    fn left(top_clear: f32, taken: Option<(f32, f32)>) -> Column {
+        Column {
+            side: TagSide::Left,
+            top_clear,
+            taken,
+        }
+    }
+
+    #[test]
+    fn left_tags_sit_in_the_position_tags_column_mirrored() {
+        let v = vp();
+        let mut out = [TagBox::default(); 4];
+        let col = left(0.0, None);
+        let n = layout_tags(
+            &v,
+            &[line(7, 605_000)],
+            400.0,
+            100.0,
+            FULL,
+            1.0,
+            &col,
+            &M,
+            &mut out,
+        );
+        assert_eq!(n, 1);
+        let t = out[0];
+        assert!(t.mirrored);
+        assert_eq!(t.left, Column::left_x(&M), "the position tag's x");
+        assert!(
+            (t.top + TAG_H * 0.5 - t.line_y).abs() < 0.01,
+            "centred on its line"
+        );
+        // × at the outer (left) end, the text after it.
+        assert_eq!((t.close_left, t.close_w), (t.left, CLOSE_W));
+        assert_eq!(t.body_left(), t.left + CLOSE_W);
+        assert_eq!(t.divider_x(), t.left + CLOSE_W);
+        assert_eq!(t.inner_x(), t.left + t.w);
+        // The right side is unchanged: × at the right end.
+        let n = layout_tags(
+            &v,
+            &[line(7, 605_000)],
+            400.0,
+            100.0,
+            FULL,
+            1.0,
+            &Column::RIGHT,
+            &M,
+            &mut out,
+        );
+        assert_eq!(n, 1);
+        let r = out[0];
+        assert!(!r.mirrored);
+        assert_eq!(
+            (r.close_left + r.close_w, r.body_left(), r.inner_x()),
+            (400.0 - TAG_GAP, r.left, r.left)
+        );
+    }
+
+    #[test]
+    fn left_tags_hit_their_close_box_at_the_left_end() {
+        let v = vp();
+        let mut out = [TagBox::default(); 4];
+        let col = left(0.0, None);
+        let n = layout_tags(
+            &v,
+            &[line(9, 605_000)],
+            400.0,
+            100.0,
+            FULL,
+            1.0,
+            &col,
+            &M,
+            &mut out,
+        );
+        let t = out[0];
+        let y = t.top + TAG_H * 0.5;
+        let none: [Option<EdgeMarker>; 2] = [None, None];
+        let no_h: [Option<Handle>; 2] = [None, None];
+        assert_eq!(
+            hit(&out[..n], &none, &no_h, t.left + 2.0, y),
+            Some(TagHit::Close(9))
+        );
+        assert_eq!(
+            hit(&out[..n], &none, &no_h, t.left + CLOSE_W - 0.5, y),
+            Some(TagHit::Close(9))
+        );
+        assert_eq!(
+            hit(&out[..n], &none, &no_h, t.left + CLOSE_W, y),
+            Some(TagHit::Body(9)),
+            "the body starts after ×"
+        );
+        assert_eq!(
+            hit(&out[..n], &none, &no_h, t.left + t.w - 1.0, y),
+            Some(TagHit::Body(9)),
+            "the right end drags"
+        );
+        assert_eq!(hit(&out[..n], &none, &no_h, t.left + t.w, y), None);
+        // A mirrored tag's handles sit at its inner (right) end.
+        let h = handles(&t, [true, true], &M);
+        let up = h[0].unwrap();
+        assert_eq!(up.left + up.w, t.left + t.w);
+        assert_eq!(
+            hit(&out[..n], &none, &h, up.left + 1.0, up.top + 1.0),
+            Some(TagHit::Handle(true))
+        );
+    }
+
+    #[test]
+    fn left_tags_stay_below_the_legend_and_off_the_position_tag() {
+        let v = vp();
+        let mut out = [TagBox::default(); 8];
+        // The legend's block ends at 20; the position tag (with its handles) takes 40..62.
+        let col = left(20.0, Some((40.0, 62.0)));
+        // Lines at y 10 (under the legend), 45 and 50 (on the position tag), and 80.
+        let lines = [
+            line(1, 609_000),
+            line(2, 605_500),
+            line(3, 605_000),
+            line(4, 602_000),
+        ];
+        let markers = edge_markers(&v, &lines, 400.0, 100.0, [60.0; 2], &col, &M);
+        let band = tag_band(&markers, 100.0, &col, &M);
+        assert_eq!(band.0, 20.0 + TAG_GAP, "below the legend");
+        let n = layout_tags(&v, &lines, 400.0, 100.0, band, 1.0, &col, &M, &mut out);
+        assert!(n >= 1);
+        let tags = &out[..n];
+        for (i, t) in tags.iter().enumerate() {
+            assert!(t.top >= band.0, "{i}: under the legend");
+            assert!(t.top + t.h <= band.1, "{i}: inside the band");
+            assert!(
+                t.top + t.h <= 40.0 || t.top >= 62.0,
+                "{i}: off the position tag: {}",
+                t.top
+            );
+            if i > 0 {
+                assert!(
+                    t.top >= tags[i - 1].top + TAG_H + TAG_GAP - 0.01,
+                    "{i}: no overlap"
+                );
+            }
+        }
+        // A line above the position tag's middle steps above it; one below steps below.
+        // (No legend here: under one ending at 20, the 18 px above the position tag hold none.)
+        let open = left(0.0, Some((40.0, 62.0)));
+        let near = [line(5, 605_600), line(6, 604_600)];
+        let n = layout_tags(&v, &near, 400.0, 100.0, FULL, 1.0, &open, &M, &mut out);
+        assert_eq!(n, 2);
+        assert_eq!(out[0].top + TAG_H, 40.0 - TAG_GAP, "above the position tag");
+        assert_eq!(out[1].top, 62.0 + TAG_GAP, "below it");
+        // The column holds fewer tags: the position tag's slots are taken.
+        assert!(tags_fit_in(band, &col, &M) < tags_fit(band, &M));
+        assert_eq!(
+            tags_fit_in(band, &Column::RIGHT, &M),
+            tags_fit(band, &M),
+            "the right column has nothing taken"
+        );
+    }
+
+    #[test]
+    fn left_edge_markers_sit_at_the_left_below_the_legend() {
+        let v = vp();
+        let col = left(20.0, None);
+        let m = edge_markers(
+            &v,
+            &[line(5, 612_000), line(6, 590_000)],
+            400.0,
+            100.0,
+            [60.0; 2],
+            &col,
+            &M,
+        );
+        let top = m[0].unwrap();
+        let bottom = m[1].unwrap();
+        assert_eq!(
+            (top.left, bottom.left),
+            (Column::left_x(&M), Column::left_x(&M))
+        );
+        assert_eq!(top.top, 20.0 + TAG_GAP, "below the legend");
+        assert_eq!(bottom.top, 100.0 - TAG_GAP - TAG_H);
+        assert_eq!(tag_band(&m, 100.0, &col, &M).0, top.top + TAG_H + TAG_GAP);
     }
 }

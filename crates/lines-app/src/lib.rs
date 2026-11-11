@@ -303,6 +303,13 @@ impl BracketUnitsArg {
     }
 }
 
+/// `--order-tags`: where charts put working-order tags (Settings › Order entry).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum OrderTagsArg {
+    Right,
+    Left,
+}
+
 /// `--pnl`: the P&L display (`crate::pnl::PnlDisplay`).
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum PnlArg {
@@ -721,6 +728,10 @@ struct Cli {
     /// Screenshot: how P&L shows (the app's setting, Ctrl+Alt+P cycles it in the app).
     #[arg(long, requires = "screenshot", value_enum)]
     pnl: Option<PnlArg>,
+    /// Screenshot: where charts put working-order tags (the app's setting, Settings › Order
+    /// entry › Order tags on the chart).
+    #[arg(long, requires = "screenshot", value_enum)]
+    order_tags: Option<OrderTagsArg>,
     /// Screenshot: the chart without study legends and tags (Ctrl+Shift+L in the app).
     #[arg(long, requires = "screenshot")]
     hide_study_labels: bool,
@@ -2188,6 +2199,7 @@ where
                     .transpose()
                     .map_err(|e| anyhow::anyhow!(e))?,
                 pnl: cli.pnl.map(PnlArg::mode),
+                order_tags_left: cli.order_tags == Some(OrderTagsArg::Left),
                 measure_parts: cli
                     .measure_parts
                     .as_deref()

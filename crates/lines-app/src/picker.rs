@@ -172,6 +172,11 @@ pub struct Settings {
     /// (`crate::pnl`). Optional: absent (and the default, both) isn't written.
     #[serde(default, skip_serializing_if = "crate::pnl::PnlDisplay::is_default")]
     pub pnl_display: crate::pnl::PnlDisplay,
+    /// Charts' working-order tags at the plot's left edge, in the position tag's column and
+    /// mirrored (`order_tags::TagSide::Left`), instead of beside the price axis. Optional:
+    /// absent (and the default, right) isn't written.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub order_tags_left: bool,
     /// The app-wide UI zoom in percent (`crate::zoom::STEPS`). Optional: absent is 100 %.
     #[serde(
         default,
@@ -919,6 +924,27 @@ mod tests {
         assert!(json.contains(r#""pnl_display":"off""#), "{json}");
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pnl_display, PnlDisplay::Off);
+        assert_eq!(SETTINGS_FORMAT.current, 1, "no version bump");
+    }
+
+    #[test]
+    fn order_tags_left_is_an_optional_setting() {
+        // A file from before the setting: right, today's place; the default isn't written.
+        let old: Settings = serde_json::from_str(r#"{"recents":[1],"favourites":[]}"#).unwrap();
+        assert!(!old.order_tags_left);
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!json.contains("order_tags_left"), "{json}");
+        let left = Settings {
+            order_tags_left: true,
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&left).unwrap();
+        assert!(json.contains(r#""order_tags_left":true"#), "{json}");
+        assert!(
+            serde_json::from_str::<Settings>(&json)
+                .unwrap()
+                .order_tags_left
+        );
         assert_eq!(SETTINGS_FORMAT.current, 1, "no version bump");
     }
 

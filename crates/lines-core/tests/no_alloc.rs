@@ -801,8 +801,8 @@ fn latency_windows_do_not_allocate() {
 #[test]
 fn chart_order_tags_do_not_allocate() {
     use lines_core::geometry::order_tags::{
-        GroupIn, LineIn, MAX_TAGS, Metrics, TagBox, TagGroup, edge_markers, group_orders, handles,
-        hit, layout_tags, tag_band, tags_fit,
+        Column, GroupIn, LineIn, MAX_TAGS, Metrics, TagBox, TagGroup, TagSide, edge_markers,
+        group_orders, handles, hit, layout_tags, tag_band, tags_fit_in,
     };
     use lines_core::geometry::snap_price;
     let vp = Viewport {
@@ -833,11 +833,22 @@ fn chart_order_tags_do_not_allocate() {
     let n = allocs_during(|| {
         for frame in 0..200 {
             let z = Metrics::at(if frame % 2 == 0 { 1.0 } else { 1.5 });
-            let m = edge_markers(&vp, &lines, 800.0, 400.0, [80.0, 80.0], &z);
-            let band = tag_band(&m, 400.0, &z);
-            let g = group_orders(&vp, &mut orders, 400.0, tags_fit(band, &z), &z, &mut groups);
+            // Both sides: the left column with a taken span and a top-left block.
+            let col = if frame % 3 == 0 {
+                Column::RIGHT
+            } else {
+                Column {
+                    side: TagSide::Left,
+                    top_clear: 60.0,
+                    taken: Some((180.0, 202.0)),
+                }
+            };
+            let m = edge_markers(&vp, &lines, 800.0, 400.0, [80.0, 80.0], &col, &z);
+            let band = tag_band(&m, 400.0, &col, &z);
+            let fit = tags_fit_in(band, &col, &z);
+            let g = group_orders(&vp, &mut orders, 400.0, fit, &z, &mut groups);
             let _ = groups[g.saturating_sub(1)].average();
-            let k = layout_tags(&vp, &lines, 800.0, 400.0, band, 1.0, &z, &mut tags);
+            let k = layout_tags(&vp, &lines, 800.0, 400.0, band, 1.0, &col, &z, &mut tags);
             let h = handles(&tags[0], [true, true], &z);
             let y = frame as f32 % 400.0;
             let _ = hit(&tags[..k], &m, &h, 700.0, y);
