@@ -120,6 +120,14 @@ impl TradesConfig {
     pub fn is_default(&self) -> bool {
         *self == TradesConfig::default()
     }
+
+    /// Shown or hidden, every other option kept ("Trades: show/hide on all charts").
+    pub fn with_shown(self, show: bool) -> TradesConfig {
+        TradesConfig {
+            hidden: !show,
+            ..self
+        }
+    }
 }
 
 /// A trade-history command applied to a chart's options (main and popped-out windows alike);
@@ -413,6 +421,9 @@ pub struct TradeMarksLayer {
     hovered: Option<usize>,
     /// The inputs `built` came from.
     key: Option<BuildKey>,
+    /// Hidden by the chart's study visibility (Clean chart, Hide studies), whatever `config`
+    /// says: nothing is built, prepared, painted or hoverable meanwhile.
+    suppressed: bool,
 }
 
 /// What the marks depend on.
@@ -461,11 +472,25 @@ impl TradeMarksLayer {
     pub fn set_config(&mut self, config: TradesConfig) {
         self.config = config;
         self.key = None;
-        if config.hidden {
-            self.shown.clear();
-            self.lines.clear();
-            self.hovered = None;
+        if !self.shown() {
+            self.forget_positions();
         }
+    }
+
+    /// Hidden or not by the chart's study visibility (`StudyVisibility::draws_trades`); the
+    /// chart's own `config.hidden` is untouched, so coming back restores exactly what was set.
+    pub fn set_suppressed(&mut self, suppressed: bool) {
+        self.suppressed = suppressed;
+        if suppressed {
+            self.forget_positions();
+        }
+    }
+
+    /// Hidden: nothing kept to show (or hit) the moment it's shown again; the first poll once
+    /// shown builds the marks afresh, never one frame of marks from before.
+    fn forget_positions(&mut self) {
+        self.clear();
+        self.hovered = None;
     }
 
     /// Forget the marks (another market: the next poll builds its own).
@@ -477,15 +502,17 @@ impl TradeMarksLayer {
         self.key = None;
     }
 
+    /// Shown: not hidden on this chart, nor by its study visibility. Only then is anything
+    /// built (the chart polls only while shown), prepared, painted or hit.
     pub fn shown(&self) -> bool {
-        !self.config.hidden
+        !self.config.hidden && !self.suppressed
     }
 
     /// Positions for this frame (allocation-free: within the reserved buffers).
     pub fn prepare(&mut self, bars: BarsView<'_>, vp: &Viewport, plot_w: f32, plot_h: f32) {
         self.shown.clear();
         self.lines.clear();
-        if self.config.hidden {
+        if !self.shown() {
             return;
         }
         let axis = TimeAxis::new(bars);
@@ -910,6 +937,55 @@ mod tests {
             ..Default::default()
         });
         assert!(layer.hit(10.0, 10.0).is_none());
+    }
+
+    /// Clean chart and Hide studies hide the marks without touching the chart's own setting:
+    /// nothing shows or hovers meanwhile, and they come back exactly as set (trades hidden on
+    /// the chart stay hidden).
+    #[test]
+    fn suppressed_trades_are_not_shown_and_come_back_as_set() {
+        let mut layer = TradeMarksLayer {
+            shown: vec![(10.0, 10.0, 0)],
+            ..Default::default()
+        };
+        layer.built.marks.push(Mark {
+            side: Side::Buy,
+            at: UtcMillis(0),
+            price: 0.0,
+            label: String::new(),
+            trade: 0,
+            fills: Vec::new(),
+        });
+        layer.built.trades.push(TradeText {
+            id: "t".into(),
+            lines: Vec::new(),
+        });
+        assert!(layer.shown());
+        layer.set_suppressed(true);
+        assert!(!layer.shown(), "no poll, prepare or paint while suppressed");
+        assert!(layer.hit(10.0, 10.0).is_none());
+        assert!(!layer.config.hidden, "the chart's own setting is untouched");
+        layer.set_suppressed(false);
+        assert!(layer.shown());
+        // Hidden on the chart first: still hidden when the chart is no longer clean.
+        layer.set_config(layer.config.with_shown(false));
+        layer.set_suppressed(true);
+        layer.set_suppressed(false);
+        assert!(!layer.shown() && layer.config.hidden);
+    }
+
+    /// "Show/hide on all charts" changes only whether trades show.
+    #[test]
+    fn all_charts_changes_only_shown() {
+        let t = TradesConfig {
+            no_lines: true,
+            all_accounts: true,
+            period: Period::Week,
+            ..Default::default()
+        };
+        let off = t.with_shown(false);
+        assert!(off.hidden);
+        assert_eq!(off.with_shown(true), t);
     }
 
     #[test]

@@ -70,6 +70,8 @@ fn command(cmd: Command) -> Option<Command> {
         | Command::ToggleTradeLabels
         | Command::TradeAccounts(_)
         | Command::TradePeriod(_) => Some(cmd),
+        // Every open chart's trade history, from any window.
+        Command::TradesOnAllCharts(_) => Some(cmd),
         // An order tag's menu (no key reaches here with one).
         Command::Order(_) => Some(cmd),
         // The UI zoom is app-wide: its keys work from every window.
@@ -161,6 +163,9 @@ impl PaneWindow {
             }
             Some(c @ (Command::ZoomIn | Command::ZoomOut | Command::ZoomReset)) => {
                 cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
+            }
+            Some(Command::TradesOnAllCharts(show)) => {
+                cx.defer(move |cx| crate::workspace::trades_on_all_charts(show, cx));
             }
             Some(
                 c @ (Command::ToggleTrades
@@ -318,6 +323,16 @@ impl PaneWindow {
                 )
                 .switch(),
             );
+            items.push(MenuItem::named(
+                "Hide trades on all charts",
+                Command::TradesOnAllCharts(false),
+                false,
+            ));
+            items.push(MenuItem::named(
+                "Show trades on all charts",
+                Command::TradesOnAllCharts(true),
+                false,
+            ));
             items.push(MenuItem::sep());
         }
         items.push(MenuItem::named(
@@ -524,6 +539,11 @@ mod tests {
         // A popped-out chart's menu toggles its markers.
         let marks = Command::Strategy(StrategyCmd::ToggleMarks);
         assert_eq!(command(marks), Some(marks));
+        // Every open chart's trade history, from a popped-out window too.
+        for show in [false, true] {
+            let c = Command::TradesOnAllCharts(show);
+            assert_eq!(command(c), Some(c));
+        }
         // Trade history on a popped-out chart, too.
         for c in [
             Command::ToggleTrades,

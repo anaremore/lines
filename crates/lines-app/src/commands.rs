@@ -82,6 +82,9 @@ pub enum Command {
     CleanChart,
     /// Trade history on the focused chart (`trade_marks`): shown or hidden (Alt+E).
     ToggleTrades,
+    /// Trade history shown (`true`) or hidden on every open chart: every window, popped-out
+    /// panes and hidden tabs (`workspace::trades_on_all_charts`).
+    TradesOnAllCharts(bool),
     /// Its entry–exit lines, on or off.
     ToggleTradeLines,
     /// Its labels, on or off.
@@ -860,9 +863,11 @@ pub fn label(c: Command) -> String {
         Command::DownloadDays => "Download days…".into(),
         Command::ToggleStudyLabels => "Chart: hide/show study labels".into(),
         Command::ToggleStudies => "Chart: hide/show studies".into(),
-        Command::CleanChart => "Clean chart (no study labels)".into(),
+        Command::CleanChart => "Clean chart (no study labels or trades)".into(),
         Command::ShowKeys => "Keyboard shortcuts…".into(),
         Command::ToggleTrades => "Show trades on the chart".into(),
+        Command::TradesOnAllCharts(false) => "Trades: hide on all charts".into(),
+        Command::TradesOnAllCharts(true) => "Trades: show on all charts".into(),
         Command::ToggleTradeLines => "Trades: entry–exit lines".into(),
         Command::ToggleTradeLabels => "Trades: labels".into(),
         Command::TradeAccounts(true) => "Trades: all accounts".into(),
@@ -1043,6 +1048,8 @@ pub fn palette() -> Vec<Command> {
         Command::ToggleStudies,
         Command::CleanChart,
         Command::ToggleTrades,
+        Command::TradesOnAllCharts(false),
+        Command::TradesOnAllCharts(true),
         Command::ToggleTradeLines,
         Command::ToggleTradeLabels,
         Command::TradeAccounts(false),

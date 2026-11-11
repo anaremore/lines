@@ -205,7 +205,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 #   --depth-note TEXT: show the replay's book as a source without depth would (only the inside), with TEXT in the DOM's bottom row (evidence).
 #   --no-book: show the replay as a source with no book at all would (no depth, no best bid/ask): the DOM's bottom row says "No depth" (evidence).
 #   --journal-dir DIR: keep that journal in DIR/screenshot.jsonl, so the script's trades get trade snapshots in DIR/shots/ (evidence; in memory without it).
-# Study visibility (screenshots): --hide-study-labels, --hide-studies (the first = Clean chart).
+# Study visibility (screenshots): --hide-study-labels, --hide-studies, --clean-chart (no legends, study tags or trade marks).
 # Volume profile (Alt+V/R/B/G in the app): --profile off|session|visible|composite, --profile-session eth|rth,
 # --profile-sessions N, --profile-va PCT, --profile-split, --profile-grouping N. Evidence from synthetic sessions:
 #   cargo run -p lines-feed --example synth_session -- recordings/synth-es-2026-11-05.lfr   # 2 ES sessions, deterministic

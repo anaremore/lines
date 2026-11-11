@@ -42,6 +42,10 @@ pub struct StudySet {
     /// cumulative delta carry theirs in `indicators`). Optional.
     #[serde(skip_serializing_if = "StudyStyles::is_empty")]
     pub styles: StudyStyles,
+    /// New charts start with their trade history off (Settings › Charts, "Save as default for
+    /// new charts"). Only in the defaults for new charts, never in a template. Optional.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub trades_off: bool,
 }
 
 /// A named study set (saved in the app settings).
@@ -125,6 +129,16 @@ fn next_color(set: &StudySet) -> u8 {
 }
 
 impl StudySet {
+    /// Whether it holds any study (the trade history switch aside): what Settings › Charts'
+    /// "Studies" row reports.
+    pub fn has_studies(&self) -> bool {
+        let studies = StudySet {
+            trades_off: false,
+            ..self.clone()
+        };
+        studies != StudySet::default()
+    }
+
     fn vwap(
         &mut self,
         i: usize,

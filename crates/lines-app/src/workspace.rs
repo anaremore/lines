@@ -1498,6 +1498,10 @@ impl WindowView {
             Command::Strategy(StrategyCmd::Open) => {
                 self.open_panel(PaneKind::Strategies, window, cx)
             }
+            Command::TradesOnAllCharts(show) => {
+                // After this update, so this window's panes are reachable too.
+                cx.defer(move |cx| trades_on_all_charts(show, cx));
+            }
             Command::ToggleTrades
             | Command::ToggleTradeLines
             | Command::ToggleTradeLabels
@@ -2591,7 +2595,7 @@ impl WindowView {
                     study_labels_shown: !v.hide_study_labels,
                     strategy_marks_shown: !c.strategy_marks_hidden(),
                     trades: c.trades_config(),
-                    clean: v.hide_study_labels,
+                    clean: v.clean,
                     order_strip: c.order_strip(),
                     magnet: c.magnet(),
                     drawings_shown: !c.drawings_hidden(),
@@ -5282,6 +5286,20 @@ fn snapshot_with(
         show_latency_hud,
         windows: docs,
     })
+}
+
+/// "Trades: show/hide on all charts": trade history on every open chart, in every window,
+/// popped out or in a hidden tab (from outside any window update). Only `hidden` changes:
+/// each chart keeps its lines, labels, accounts and period.
+pub fn trades_on_all_charts(show: bool, cx: &mut App) {
+    for (_, h) in all_panes(cx) {
+        if let PaneHandle::Chart(chart) = h {
+            chart.update(cx, |c, cx| {
+                let t = c.trades_config().with_shown(show);
+                c.set_trades(t, cx);
+            });
+        }
+    }
 }
 
 /// The whole workspace as a document (from outside any window update).
