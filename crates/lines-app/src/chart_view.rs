@@ -7279,6 +7279,16 @@ impl ChartView {
     /// controls' gutter.
     fn header(&self, window: &Window, cx: &mut Context<Self>) -> gpui::Div {
         let t = self.theme;
+        // An unavailable chart never paints its canvas, so its last width may be stale: it keeps
+        // the full gutter (more room than the controls need, never less).
+        let gutter = if pane::unavailable_title(&self.feed).is_some() {
+            pane::controls_gutter(crate::layout::PaneKind::Chart)
+        } else {
+            pane::controls_gutter_at(
+                crate::layout::PaneKind::Chart,
+                f32::from(self.chart.size.width),
+            )
+        };
         let bar = || {
             div()
                 .flex()
@@ -7288,10 +7298,7 @@ impl ChartView {
                 .whitespace_nowrap()
                 .overflow_hidden()
                 .px_3()
-                .pr(px(pane::controls_gutter_at(
-                    crate::layout::PaneKind::Chart,
-                    f32::from(self.chart.size.width),
-                )))
+                .pr(px(gutter))
                 .py_1()
                 .bg(t.panel)
                 .border_b_1()
@@ -8624,14 +8631,14 @@ const LEGEND_MAX_W: f32 = 360.0;
 /// Charts narrower than this show the latency HUD's p99s only (no sparklines).
 const HUD_COMPACT_BELOW_PX: f32 = 1_200.0;
 
-/// The latency HUD's compact form for a chart `w` px wide (0: not laid out yet).
-/// Whether a price-axis label for the line at `y` (plot px from its top) shows: whole inside
-/// the plot, centered on its line (`size` px text). A label near the top would reach up into
-/// the header row, where header text can sit above the axis.
+/// Whether a price-axis label for the line at `y` (plot px from its top) shows: its line inside
+/// the plot and the label clear of the plot's top, centered on its line (`size` px text). A label
+/// near the top would reach up into the header row, where header text can sit above the axis.
 fn price_label_shows(y: f32, plot_h: f32, size: f32) -> bool {
     y >= size * 0.65 && y <= plot_h
 }
 
+/// The latency HUD's compact form for a chart `w` px wide (0: not laid out yet).
 fn hud_compact(w: f32) -> bool {
     // In 100 % units (`crate::zoom`): the header's text grows with the zoom.
     w > 0.0 && w / crate::zoom::get() < HUD_COMPACT_BELOW_PX
@@ -8860,9 +8867,7 @@ fn needs_shaping<K: Eq + std::hash::Hash, T>(
 mod tests {
     use super::*;
 
-    /// A theme switch reshapes chart labels: a label cached in one theme's color is shaped
-    /// again when asked for in another theme's, and kept when the color is the same.
-    /// A price label shows only whole inside the plot: one whose line is within its half
+    /// A price label shows only clear of the plot's top: one whose line is within its half
     /// height of the top would reach into the header row (and under header text there).
     #[test]
     fn a_price_label_near_the_top_is_left_out() {
@@ -8874,6 +8879,8 @@ mod tests {
         assert!(!price_label_shows(401.0, 400.0, size));
     }
 
+    /// A theme switch reshapes chart labels: a label cached in one theme's color is shaped
+    /// again when asked for in another theme's, and kept when the color is the same.
     #[test]
     fn labels_are_shaped_again_in_a_new_color() {
         let (dark, light) = (

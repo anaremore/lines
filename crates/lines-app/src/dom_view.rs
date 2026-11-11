@@ -1330,14 +1330,14 @@ impl DomView {
         // right-hand text goes first); else left out, with its gap.
         let shows_name = has_contract
             && (room <= 0.0
-                || pane::side_header_keep_px(true, &left, tag.as_deref(), word, stale, &tw)
+                || pane::side_header_keep_px(true, &left, tag.as_deref(), word, state, stale, &tw)
                     + 8.0 // the row's left padding (px_2) is inside the room
                     + 8.0 // the gap before the right group, there even when its text isn't
                     + 8.0 + 2.0 // the name's own gap, and its basis' slack (`whole_or_none_at`)
                     + tw("DOM")
                     <= room);
         // The left group's least width: all of it but the pane's word, which gives way first.
-        let keep = pane::side_header_keep_px(true, &left, tag.as_deref(), word, stale, &tw);
+        let keep = pane::side_header_keep_px(true, &left, tag.as_deref(), word, state, stale, &tw);
         div()
             .flex()
             .flex_row()
@@ -1408,6 +1408,19 @@ impl DomView {
                                     .children(crate::layout_rec::text_marker(w))
                                     .child(w)
                             }))
+                            // The book's state is text, not only colour, and never gives way:
+                            // it's counted in the left group's least width.
+                            .when_some(state, |d, s| {
+                                d.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_color(t.text_main)
+                                        .font_weight(gpui::FontWeight::BOLD)
+                                        .relative()
+                                        .children(crate::layout_rec::text_marker(s))
+                                        .child(s),
+                                )
+                            })
                             .children(pane::stale_badge(&self.store, &t)),
                     )
                     .child(
@@ -1422,16 +1435,6 @@ impl DomView {
                             .min_w_0()
                             .overflow_hidden()
                             .text_color(t.text_dim)
-                            .when_some(state, |d, s| {
-                                // The book's state is text, not only colour.
-                                d.child(
-                                    div()
-                                        .flex_shrink_0()
-                                        .text_color(t.text_main)
-                                        .font_weight(gpui::FontWeight::BOLD)
-                                        .child(s),
-                                )
-                            })
                             // Whole or not at all when the pane is narrow, never a bare "…".
                             .child(pane::whole_or_none(right, t.text_dim, true)),
                     ),

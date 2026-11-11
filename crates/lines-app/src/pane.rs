@@ -676,14 +676,15 @@ pub fn chart_header_fit(
 }
 
 /// What a DOM or T&S header's left group never gives up, in 100 % units: the link chip, the
-/// contract (or the unavailable title), the source tag when it shows, the feed's status word and
-/// the STALE badge while stale. Only the pane's word ("DOM") may go from it, so it is the left
+/// contract (or the unavailable title), the source tag when it shows, the feed's status word,
+/// the DOM's book state (bold: "crossed") and the STALE badge while stale. Only the pane's word ("DOM") may go from it, so it is the left
 /// group's least width: the contract is never drawn over the status word.
 pub fn side_header_keep_px(
     linked: bool,
     contract: &str,
     tag: Option<&str>,
     status: Option<&str>,
+    book: Option<&str>,
     stale: bool,
     tw: TextPx,
 ) -> f32 {
@@ -691,6 +692,7 @@ pub fn side_header_keep_px(
     header_base_px(linked, contract, tw) - 12.0
         + tag.map_or(0.0, |t| HEADER_GAP + tw(t))
         + status.map_or(0.0, |s| HEADER_GAP + tw(s))
+        + book.map_or(0.0, |b| HEADER_GAP + tw(b) * BOLD)
         + if stale {
             HEADER_GAP + tw("STALE · no data 99 s") * BOLD + 8.0
         } else {
@@ -1002,6 +1004,29 @@ mod tests {
         ] {
             assert_eq!(status_word(&s), Some(w));
         }
+    }
+
+    /// A DOM or T&S header's least width counts everything that never gives way, each after its
+    /// gap: the contract, the tag, the status word, the book's state (bold) and STALE.
+    #[test]
+    fn a_side_header_keeps_its_contract_and_states() {
+        let base = side_header_keep_px(true, "ESZ26", None, None, None, false, &tw7);
+        assert_eq!(base, header_base_px(true, "ESZ26", &tw7) - 12.0);
+        let all = side_header_keep_px(
+            true,
+            "ESZ26",
+            Some("CQG"),
+            Some("ended"),
+            Some("crossed"),
+            true,
+            &tw7,
+        );
+        let want = base
+            + (HEADER_GAP + tw7("CQG"))
+            + (HEADER_GAP + tw7("ended"))
+            + (HEADER_GAP + tw7("crossed") * BOLD)
+            + (HEADER_GAP + tw7("STALE · no data 99 s") * BOLD + 8.0);
+        assert!((all - want).abs() < 0.01, "{all} vs {want}");
     }
 
     /// A narrow pane's header shows only ⋯ (every other control is in the pane menu), and keeps
