@@ -2455,6 +2455,11 @@ impl ChartView {
                 MouseButton::Left,
                 cx.listener(move |v, ev: &MouseDownEvent, window, cx| {
                     cx.stop_propagation();
+                    // A popover open elsewhere: this press only closes it (never an order).
+                    if popover::press_closes_popover(cx) {
+                        cx.notify();
+                        return;
+                    }
                     // The chart takes focus, so Esc reaches an armed pick.
                     v.focus.focus(window, cx);
                     // Recorded for what's pressed next; its verdict can't refuse more than this.
