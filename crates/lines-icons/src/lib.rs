@@ -1,5 +1,6 @@
 //! The line icons Lines draws with: [Lucide](https://lucide.dev) 1.61.0 (ISC; MIT for the icons
-//! derived from Feather), each file as released but for its stroke (1.6 on the 24 grid, not 2).
+//! derived from Feather), each file as released but for its stroke (1.6 on the 24 grid, not 2)
+//! and, for `play`, `pause` and `ellipsis`, solid shapes (`fill="currentColor"`).
 //! `README.md` here has the release, its hash and the one edit; `LICENSE-ISC.txt`,
 //! `LICENSE-MIT.txt` and `NOTICE-feather.txt` the licence.
 //!

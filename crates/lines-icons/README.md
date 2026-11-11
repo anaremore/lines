@@ -15,12 +15,17 @@ Lucide's own GitHub release, never another project's copy:
 The repository's `LICENSE` at tag `1.61.0`, split so cargo-about matches each part and ships
 its copyright line in `THIRD_PARTY_LICENSES.txt`: `LICENSE-ISC.txt` (Lucide Icons and
 Contributors), `LICENSE-MIT.txt` (Cole Bemis, Feather) and `NOTICE-feather.txt` (which Lucide
-icons are derived from Feather, and so under MIT; here `log-in`, `maximize` and `x`).
+icons are derived from Feather, and so under MIT, by their Feather names; here `log-in`,
+`maximize`, `x`, and `ellipsis`, Feather's `more-horizontal`).
 
 ## Changes
 
 One edit to each file: `stroke-width="2"` became `stroke-width="1.6"` (a thinner line at 16 px,
 the owner's pick). Shapes, caps (round) and joins (round) are Lucide's.
+
+A second edit to three: `play`, `pause` and `ellipsis` have `fill="currentColor"` on their shapes,
+so the replay bar's play/pause reads as solid on its accent button and the pane menu's three dots
+read as dots at 16 px (review, 2026-11-11).
 
 ## Adding an icon
 

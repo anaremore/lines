@@ -2,9 +2,9 @@
 //! (vendored in `lines-icons`: ISC, MIT for the icons derived from Feather; stroke 1.6 on the
 //! 24 grid, round caps and joins), drawn 16 px in a 20 px hit box. GPUI rasterizes each SVG
 //! once per size into its sprite atlas (antialiased, at device resolution) and tints it with the
-//! caller's theme token, so painting a cached icon allocates nothing of ours. The SVGs are also
-//! served to GPUI's `svg()` element as assets ([`Assets`], registered with the app), under
-//! `icons/<name>.svg`.
+//! caller's theme token, so painting a cached icon allocates nothing of ours. The same SVGs are
+//! the app's assets ([`Assets`], registered with the app) under `icons/<name>.svg`, for GPUI's
+//! `svg()` element (no caller yet; the drawing toolbar will be one).
 
 use std::borrow::Cow;
 
@@ -26,9 +26,9 @@ pub const HIT: f32 = 20.0;
 pub enum Icon {
     /// A square with an arrow leaving up-right: pop the pane out into its own window.
     PopOut,
-    /// An arrow coming into a square: re-attach a popped-out pane where it was.
+    /// An arrow coming into an open bracket: re-attach a popped-out pane where it was.
     Reattach,
-    /// Two panes side by side, an arrow into the right one: dock beside the chart.
+    /// A panel with its right side marked off: dock beside the chart.
     Dock,
     /// An eye with a stroke through it: hide the pane.
     Hide,
@@ -139,15 +139,19 @@ pub fn paint(icon: Icon, bounds: Bounds<Pixels>, color: Hsla, window: &mut Windo
     let y = f32::from(bounds.origin.y) + (f32::from(bounds.size.height) - side) * 0.5;
     let b = Bounds::new(point(px(x), px(y)), size(px(side), px(side)));
     let svg = lines_icons::svg(icon.lucide());
-    // A missing icon would be a build error in `lines-icons`' test; nothing to draw otherwise.
-    let _ = window.paint_svg(
+    // Every icon is embedded and parses (tested below); a failure would draw nothing, so it's
+    // logged once rather than every frame.
+    if let Err(e) = window.paint_svg(
         b,
         SharedString::new_static(icon.path()),
         svg,
         TransformationMatrix::unit(),
         color,
         cx,
-    );
+    ) {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| tracing::warn!("icon {icon:?} not drawn: {e}"));
+    }
 }
 
 /// An icon that is only shown (a pinned tab's pin): [`HIT`] px square, in `color`.
@@ -221,6 +225,16 @@ mod tests {
             for other in &Icon::ALL[i + 1..] {
                 assert_ne!(icon.lucide(), other.lucide(), "{icon:?} vs {other:?}");
             }
+        }
+        // Every vendored SVG parses as GPUI will rasterize it (a malformed file would fail in
+        // paint, drawing nothing).
+        let renderer = gpui::SvgRenderer::new(std::sync::Arc::new(Assets));
+        for f in lines_icons::ICONS {
+            assert!(
+                renderer.parse_svg(f.svg).is_ok(),
+                "{} doesn't parse",
+                f.name
+            );
         }
         assert!(Assets.load("icons/nope.svg").unwrap().is_none());
         assert!(Assets.load("fonts/x.ttf").unwrap().is_none());
