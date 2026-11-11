@@ -58,6 +58,8 @@ pub struct Shot {
     pub order_controls: bool,
     /// The order size symbols start with (`--order-size`).
     pub order_size: Option<u32>,
+    /// Where the drawing toolbar sits (`--drawing-tools left|top`), as Settings › Charts sets it.
+    pub drawing_tools_dock: Option<crate::drawing_toolbar::Dock>,
     /// The paper accounts' largest allowed order (`--max-order-qty`).
     pub max_order_qty: Option<i64>,
     /// A synthetic read-only broker; the panes trade its SIM account (`--demo-broker`).
@@ -221,6 +223,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         hotkeys,
         order_controls,
         order_size,
+        drawing_tools_dock,
         max_order_qty,
         demo_broker,
         strategies_demo,
@@ -391,6 +394,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
             // `--ui-font` as Settings › Appearance would have saved it (its row shows it).
             settings.settings.ui_font = ui_font.to_saved();
             settings.settings.new_panes.default_qty = order_size;
+            if let Some(d) = drawing_tools_dock {
+                settings.settings.drawing_tools_dock = d;
+            }
             if let Some((x, y)) = panel_at {
                 for p in crate::popover::Panel::ALL {
                     settings

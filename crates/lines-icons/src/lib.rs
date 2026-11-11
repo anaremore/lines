@@ -1,4 +1,4 @@
-//! The line icons Lines draws with: [Lucide](https://lucide.dev) 1.61.0 (ISC; MIT for the icons
+//! The line icons Lines draws with: [Lucide](https://lucide.dev) 1.61.0 and 1.62.0 (ISC; MIT for the icons
 //! derived from Feather), each file as released but for its stroke (1.6 on the 24 grid, not 2)
 //! and, for `play`, `pause` and `ellipsis`, solid shapes (`fill="currentColor"`).
 //! `README.md` here has the release, its hash and the edits; `LICENSE-ISC.txt`,
@@ -28,13 +28,19 @@ pub const ICONS: &[IconFile] = &[
     icon!("eye-off"),
     icon!("log-in"),
     icon!("maximize"),
+    icon!("minus"),
     icon!("panel-right"),
     icon!("pause"),
     icon!("pin"),
     icon!("play"),
+    icon!("ruler"),
     icon!("skip-back"),
     icon!("skip-forward"),
+    icon!("slash"),
+    icon!("square"),
     icon!("square-arrow-out-up-right"),
+    icon!("trash"),
+    icon!("type"),
     icon!("x"),
 ];
 

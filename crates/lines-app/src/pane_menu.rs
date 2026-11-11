@@ -47,6 +47,8 @@ pub struct ChartMenu {
     pub order_strip: bool,
     pub magnet: bool,
     pub drawings_shown: bool,
+    /// The drawing toolbar is shown (`crate::drawing_toolbar`).
+    pub drawing_tools: bool,
     pub drawing_selected: bool,
     pub symbol: String,
     pub chart_only: bool,
@@ -497,6 +499,11 @@ fn chart_show(c: &ChartMenu) -> MenuItem {
         Command::Strategy(StrategyCmd::ToggleMarks),
         c.strategy_marks_shown,
     ));
+    sub.push(toggle(
+        "Drawing tools",
+        Command::ToggleDrawingTools,
+        c.drawing_tools,
+    ));
     sub.push(MenuItem::sep());
     sub.push(toggle("Clean chart", Command::CleanChart, c.clean));
     MenuItem::submenu("Show", "", sub)
@@ -670,6 +677,7 @@ mod tests {
             order_strip: false,
             magnet: true,
             drawings_shown: true,
+            drawing_tools: false,
             drawing_selected: true,
             symbol: "ES".into(),
             orders: None,
@@ -873,6 +881,7 @@ mod tests {
                 "Studies",
                 "Study labels",
                 "Strategy markers",
+                "Drawing tools",
                 "---",
                 "Clean chart"
             ]

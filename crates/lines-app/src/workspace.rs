@@ -1684,6 +1684,11 @@ impl WindowView {
                     chart.update(cx, |c, cx| c.toggle_magnet(cx));
                 }
             }
+            Command::ToggleDrawingTools => {
+                if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
+                    chart.update(cx, |c, cx| c.toggle_drawing_tools(cx));
+                }
+            }
             Command::ToggleOrderStrip => {
                 if let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() {
                     chart.update(cx, |c, cx| c.toggle_order_strip(cx));
@@ -2634,6 +2639,7 @@ impl WindowView {
                     order_strip: c.order_strip(),
                     magnet: c.magnet(),
                     drawings_shown: !c.drawings_hidden(),
+                    drawing_tools: c.drawing_tools(),
                     drawing_selected: c.drawing_selected(),
                     symbol: c.product_symbol().to_string(),
                     chart_only: tabstate::is_chart_only(&leaves, tab.focused),

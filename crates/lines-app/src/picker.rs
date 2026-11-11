@@ -260,6 +260,13 @@ pub struct Settings {
         skip_serializing_if = "crate::chart_draw::MeasureShow::is_default"
     )]
     pub measure: crate::chart_draw::MeasureShow,
+    /// Where the drawing toolbar sits on every chart (Settings › Charts). Optional: absent is
+    /// left.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::drawing_toolbar::Dock::is_default"
+    )]
+    pub drawing_tools_dock: crate::drawing_toolbar::Dock,
     /// Settings › General › Updates (decision 0031): automatic, notify only or off. Optional:
     /// absent is automatic.
     #[serde(default, skip_serializing_if = "crate::update::UpdateMode::is_default")]

@@ -27,6 +27,7 @@ mod dom_trail;
 mod dom_view;
 mod download_days;
 mod download_view;
+mod drawing_toolbar;
 mod drawings_store;
 mod dropdown;
 mod econ_layer;
@@ -731,6 +732,17 @@ struct Cli {
     /// Screenshot: show the order strip on the first chart (the pane menu's "Order strip").
     #[arg(long, requires = "screenshot")]
     order_strip: bool,
+    /// Screenshot: show the drawing toolbar on the first chart, docked `left` (the default) or
+    /// `top` (the pane menu's Show › Drawing tools; Settings › Charts for the dock).
+    #[arg(long, requires = "screenshot", value_parser = ["left", "top"], num_args = 0..=1, default_missing_value = "left")]
+    drawing_tools: Option<String>,
+    /// Screenshot: the first chart in drawing mode with this tool (`trend`, `hline`, `vline`,
+    /// `rect`, `note`, `measure`, ...: a drawings file's tool names), as its key would.
+    #[arg(long, requires = "screenshot", value_parser = parse_tool)]
+    draw_tool: Option<lines_core::drawings::Tool>,
+    /// Screenshot: drawing ID of --drawings selected on the first chart, as a click would.
+    #[arg(long, requires = "drawings")]
+    select_drawing: Option<lines_core::drawings::DrawingId>,
     /// Screenshot: the order strip with a limit's price pick armed (`buy` or `sell`).
     #[arg(long, requires = "screenshot", value_parser = ["buy", "sell"])]
     strip_pick: Option<String>,
@@ -937,6 +949,19 @@ where
 {
     let mut matches = command(ext).try_get_matches_from(args)?;
     Cli::from_arg_matches_mut(&mut matches)
+}
+
+fn parse_tool(s: &str) -> Result<lines_core::drawings::Tool, String> {
+    lines_core::drawings::Tool::ALL
+        .into_iter()
+        .find(|t| t.key() == s)
+        .ok_or_else(|| {
+            let names: Vec<_> = lines_core::drawings::Tool::ALL
+                .iter()
+                .map(|t| t.key())
+                .collect();
+            format!("unknown tool {s:?} ({})", names.join(", "))
+        })
 }
 
 fn parse_volume(s: &str) -> Result<lines_indicators::VolumeSpec, String> {
@@ -2005,6 +2030,9 @@ where
             studies_menu: cli.studies_menu.clone(),
             magnet: cli.magnet,
             order_strip: cli.order_strip,
+            drawing_tools: cli.drawing_tools.is_some(),
+            draw_tool: cli.draw_tool,
+            select_drawing: cli.select_drawing,
             strip_pick: cli.strip_pick.as_deref().map(|s| {
                 if s == "buy" {
                     crate::chart_trade::StripOrder::BuyLimit
@@ -2132,6 +2160,13 @@ where
                 hotkeys: cli.hotkeys,
                 order_controls: cli.order_controls,
                 order_size: cli.order_size,
+                drawing_tools_dock: cli.drawing_tools.as_deref().map(|d| {
+                    if d == "top" {
+                        drawing_toolbar::Dock::Top
+                    } else {
+                        drawing_toolbar::Dock::Left
+                    }
+                }),
                 max_order_qty: cli.max_order_qty,
                 demo_broker: cli.demo_broker,
                 strategies_demo: cli.strategies_demo,

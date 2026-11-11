@@ -1,10 +1,10 @@
-//! Line icons for pane headers, tabs and the replay bar: [Lucide](https://lucide.dev)
+//! Line icons for pane headers, tabs, the replay bar and the drawing toolbar: [Lucide](https://lucide.dev)
 //! (vendored in `lines-icons`: ISC, MIT for the icons derived from Feather; stroke 1.6 on the
 //! 24 grid, round caps and joins), drawn 16 px in a 20 px hit box. GPUI rasterizes each SVG
 //! once per size into its sprite atlas (antialiased, at device resolution) and tints it with the
 //! caller's theme token, so painting a cached icon allocates nothing of ours. The same SVGs are
 //! the app's assets ([`Assets`], registered with the app) under `icons/<name>.svg`, for GPUI's
-//! `svg()` element (no caller yet; the drawing toolbar will be one).
+//! `svg()` element ([`lucide`]: the drawing toolbar's).
 
 use std::borrow::Cow;
 
@@ -125,6 +125,24 @@ impl AssetSource for Assets {
             .map(|i| SharedString::from(format!("icons/{}.svg", i.name)))
             .filter(|p| p.starts_with(path))
             .collect())
+    }
+}
+
+/// A vendored icon as GPUI's `svg()` element: `path` is its asset path (`icons/<name>.svg`,
+/// served by [`Assets`]), `size` logical px square, in `color`, turned `turns` quarter turns
+/// clockwise (a vertical line from Lucide's horizontal `minus`). For an icon that is its own
+/// element (the drawing toolbar's), where a painted [`Icon`] doesn't fit.
+pub fn lucide(path: &'static str, size: Pixels, color: Hsla, turns: u8) -> gpui::Svg {
+    let s = gpui::svg()
+        .path(path)
+        .flex_none()
+        .size(size)
+        .text_color(color);
+    match turns % 4 {
+        0 => s,
+        q => s.with_transformation(gpui::Transformation::rotate(gpui::radians(
+            f32::from(q) * std::f32::consts::FRAC_PI_2,
+        ))),
     }
 }
 

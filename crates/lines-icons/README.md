@@ -11,12 +11,19 @@ Lucide's own GitHub release, never another project's copy:
 | Release | Asset | SHA-256 of the asset |
 |---|---|---|
 | `1.61.0` (2026-10-21) | `lucide-icons-1.61.0.zip` | `d4cfe5949e0cf202ec558c3fe2cc6c8373371c1cb8643fac2f7c68ce4153ff4b` |
+| `1.62.0` (2026-10-27) | `lucide-icons-1.62.0.zip` | `9a12dbe539321116728318a87301837ff16b8bab42a706c41370f27f43ea7378` |
+
+From `1.61.0`: `ellipsis`, `eye-off`, `log-in`, `maximize`, `panel-right`, `pause`, `pin`,
+`play`, `skip-back`, `skip-forward`, `square-arrow-out-up-right`, `x` (the header, tab and
+replay-bar icons). From `1.62.0`: `minus`, `ruler`, `slash`, `square`, `trash`, `type` (the
+drawing toolbar's). Both releases' `LICENSE` texts are the same.
 
 The repository's `LICENSE` at tag `1.61.0`, split so cargo-about matches each part and ships
 its copyright line in `THIRD_PARTY_LICENSES.txt`: `LICENSE-ISC.txt` (Lucide Icons and
 Contributors), `LICENSE-MIT.txt` (Cole Bemis, Feather) and `NOTICE-feather.txt` (which Lucide
 icons are derived from Feather, and so under MIT, by their Feather names; here `log-in`,
-`maximize`, `x`, and `ellipsis`, Feather's `more-horizontal`).
+`maximize`, `minus`, `square`, `trash`, `type`, `x`, and `ellipsis`, Feather's
+`more-horizontal`).
 
 ## Changes
 

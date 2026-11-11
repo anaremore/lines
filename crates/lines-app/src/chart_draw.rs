@@ -810,7 +810,21 @@ impl ChartDrawings {
         true
     }
 
+    /// Whether Delete (the key, the toolbar's button) has a drawing to delete: a selection
+    /// that still exists, with drawings shown. Read from the data, not the last paint, so the
+    /// toolbar is right on a chart's first frame.
+    pub fn can_delete(&self) -> bool {
+        !self.hidden
+            && self
+                .selected
+                .is_some_and(|id| self.data.lock().get(id).is_some())
+    }
+
     pub fn delete_selected(&mut self) -> bool {
+        // Never a drawing the chart doesn't show (`can_delete`: the toolbar's Delete agrees).
+        if self.hidden {
+            return false;
+        }
         let Some(id) = self.selected.take() else {
             return false;
         };
