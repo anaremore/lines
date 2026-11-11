@@ -1126,6 +1126,17 @@ pub fn palette() -> Vec<Command> {
 /// While the focused pane takes typed text (a symbol search, a note, a timeframe), drawing
 /// commands stay with the text: their Alt+letters (on macOS Option types characters, e.g. in
 /// a note) and undo/redo. Every other binding runs as before (Alt+arrows, F1, Shift+F10, …).
+/// Flatten, Cancel all and Stop all from their keys (Ctrl+Shift+F, Ctrl+Shift+A,
+/// Ctrl+Shift+R): they always act, before any open menu, list, prompt or popover takes the key,
+/// and close it (owner, 2026-11-10). Never gated by arming, risk or rules, as always.
+pub fn emergency(cmd: Command) -> bool {
+    matches!(
+        cmd,
+        Command::Trade(TradeCmd::Flatten | TradeCmd::CancelAll)
+            | Command::Strategy(StrategyCmd::StopAll)
+    )
+}
+
 pub fn runs_while_typing(_k: &Keystroke, cmd: Command) -> bool {
     !matches!(cmd, Command::Draw(_))
 }
@@ -1149,6 +1160,27 @@ pub fn filter(query: &str, commands: &[Command]) -> Vec<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Flatten, Cancel all and Stop all from their keys always act, before an open menu, list,
+    /// prompt or popover takes the key (owner, 2026-11-10); nothing else is one of them.
+    #[test]
+    fn the_emergency_keys_are_flatten_cancel_all_and_stop_all() {
+        let mut keys: Vec<_> = BINDINGS
+            .iter()
+            .filter(|b| emergency(b.cmd))
+            .map(|b| (b.ctrl, b.shift, b.alt, b.key))
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            [
+                (true, true, false, "a"),
+                (true, true, false, "f"),
+                (true, true, false, "r")
+            ],
+            "Ctrl+Shift+A, F and R, and nothing else"
+        );
+    }
 
     /// AltGr is Ctrl+Alt on Windows/Linux: a character it types other than the key itself
     /// ("ś" from AltGr+S, Polish) is text and never sends an order; Ctrl+Alt+S itself (no

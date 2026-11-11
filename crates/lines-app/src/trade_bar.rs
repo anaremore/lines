@@ -2705,6 +2705,11 @@ fn run_on_click<V: TradePane>(
         MouseButton::Left,
         cx.listener(move |v: &mut V, ev: &gpui::MouseDownEvent, _, cx| {
             cx.stop_propagation();
+            // A popover open anywhere (another window's): this press only closes it.
+            if crate::popover::press_closes_popover(cx) {
+                cx.notify();
+                return;
+            }
             // Aimed at what has moved (the bracket editor closing, a list over this row).
             let exit = matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll);
             let refused = if exit {
@@ -2723,10 +2728,6 @@ fn run_on_click<V: TradePane>(
             }
             if exit {
                 v.trade().clear_notice();
-            }
-            if matches!(cmd, TradeCmd::Flatten | TradeCmd::CancelAll) {
-                // Drawn over an open popover's backdrop (`popover::always_live`): it closes.
-                crate::popover::close_any(cx);
             }
             run_from(v, cmd, Instant::now(), Source::Dom, cx);
         }),
@@ -3385,12 +3386,7 @@ pub fn dom_bar<V: TradePane>(
                 .text_color(t.text_dim);
         }
         let b = run_on_click(tip(b, name, Some(cmd), t), cmd, cx);
-        if entry {
-            b.into_any_element()
-        } else {
-            // Cancel all and Flatten: one press even with a popover open (design.md §3).
-            crate::popover::always_live(b).into_any_element()
-        }
+        b.into_any_element()
     };
     if rows.actions_row(width) {
         let mut row = div()
@@ -4261,14 +4257,12 @@ fn controls<V: TradePane>(
             cx.listener(|v: &mut V, _: &gpui::MouseDownEvent, _, cx| close_account_menu(v, cx)),
         )
     };
-    // Each list opens under its field (`dropdown::fit`), under Flatten and Cancel all, which it
-    // can reach and which stay one press over it (`dropdown::PANEL_PRIORITY`).
+    // Each list opens under its field (`dropdown::fit`) and covers what is under it, Flatten and
+    // Cancel all included (owner, 2026-11-10).
     let qty = crate::dropdown::dropdown(div().flex().flex_shrink_0().child(qty), qty_menu)
-        .in_panel()
         .on_dismiss(dismiss(cx));
     let bracket =
         crate::dropdown::dropdown(div().flex().flex_1().min_w_0().child(bracket), bracket_menu)
-            .in_panel()
             .on_dismiss(dismiss(cx));
     div()
         .flex()

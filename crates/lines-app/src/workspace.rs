@@ -2968,6 +2968,26 @@ impl WindowView {
     // ---- input ------------------------------------------------------------------------------
 
     fn on_key_capture(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flatten and Cancel all always act: whatever is open (a menu, a prompt, any popover in
+        // any pane or window) closes and never takes the key.
+        if let Some(cmd) = commands::command_for(&ev.keystroke).filter(|c| commands::emergency(*c))
+        {
+            self.menu = None;
+            self.prompt = None;
+            crate::popover::close_any(cx);
+            if !ev.is_held {
+                match cmd {
+                    Command::Trade(tc) => {
+                        self.focus_for_size(tc, window, cx);
+                        self.run_trade(tc, true, cx)
+                    }
+                    _ => self.run(cmd, window, cx),
+                }
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if self.menu.is_some() {
             self.menu_key(ev, window, cx);
             cx.stop_propagation();

@@ -6,7 +6,7 @@
 //!   they show moved: the source, the core's events for the instances' accounts, the
 //!   journal, the P&L display or the trade date.
 //! - **Commands** go straight to the trading core (`Trading::submit`). Stop all is never
-//!   gated and stays one press, even with a popover open (`popover::always_live`). Its key
+//!   gated; with a popover open its first press only closes it (owner, 2026-11-10). Its key
 //!   is in `commands::BINDINGS`; it is also in the palette.
 //! - **Paper only:** strategies trade the paper broker only (the core refuses anything else),
 //!   and the header says so.
@@ -356,8 +356,12 @@ impl StrategyView {
                     MouseButton::Left,
                     cx.listener(|this, _: &MouseDownEvent, _, cx| {
                         cx.stop_propagation();
-                        // One press even over a popover, which it closes (as Flatten does).
-                        crate::popover::close_any(cx);
+                        // A popover open anywhere: this press only closes it (its key,
+                        // Ctrl+Shift+R, always acts).
+                        if crate::popover::press_closes_popover(cx) {
+                            cx.notify();
+                            return;
+                        }
                         let _ = this.run(StrategyCmd::StopAll, Source::Palette, cx);
                     }),
                 ),
@@ -401,7 +405,7 @@ impl StrategyView {
                             .child(crate::trade_bar::paper_badge(&t).flex_shrink_0()),
                     )
                     // Always visible while any instance exists (decision 0025).
-                    .when(any, |d| d.child(crate::popover::always_live(stop_all))),
+                    .when(any, |d| d.child(stop_all)),
             )
     }
 

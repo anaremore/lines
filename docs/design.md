@@ -19,7 +19,7 @@ Minimal, modern, maximally useful, beautiful, and never at the cost of speed or 
 - Connection, data delay, and paper vs live are always visible, never only in a menu. Paper vs live differ by more than colour (decision 0006).
 - The window footer's left zone is for safety: account kind, trading on (with the armed DOM count), feeds that aren't live, recording, a pending restart and notices that need action, in a fixed order, never hidden or folded (narrow, they shorten their words). The middle is one line of background work; the right holds links, which fold into ⋯ (`footer.rs`). No key-hint text: keys are keycaps where the action is.
 - Errors appear inline where they happened, never as modal dialogs that steal focus during trading. Modals only for destructive confirmations the user opted into.
-- Flatten and Cancel All are always reachable with one action.
+- Flatten and Cancel All are always reachable with one action: one press on their buttons with nothing open, and their keys (Ctrl+Shift+F, Ctrl+Shift+A) at any time, which also close whatever is open. An open list or menu covers everything under it, Flatten and Cancel all included, and while any popover is open (in any pane or window) the first press outside it only closes it, on those buttons too (owner, 2026-11-10: a press meant for a list row must never flatten or cancel, and nothing draws over a list as if it were part of it).
 
 ## 4. Readable at a glance
 - **Numbers:** tabular (fixed-width) digits everywhere prices or sizes align, right-aligned, using the instrument's display format (decision 0002). Never truncate a price.

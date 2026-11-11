@@ -348,6 +348,21 @@ impl PaneWindow {
     }
 
     fn on_key_capture(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Flatten and Cancel all always act: an open menu or popover closes and never takes
+        // the key (as in main windows).
+        if let Some(cmd) = commands::command_for(&ev.keystroke)
+            .and_then(command)
+            .filter(|c| commands::emergency(*c))
+        {
+            self.menu = None;
+            crate::popover::close_any(cx);
+            if !ev.is_held {
+                self.run(cmd, window, cx);
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if let Some(menu) = self.menu.as_mut() {
             match menu.key(ev.keystroke.key.as_str()) {
                 MenuKey::Close => self.menu = None,

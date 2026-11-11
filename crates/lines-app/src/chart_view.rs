@@ -1603,6 +1603,12 @@ impl ChartView {
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A popover open in another window: this press only closes it (never an order).
+        if popover::press_closes_popover(cx) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         popover::clear_dismissing();
         let Some(region) = self.region(ev.position) else {
             return;
