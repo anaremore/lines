@@ -30,8 +30,12 @@ pub enum Icon {
     Reattach,
     /// A panel with its right side marked off: dock beside the chart.
     Dock,
-    /// An eye with a stroke through it: hide the pane.
+    /// An eye with a stroke through it: hide the pane; a hidden study (the legend).
     Hide,
+    /// An eye: a shown study (the legend's hide button).
+    Show,
+    /// A gear: a study's settings (the legend).
+    Settings,
     /// Four corners pointing out: chart only (the chart takes the space).
     ChartOnly,
     /// Three dots: the pane menu.
@@ -52,7 +56,7 @@ pub enum Icon {
 
 impl Icon {
     #[cfg(test)]
-    pub const ALL: [Icon; 12] = [
+    pub const ALL: [Icon; 14] = [
         Icon::Play,
         Icon::Pause,
         Icon::SkipBack,
@@ -61,6 +65,8 @@ impl Icon {
         Icon::Reattach,
         Icon::Dock,
         Icon::Hide,
+        Icon::Show,
+        Icon::Settings,
         Icon::ChartOnly,
         Icon::Menu,
         Icon::Close,
@@ -76,6 +82,8 @@ impl Icon {
             Icon::Reattach => "log-in",
             Icon::Dock => "panel-right",
             Icon::Hide => "eye-off",
+            Icon::Show => "eye",
+            Icon::Settings => "settings",
             Icon::ChartOnly => "maximize",
             Icon::Menu => "ellipsis",
             Icon::Close => "x",
@@ -94,6 +102,8 @@ impl Icon {
             Icon::Reattach => "icons/log-in.svg",
             Icon::Dock => "icons/panel-right.svg",
             Icon::Hide => "icons/eye-off.svg",
+            Icon::Show => "icons/eye.svg",
+            Icon::Settings => "icons/settings.svg",
             Icon::ChartOnly => "icons/maximize.svg",
             Icon::Menu => "icons/ellipsis.svg",
             Icon::Close => "icons/x.svg",

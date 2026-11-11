@@ -751,6 +751,10 @@ pub fn zone_scale(theme: &Theme, looks: &[Look; 2], rgbas: impl Iterator<Item = 
 /// text (empty while current: a current map's time is never shown), whether that is a warning
 /// (missing), whether the row is dimmed (stale), and its stats (a line under it).
 pub struct LegendRow {
+    /// The source's id (the row's study: `StudyRef::Levels`).
+    pub id: String,
+    /// Hidden on this chart: listed, dimmed, nothing else said.
+    pub hidden: bool,
     pub label: &'static str,
     pub title: Option<String>,
     pub text: String,
@@ -1825,10 +1829,27 @@ impl LevelsLayer {
     /// Legend rows (render time, after [`Self::snapshot`]): one per source on this chart,
     /// with its freshness, from the same snapshot the levels are drawn from.
     pub fn legend(&self) -> Vec<LegendRow> {
+        // Levels turned off as a whole: none listed (the switch is the chart's, not a row's).
+        if self.config.hidden {
+            return Vec::new();
+        }
         self.slots
             .iter()
-            .filter(|s| self.config.source_shown(s.handle.source()))
             .map(|s| {
+                let id = s.handle.source().to_owned();
+                // Hidden here: listed, dimmed, so it is one click from coming back.
+                if !self.config.source_shown(&id) {
+                    return LegendRow {
+                        id,
+                        hidden: true,
+                        label: s.label,
+                        title: None,
+                        text: "· hidden".into(),
+                        warn: false,
+                        dim: true,
+                        stats: Vec::new(),
+                    };
+                }
                 // A map's time is never shown in the legend (it says nothing a trader acts on
                 // while current); a stale map says "· stale" (after its title), dimmed with its levels.
                 let (text, warn, dim) = match s.status {
@@ -1850,6 +1871,8 @@ impl LevelsLayer {
                     .filter(|_| s.status != LevelStatus::Missing)
                     .and_then(|m| m.legend.as_ref());
                 LegendRow {
+                    id,
+                    hidden: false,
                     label: s.label,
                     title: legend.and_then(|l| l.title.clone()),
                     text,

@@ -16,7 +16,7 @@ Lucide's own GitHub release, never another project's copy:
 From `1.61.0`: `ellipsis`, `eye-off`, `log-in`, `maximize`, `panel-right`, `pause`, `pin`,
 `play`, `skip-back`, `skip-forward`, `square-arrow-out-up-right`, `x` (the header, tab and
 replay-bar icons). From `1.62.0`: `minus`, `ruler`, `slash`, `square`, `trash`, `type` (the
-drawing toolbar's). Both releases' `LICENSE` texts are the same.
+drawing toolbar's), and `eye`, `settings` (the study legend's). Both releases' `LICENSE` texts are the same.
 
 The repository's `LICENSE` at tag `1.61.0`, split so cargo-about matches each part and ships
 its copyright line in `THIRD_PARTY_LICENSES.txt`: `LICENSE-ISC.txt` (Lucide Icons and

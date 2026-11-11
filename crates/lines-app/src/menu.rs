@@ -81,6 +81,8 @@ pub struct MenuItem {
     /// An on/off switch: drawn as a box (checked when on), told apart from one of a set (a
     /// check on the one in force) and from an action.
     pub toggle: bool,
+    /// The hint is a key with no command of its own (a legend row's Del): drawn as a cap.
+    pub hint_cap: bool,
 }
 
 impl MenuItem {
@@ -112,6 +114,7 @@ impl MenuItem {
             destructive: false,
             title: false,
             toggle: false,
+            hint_cap: false,
         }
     }
 
@@ -546,7 +549,12 @@ fn rows<V: 'static>(
             .gap_2()
             .child(match item.key.and_then(|k| crate::keycap::caps(k, &t)) {
                 Some(caps) => caps,
-                None => div().text_color(t.text_dim).child(item.hint.clone()),
+                None => match crate::keycap::caps_of(std::slice::from_ref(&item.hint), &t)
+                    .filter(|_| item.hint_cap)
+                {
+                    Some(cap) => cap,
+                    None => div().text_color(t.text_dim).child(item.hint.clone()),
+                },
             })
             .child(
                 div()

@@ -198,6 +198,9 @@ pub enum Command {
     /// One working order on the focused chart, from its tag's menu (`crate::pane_menu`). Not
     /// in the palette or the keymap: it needs the order under the pointer.
     Order(OrderCmd),
+    /// One study of the focused chart, from its legend row's menu (`crate::legend`). Not in
+    /// the palette or the keymap: it needs the row under the pointer.
+    Study(StudyCmd),
     /// The replay bar (`crate::replay_bar`). Its plain keys act only while a replay plays and
     /// the focused pane doesn't use the key itself.
     Replay(ReplayCmd),
@@ -230,6 +233,24 @@ impl ReplayCmd {
         ReplayCmd::Faster,
         ReplayCmd::GoTo,
     ];
+}
+
+/// What a legend row's menu does to its study: the same paths as its hover buttons and the
+/// studies menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StudyCmd {
+    /// Hide it, or show it again.
+    ToggleHidden,
+    /// Its settings in the studies menu.
+    Settings,
+    /// The same study on every chart of the tab.
+    AddToTab,
+    /// One place earlier (`true`) or later in the drawing order.
+    Move(bool),
+    /// Remove it (Undo in the footer).
+    Remove,
+    /// Put the study just removed back (the footer's Undo).
+    Undo,
 }
 
 /// What an order's tag menu does: the same paths as its tag's controls and the DOM.
@@ -975,6 +996,16 @@ pub fn label(c: Command) -> String {
             ReplayCmd::Slower => "Replay: slower",
             ReplayCmd::Faster => "Replay: faster",
             ReplayCmd::GoTo => "Replay: go to…",
+        }
+        .into(),
+        Command::Study(s) => match s {
+            StudyCmd::ToggleHidden => "Hide or show study",
+            StudyCmd::Settings => "Settings…",
+            StudyCmd::AddToTab => "Add to every chart in this tab",
+            StudyCmd::Move(true) => "Move up",
+            StudyCmd::Move(false) => "Move down",
+            StudyCmd::Remove => "Remove",
+            StudyCmd::Undo => "Undo study removal",
         }
         .into(),
         Command::Order(o) => match o {

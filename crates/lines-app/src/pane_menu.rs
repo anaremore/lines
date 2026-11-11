@@ -123,6 +123,15 @@ pub enum MenuObject {
         /// rows say so (money-relevant: never a checked box that shows nothing).
         pnl: crate::pnl::PnlDisplay,
     },
+    /// A study's legend row (`crate::legend`): its title, whether it is hidden, whether it
+    /// can be removed (a level source is only hidden), and whether it can move up or down.
+    Study {
+        title: String,
+        hidden: bool,
+        removable: bool,
+        up: bool,
+        down: bool,
+    },
 }
 
 /// A menu a screenshot opens (`--context-menu`, decision 0009): the focused pane's, or the
@@ -130,6 +139,8 @@ pub enum MenuObject {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ShotMenu {
     pub order: bool,
+    /// A legend row's menu (`study:SPEC`, `crate::legend::study_spec`).
+    pub study: Option<String>,
     /// The focused chart's temporary measure's menu (`measure`).
     pub measure: bool,
     /// The tab's menu (`tab`).
@@ -161,15 +172,32 @@ pub fn parse_shot_menu(s: &str) -> Result<ShotMenu, String> {
         Some((w, sub)) => (w, Some(sub.to_owned())),
         None => (rest, None),
     };
+    if what == "study" {
+        let spec = sub.ok_or("study: expected study:SPEC (e.g. study:vwap:0)")?;
+        crate::legend::study_spec(&spec)?;
+        return Ok(ShotMenu {
+            order: false,
+            study: Some(spec),
+            measure: false,
+            tab: false,
+            sub: None,
+            at,
+        });
+    }
     let (order, tab, measure) = match what {
         "pane" => (false, false, false),
         "order" => (true, false, false),
         "tab" => (false, true, false),
         "measure" => (false, false, true),
-        other => return Err(format!("{other}: expected pane, order, tab or measure")),
+        other => {
+            return Err(format!(
+                "{other}: expected pane, order, tab, measure or study"
+            ));
+        }
     };
     Ok(ShotMenu {
         order,
+        study: None,
         measure,
         tab,
         sub,
@@ -236,6 +264,46 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
             }
             v.push(MenuItem::sep());
             v.push(row("Remove measure", Command::Draw(DrawCmd::RemoveMeasure)).destructive());
+            v
+        }
+        MenuObject::Study {
+            title,
+            hidden,
+            removable,
+            up,
+            down,
+        } => {
+            use crate::commands::StudyCmd;
+            let mut v = vec![
+                MenuItem::title(title),
+                MenuItem::sep(),
+                // A switch, checked while shown (never a label that flips).
+                toggle("Visible", Command::Study(StudyCmd::ToggleHidden), !*hidden),
+                row("Settings…", Command::Study(StudyCmd::Settings)),
+                row(
+                    "Add to every chart in this tab",
+                    Command::Study(StudyCmd::AddToTab),
+                ),
+            ];
+            let mut moves = Vec::new();
+            if *up {
+                moves.push(row("Move up", Command::Study(StudyCmd::Move(true))));
+            }
+            if *down {
+                moves.push(row("Move down", Command::Study(StudyCmd::Move(false))));
+            }
+            if !moves.is_empty() {
+                v.push(MenuItem::submenu("Move up / down", "", moves));
+            }
+            if *removable {
+                v.push(MenuItem::sep());
+                let mut remove = row("Remove", Command::Study(StudyCmd::Remove)).destructive();
+                // Del on the row under the pointer (no command key: the row is the pointer's).
+                remove.hint = "Del".into();
+                remove.key = None;
+                remove.hint_cap = true;
+                v.push(remove);
+            }
             v
         }
         MenuObject::Drawing { title } => vec![
@@ -1100,6 +1168,57 @@ mod tests {
         assert!(d.last().unwrap().destructive);
     }
 
+    /// A legend row's menu: hide (or show), settings, add to the tab, the moves it can make
+    /// in a submenu, and Remove last with its key; a level source has no Remove.
+    #[test]
+    fn a_study_rows_menu() {
+        use crate::commands::StudyCmd;
+        let v = object_items(&MenuObject::Study {
+            title: "VWAP ETH".into(),
+            hidden: false,
+            removable: true,
+            up: false,
+            down: true,
+        });
+        assert_eq!(
+            labels(&v),
+            [
+                "VWAP ETH",
+                "---",
+                "Visible",
+                "Settings…",
+                "Add to every chart in this tab",
+                "Move up / down",
+                "---",
+                "Remove"
+            ]
+        );
+        let moves = &v[5].sub;
+        assert_eq!(moves.len(), 1);
+        assert_eq!(moves[0].cmd, Some(Command::Study(StudyCmd::Move(false))));
+        let remove = v.last().unwrap();
+        assert!(remove.destructive && remove.hint == "Del" && remove.hint_cap);
+        assert!(v[2].toggle && v[2].checked, "shown: the switch is on");
+        let levels = object_items(&MenuObject::Study {
+            title: "RS Levels".into(),
+            hidden: true,
+            removable: false,
+            up: false,
+            down: false,
+        });
+        assert!(levels[2].toggle && !levels[2].checked, "hidden: off");
+        assert_eq!(
+            labels(&levels),
+            [
+                "RS Levels",
+                "---",
+                "Visible",
+                "Settings…",
+                "Add to every chart in this tab"
+            ]
+        );
+    }
+
     #[test]
     fn switches_show_a_box_and_sets_a_check() {
         let v = items(&pane_of(PaneKind::Chart));
@@ -1218,12 +1337,19 @@ mod tests {
             parse_shot_menu("pane:Show@1400,300"),
             Ok(ShotMenu {
                 order: false,
+                study: None,
                 measure: false,
                 tab: false,
                 sub: Some("Show".into()),
                 at: (1400.0, 300.0)
             })
         );
+        assert_eq!(
+            parse_shot_menu("study:levels:demo@300,90").map(|m| (m.study, m.at)),
+            Ok((Some("levels:demo".into()), (300.0, 90.0)))
+        );
+        assert!(parse_shot_menu("study").is_err());
+        assert!(parse_shot_menu("study:vwap").is_err());
         assert_eq!(
             parse_shot_menu("order").map(|m| (m.order, m.at)),
             Ok((true, (200.0, 120.0)))

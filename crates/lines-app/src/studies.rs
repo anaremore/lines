@@ -24,8 +24,8 @@ use std::cell::Cell;
 use std::collections::HashMap;
 
 use gpui::{
-    AnyElement, App, Bounds, Hsla, IntoElement, ParentElement, PathBuilder, Pixels, ShapedLine,
-    SharedString, Styled, TextAlign, TextRun, Window, div, fill, point, px, size,
+    App, Bounds, Div, Hsla, ParentElement, PathBuilder, Pixels, ShapedLine, SharedString, Styled,
+    TextAlign, TextRun, Window, div, fill, point, px, size,
 };
 use lines_core::profile::Footprint;
 use lines_core::style::{Color, LineType};
@@ -36,6 +36,7 @@ use lines_indicators::render::{Column, DeltaCandle, build_columns, build_delta_c
 use lines_indicators::{Bands, IndicatorConfig, Reset};
 
 use crate::series_pane::{ExtFrame, ExtStatus};
+use crate::study_menu::StudyRef;
 use crate::study_style::{self, Look};
 use crate::subpane::Scale;
 use crate::theme::Theme;
@@ -1750,17 +1751,6 @@ impl Studies {
         }
     }
 
-    /// Text rows the legend shows (one per shown, labeled study).
-    pub fn legend_rows(&self) -> usize {
-        self.list
-            .iter()
-            .filter(|s| {
-                let d = s.config.display();
-                !d.hidden && d.label && !s.config.in_subpane()
-            })
-            .count()
-    }
-
     /// The shown studies drawn in lower panes, top to bottom (their indices in the list).
     fn lower(&self) -> impl Iterator<Item = &Study> + '_ {
         self.list
@@ -1985,25 +1975,58 @@ impl Studies {
 
     /// The legend under the readout: one row per study (render time, not paint), on a
     /// `label_bg` box so lines and profile rows never run through the text.
-    pub fn legend(&self, theme: &Theme, product: &Product) -> Option<AnyElement> {
-        // Sub-pane studies are titled in their sub-pane.
+    pub fn legend(&self, theme: &Theme, product: &Product) -> Vec<(StudyRef, Div, bool)> {
+        // Drawn on the chart and named here (sub-pane studies are titled in their sub-pane).
         let shown = |s: &&Study| {
             let d = s.config.display();
             !d.hidden && d.label && !s.config.in_subpane()
         };
-        if !self.list.iter().any(|s| shown(&s)) {
-            return None;
-        }
         let no_rth = lines_feed::catalog::sessions(product.id).is_some_and(|c| !c.has_rth());
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .px(crate::zoom::ui(8.0))
-            .py(crate::zoom::ui(4.0))
-            .bg(theme.label_bg)
-            .text_size(crate::zoom::ui(12.0));
-        for s in self.list.iter().filter(shown) {
+        let mut rows = Vec::new();
+        for (i, s) in self.list.iter().enumerate().filter(|(_, s)| listed(s)) {
+            let r = match &s.config {
+                IndicatorConfig::Vwap { .. } => StudyRef::Vwap(i),
+                IndicatorConfig::CumDelta { .. } => StudyRef::Delta(i),
+                IndicatorConfig::Volume { .. } => StudyRef::Volume(i),
+                IndicatorConfig::External { .. } => StudyRef::External(i),
+            };
+            // Hidden: listed, dimmed, one click from coming back (it does no work meanwhile).
+            if s.config.display().hidden {
+                let name = match &s.config {
+                    IndicatorConfig::Vwap { spec, .. } => {
+                        format!("VWAP {}{}", spec.reset.label(), bands_label(spec.bands))
+                    }
+                    IndicatorConfig::CumDelta { spec, .. } => {
+                        format!("Cumulative delta · {}", spec.reset.label())
+                    }
+                    IndicatorConfig::Volume { .. } => "Volume".to_owned(),
+                    c @ IndicatorConfig::External { spec, .. } => {
+                        ext_def(c).map_or_else(|| spec.study.clone(), |d| d.name.to_owned())
+                    }
+                };
+                // Its swatch's place stays, so the row keeps its shape when hidden: a dashed line
+                // in dim text, the dimmed state (docs/design.md: never a hand fade).
+                let swatch = match &s.config {
+                    IndicatorConfig::Vwap { .. } => {
+                        Some(vwap_swatch((theme.text_dim, LineType::Dashed), None))
+                    }
+                    c @ IndicatorConfig::Volume { .. } if !c.in_subpane() => {
+                        Some(vwap_swatch((theme.text_dim, LineType::Dashed), None))
+                    }
+                    _ => None,
+                };
+                let row = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .text_color(theme.text_dim)
+                    .children(swatch)
+                    .child(name)
+                    .child("· hidden");
+                rows.push((r, row, true));
+                continue;
+            }
             if let IndicatorConfig::Volume { spec, .. } = &s.config {
                 // Volume as an overlay: named here (its pane title is gone with its pane).
                 let c =
@@ -2012,7 +2035,8 @@ impl Studies {
                 if spec.average {
                     name.push_str(&format!(" · average {}", spec.window()));
                 }
-                col = col.child(
+                rows.push((
+                    r,
                     div()
                         .flex()
                         .flex_row()
@@ -2020,7 +2044,8 @@ impl Studies {
                         .gap_2()
                         .child(div().w(crate::zoom::ui(12.0)).h(crate::zoom::ui(8.0)).bg(c))
                         .child(div().text_color(theme.text_main).child(name)),
-                );
+                    false,
+                ));
                 continue;
             }
             let IndicatorConfig::Vwap { spec, .. } = &s.config else {
@@ -2124,9 +2149,9 @@ impl Studies {
                         .child(format!("no RTH for {}", product.symbol)),
                 );
             }
-            col = col.child(row);
+            rows.push((r, row, false));
         }
-        Some(col.into_any_element())
+        rows
     }
 
     /// Column buffers reserved so far (tests: hidden studies do no work).
@@ -2139,6 +2164,11 @@ impl Studies {
     pub fn max_columns(width: Pixels) -> usize {
         f32::from(width) as usize + 2
     }
+}
+
+/// A study the chart's legend lists (`study_menu::legend_lists`).
+fn listed(s: &Study) -> bool {
+    crate::study_menu::legend_lists(&s.config)
 }
 
 /// An overlay bar's half width for a candle body of half width `body` at `dpi`: the odd number
