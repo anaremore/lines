@@ -2002,6 +2002,7 @@ where
             visibility: wsdoc::StudyVisibility {
                 hide_study_labels: cli.hide_study_labels,
                 hide_studies: cli.hide_studies,
+                clean: false,
             },
         })),
         default_size: cli.size,

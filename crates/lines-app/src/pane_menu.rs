@@ -495,6 +495,8 @@ fn chart_trades(c: &ChartMenu) -> MenuItem {
         toggle("Show trades", Command::ToggleTrades, !t.hidden),
         toggle("Entry–exit lines", Command::ToggleTradeLines, !t.no_lines),
         toggle("Labels", Command::ToggleTradeLabels, !t.no_labels),
+        row("Hide on all charts", Command::TradesOnAllCharts(false)),
+        row("Show on all charts", Command::TradesOnAllCharts(true)),
         MenuItem::header("Account"),
         pick(
             "This pane's account",
@@ -830,6 +832,8 @@ mod tests {
                 "Show trades",
                 "Entry–exit lines",
                 "Labels",
+                "Hide on all charts",
+                "Show on all charts",
                 "Account",
                 "This pane's account",
                 "All accounts",

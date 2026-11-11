@@ -844,6 +844,27 @@ const fn s(
     }
 }
 
+/// Trade history on new charts (`on`), kept in the defaults for new charts: off adds the
+/// switch to them (creating them if there are none); on removes it, and defaults that then
+/// hold nothing go (new charts start empty either way).
+fn set_new_chart_trades(defaults: &mut Option<crate::study_menu::StudySet>, on: bool) {
+    match defaults {
+        Some(set) => {
+            set.trades_off = !on;
+            if *set == crate::study_menu::StudySet::default() {
+                *defaults = None;
+            }
+        }
+        None if !on => {
+            *defaults = Some(crate::study_menu::StudySet {
+                trades_off: true,
+                ..Default::default()
+            });
+        }
+        None => {}
+    }
+}
+
 fn with_default(mut st: Setting, v: Value) -> Setting {
     st.default = Some(v);
     st
@@ -1041,6 +1062,23 @@ fn table() -> Vec<Setting> {
             ),
             Value::Choice(0),
         ),
+        with_default(
+            s(
+                "charts.trades",
+                Sec::Charts,
+                "Trade history on new charts",
+                "A new chart shows your closed trades on its contract (Alt+E on a chart).",
+                Scope::NewPanes,
+                Normal,
+                Toggle,
+                |p, _, _| Value::Bool(!p.app.chart_defaults.as_ref().is_some_and(|s| s.trades_off)),
+                Some(|p, _, v| {
+                    set_new_chart_trades(&mut p.app.chart_defaults, want_bool(v)?);
+                    Ok(())
+                }),
+            ),
+            Value::Bool(true),
+        ),
         s(
             "charts.studies",
             Sec::Charts,
@@ -1050,11 +1088,17 @@ fn table() -> Vec<Setting> {
             Normal,
             Info,
             |p, _, _| {
-                Value::Text(if p.app.chart_defaults.is_some() {
-                    "The saved default set".to_owned()
-                } else {
-                    "Off".to_owned()
-                })
+                Value::Text(
+                    if p.app
+                        .chart_defaults
+                        .as_ref()
+                        .is_some_and(|s| s.has_studies())
+                    {
+                        "The saved default set".to_owned()
+                    } else {
+                        "Off".to_owned()
+                    },
+                )
             },
             None,
         ),
@@ -2569,6 +2613,7 @@ const CHARTS: &[Group] = &[group(
     "",
     &[
         line!("charts.timeframe"),
+        line!("charts.trades"),
         line!("charts.studies"),
         line!("appearance.hollow"),
     ],
@@ -2917,6 +2962,35 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    /// Settings › Charts, trade history on new charts: on by default; off is kept in the
+    /// defaults for new charts (created if none), on takes it out again, leaving studies as
+    /// they were and no empty defaults behind.
+    #[test]
+    fn trade_history_on_new_charts() {
+        let st = by_key("charts.trades").unwrap();
+        assert_eq!(st.section, Section::Charts);
+        assert_eq!(st.default, Some(Value::Bool(true)));
+        let mut d = None;
+        set_new_chart_trades(&mut d, true);
+        assert_eq!(d, None, "on with no defaults: nothing saved");
+        set_new_chart_trades(&mut d, false);
+        assert!(d.as_ref().is_some_and(|s| s.trades_off && !s.has_studies()));
+        set_new_chart_trades(&mut d, true);
+        assert_eq!(d, None, "back on: no empty defaults left");
+        // With studies saved, the switch leaves them.
+        let studies = crate::study_menu::StudySet {
+            profile: crate::profile::ProfileConfig {
+                mode: crate::profile::ProfileMode::Session,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut d = Some(studies.clone());
+        set_new_chart_trades(&mut d, false);
+        set_new_chart_trades(&mut d, true);
+        assert_eq!(d, Some(studies));
+    }
+
     fn acct() -> Target {
         Target {
             account: Some("paper-eval".into()),
@@ -3030,15 +3104,19 @@ mod tests {
         for (k, sec) in want {
             assert_eq!(by_key(k).map(|s| s.section), Some(*sec), "{k}");
         }
-        // Keys added since: the UI font (decision 0036, on Appearance), and the only key the
-        // regrouping adds, the prop values line the overrides fold behind (a button, nothing
-        // saved).
+        // Keys added since, in window order: the UI font (decision 0036, on Appearance), trade
+        // history on new charts (Charts), and the only key the regrouping adds, the prop values
+        // line the overrides fold behind (a button, nothing saved).
         let new: Vec<&str> = all()
             .iter()
             .map(|s| s.key)
             .filter(|k| !want.iter().any(|(w, _)| w == k))
             .collect();
-        assert_eq!(new, ["appearance.ui_font", PROP_OVERRIDES_KEY]);
+        assert_eq!(
+            new,
+            ["appearance.ui_font", "charts.trades", PROP_OVERRIDES_KEY]
+        );
+        assert_eq!(by_key("charts.trades").map(|s| s.section), Some(S::Charts));
         assert_eq!(
             by_key("appearance.ui_font").map(|s| s.section),
             Some(S::Appearance)

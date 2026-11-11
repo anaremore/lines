@@ -711,3 +711,29 @@ fn a_type_off_in_style_reads_unchecked() {
     assert_eq!(on("pivot (off in Style…)"), Some(false));
     assert_eq!(on("zone"), Some(true));
 }
+
+/// Trade history on new charts is optional in the saved defaults (absent: on) and written only
+/// when off; it isn't a study, so a set holding only it has none.
+#[test]
+fn trades_off_is_optional_and_not_a_study() {
+    let set: StudySet = serde_json::from_str("{}").unwrap();
+    assert!(!set.trades_off && !set.has_studies());
+    assert_eq!(serde_json::to_string(&set).unwrap(), "{}");
+    let off = StudySet {
+        trades_off: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        serde_json::to_string(&off).unwrap(),
+        r#"{"trades_off":true}"#
+    );
+    assert!(!off.has_studies());
+    let profile = StudySet {
+        profile: ProfileConfig {
+            mode: crate::profile::ProfileMode::Session,
+            ..Default::default()
+        },
+        ..off.clone()
+    };
+    assert!(profile.has_studies());
+}

@@ -984,6 +984,8 @@ impl ChartView {
             levels: self.levels.config.clone(),
             footprint: self.footprint.config(),
             styles: self.study_styles(),
+            // Templates never carry it; "Save as default" adds this chart's own.
+            trades_off: false,
         }
     }
 
@@ -1034,6 +1036,14 @@ impl ChartView {
             .and_then(lines_core::Timeframe::parse)
             .filter(|t| t.is_valid());
         if let Some(set) = set {
+            // Settings › Charts: trade history on new charts (on unless saved off).
+            if set.trades_off {
+                self.trade_marks
+                    .set_config(crate::trade_marks::TradesConfig {
+                        hidden: true,
+                        ..self.trade_marks.config
+                    });
+            }
             self.set_study_set(set);
         }
         self.promote_levels(cx);
@@ -1398,7 +1408,11 @@ impl ChartView {
                 });
             }
             Some(MenuCmd::SaveDefault) => {
-                let set = self.study_set();
+                // The studies and whether this chart shows its trade history.
+                let set = StudySet {
+                    trades_off: self.trade_marks.config.hidden,
+                    ..self.study_set()
+                };
                 crate::picker_view::update_settings(cx, |s| s.chart_defaults = Some(set));
             }
             Some(MenuCmd::Close) => self.close_popover(Kind::Studies, cx),
@@ -2449,6 +2463,8 @@ impl ChartView {
         self.drawings.hidden = state.hide_drawings;
         self.marks.set_hidden(state.hide_strategy_marks);
         self.trade_marks.set_config(state.trades);
+        self.trade_marks
+            .set_suppressed(!state.visibility.draws_trades());
         if state.magnet {
             self.crosshair_mode = CrosshairMode::Magnet;
         }
@@ -2614,6 +2630,8 @@ impl ChartView {
     pub fn set_visibility(&mut self, v: StudyVisibility, cx: &mut Context<Self>) {
         if v != self.visibility {
             self.visibility = v;
+            // Clean chart and Hide studies hide trade marks too; the chart's own setting stays.
+            self.trade_marks.set_suppressed(!v.draws_trades());
             self.seen_studies = u64::MAX; // studies shown again: draw their latest values
             cx.notify();
         }
@@ -8302,7 +8320,9 @@ impl Pane for ChartView {
         }
         // Kept current while hidden, but only asks for a repaint while shown.
         let marks = self.poll_marks() && !self.marks.hidden;
-        let marks = marks | (self.poll_trade_marks() && self.trade_marks.shown());
+        // Trade history does no work at all while hidden (on the chart, or by Clean chart or
+        // Hide studies): built again on the first poll once shown, if its inputs moved.
+        let marks = marks | (self.trade_marks.shown() && self.poll_trade_marks());
         // Drawings changed on any chart of this product (shown here).
         let rates = group
             | marks

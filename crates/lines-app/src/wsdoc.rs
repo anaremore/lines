@@ -471,16 +471,26 @@ impl<'de> Deserialize<'de> for TimeframeDoc {
     }
 }
 
-/// What a chart draws of its studies (VWAP lines and bands, the volume profile). Hiding
-/// keeps every study's configuration: showing again restores them exactly.
+/// What a chart draws of its studies (VWAP lines and bands, the volume profile) and of its
+/// trade history (`crate::trade_marks`). Each switch is its own field, so turning one off
+/// restores exactly what was there: hiding keeps every study's configuration, and a chart's
+/// own trade setting (`TradesConfig::hidden`) is never touched (trades hidden on the chart stay
+/// hidden when these come back).
+/// - Hide study labels: no legends, study tags or trade labels; studies and trade marks stay.
+/// - Hide studies (Ctrl+Shift+I): no studies and no trade marks, and no work for either.
+/// - Clean chart (Ctrl+Shift+M): no legends, study tags or trade marks; studies stay drawn.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StudyVisibility {
-    /// No legends or study tags (the studies stay drawn).
+    /// No legends, study tags or trade labels (the studies and trade marks stay drawn).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_study_labels: bool,
-    /// No studies at all (and no work for them in paint).
+    /// No studies and no trade marks (and no work for them).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hide_studies: bool,
+    /// Clean chart: no legends, study tags or trade marks. Optional (files without it are
+    /// not clean).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clean: bool,
 }
 
 impl StudyVisibility {
@@ -489,15 +499,20 @@ impl StudyVisibility {
     }
 
     pub fn draws_labels(self) -> bool {
-        !self.hide_studies && !self.hide_study_labels
+        !self.hide_studies && !self.hide_study_labels && !self.clean
     }
 
-    /// The `CleanChart` command: a chart without legends or study tags. Run on a chart that is
-    /// already clean, it restores them. Studies stay drawn (and hidden studies stay hidden):
-    /// clean is about text, not data.
+    /// Whether trade history may show (the chart's own setting decides within that).
+    pub fn draws_trades(self) -> bool {
+        !self.hide_studies && !self.clean
+    }
+
+    /// The `CleanChart` command: a chart without legends, study tags or trade marks. Run on a
+    /// clean chart, it restores exactly what was there. Studies stay drawn (and hidden
+    /// studies or labels stay hidden): clean is about text and trades, not data.
     pub fn clean_chart(self) -> StudyVisibility {
         StudyVisibility {
-            hide_study_labels: !self.hide_study_labels,
+            clean: !self.clean,
             ..self
         }
     }
@@ -1328,6 +1343,7 @@ mod tests {
             visibility: StudyVisibility {
                 hide_study_labels: true,
                 hide_studies: true,
+                clean: true,
             },
             indicators: vec![lines_indicators::IndicatorConfig::Vwap {
                 spec: lines_indicators::VwapSpec::default(),
@@ -1435,6 +1451,24 @@ mod tests {
         assert!(value.show_latency_hud);
     }
 
+    /// `clean` is optional: files without it aren't clean (a chart saved clean before kept its
+    /// labels hidden, which stays so), and it's written only when set.
+    #[test]
+    fn clean_is_saved_only_when_set() {
+        let v: StudyVisibility = serde_json::from_str(r#"{"hide_study_labels":true}"#).unwrap();
+        assert!(v.hide_study_labels && !v.clean && v.draws_trades());
+        assert_eq!(
+            serde_json::to_string(&StudyVisibility::default()).unwrap(),
+            "{}"
+        );
+        let c = StudyVisibility::default().clean_chart();
+        assert_eq!(serde_json::to_string(&c).unwrap(), r#"{"clean":true}"#);
+        assert_eq!(
+            serde_json::from_str::<StudyVisibility>(r#"{"clean":true}"#).unwrap(),
+            c
+        );
+    }
+
     #[test]
     fn toggles_and_clean_chart() {
         let v = StudyVisibility::default();
@@ -1449,14 +1483,20 @@ mod tests {
             ..v
         };
         assert!(!studies.draws_studies() && !studies.draws_labels());
-        // Clean chart: labels off; again: back.
+        // Labels hidden: trade marks stay (their labels go with the study labels).
+        assert!(labels.draws_trades());
+        // Hidden studies hide the trade marks too.
+        assert!(!studies.draws_trades());
+        // Clean chart: labels and trade marks off, studies drawn; again: back exactly.
         let c = v.clean_chart();
-        assert_eq!(c, labels);
+        assert!(c.draws_studies() && !c.draws_labels() && !c.draws_trades());
         assert_eq!(c.clean_chart(), v);
-        // Hidden studies stay hidden either way.
+        // Hidden labels or studies stay hidden either way.
+        let c = labels.clean_chart();
+        assert_eq!(c.clean_chart(), labels);
         let c = studies.clean_chart();
-        assert!(c.hide_studies && c.hide_study_labels);
-        assert!(c.clean_chart().hide_studies);
+        assert!(c.hide_studies && !c.draws_trades());
+        assert_eq!(c.clean_chart(), studies);
     }
 
     #[test]
