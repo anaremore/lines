@@ -232,6 +232,9 @@ pub struct SettingsWindow {
     seen_data: u64,
     /// The settings list's scroll (keeps the selected row in view).
     scroll: gpui::ScrollHandle,
+    /// The window's width as of this frame (logical px; 0 before the first): where a long
+    /// choice's chips go (`line_view`).
+    win_w: f32,
     /// Risk changes the trading core hasn't answered yet, oldest first.
     awaiting: Vec<Awaiting>,
     /// The trading accounts' revisions last shown (the watcher repaints when they move).
@@ -816,6 +819,7 @@ impl SettingsWindow {
             chip: 0,
             seen_data: 0,
             scroll: gpui::ScrollHandle::new(),
+            win_w: 0.0,
             scrolled: None,
             awaiting: Vec::new(),
             conn: Default::default(),
@@ -2122,6 +2126,8 @@ impl SettingsWindow {
                 let idle = schema::palette_in_use(st.key, a, schema::os_dark()) == Some(false);
                 for (j, name) in c.iter().enumerate() {
                     let on = j == *k;
+                    // What the chip draws (also what the layout lint is told).
+                    let label = schema::choice_label(st.key, j, name, a);
                     seg = seg.child(
                         div()
                             .id(("choice", i * 64 + j))
@@ -2147,12 +2153,8 @@ impl SettingsWindow {
                                     )
                             })
                             .relative()
-                            .children({
-                                // What the chip draws, for the layout lint.
-                                let shown = schema::choice_label(st.key, j, name, a);
-                                crate::layout_rec::text_marker(&shown)
-                            })
-                            .child(schema::choice_label(st.key, j, name, a))
+                            .children(crate::layout_rec::text_marker(&label))
+                            .child(label)
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |v, _, _, cx| {
@@ -2574,15 +2576,17 @@ impl SettingsWindow {
                     .child(now),
             );
         }
-        // A choice too wide to sit beside its label at the narrowest window (Bar period's 23
-        // chips, Light palette's long names) takes its own full-width line under the label, in
-        // a column: its chips wrap at a width the column gives them, so the row's height is
-        // measured with them wrapped. A wrapping chip group as an item of the wrapping row (and
-        // of a wrapping control group) could be measured on one line and then shrunk, painting
-        // its wrapped chips over the description and the next row.
+        // A choice whose chips would wrap even on a line of their own, at this window's width
+        // and zoom (Bar period's 23 chips; at 150 % in a narrow window, shorter ones too), takes
+        // that line under the label, in a column: its chips wrap at a width the column gives
+        // them, so the row's height is measured with them wrapped. A wrapping chip group as an
+        // item of the wrapping row (and of a wrapping control group) could be measured on one
+        // line and then shrunk, painting its wrapped chips over the description and the next
+        // row. Chips that fit their line never wrap, so they keep their place beside the label.
+        let line_w = content_line_w(self.win_w, crate::zoom::get());
         let own_line = idx
             .iter()
-            .any(|&k| matches!(schema::all()[k].kind, Kind::Choice(c) if long_choice(c)));
+            .any(|&k| matches!(schema::all()[k].kind, Kind::Choice(c) if long_choice(c, line_w)));
         let mut right = if own_line {
             div().flex().flex_col().items_end().w_full().min_w_0()
         } else {
@@ -3365,6 +3369,7 @@ impl List {
 impl Render for SettingsWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(crate::zoom::rem());
+        self.win_w = f32::from(window.viewport_size().width);
         let t = self.theme;
         // What the trading core reports (in force, waiting, lockouts) as of this frame; a
         // busy cache keeps the last frame's.
@@ -3680,9 +3685,17 @@ fn inline_text(s: &str) -> bool {
     !s.contains('\n') && s.chars().count() <= 40
 }
 
-/// The widest chip group (100 % logical px) that sits beside its label: the content width
-/// beside a label at the narrowest window (`MIN_SIZE`) and the largest zoom, in 100 % units.
-const BESIDE_MAX_W: f32 = 230.0;
+/// A line's width outside its content (100 % logical px): the nav and its border, the main
+/// column's padding (px_3 each side), the line's edge slot, its three gaps (gap_2), its right
+/// padding (pr_2), ● and ↺. All of it scales with the UI zoom.
+const LINE_CHROME_W: f32 = NAV_W + 1.0 + 2.0 * 12.0 + 2.0 + 3.0 * 8.0 + 8.0 + DOT_W + RESET_W;
+
+/// The width a line's controls get on a line of their own (100 % px), in a window `win_w`
+/// logical px wide at UI zoom `z` (0: not laid out yet, the default size).
+fn content_line_w(win_w: f32, z: f32) -> f32 {
+    let w = if win_w > 0.0 { win_w } else { SIZE.0 };
+    w / z.max(0.1) - LINE_CHROME_W
+}
 
 /// A chip group's width estimated from its labels (100 % px): a wide glyph (7 px) a
 /// character, each chip's padding (px_2) and the group's border. Wide on purpose: a group
@@ -3695,10 +3708,11 @@ fn choice_w(chips: &[&str]) -> f32 {
         + 2.0
 }
 
-/// Whether a choice takes its own line under its label: wider than [`BESIDE_MAX_W`]. (Light
-/// palette's first chip names the dark palette, "Same as dark (Standard)": the longest it
-/// can read is counted.)
-fn long_choice(chips: &[&str]) -> bool {
+/// Whether a choice takes its own line under its label: wider than `line_w`, the line its
+/// controls get on their own ([`content_line_w`]), so its chips would wrap. (Light palette's
+/// first chip names the dark palette, "Same as dark (Standard)": the longest it can read is
+/// counted.)
+fn long_choice(chips: &[&str], line_w: f32) -> bool {
     let shown: Vec<&str> = chips
         .iter()
         .map(|c| {
@@ -3709,7 +3723,7 @@ fn long_choice(chips: &[&str]) -> bool {
             }
         })
         .collect();
-    choice_w(&shown) > BESIDE_MAX_W
+    choice_w(&shown) > line_w
 }
 
 /// Editors whose summary sits beside their button ("8/16, 12/24 ticks  Edit…"); the rest
@@ -3739,22 +3753,37 @@ mod tests {
     /// label at the narrowest window. Named here, so a new long choice is a decision.
     #[test]
     fn long_choices_take_their_own_line() {
-        let long: Vec<&str> = schema::all()
-            .iter()
-            .filter(|s| matches!(s.kind, Kind::Choice(c) if long_choice(c)))
-            .map(|s| s.key)
-            .collect();
+        let long = |win: f32, z: f32| -> Vec<&str> {
+            let line = content_line_w(win, z);
+            schema::all()
+                .iter()
+                .filter(|s| matches!(s.kind, Kind::Choice(c) if long_choice(c, line)))
+                .map(|s| s.key)
+                .collect()
+        };
+        // At the default size and zoom, only Bar period's chips would wrap.
+        assert_eq!(long(SIZE.0, 1.0), ["charts.timeframe"]);
+        // The narrowest window at 150 %: every group wider than its line.
+        let line = content_line_w(MIN_SIZE.0, 1.5);
+        assert!((150.0..200.0).contains(&line), "{line}");
+        for k in [
+            "general.updates",
+            "appearance.light_palette",
+            "appearance.ui_zoom",
+            "charts.timeframe",
+            "trading.pnl",
+            "guard.news",
+            "prop.preset",
+        ] {
+            assert!(long(MIN_SIZE.0, 1.5).contains(&k), "{k}");
+        }
+        // A short group never wraps, so it keeps its place beside the label.
+        assert!(!long_choice(&["Dark", "Light", "System"], line));
+        // The chrome is the smallest-window test's, plus ● and ↺ and the line's gaps.
         assert_eq!(
-            long,
-            [
-                "appearance.light_palette",
-                "appearance.ui_zoom",
-                "charts.timeframe",
-                "prop.preset"
-            ]
+            LINE_CHROME_W,
+            NAV_W + 1.0 + 2.0 * 12.0 + 2.0 + 8.0 + 8.0 + 2.0 * 8.0 + DOT_W + RESET_W
         );
-        // A short group stays beside its label.
-        assert!(!long_choice(&["Dark", "Light", "System"]));
     }
 
     /// At its smallest the window leaves a row's label column its full width, and the widest

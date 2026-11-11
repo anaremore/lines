@@ -280,7 +280,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             )),
         ));
     }
-    // Settings › Charts at the narrowest window: Bar period's 21 chips wrap on their own line
+    // Settings › Charts at the narrowest window: Bar period's 23 chips wrap on their own line
     // under the label, and the row grows to hold them (never over its description or the next
     // row). Dark at 100 %, light at 150 % (tall enough that the page needs no scrolling, so
     // nothing is cut at its edge).
@@ -296,7 +296,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     v.push(set);
     let mut set = s(
         "settings-charts-narrow-light-150",
-        false,
+        true,
         end,
         args(
             "--layout chart --size 1000x700 --theme light --ui-zoom 150 --settings charts --settings-size 640x900",
@@ -304,15 +304,17 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     );
     set.windows = 2;
     v.push(set);
-    // The other pages with long choices: Appearance (Light palette's long names, UI zoom) and
-    // Accounts (the prop preset), at the narrowest window and 150 %.
-    for (page, h) in [("appearance", 900), ("accounts", 900)] {
+    // Every other page with a chip group that wraps at the narrowest window and 150 %: General
+    // (updates), Appearance (Light palette's long names, UI zoom), Order entry (P&L display)
+    // and Accounts (the news blackout, the prop preset).
+    for (page, name, h) in [
+        ("general", "settings-general-narrow-light-150", 700),
+        ("appearance", "settings-appearance-narrow-light-150", 900),
+        ("order-entry", "settings-order-entry-narrow-light-150", 1100),
+        ("accounts", "settings-accounts-narrow-light-150", 900),
+    ] {
         let mut set = s(
-            if page == "appearance" {
-                "settings-appearance-narrow-light-150"
-            } else {
-                "settings-accounts-narrow-light-150"
-            },
+            name,
             false,
             end,
             args(&format!(
