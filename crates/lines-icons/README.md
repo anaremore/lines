@@ -20,7 +20,7 @@ icons are derived from Feather, and so under MIT, by their Feather names; here `
 
 ## Changes
 
-One edit to each file: `stroke-width="2"` became `stroke-width="1.6"` (a thinner line at 16 px,
+Every file: `stroke-width="2"` became `stroke-width="1.6"` (a thinner line at 16 px,
 the owner's pick). Shapes, caps (round) and joins (round) are Lucide's.
 
 A second edit to three: `play`, `pause` and `ellipsis` have `fill="currentColor"` on their shapes,
@@ -29,5 +29,10 @@ read as dots at 16 px (review, 2026-11-11).
 
 ## Adding an icon
 
-Copy `icons/<name>.svg` from the same release zip, make the same stroke edit, and add it to
-`ICONS` in `src/lib.rs`.
+1. Copy `icons/<name>.svg` from the same release zip and make the same stroke edit.
+2. Add it to `ICONS` in `src/lib.rs`.
+3. If `NOTICE-feather.txt` lists it (by its Feather name), it's under MIT: add it to the "here"
+   list above and in `Cargo.toml`'s comment.
+4. For a header, tab or replay-bar icon: a variant in `lines-app`'s `icons::Icon`, with its lines
+   in `Icon::lucide` and `Icon::path` (tested: every variant's SVG is embedded and parses). For a
+   `svg()` element, the path `icons/<name>.svg` (`icons::Assets`).
