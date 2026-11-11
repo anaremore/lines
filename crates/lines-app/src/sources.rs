@@ -403,6 +403,15 @@ fn current<'a>(sources: &'a Sources, feed: &'a crate::feeds::PaneFeed) -> &'a st
     sources.own(feed.source_doc.as_deref())
 }
 
+/// Whether this pane's source is the run's replay (its clock is the pane's): without the
+/// sources (tests), a run with a replay is taken as all replay.
+pub fn on_replay(feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> bool {
+    match crate::workspace::try_env(cx) {
+        Some(env) => current(&env.sources, feed) == "replay",
+        None => true,
+    }
+}
+
 /// The picker's sources for a pane.
 pub fn pick(feed: &crate::feeds::PaneFeed, cx: &gpui::App) -> Pick {
     let Some(env) = crate::workspace::try_env(cx) else {

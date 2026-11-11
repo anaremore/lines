@@ -102,14 +102,15 @@ impl Provider for DatabentoProvider {
     }
 }
 
-/// `LINES_DATABENTO_REPLAY_HOURS`: hours (fractions allowed), 0 = none; unset or not a
-/// non-negative number = the default (the whole replay window).
+/// `LINES_DATABENTO_REPLAY_HOURS`: hours (fractions allowed), 0 = none, a cap that stands
+/// ([`ReplayLimit::cap`]); unset or not a non-negative number = the default (the gateway's
+/// whole replay window, ~23 h 40 min, which covers a normal session from its open).
 pub fn replay_limit(hours: Option<&str>) -> ReplayLimit {
     hours
         .and_then(|h| h.trim().parse::<f64>().ok())
         .filter(|h| h.is_finite() && *h >= 0.0)
-        .map_or_else(ReplayLimit::default, |h| ReplayLimit {
-            max_ms: (h * 3_600_000.0) as i64,
+        .map_or_else(ReplayLimit::default, |h| {
+            ReplayLimit::cap((h * 3_600_000.0) as i64)
         })
 }
 
@@ -237,7 +238,7 @@ impl SourceExtension for DatabentoExtension {
              keychain entry `lines-databento` (the key as its password, account `databento`; Settings › Connections saves it there), else the file named by \
              LINES_DATABENTO_KEY_FILE; with none it is not set up and makes no requests. Live data is billed by Databento. Each contract \
              shown is one connection (at most 8). LINES_DATABENTO_REPLAY_HOURS caps the trades \
-             replay on connect (default 24, 0 = none); LINES_DATABENTO_GATEWAY overrides the \
+             replay on connect (default: the gateway's whole window, about 23 h 40 min, which covers a normal session from its open; 0 = none; a set cap stands, and a session longer than the window starts its VWAP late); LINES_DATABENTO_GATEWAY overrides the \
              gateway. The DOM shows the inside bid and ask only: top-10 depth needs Databento's \
              CME Plus plan, then LINES_DATABENTO_DEPTH=mbp-10.",
         )

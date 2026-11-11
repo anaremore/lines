@@ -15,10 +15,15 @@ use crate::theme::Theme;
 
 const W: f32 = 420.0;
 
+/// The scroll cue's height: the Add list's last rows fade into the panel while more is below
+/// (never a row cut in half with nothing saying there is more).
+const FADE_H: f32 = 24.0;
+
 pub fn render(
     menu: &StudyMenu,
     items: &[Item],
     t: &Theme,
+    scroll: &gpui::ScrollHandle,
     cx: &mut Context<ChartView>,
 ) -> AnyElement {
     let click = |i: usize, part: MenuPart| {
@@ -127,24 +132,18 @@ pub fn render(
                 i += 1;
             }
             Item::Control { group, .. } => {
-                // Every consecutive control of this group on one line.
+                // Every consecutive control of this group on one line: its name, then its
+                // chips, which wrap under the first chip (the value column), never under the
+                // name.
                 let group = *group;
                 let mut line = div()
-                    .px_3()
-                    .py(crate::zoom::ui(2.0))
-                    .pl(crate::zoom::ui(32.0))
                     .flex()
                     .flex_row()
                     .flex_wrap()
+                    .flex_1()
+                    .min_w_0()
                     .items_center()
-                    .gap_1()
-                    .child(
-                        div()
-                            .w(crate::zoom::ui(64.0))
-                            .text_size(crate::zoom::ui(11.0))
-                            .text_color(t.text_dim)
-                            .child(group),
-                    );
+                    .gap_1();
                 while let Some(Item::Control {
                     group: g,
                     label,
@@ -157,20 +156,16 @@ pub fn render(
                         break;
                     }
                     let sel = i == menu.cursor;
+                    // The keys' chip: a 2 px violet outline (the accent: focus), seen on a chip
+                    // that is on too; a chip that is on: its fill and a 1 px violet edge; off:
+                    // the control edge (3:1). The thicker edge takes a pixel of padding, so
+                    // nothing moves.
                     let chip = div()
                         .id(("control", i))
-                        .px_2()
-                        .py(px(1.0))
                         .rounded_sm()
-                        .border_1()
-                        .border_color(if sel {
-                            // The keys' chip: a main-text edge, seen on a chip that is on too.
-                            t.text_main
-                        } else if *on {
-                            t.accent
-                        } else {
-                            t.axis_line
-                        })
+                        .when(sel, |d| d.border_2().px(crate::zoom::ui(7.0)).py(px(0.0)))
+                        .when(!sel, |d| d.border_1().px(crate::zoom::ui(8.0)).py(px(1.0)))
+                        .border_color(if sel || *on { t.accent } else { t.control_edge })
                         .text_size(crate::zoom::ui(12.0))
                         .text_color(t.text_main)
                         .when(*on, |d| d.bg(t.element_selected))
@@ -193,7 +188,25 @@ pub fn render(
                     line = line.child(chip);
                     i += 1;
                 }
-                body = body.child(line);
+                body = body.child(
+                    div()
+                        .px_3()
+                        .py(crate::zoom::ui(2.0))
+                        .pl(crate::zoom::ui(32.0))
+                        .flex()
+                        .flex_row()
+                        .items_start()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(crate::zoom::ui(64.0))
+                                .text_size(crate::zoom::ui(11.0))
+                                .text_color(t.text_dim)
+                                .child(group),
+                        )
+                        .child(line),
+                );
             }
             Item::Action { label, delete, .. } => {
                 body = body.child(
@@ -259,6 +272,7 @@ pub fn render(
                 .w(crate::zoom::ui(W))
                 .max_h(crate::zoom::ui(620.0))
                 .overflow_y_scroll()
+                .track_scroll(scroll)
                 .flex()
                 .flex_col()
                 .bg(t.panel)
@@ -279,6 +293,26 @@ pub fn render(
                         .child(div().flex_1().min_w_0().truncate().child(query)),
                 )
                 .child(body),
+        )
+        .when(
+            // More below the visible part (the offset is negative, down to -max_offset).
+            scroll.max_offset().y > px(0.0) && -scroll.offset().y < scroll.max_offset().y - px(1.0),
+            |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(1.0))
+                        .right(px(1.0))
+                        .bottom(px(1.0))
+                        .h(crate::zoom::ui(FADE_H))
+                        .bg(gpui::linear_gradient(
+                            180.0,
+                            // The panel, fully transparent: a scroll cue, not a UI state.
+                            gpui::linear_color_stop(t.panel.opacity(0.0), 0.0),
+                            gpui::linear_color_stop(t.panel, 1.0),
+                        )),
+                )
+            },
         )
         .into_any_element()
 }

@@ -189,6 +189,15 @@ pub enum Input {
         trades: Vec<Print>,
         covered: Vec<(i64, i64)>,
     },
+    /// The provider couldn't deliver history for `[from, to)` (`MarketEvent::HistoryGap`):
+    /// what the chart doesn't hold from elsewhere (`Covered`, stored trades) is missing.
+    HistoryGap {
+        from: UtcMillis,
+        to: UtcMillis,
+    },
+    /// Inclusive ms ranges the local store's bars are known complete for (its bar coverage,
+    /// decision 0019): a history gap inside them isn't missing.
+    Covered(Vec<(i64, i64)>),
 }
 
 /// Inclusive `[from, to]` ms ranges where the trade stream was complete.
@@ -213,12 +222,48 @@ impl Complete {
         self.0.insert(at, (lo, hi));
     }
 
+    /// Drop `[from, to]` (ranges across it keep their parts outside it).
+    fn remove(&mut self, from: i64, to: i64) {
+        if from > to || !self.0.iter().any(|&(a, b)| a <= to && b >= from) {
+            return;
+        }
+        let mut out = Vec::with_capacity(self.0.len() + 1);
+        for &(a, b) in &self.0 {
+            if b < from || a > to {
+                out.push((a, b));
+                continue;
+            }
+            if a < from {
+                out.push((a, from - 1));
+            }
+            if b > to {
+                out.push((to + 1, b));
+            }
+        }
+        self.0 = out;
+    }
+
     fn covers(&self, from: i64, to: i64) -> bool {
         self.0.iter().any(|&(a, b)| a <= from && to <= b)
     }
 
+    /// Drop what lies before `t` (ranges that reach past it start there).
     fn forget_before(&mut self, t: i64) {
         self.0.retain(|&(_, b)| b >= t);
+        for r in &mut self.0 {
+            r.0 = r.0.max(t);
+        }
+    }
+
+    fn first(&self) -> Option<i64> {
+        self.0.first().map(|&(a, _)| a)
+    }
+
+    /// The start of the range holding `x`, if one does.
+    fn containing(&self, x: i64) -> Option<i64> {
+        let i = self.0.partition_point(|&(a, _)| a <= x);
+        let &(a, b) = self.0.get(i.checked_sub(1)?)?;
+        (b >= x).then_some(a)
     }
 }
 
@@ -239,6 +284,17 @@ pub struct MarketSeries {
     /// Newest stored trade time replayed (`Input::Stored`).
     stored_through: Option<i64>,
     complete: Complete,
+    /// History the provider reported it couldn't deliver (inclusive ms ranges); a later
+    /// back-fill (`Input::History`) takes back the minutes it delivers bars for (a hole
+    /// reported at a connection's end that the next connection fills).
+    gaps: Complete,
+    /// The gaps reported since the current `Connect`: a back-fill never takes these back (the
+    /// same connection's partial or forming bar isn't the missing history).
+    fresh_gaps: Complete,
+    /// Where the local store's bars are known complete (`Input::Covered`).
+    covered: Complete,
+    /// A replay's first recorded frame (`Input::TradesFrom`): data is known from here.
+    trades_from: Option<i64>,
     buckets: Vec<Bucket>,
     /// Evaluations (inputs batches applied), for tests and stats.
     pub batches: u64,
@@ -258,6 +314,10 @@ impl MarketSeries {
             newest_trade: None,
             stored_through: None,
             complete: Complete::default(),
+            gaps: Complete::default(),
+            fresh_gaps: Complete::default(),
+            covered: Complete::default(),
+            trades_from: None,
             buckets: Vec::with_capacity(max_buckets.min(1 << 16)),
             batches: 0,
         }
@@ -276,6 +336,62 @@ impl MarketSeries {
         self.seen_trimmed
     }
 
+    /// The end (exclusive, ms) of the latest stretch of `[from, to)` that is known missing: a
+    /// history gap the provider reported that neither the store's bars (`Input::Covered`) nor
+    /// complete trades cover. `None`: nothing in it is known missing. No allocation (it runs per
+    /// bucket in a VWAP's recompute).
+    pub fn missing_end(&self, from: i64, to: i64) -> Option<i64> {
+        if from >= to {
+            return None;
+        }
+        let last = to - 1;
+        // Gaps are sorted and disjoint: the newest one with an uncovered time holds the answer.
+        self.gaps
+            .0
+            .iter()
+            .rev()
+            .filter(|&&(a, b)| b >= from && a <= last)
+            .find_map(|&(a, b)| {
+                let (lo, mut x) = (a.max(from), b.min(last));
+                // Walk back from the gap's end over what the store or complete trades cover.
+                while x >= lo {
+                    match self
+                        .covered
+                        .containing(x)
+                        .or_else(|| self.complete.containing(x))
+                    {
+                        Some(start) if start > i64::MIN => x = start - 1,
+                        Some(_) => return None,
+                        None => return Some(x + 1),
+                    }
+                }
+                None
+            })
+    }
+
+    /// The earliest time the series knows anything from: its first bucket, a replay's first
+    /// frame, or a complete or covered range. Before it nothing is known (not even missing).
+    ///
+    /// Store coverage (`Input::Covered`) and stored trades' complete ranges count only from the
+    /// first held bucket: the store may cover months the chart doesn't hold (its cached bars
+    /// are bounded), and a period whose bars aren't held is never whole. The same after a trim.
+    pub fn known_from(&self) -> Option<i64> {
+        let first = self.buckets.first().map(|b| b.time.0);
+        let held = |t: Option<i64>| match (t, first) {
+            (Some(t), Some(f)) => Some(t.max(f)),
+            (t, _) => t,
+        };
+        [
+            first,
+            self.trades_from,
+            held(self.complete.first()),
+            held(self.covered.first()),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
     /// End the current run of complete trades at `to`.
     fn close_run(&mut self, to: Option<i64>) {
         if let (Some(from), Some(to)) = (self.run_start.take(), to) {
@@ -284,6 +400,40 @@ impl MarketSeries {
     }
 
     /// Apply a batch in order; returns the earliest bucket time that changed.
+    /// A back-fill takes back the earlier connections' gaps over the minutes it has bars for
+    /// (runs of consecutive bars; a hole inside the span stays), never the `as_of` (forming)
+    /// bucket and never a gap reported since the current `Connect`.
+    fn clear_back_filled(&mut self, bars: &[Bar], as_of: Option<UtcMillis>) {
+        if self.gaps.0.is_empty() {
+            return;
+        }
+        let p = self.period_ms;
+        let forming = as_of.map(|a| a.0.div_euclid(p) * p);
+        let mut run: Option<(i64, i64)> = None;
+        for b in bars {
+            let s = b.time.0.div_euclid(p) * p;
+            if Some(s) == forming {
+                continue;
+            }
+            let e = s.saturating_add(p - 1);
+            run = match run {
+                Some((a, z)) if s <= z.saturating_add(1) && s >= a => Some((a, z.max(e))),
+                Some((a, z)) => {
+                    self.gaps.remove(a, z);
+                    Some((s, e))
+                }
+                None => Some((s, e)),
+            };
+        }
+        if let Some((a, z)) = run {
+            self.gaps.remove(a, z);
+        }
+        for i in 0..self.fresh_gaps.0.len() {
+            let (a, z) = self.fresh_gaps.0[i];
+            self.gaps.add(a, z);
+        }
+    }
+
     pub fn apply(&mut self, inputs: &[Input]) -> Option<UtcMillis> {
         self.batches += 1;
         let p = self.period_ms;
@@ -301,6 +451,8 @@ impl MarketSeries {
                         mark(t, &mut dirty);
                     }
                     self.stitch.begin_connection(*expect_history);
+                    // Gaps reported so far belong to an earlier connection now.
+                    self.fresh_gaps.0.clear();
                     self.awaiting_history = *expect_history;
                     self.restart_on_trade = !*expect_history;
                 }
@@ -328,8 +480,9 @@ impl MarketSeries {
                 }
                 Input::History { bars, as_of } => {
                     self.stitch.history(&mut self.bars, bars, *as_of);
-                    if let Some(b) = bars.first() {
-                        mark(b.time.0, &mut dirty);
+                    if let Some(a) = bars.first() {
+                        self.clear_back_filled(bars, *as_of);
+                        mark(a.time.0, &mut dirty);
                     }
                     if let Some(a) = as_of {
                         // The trades before the snapshot's first bar were complete and stay
@@ -349,6 +502,11 @@ impl MarketSeries {
                 }
                 Input::HistoryComplete => self.stitch.history_complete(),
                 Input::TradesFrom(t) => {
+                    self.trades_from = Some(self.trades_from.map_or(t.0, |f| f.min(t.0)));
+                    // Where data is known from moved: a run already built from the buckets
+                    // may now reach its open (or start earlier), so from the first bucket on.
+                    let first = self.buckets.first().map_or(t.0, |b| b.time.0);
+                    mark(t.0.min(first), &mut dirty);
                     if self.restart_on_trade && !self.awaiting_history {
                         self.restart_on_trade = false;
                         self.run_start = Some(t.0);
@@ -391,7 +549,26 @@ impl MarketSeries {
                         self.complete.add(a, b);
                     }
                 }
+                Input::HistoryGap { from, to } => {
+                    if from < to {
+                        self.gaps.add(from.0, to.0 - 1);
+                        self.fresh_gaps.add(from.0, to.0 - 1);
+                        mark(from.0, &mut dirty);
+                    }
+                }
+                Input::Covered(ranges) => {
+                    for &(a, b) in ranges {
+                        self.covered.add(a, b);
+                        mark(a, &mut dirty);
+                    }
+                }
             }
+        }
+        // The bars dropped buckets from the front (bounded memory): everything is rebuilt
+        // from the new front, so a run the trim cut is a late one (its sums lose the dropped
+        // buckets), the same whenever it is recomputed.
+        if self.bars.trimmed() > self.seen_trimmed {
+            dirty = Some(i64::MIN);
         }
         if let Some(d) = dirty {
             self.rebuild_from(d);
@@ -421,6 +598,11 @@ impl MarketSeries {
                 let t = first.time.0;
                 self.trades = self.trades.split_off(&t);
                 self.complete.forget_before(t);
+                self.gaps.forget_before(t);
+                self.fresh_gaps.forget_before(t);
+                self.covered.forget_before(t);
+                // Nothing before the new front is held any more.
+                self.trades_from = self.trades_from.map(|f| f.max(t));
             }
         }
         let at = self.bars.bars().partition_point(|b| b.time.0 < from);
@@ -795,5 +977,127 @@ mod tests {
             "stored [4:00, 4:20] + live from 4:10.001"
         );
         assert_eq!(m.buckets()[4].sums, live.buckets()[4].sums);
+    }
+
+    /// A hole reported at a connection's end (Coinbase: one too wide to fetch) that the next
+    /// connection's back-fill delivers bars for is no longer missing; what the back-fill
+    /// didn't reach stays missing, and a gap reported after it stands.
+    #[test]
+    fn a_later_back_fill_clears_the_gap_it_covers() {
+        let bar = |min: i64| Bar {
+            time: t(min, 0),
+            open: Price(100),
+            high: Price(101),
+            low: Price(99),
+            close: Price(100),
+            volume: Qty(1),
+        };
+        let mut m = MarketSeries::new(60_000, 100);
+        m.apply(&[
+            Input::Connect {
+                expect_history: true,
+            },
+            Input::History {
+                bars: (0..3).map(bar).collect(),
+                as_of: None,
+            },
+            // The connection ends with minutes 3..8 unknown.
+            Input::HistoryGap {
+                from: t(3, 0),
+                to: t(8, 0),
+            },
+        ]);
+        assert_eq!(m.missing_end(t(0, 0).0, t(10, 0).0), Some(t(8, 0).0));
+        // The next connection back-fills minutes 3..5.
+        m.apply(&[
+            Input::Connect {
+                expect_history: true,
+            },
+            Input::History {
+                bars: (3..6).map(bar).collect(),
+                as_of: None,
+            },
+        ]);
+        assert_eq!(
+            m.missing_end(t(0, 0).0, t(10, 0).0),
+            Some(t(8, 0).0),
+            "6..8 still missing"
+        );
+        assert_eq!(m.missing_end(t(0, 0).0, t(6, 0).0), None, "3..5 delivered");
+        m.apply(&[Input::History {
+            bars: (6..8).map(bar).collect(),
+            as_of: None,
+        }]);
+        assert_eq!(m.missing_end(t(0, 0).0, t(10, 0).0), None, "all delivered");
+        // A gap the provider reports after its history stands.
+        m.apply(&[Input::HistoryGap {
+            from: t(4, 0),
+            to: t(5, 0),
+        }]);
+        assert_eq!(m.missing_end(t(0, 0).0, t(10, 0).0), Some(t(5, 0).0));
+    }
+    /// A gap and then the same connection's partial or forming bar over it (Coinbase's hole
+    /// then its forming bar; Kraken's gap then the rest): the gap stands. The next
+    /// connection's back-fill takes back only the minutes it has bars for.
+    #[test]
+    fn a_back_fill_keeps_its_own_connections_gaps_and_holes() {
+        let bar = |min: i64| Bar {
+            time: t(min, 0),
+            open: Price(100),
+            high: Price(101),
+            low: Price(99),
+            close: Price(100),
+            volume: Qty(1),
+        };
+        let mut m = MarketSeries::new(60_000, 100);
+        m.apply(&[
+            Input::Connect {
+                expect_history: true,
+            },
+            Input::HistoryGap {
+                from: t(3, 0),
+                to: t(9, 0),
+            },
+            Input::History {
+                bars: vec![bar(8)],
+                as_of: Some(t(8, 30_000)),
+            },
+        ]);
+        assert_eq!(
+            m.missing_end(t(0, 0).0, t(10, 0).0),
+            Some(t(9, 0).0),
+            "same batch: the gap stands"
+        );
+        m.apply(&[Input::History {
+            bars: vec![bar(7)],
+            as_of: None,
+        }]);
+        assert_eq!(
+            m.missing_end(t(0, 0).0, t(10, 0).0),
+            Some(t(9, 0).0),
+            "same connection: the gap stands"
+        );
+        // The next connection back-fills minutes 3, 4, 6 and the forming minute 8.
+        m.apply(&[
+            Input::Connect {
+                expect_history: true,
+            },
+            Input::History {
+                bars: vec![bar(3), bar(4), bar(6), bar(8)],
+                as_of: Some(t(8, 10_000)),
+            },
+        ]);
+        assert_eq!(m.missing_end(t(3, 0).0, t(5, 0).0), None, "3..4 delivered");
+        assert_eq!(
+            m.missing_end(t(3, 0).0, t(6, 0).0),
+            Some(t(6, 0).0),
+            "the hole at 5 stays"
+        );
+        assert_eq!(m.missing_end(t(6, 0).0, t(7, 0).0), None, "6 delivered");
+        assert_eq!(
+            m.missing_end(t(7, 0).0, t(10, 0).0),
+            Some(t(9, 0).0),
+            "7 and the forming 8 stay missing"
+        );
     }
 }

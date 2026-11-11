@@ -859,8 +859,10 @@ fn full_writer(
                 d.series.prepend_older(&older);
                 d.tick_source = Some(source);
             });
-            // The indicator engine's series gets them too, as at startup (`warm_start`).
+            // The indicator engine's series gets them too, as at startup (`warm_start`), and
+            // where the store's bars are complete.
             tap.cached(older);
+            tap.covered(w.coverage().bars.ranges().to_vec());
             Some(w)
         }
         Err(e) => {
@@ -960,6 +962,8 @@ fn warm_start(
         (d.series.bars().to_vec(), d.series.last().map(|b| b.time))
     };
     tap.cached(bars);
+    // Where those bars are complete: a history gap the provider reports there isn't missing.
+    tap.covered(writer.coverage().bars.ranges().to_vec());
     let Some(from) = newest
         .and_then(|t| disk::orderflow::lookback_start(writer.dir(), t, config.orderflow_sessions))
     else {

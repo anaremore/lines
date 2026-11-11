@@ -48,6 +48,9 @@ pub struct RecordedEvents {
     session: Box<dyn ProviderSession>,
     frames: Frames,
     started: bool,
+    /// The newest frame's recorded time, and whether the session's end was given.
+    last_t: Option<UtcMillis>,
+    ended: bool,
     history_ms: i64,
     /// Frames the session refused (counted, as a replay counts them; never fatal).
     decode_errors: u64,
@@ -93,6 +96,8 @@ impl RecordedEvents {
             session,
             frames,
             started: false,
+            last_t: None,
+            ended: false,
             history_ms,
             decode_errors: 0,
         })
@@ -126,13 +131,24 @@ impl RecordedEvents {
     }
 
     /// The next frame's events and its recorded time; `None` at the end. Frames that decode
-    /// to nothing are skipped.
+    /// to nothing are skipped. After the last frame the session's end
+    /// ([`ProviderSession::on_end`], as the live driver calls it) at the last frame's time: a
+    /// hole still open is reported through it, so a replay reads what live did.
     pub fn next_batch(&mut self) -> Result<Option<(UtcMillis, Vec<MarketEvent>)>> {
         let mut out: Vec<Outgoing> = Vec::new();
         loop {
             let Some((t, frame)) = self.frames.next()? else {
+                if let (false, Some(end)) = (self.ended, self.last_t) {
+                    self.ended = true;
+                    let mut events = Vec::new();
+                    self.session.on_end(end, &mut events);
+                    if !events.is_empty() {
+                        return Ok(Some((end, events)));
+                    }
+                }
                 return Ok(None);
             };
+            self.last_t = Some(t);
             if !self.started {
                 self.started = true;
                 self.session.start(

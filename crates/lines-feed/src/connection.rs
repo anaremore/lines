@@ -121,7 +121,15 @@ pub async fn run_connection_with<T: Transport>(
 ) -> Result<ConnectionEnd, ConnectionError> {
     let now = transport.clock().unwrap_or_else(crate::now_utc);
     let result = drive(transport, session, store, opts, shutdown, sink, now).await;
-    sink.end(transport.clock().unwrap_or_else(crate::now_utc));
+    let end = transport.clock().unwrap_or_else(crate::now_utc);
+    // What the session still holds open (a hole not yet reported) goes in before the end.
+    let mut events = Vec::new();
+    session.on_end(end, &mut events);
+    if !events.is_empty() {
+        store.update_frame(|d| d.apply(&events));
+        sink.frame(&events, end);
+    }
+    sink.end(end);
     result
 }
 

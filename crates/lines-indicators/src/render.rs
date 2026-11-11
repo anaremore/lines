@@ -33,6 +33,15 @@ pub struct Column {
     pub approx: bool,
     /// Continues the previous column's line (same reset period, adjacent bar).
     pub joins: bool,
+    /// The drawn VWAP value (price units, `f64`: a display value, never an order price).
+    pub vwap: f64,
+    /// The drawn point's standard deviation (price units): the ±kσ edges' values are
+    /// `vwap ± k·sd` (band edges' tags).
+    pub sd: f64,
+    /// A run begins in this bar (the point before it, if any, is another run's).
+    pub starts: bool,
+    /// The drawn point's run starts late ([`Point::from`]): the first time it covers.
+    pub from: Option<UtcMillis>,
 }
 
 /// Fill `out` (at most its capacity: never allocates) with the columns for the visible bars.
@@ -53,19 +62,31 @@ pub fn build_columns(
     let first_t = bars.bars[range.start].time;
     let mut j = points.partition_point(|p| p.time < first_t);
     let mut prev: Option<(usize, i64)> = None;
+    // Tick bars: the newest point a bar before took in (a minute two bars share flags a run
+    // start on the first of them only).
+    let mut seen: Option<usize> = None;
     for i in range {
         if out.len() == out.capacity() {
             break;
         }
-        let (last, approx) = match bars.trades {
+        let (last, approx, starts) = match bars.trades {
             Some(tb) => {
-                let Some(p) = tb
+                let Some(k) = tb
                     .last_trade(i)
-                    .and_then(|t| point_at(points, t, |p| p.time))
+                    .and_then(|t| index_at(points, t, |p| p.time))
                 else {
                     continue;
                 };
-                (p, p.approx)
+                let p = &points[k];
+                // A run that begins anywhere from the bar's first trade's minute to its last's
+                // starts in this bar (the bar's time is its first trade, or its slot's start).
+                let first = points
+                    .partition_point(|q| {
+                        q.time.0.saturating_add(UtcMillis::MINUTE) <= bars.bars[i].time.0
+                    })
+                    .max(seen.map_or(0, |s| s + 1));
+                seen = Some(k);
+                (p, p.approx, (first..=k).any(|q| starts_run(points, q)))
             }
             None => {
                 let t = bars.bars[i].time;
@@ -76,15 +97,17 @@ pub fn build_columns(
                 // The bucket's points: the last one is drawn, any approximate one flags it.
                 let mut last = None;
                 let mut approx = false;
+                let mut starts = false;
                 while j < points.len() && points[j].time < end {
                     approx |= points[j].approx;
+                    starts |= starts_run(points, j);
                     last = Some(&points[j]);
                     j += 1;
                 }
                 let Some(p) = last else {
                     continue;
                 };
-                (p, approx)
+                (p, approx, starts)
             }
         };
         let p = last;
@@ -108,16 +131,29 @@ pub fn build_columns(
             down,
             approx,
             joins,
+            vwap: p.vwap,
+            sd: p.sd,
+            starts,
+            from: p.from,
         });
         prev = Some((i, p.period));
     }
 }
 
+/// Point `k` begins its run: the first point, or the one before it is another run's.
+fn starts_run(points: &[Point], k: usize) -> bool {
+    k == 0 || points[k - 1].period != points[k].period
+}
+
+/// The index of the 1-minute point holding `t` (points sorted by their minute's start).
+fn index_at<P>(points: &[P], t: UtcMillis, time: impl Fn(&P) -> UtcMillis) -> Option<usize> {
+    let k = points.partition_point(|p| time(p) <= t).checked_sub(1)?;
+    (t.0 - time(&points[k]).0 < UtcMillis::MINUTE).then_some(k)
+}
+
 /// The 1-minute point holding `t` (points sorted by their minute's start), if there is one.
 fn point_at<P>(points: &[P], t: UtcMillis, time: impl Fn(&P) -> UtcMillis) -> Option<&P> {
-    let k = points.partition_point(|p| time(p) <= t).checked_sub(1)?;
-    let p = &points[k];
-    (t.0 - time(p).0 < UtcMillis::MINUTE).then_some(p)
+    index_at(points, t, &time).map(|k| &points[k])
 }
 
 /// One chart bar of cumulative delta (quantity units): the merge of its bucket's 1-minute
@@ -239,6 +275,7 @@ mod tests {
             approx,
             period,
             forming: false,
+            from: None,
         }
     }
 
@@ -388,6 +425,7 @@ mod tick_tests {
             approx,
             period: 0,
             forming: false,
+            from: None,
         }
     }
 
@@ -419,6 +457,37 @@ mod tick_tests {
         assert_eq!(
             out.iter().map(|c| c.approx).collect::<Vec<_>>(),
             [false, true, true]
+        );
+    }
+
+    /// A run that begins inside a tick bar (not at its last trade's minute) still starts in
+    /// that bar; the next bar, sharing the last minute, doesn't start it again.
+    #[test]
+    fn tick_bars_flag_a_run_start_anywhere_in_their_minutes() {
+        // 3-trade bars: 70 s, 130 s, 190 s | 200 s, 210 s, 220 s.
+        let mut tb = TickBars::new(3, TickReset::Continuous, None, 100);
+        for s in [70, 130, 190, 200, 210, 220] {
+            tb.push(UtcMillis(s * 1000), Price(100), Qty(1), None);
+        }
+        let mut points = [
+            point(0, 100.0, false),
+            point(1, 101.0, false),
+            point(2, 102.0, false),
+            point(3, 103.0, false),
+        ];
+        points[2].period = 1;
+        points[3].period = 1;
+        let mut vp = Viewport::default();
+        vp.set_size(300.0, 200.0);
+        vp.price_lo = 90.0;
+        vp.price_hi = 110.0;
+        vp.right_index = 1.0;
+        let mut out = Vec::with_capacity(8);
+        build_columns(&points, tb.view(), &vp, Bands::default(), &mut out);
+        assert_eq!(
+            out.iter().map(|c| c.starts).collect::<Vec<_>>(),
+            [true, false],
+            "the first bar holds minutes 1 to 3 (a run begins at 2); the second only 3"
         );
     }
 }

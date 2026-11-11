@@ -416,6 +416,72 @@ pub struct MenuInput<'a> {
     pub templates: &'a [String],
     /// The chart's product has RTH (else RTH choices are not offered).
     pub has_rth: bool,
+    /// When the product's ETH and RTH sessions open, from its sessions calendar
+    /// ([`session_opens`]): "5:00 pm CT". `None`: no calendar, the choice names no time.
+    pub opens: SessionOpens,
+}
+
+/// The regular ETH and RTH opens a VWAP's session choice names.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionOpens {
+    pub eth: Option<String>,
+    pub rth: Option<String>,
+}
+
+/// The product's session opens, read from its sessions calendar (the exchange's hours, never
+/// hard-coded) and named on the chart's clock (`zone`): "5:00 pm CT" for CME's equity futures
+/// on a Chicago clock, "6:00 pm ET" on New York's. The open named is the next session's (the
+/// one trading at `now`, else the next), so a DST change or a holiday's own open is the
+/// calendar's.
+/// The time the session choice names its opens for: the feed's clock, else the trading
+/// core's (a replay's or a screenshot's), else a replay's own clock or first recorded frame
+/// (`replay`); the wall clock (`wall`, `lines_feed::now_utc` in the app) only when none is
+/// known (live).
+pub fn opens_clock(
+    feed: Option<lines_core::UtcMillis>,
+    core: Option<lines_core::UtcMillis>,
+    replay: Option<Option<lines_core::UtcMillis>>,
+    wall: impl FnOnce() -> lines_core::UtcMillis,
+) -> lines_core::UtcMillis {
+    feed.or(core).or(replay.flatten()).unwrap_or_else(wall)
+}
+
+pub fn session_opens(
+    cal: Option<&lines_core::sessions::SessionCalendar>,
+    zone: &lines_core::display_tz::DisplayTz,
+    now: lines_core::UtcMillis,
+) -> SessionOpens {
+    use lines_core::sessions::SessionKind;
+    let Some(cal) = cal else {
+        return SessionOpens::default();
+    };
+    let say = |kind| {
+        let open = cal.next_session(now, kind)?.open;
+        let (_, _, _, h, m, _) = zone.civil(open);
+        let h12 = match h % 12 {
+            0 => 12,
+            x => x,
+        };
+        let mut s = format!("{h12}:{m:02} {} ", if h < 12 { "am" } else { "pm" });
+        let _ = zone.write_label(open, &mut s);
+        Some(s)
+    };
+    SessionOpens {
+        eth: say(SessionKind::Eth),
+        rth: if cal.has_rth() {
+            say(SessionKind::Rth)
+        } else {
+            None
+        },
+    }
+}
+
+/// A session choice's label: "ETH (5:00 pm CT open)", or just "ETH" without a calendar.
+fn session_choice(name: &str, open: Option<&String>) -> String {
+    match open {
+        Some(o) => format!("{name} ({o} open)"),
+        None => name.to_owned(),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -519,27 +585,24 @@ pub fn volume_label(v: &VolumeSpec) -> String {
 fn catalog(input: &MenuInput) -> Vec<(String, MenuCmd)> {
     let set = |a| MenuCmd::Set(a);
     let mut v = vec![(
-        "VWAP · ETH session".to_owned(),
+        format!("VWAP · {}", session_choice("ETH", input.opens.eth.as_ref())),
         set(StudyAction::AddVwap(Reset::Eth)),
     )];
     if input.has_rth {
         v.push((
-            "VWAP · RTH session".into(),
+            format!("VWAP · {}", session_choice("RTH", input.opens.rth.as_ref())),
             set(StudyAction::AddVwap(Reset::Rth)),
         ));
     }
     v.push((
-        "VWAP · weekly".into(),
+        "VWAP · week".into(),
         set(StudyAction::AddVwap(Reset::Weekly)),
     ));
     v.push((
-        "VWAP · monthly".into(),
+        "VWAP · month".into(),
         set(StudyAction::AddVwap(Reset::Monthly)),
     ));
-    v.push((
-        "Anchored VWAP (click a bar)".into(),
-        MenuCmd::BeginAnchor(None),
-    ));
+    v.push(("VWAP · from a bar…".into(), MenuCmd::BeginAnchor(None)));
     if !input
         .set
         .indicators
@@ -554,13 +617,20 @@ fn catalog(input: &MenuInput) -> Vec<(String, MenuCmd)> {
         .iter()
         .any(|c| matches!(c, IndicatorConfig::CumDelta { .. }))
     {
+        // The same session resets as VWAP's, named the same way.
         v.push((
-            "Cumulative delta · ETH session".into(),
+            format!(
+                "Cumulative delta · {}",
+                session_choice("ETH", input.opens.eth.as_ref())
+            ),
             set(StudyAction::AddDelta(DeltaReset::Eth)),
         ));
         if input.has_rth {
             v.push((
-                "Cumulative delta · RTH session".into(),
+                format!(
+                    "Cumulative delta · {}",
+                    session_choice("RTH", input.opens.rth.as_ref())
+                ),
                 set(StudyAction::AddDelta(DeltaReset::Rth)),
             ));
         }
@@ -836,23 +906,27 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 return;
             };
             let i = *i;
-            let mut resets = vec![(Reset::Eth, "ETH")];
+            let mut resets = vec![(Reset::Eth, session_choice("ETH", input.opens.eth.as_ref()))];
             if input.has_rth {
-                resets.push((Reset::Rth, "RTH"));
+                resets.push((Reset::Rth, session_choice("RTH", input.opens.rth.as_ref())));
             }
-            resets.extend([(Reset::Weekly, "Week"), (Reset::Monthly, "Month")]);
+            resets.extend([
+                (Reset::Weekly, "Week".to_owned()),
+                (Reset::Monthly, "Month".to_owned()),
+            ]);
+            // "Anchor": where the VWAP starts (the Add list's terms).
             for (r, name) in resets {
                 c(
-                    "Reset",
-                    name.into(),
+                    "Anchor",
+                    name,
                     spec.reset == r,
                     Swatch::None,
                     set(StudyAction::SetReset(i, r)),
                 );
             }
             c(
-                "Reset",
-                "Anchored…".into(),
+                "Anchor",
+                "From a bar…".into(),
                 matches!(spec.reset, Reset::Anchored { .. }),
                 Swatch::None,
                 MenuCmd::BeginAnchor(Some(i)),
