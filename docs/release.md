@@ -10,7 +10,7 @@ Lines ships continuous **pre-alpha** builds. Releases are produced by the planni
 ## Linux system packages
 GPUI's Linux backends (Wayland and X11, enabled in `crates/lines-app/Cargo.toml`) link system libraries:
 - Building (CI and release runners, `ci.yml` and `release.yml`), on Debian/Ubuntu: `build-essential pkg-config libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-x11-dev libx11-xcb-dev libxcb1-dev libvulkan1 libglib2.0-dev libzstd-dev libasound2-dev`.
-- Running (the package's `README.txt`, `.github/release/README-linux.txt`): a Vulkan driver, and X11 or Wayland with xkbcommon and fontconfig: `libvulkan1 libxkbcommon-x11-0 libwayland-client0 libfontconfig1`.
+- Running (the package's `README.txt`, `.github/release/README-linux.txt`): a Vulkan driver, and X11 or Wayland with xkbcommon and fontconfig: `libvulkan1 libxkbcommon-x11-0 libwayland-client0 libfontconfig1`. xkbcommon (with its X11 part) and libxcb are linked into the binary, so even `--headless` needs them installed (Wayland's library is loaded only when used); the README doesn't say so yet (a `.github` change, owner's).
 Change both lists and the README together when a backend's libraries change.
 
 ## A release requires

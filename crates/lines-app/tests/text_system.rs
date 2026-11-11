@@ -65,6 +65,13 @@ fn main() {
     ts.add_fonts(lines_fonts::all().map(std::borrow::Cow::Borrowed).collect())
         .expect("the embedded fonts load");
     let names = ts.all_font_names();
+    // Without its `wayland`/`x11` backends GPUI's Linux text system is the no-op one, which
+    // keeps nothing `add_fonts` gives it.
+    #[cfg(target_os = "linux")]
+    assert!(
+        !names.is_empty(),
+        "GPUI's Linux text system lists no fonts: built without `gpui_platform/wayland`/`x11`"
+    );
     for family in [lines_fonts::SANS, lines_fonts::MONO] {
         assert!(
             names.iter().any(|n| n == family),
@@ -90,6 +97,8 @@ fn main() {
         // Linux (cosmic-text): its glyph bounds are the advance, so the stem can't tell for
         // Plex Mono. There each loaded face is its own font id and a weight picks the nearest
         // face, so three ids mean three files (a missing weight would reuse another's id).
+        // On a machine with IBM Plex installed, a system face can stand in for a missing
+        // embedded one (CI's image has no Plex; `docs/known-gaps.md`, UI font).
         #[cfg(target_os = "linux")]
         {
             let ids = weights.each_ref().map(|f| {
