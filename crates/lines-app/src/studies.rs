@@ -178,8 +178,36 @@ fn clear_of(blocked: &[(f32, f32)], y: f32, h: f32) -> bool {
     blocked.iter().all(|&(t, b)| y + h <= t || y >= b)
 }
 
-/// Off-scale markers one frame moves to the price axis, at most (any edge; later ones are dropped).
-const MAX_AXIS_MARKS: usize = 4;
+/// Tags one frame moves out of the plot, at most: off-scale markers to the price axis, and
+/// end tags to the axis or the label column (later ones are dropped).
+const MAX_AXIS_MARKS: usize = 12;
+
+/// Where this frame's VWAP tags may go outside the plot, from the chart's study label
+/// placement ([`crate::levels_layer::LabelPlace`]).
+#[derive(Copy, Clone, Debug)]
+pub struct TagRoom<'a> {
+    /// Everything right of the plot: the label column (if any) and the price axis, px.
+    pub axis_w: f32,
+    /// The label column's width (0: none).
+    pub column: f32,
+    /// Where end tags go: tags in the price axis, in the label column, or on the chart (a
+    /// column placement without a column draws them on the chart).
+    pub place: crate::levels_layer::LabelPlace,
+    /// Rows (top, bottom, plot px) no tag outside the plot may cover: the last-price tag, the
+    /// drawings' and the levels' tags.
+    pub blocked: &'a [(f32, f32)],
+}
+
+/// The nearest free row for a tag `h` tall that wants top `want` on a plot `ph` tall: its own,
+/// else a row up or down, at most two rows away, clear of `blocked` and of `taken` (tops of
+/// tags already there, each `h` tall). `None`: none is free (the tag isn't drawn).
+fn free_row(want: f32, h: f32, ph: f32, blocked: &[(f32, f32)], taken: &[f32]) -> Option<f32> {
+    let top = |y: f32| y.clamp(0.0, (ph - h).max(0.0));
+    [0.0f32, -1.0, 1.0, -2.0, 2.0]
+        .iter()
+        .map(|k| top(want + k * (h + 1.0)))
+        .find(|&y| clear_of(blocked, y, h) && taken.iter().all(|&t| y + h <= t || y >= t + h))
+}
 
 /// Where an off-scale marker `w` wide goes when the strip right of the newest bar (clear from
 /// `x_free`) is narrower than it: right-aligned to the price axis column's right edge (the
@@ -895,14 +923,14 @@ impl Studies {
         fmt: &lines_core::PriceFormat,
         label_px: f32,
         labels: bool,
-        axis: (f32, &[(f32, f32)]),
+        room: TagRoom<'_>,
         covers: &[Option<crate::layout::Rect>],
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
         self.axis_marks = [None; MAX_AXIS_MARKS];
         self.paint_layer(origin, theme, window, false);
-        labels && self.paint_tags(origin, vp, theme, fmt, label_px, axis, covers, window, cx)
+        labels && self.paint_tags(origin, vp, theme, fmt, label_px, room, covers, window, cx)
     }
 
     /// After the price axis's labels and last-price tag (outside the plot's mask): the
@@ -954,8 +982,9 @@ impl Studies {
     /// - where a late run begins on the plot, a tick across the line, and its time in clear
     ///   space left of the run's first bar ("ETH from 12:34 ET"; runs that begin together
     ///   share one: "ETH = RTH from 12:34 ET"), else above or below its first bars;
-    /// - at the lines' end, right of the newest bar (the labels' gutter makes the room), the
-    ///   value: "ETH 6004.50", or "ETH = RTH 6004.50" where values meet; for a line that is
+    /// - at the lines' end (where the chart's study labels go, [`TagRoom`]: right of the
+    ///   newest bar, else pinned to the plot's edge; or a tag in the price axis or the label
+    ///   column at its price), the value: "ETH 6004.50", or "ETH = RTH 6004.50" where values meet; for a line that is
     ///   off the scale, each band edge on the plot instead ("ETH −1σ 6002.25"), so an edge is
     ///   never read as the VWAP. Only for a line that reaches the newest bar: an RTH VWAP on
     ///   an evening chart (or any line panned back) ends mid-plot and gets none.
@@ -970,12 +999,19 @@ impl Studies {
         theme: &Theme,
         fmt: &lines_core::PriceFormat,
         label_px: f32,
-        axis: (f32, &[(f32, f32)]),
+        room: TagRoom<'_>,
         covers: &[Option<crate::layout::Rect>],
         window: &mut Window,
         cx: &mut App,
     ) -> bool {
-        let (axis_w, blocked) = axis;
+        let (axis_w, blocked) = (room.axis_w, room.blocked);
+        // Where end tags go: a column placement without a column draws them on the chart.
+        let place = match room.place {
+            crate::levels_layer::LabelPlace::Column if room.column <= 0.0 => {
+                crate::levels_layer::LabelPlace::Chart
+            }
+            p => p,
+        };
         let mut n_axis = 0;
         let mut axis_marks = [None; MAX_AXIS_MARKS];
         self.sync_tags((lines_core::display_tz::epoch(), crate::zoom::generation()));
@@ -1282,11 +1318,49 @@ impl Studies {
             });
             let n = mask.count_ones() as usize;
             let w = f32::from(line.width) + pad * 2.0 + bars_w(n);
-            let x = x_end + 2.0;
-            // Only in clear space right of the last bar (never over the forming bar).
-            if x + w > pw {
+            // Outside the plot (the chart's study label placement): a tag in the price axis
+            // at its price, or one in the label column, on its own row (never over the
+            // last-price tag, a drawing's or a level's tag, or another tag there).
+            if place != crate::levels_layer::LabelPlace::Chart {
+                let (x, room_w) = if place == crate::levels_layer::LabelPlace::Axis {
+                    (
+                        pw + room.column + crate::levels_layer::AXIS_LEADER,
+                        axis_w - room.column - crate::levels_layer::AXIS_LEADER - 2.0,
+                    )
+                } else {
+                    let pad = crate::levels_layer::COLUMN_PAD;
+                    (pw + pad, room.column - 2.0 * pad)
+                };
+                if w > room_w || n_axis >= MAX_AXIS_MARKS {
+                    continue;
+                }
+                let mut taken = [0.0f32; MAX_AXIS_MARKS];
+                let mut n_taken = 0;
+                for m in axis_marks[..n_axis].iter().flatten() {
+                    taken[n_taken] = m.at[1];
+                    n_taken += 1;
+                }
+                let Some(ty) = free_row(y - h * 0.5, h, ph, blocked, &taken[..n_taken]) else {
+                    continue;
+                };
+                if covered(covers, ox + x, oy + ty, w, h) {
+                    continue;
+                }
+                axis_marks[n_axis] = Some(AxisMark {
+                    key: (first, tag, v),
+                    color: colors[first],
+                    at: [x, ty, w, h],
+                });
+                n_axis += 1;
                 continue;
             }
+            // On the chart: just right of the newest bar, else pinned to the plot's edge
+            // (over the bars, on its chip), as the chart's other study labels are.
+            let x = if x_end + 2.0 + w <= pw {
+                x_end + 2.0
+            } else {
+                (pw - w - 6.0).max(0.0)
+            };
             let ty = (y - h * 0.5).max(next_top).clamp(0.0, (ph - h).max(0.0));
             next_top = ty + h + 1.0;
             // Never a tag partly under an open panel.
@@ -2279,6 +2353,26 @@ fn stroke(w: Pixels, dash: &([Pixels; 4], usize)) -> PathBuilder {
 mod tests {
     use super::*;
     use lines_indicators::{Bands, Reset, VwapSpec};
+
+    /// An end tag outside the plot takes its own row, else the nearest one up or down within
+    /// two rows, clear of the blocked rows (the last-price tag, drawings' and levels' tags)
+    /// and of the tags already there; none free: not drawn.
+    #[test]
+    fn an_end_tag_takes_the_nearest_free_row() {
+        let (h, ph) = (16.0, 400.0);
+        assert_eq!(free_row(100.0, h, ph, &[], &[]), Some(100.0));
+        // The last-price tag on its row: one row up.
+        assert_eq!(free_row(100.0, h, ph, &[(100.0, 116.0)], &[]), Some(83.0));
+        // That too taken by a tag: one row down.
+        assert_eq!(
+            free_row(100.0, h, ph, &[(100.0, 116.0)], &[83.0]),
+            Some(117.0)
+        );
+        // Inside the plot at its edges.
+        assert_eq!(free_row(-10.0, h, ph, &[], &[]), Some(0.0));
+        // Everything near it blocked: none.
+        assert_eq!(free_row(100.0, h, ph, &[(40.0, 170.0)], &[]), None);
+    }
 
     /// A late VWAP's legend names the first time it covers, on the display zone's clock.
     #[test]

@@ -2866,10 +2866,24 @@ impl ChartView {
                 } else {
                     (0.0, 0.0)
                 };
-                let (axis, room) =
-                    crate::levels_layer::axis_fit(need, cut, base, crate::zoom::f(AXIS_TAG_CAP));
+                let cap = crate::zoom::f(AXIS_TAG_CAP);
+                let (axis, room) = crate::levels_layer::axis_fit(need, cut, base, cap);
                 self.levels.set_room(room);
-                (axis, 0.0)
+                // The VWAPs' end tags are tags here too (measured in render): the axis grows
+                // to the widest of either.
+                let ends = if self.visibility.draws_studies() && self.visibility.draws_labels() {
+                    self.studies.end_tags_need()
+                } else {
+                    0.0
+                };
+                let ends = if ends > 0.0 {
+                    (ends + crate::levels_layer::AXIS_LEADER)
+                        .clamp(base, cap.max(base))
+                        .ceil()
+                } else {
+                    base
+                };
+                (axis.max(ends), 0.0)
             }
             LabelPlace::Column => {
                 if !column_ok {
@@ -5217,7 +5231,7 @@ impl ChartView {
             // Paint order inside the plot: grid, volume profile, the levels' zones and VWAP
             // band fills (behind the candles: a heavy fill never covers a bar), candles,
             // `layers`, footprint cell fills, indicator studies (VWAP lines and band edges),
-            // the levels' lines, the footprint's numbers on their cells' color, the levels' labels (in their gutter right of the
+            // the levels' lines, the footprint's numbers on their cells' color, the levels' labels (where the chart puts them: on the chart, after the
             // newest bar), drawings, strategy markers, the profile's label, then the
             // last-price line (above every study fill and line), crosshair.
             let (studies, labels) = (
@@ -5361,9 +5375,10 @@ impl ChartView {
                         .flatten(),
                 ];
                 // Off-scale markers with no room right of the newest bar go to the price axis
-                // column, clear of the last-price tag and the drawings' price tags (painted after the
-                // axis below; fixed arrays, allocation-free).
-                let mut blocked = [(0.0f32, 0.0f32); 1 + MAX_DRAWING_TAGS];
+                // column, and end tags where the chart's study labels go (the axis or the label
+                // column), clear of the last-price tag, the drawings' price tags and the
+                // levels' tags (painted after the axis below; fixed arrays, allocation-free).
+                let mut blocked = [(0.0f32, 0.0f32); 1 + MAX_DRAWING_TAGS + MAX_LEVEL_ROWS];
                 let mut n_blocked = 0;
                 let last_y = self.last_trade.map(|p| last_tag_y(&self.vp, p, ph));
                 if let Some(y) = last_y {
@@ -5384,6 +5399,22 @@ impl ChartView {
                         n_blocked += 1;
                     }
                 }
+                // The levels' tags, where they share the axis or the column with end tags.
+                if self.levels.config.label_place != LabelPlace::Chart {
+                    let half = LevelsLayer::label_h() * 0.5;
+                    self.levels.tag_rows(|y| {
+                        if n_blocked < blocked.len() {
+                            blocked[n_blocked] = (y - half, y + half);
+                            n_blocked += 1;
+                        }
+                    });
+                }
+                let room = crate::studies::TagRoom {
+                    axis_w: self.label_col + self.axis_now,
+                    column: self.label_col,
+                    place: self.levels.config.label_place,
+                    blocked: &blocked[..n_blocked],
+                };
                 // Their end tags changed: render measures their room again (`paint_chart`).
                 self.end_tags_moved |= self.studies.paint(
                     (ox, oy),
@@ -5392,7 +5423,7 @@ impl ChartView {
                     &fmt,
                     label_px(),
                     labels,
-                    (axis_w(), &blocked[..n_blocked]),
+                    room,
                     &covers,
                     window,
                     cx,
@@ -9024,6 +9055,9 @@ fn prepare_studies(
     // axis.
     levels.columns(bars, vp);
 }
+
+/// The levels' tag rows the end tags keep clear of, at most (fixed array: allocation-free).
+const MAX_LEVEL_ROWS: usize = 32;
 
 /// Whether a pointer at `x` from the plot's right edge and `y` from its top is on the label
 /// column's edge (the plot's right edge, above the time axis): its first few px, on the
