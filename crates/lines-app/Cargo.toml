@@ -65,6 +65,11 @@ keyring = { version = "3", features = ["apple-native"] }
 keyring = { version = "3", features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Without a display backend, GPUI on Linux is headless only, with a no-op text system: no
+# windows and no text. Wayland and X11 bring the windows and GPUI's cosmic-text text system
+# (system fonts from its own font database). Target-specific so no Linux build can leave them
+# out; guarded by `tests/text_system.rs`.
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 # Pure Rust D-Bus (zbus), no libdbus to install.
 keyring = { version = "3", features = ["async-secret-service", "tokio", "crypto-rust"] }
 
