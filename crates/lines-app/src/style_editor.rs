@@ -226,6 +226,11 @@ pub struct StyleEditor {
     pub recent: Vec<Rgb>,
     /// `recent` changed since the host saved it.
     pub recent_changed: bool,
+    /// While a press drags in the picker's square or a slider: the warnings slot's height,
+    /// fixed when the drag began (`style_editor_view::warnings_height`), so nothing around the
+    /// picker changes size under the pointer; the warnings show live inside it and the slot
+    /// settles on release. Whole logical px, rounded up. `None` otherwise.
+    pub warn_slot: Option<u32>,
     /// The current tab's style was just saved as the default (until the next change).
     pub saved: bool,
     /// A study's editor: theme colors are the study colors, every part offers the line
@@ -371,6 +376,7 @@ impl StyleEditor {
             dropper: false,
             recent: Vec::new(),
             recent_changed: false,
+            warn_slot: None,
             saved: false,
             study: false,
         }
@@ -820,6 +826,7 @@ impl StyleEditor {
             return false;
         };
         self.dropper = false;
+        self.warn_slot = None;
         if keep {
             if let Some((Color::Custom(rgb), _)) = self.picked(p.fill)
                 && (Color::Custom(rgb), p.opacity) != p.initial
