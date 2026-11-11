@@ -809,8 +809,8 @@ fn the_axis_grows_to_its_widest_tag() {
         w += 0.75;
     }
     assert_eq!(axis_fit(0.0, 0.0, base, cap), (base, None), "no labels");
-    // Not even the shortest cut fits the widest axis: no tags.
-    assert_eq!(axis_fit(400.0, 300.0, base, cap).1, None);
+    // Not even the shortest cut fits the widest axis: no tags, and no wider axis.
+    assert_eq!(axis_fit(400.0, 300.0, base, cap), (base, None));
 }
 
 /// On the chart the labels sit just right of the newest bar while their widest fits there,

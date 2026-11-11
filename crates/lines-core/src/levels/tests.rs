@@ -796,6 +796,46 @@ fn a_sweeping_last_price_never_covers_a_tag() {
     }
 }
 
+/// A name too long for the room is cut with "…" before the price; the price is never cut.
+#[test]
+fn long_names_are_cut_before_the_price() {
+    let mono = |t: &str| t.chars().count() as f32 * 6.0;
+    let cut = cut_label("Previous session close", Some("7517.25"), 120.0, mono).unwrap();
+    assert!(cut.ends_with("… : 7517.25"), "{cut}");
+    assert!(mono(&cut) <= 120.0);
+    assert!(cut.starts_with("Prev"));
+    assert_eq!(
+        cut_label("Upper band", None, 36.0, mono).as_deref(),
+        Some("Upper…")
+    );
+    // Not even a letter with the price: none (the price is never cut).
+    assert_eq!(cut_label("Mid line", Some("7517.25"), 40.0, mono), None);
+}
+
+/// A label clashing only with another label stacks at most a label's height away, even while
+/// a blocked span elsewhere lets rows beside it reach further.
+#[test]
+fn only_rows_beside_the_blocked_span_reach_further() {
+    let m = LevelMap::builder("demo", ES, UtcMillis(0))
+        .line("a", LevelValue::Raw(600_100.0), Some("A"), style())
+        .line("a", LevelValue::Raw(600_075.0), Some("B"), style())
+        .build(TICK)
+        .unwrap();
+    let mut out = Vec::with_capacity(4);
+    place(&m, &vp(), None, |_| true, &mut out);
+    let h = 16.0;
+    let mut seen = [LabelSeen::New; 2];
+    // The blocked span far away (at the bottom of the plot).
+    place_labels(&mut out, h, 400.0, Some((390.0, 18.0)), &mut seen, |_| true);
+    let (a, b) = (out[0].label_y.unwrap(), out[1].label_y.unwrap());
+    assert!((a - b).abs() >= h - 1e-3);
+    assert!(
+        (b - out[1].top).abs() <= h + 1e-3,
+        "{b} from {}",
+        out[1].top
+    );
+}
+
 /// A type's label edge: just under a zone's low edge (with the low edge's price), just above
 /// its high edge, or on its own price (a zone's high edge, as before).
 #[test]

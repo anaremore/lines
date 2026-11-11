@@ -1901,7 +1901,11 @@ pub fn axis_fit(need: f32, cut: f32, base: f32, cap: f32) -> (f32, Option<f32>) 
     let frame = AXIS_LEADER + LABEL_CHROME + AXIS_EDGE;
     let axis = (need + frame).clamp(base, cap.max(base)).ceil();
     let room = axis - frame;
-    (axis, (cut <= room).then_some(room))
+    // Not even the shortest cut fits: no tags, and the axis keeps its own width.
+    if cut > room {
+        return (base, None);
+    }
+    (axis, Some(room))
 }
 
 /// The room for a label's text on the chart (`plot_w` px wide): the plot's width less its

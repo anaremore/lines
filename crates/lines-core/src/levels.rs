@@ -1097,14 +1097,16 @@ fn stack_row(
         let off = (label_h + h) * 0.5;
         [b - off, b + off]
     });
-    let reach = blocked.map_or(label_h, |(_, h)| label_h.max((label_h + h) * 0.5 + half));
+    // Rows against another label reach a label's height; rows beside the blocked span as far
+    // as clearing it takes.
+    let reach_beside = blocked.map_or(label_h, |(_, h)| label_h.max((label_h + h) * 0.5 + half));
     let rows = placed
         .iter()
         .filter_map(|q| q.label_y)
-        .flat_map(|q| [q - label_h, q + label_h])
-        .chain(beside.into_iter().flatten());
+        .flat_map(|q| [(q - label_h, label_h), (q + label_h, label_h)])
+        .chain(beside.into_iter().flatten().map(|c| (c, reach_beside)));
     {
-        for c in rows {
+        for (c, reach) in rows {
             let d = c - y;
             let way_ok = match anchor {
                 LabelAt::Own => true,

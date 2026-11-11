@@ -964,13 +964,14 @@ impl Studies {
         }
     }
 
-    /// Whether an off-scale marker moved to the price axis covers plot px `top..bottom` there
-    /// (a price label it would cover isn't drawn).
-    pub fn axis_marks_cover(&self, top: f32, bottom: f32) -> bool {
+    /// Whether a tag moved out of the plot covers plot px `top..bottom` in the price axis
+    /// (whose left edge is at plot x `axis_x`; a tag in the label column covers none of it): a
+    /// price label it would cover isn't drawn.
+    pub fn axis_marks_cover(&self, top: f32, bottom: f32, axis_x: f32) -> bool {
         self.axis_marks
             .iter()
             .flatten()
-            .any(|m| top < m.at[1] + m.at[3] && m.at[1] < bottom)
+            .any(|m| m.at[0] + m.at[2] > axis_x && top < m.at[1] + m.at[3] && m.at[1] < bottom)
     }
 
     /// The VWAPs' tags, over their lines, each on an opaque chip of the chart's background

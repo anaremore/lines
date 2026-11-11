@@ -1714,7 +1714,10 @@ impl ChartView {
             if ev.click_count >= 2 {
                 self.fit_label_column(cx);
             } else {
-                self.column_drag = Some((f32::from(ev.position.x), self.levels.config.column_w()));
+                // From the width drawn (the 40 % cap may hold it under the saved one), so
+                // the edge follows the pointer from the first move.
+                let drawn = self.label_col / crate::zoom::f(1.0);
+                self.column_drag = Some((f32::from(ev.position.x), drawn));
             }
             return;
         }
@@ -5605,9 +5608,11 @@ impl ChartView {
             if !label_clear_of_tags(span, &tags)
                 || !label_clear_of_tags(span, &drawing_tags)
                 || (axis_marks
-                    && self
-                        .studies
-                        .axis_marks_cover(l.y - label_px() * 0.65, l.y + label_px() * 0.65))
+                    && self.studies.axis_marks_cover(
+                        l.y - label_px() * 0.65,
+                        l.y + label_px() * 0.65,
+                        ax,
+                    ))
             {
                 continue;
             }
