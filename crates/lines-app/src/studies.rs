@@ -1229,18 +1229,19 @@ impl Studies {
                 let x = if at_newest && x_end + 2.0 + w <= pw {
                     x_end + 2.0
                 } else if reaches {
-                    // Clear of the last-price tag and the drawings' price tags (a half-covered
-                    // number reads as another price).
-                    let clear_of_last = clear_of(blocked, y, h);
+                    // Clear of the last-price tag and the drawings' and levels' price tags (a
+                    // half-covered number reads as another price): on the nearest free row at
+                    // that edge, else not at all.
+                    let (taken, n_taken) = taken_tops(&axis_marks[..n_axis]);
                     if let Some(x) = axis_mark_x(w, x_end + 2.0, pw, axis_w)
-                        && clear_of_last
                         && n_axis < MAX_AXIS_MARKS
-                        && !covered(covers, ox + x, oy + y, w, h)
+                        && let Some(ty) = free_row(y, h, ph, blocked, &taken[..n_taken])
+                        && !covered(covers, ox + x, oy + ty, w, h)
                     {
                         axis_marks[n_axis] = Some(AxisMark {
                             key: (k, Tag::Edge(above, band), v),
                             color: colors[k],
-                            at: [x, y, w, h],
+                            at: [x, ty, w, h],
                         });
                         n_axis += 1;
                     }
