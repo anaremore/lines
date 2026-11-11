@@ -1604,9 +1604,11 @@ impl LevelsLayer {
                         ));
                     }
                     LabelPlace::Axis => {
-                        // Stacked off its price: a short leader from the price to the tag.
-                        let at = p.label_anchor(box_h * 0.5).clamp(0.0, ph);
-                        if (at - y).abs() > 0.5 {
+                        // Stacked off its price: a short leader from the price to the tag (only
+                        // for a price on the plot: a tag held at an edge for a level off it has
+                        // nothing to lead to).
+                        let at = p.label_anchor(box_h * 0.5);
+                        if (0.0..=ph).contains(&at) && (at - y).abs() > 0.5 {
                             let lead = |window: &mut Window, x0: f32, y0: f32, w: f32, h: f32| {
                                 window.paint_quad(fill(
                                     Bounds::new(
