@@ -69,6 +69,7 @@ pub enum RefreshMode {
 /// .connection();
 /// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SettingSpec {
     /// Stable key, e.g. `service_url`.
     pub key: &'static str,
