@@ -207,6 +207,9 @@ struct OpenDrop {
     /// The setting.
     i: usize,
     list: DropList,
+    /// A multi-select's row keys (a product's symbol, an option's name), fixed when it opens:
+    /// a toggle and its ✓ go by key, never by a row index into a list that may have changed.
+    keys: Vec<String>,
     scroll: gpui::ScrollHandle,
     /// Frames waited for its first layout before the lit row is scrolled to (GPUI scrolls
     /// against the list's last bounds, none on its first frame); `None` once done.
@@ -342,6 +345,20 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
     // `account=NAME` picks the window's account (by name or id), `appearance.time_zone=list:Q`
     // (or `appearance.ui_font=list:Q`) opens that setting's list with Q typed; the rest are
     // settings.
+    for s in set {
+        if let Some((i, _)) = drop_open(s) {
+            let st = &schema::all()[i];
+            let drops = match st.kind {
+                Kind::Choice(c) => schema::drops_down(c),
+                Kind::Products | Kind::Picks(_) => true,
+                Kind::Editor => List::of(st.key).is_some(),
+                _ => false,
+            };
+            if !drops {
+                anyhow::bail!("--settings-set {s:?}: {} has no dropdown", st.key);
+            }
+        }
+    }
     for s in set.iter().filter(|s| {
         !s.starts_with("account=")
             && List::typed(s).is_none()
@@ -1368,17 +1385,27 @@ impl SettingsWindow {
         })
     }
 
-    /// Whether row `k` of setting `i`'s dropdown is the value in force (one pick) or on
-    /// (several).
-    fn drop_checked(i: usize, cur: &Value, k: usize) -> bool {
+    /// A multi-select's row keys for its value `cur` (each product's symbol, each option's
+    /// name), row for row with [`Self::drop_rows`]; empty for a one-pick list.
+    fn drop_keys(i: usize, cur: &Value) -> Vec<String> {
         match (schema::all()[i].kind, cur) {
-            (Kind::Choice(_), Value::Choice(j)) => *j == k,
             (Kind::Products, Value::List(l)) => schema::depth_choices(l)
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect(),
+            (Kind::Picks(names), _) => names.iter().map(|n| (*n).to_owned()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether row `k` of a dropdown is the value in force (one pick, `cur` a choice) or on
+    /// (several: its key, from `keys`, is in `cur`).
+    fn drop_checked(cur: &Value, keys: &[String], k: usize) -> bool {
+        match cur {
+            Value::Choice(j) => *j == k,
+            Value::List(l) => keys
                 .get(k)
-                .is_some_and(|(sym, _)| l.iter().any(|x| x.eq_ignore_ascii_case(sym))),
-            (Kind::Picks(names), Value::List(l)) => {
-                names.get(k).is_some_and(|n| l.iter().any(|x| x == n))
-            }
+                .is_some_and(|key| l.iter().any(|x| x.eq_ignore_ascii_case(key))),
             _ => false,
         }
     }
@@ -1388,11 +1415,17 @@ impl SettingsWindow {
         let prefs = current_prefs(cx);
         let cur = (schema::all()[i].get)(&prefs, &self.target, &self.facts);
         if let Some(list) = Self::drop_rows(i, &cur, &prefs) {
+            // One thing at a time: a question waiting (a loosening's Y, the data folder's Move
+            // or Start empty) is left, as a click elsewhere leaves it.
             self.list_pick = None;
             self.edit = None;
+            self.cancel_pending();
+            self.data_choice = None;
+            self.data_holds = None;
             self.drop = Some(OpenDrop {
                 i,
                 list,
+                keys: Self::drop_keys(i, &cur),
                 scroll: gpui::ScrollHandle::new(),
                 reveal_wait: Some(0),
             });
@@ -1413,26 +1446,32 @@ impl SettingsWindow {
                 self.drop = None;
                 self.set(i, Value::Choice(k), false, cx);
             }
-            // Refused (not a timeframe, out of range): the row says why.
+            // Refused (not a timeframe, out of range): the field stays, with what was typed,
+            // and the row says why.
             Outcome::Submit(text) => {
-                self.drop = None;
-                self.set(i, Value::Text(text), false, cx);
+                let mut p = current_prefs(cx);
+                match st.apply(&mut p, &self.target, Value::Text(text.clone())) {
+                    Ok(()) => {
+                        self.drop = None;
+                        self.set(i, Value::Text(text), false, cx);
+                    }
+                    Err(e) => self.note = Some((i, e.to_owned(), Tone::Problem)),
+                }
             }
             Outcome::Toggle(k) => {
                 d.list.lit = k;
+                let key = d.keys.get(k).cloned();
                 let cur = (st.get)(&current_prefs(cx), &self.target, &self.facts);
-                let next = match (st.kind, cur) {
-                    (Kind::Products, Value::List(l)) => schema::depth_choices(&l)
-                        .get(k)
-                        .map(|(sym, _)| schema::toggled(&l, sym)),
-                    // In the options' order; `k` flips, the rest stay.
-                    (Kind::Picks(names), Value::List(l)) => names.get(k).map(|n| {
+                let next = match (st.kind, cur, key) {
+                    (Kind::Products, Value::List(l), Some(sym)) => Some(schema::toggled(&l, &sym)),
+                    // In the options' order; `key` flips, the rest stay.
+                    (Kind::Picks(names), Value::List(l), Some(key)) => Some(
                         names
                             .iter()
-                            .filter(|m| (*m == n) != l.iter().any(|x| x == *m))
+                            .filter(|m| (**m == key) != l.iter().any(|x| x == *m))
                             .map(|m| (*m).to_owned())
-                            .collect()
-                    }),
+                            .collect(),
+                    ),
                     _ => None,
                 };
                 if let Some(next) = next {
@@ -2452,7 +2491,7 @@ impl SettingsWindow {
                 )
             });
         let list = open.map(|d| {
-            let checked = |k: usize| Self::drop_checked(i, value, k);
+            let checked = |k: usize| Self::drop_checked(value, &d.keys, k);
             let el = drop_view::list(
                 "drop-list",
                 &d.list,
@@ -2534,8 +2573,12 @@ impl SettingsWindow {
         }
         let t = self.theme;
         let kind = st.kind;
+        // A prop override's empty is "the preset's" (not Off): − stops at the least.
+        let to_empty = !schema::PROP_OVERRIDES.contains(&st.key);
+        let next =
+            move |up: bool| schema::stepped(kind, n, up).filter(|next| next.is_some() || to_empty);
         let step = |up: bool| {
-            let can = schema::stepped(kind, n, up).is_some();
+            let can = next(up).is_some();
             let hover = t.ghost_selected;
             div()
                 .id(("step", i * 2 + usize::from(up)))
@@ -2553,7 +2596,7 @@ impl SettingsWindow {
                     MouseButton::Left,
                     cx.listener(move |v, _, _, cx| {
                         v.select(i);
-                        if let Some(next) = schema::stepped(kind, n, up) {
+                        if let Some(next) = next(up) {
                             v.set(i, Value::Number(next), false, cx);
                         }
                         cx.notify();
@@ -4122,11 +4165,21 @@ mod tests {
         let cols = rows("dom.columns", Value::List(vec!["Bid".into(), "Ask".into()]));
         assert!(cols.multi);
         let on = Value::List(vec!["Bid".into(), "Ask".into()]);
+        let keys = SettingsWindow::drop_keys(at("dom.columns"), &on);
         let checked: Vec<bool> = (0..4)
-            .map(|k| SettingsWindow::drop_checked(at("dom.columns"), &on, k))
+            .map(|k| SettingsWindow::drop_checked(&on, &keys, k))
             .collect();
         assert_eq!(checked, [false, true, true, false]);
         assert!(rows("data.depth", Value::List(vec!["ES".into()])).multi);
+        // Rows keep their product when the saved set shrinks under the open list: unknown
+        // symbols sit last, so removing one would move the rows after it.
+        let saved = Value::List(vec!["ES".into(), "ZZ1".into(), "ZZ2".into()]);
+        let keys = SettingsWindow::drop_keys(at("data.depth"), &saved);
+        let (zz1, zz2) = (keys.len() - 2, keys.len() - 1);
+        assert_eq!((&*keys[zz1], &*keys[zz2]), ("ZZ1", "ZZ2"));
+        let after = Value::List(vec!["ES".into(), "ZZ2".into()]);
+        assert!(!SettingsWindow::drop_checked(&after, &keys, zz1));
+        assert!(SettingsWindow::drop_checked(&after, &keys, zz2));
         // Buttons stay buttons.
         for key in [
             "appearance.theme",

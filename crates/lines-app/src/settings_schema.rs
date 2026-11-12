@@ -704,8 +704,24 @@ pub struct NewPanes {
     pub default_qty: Option<u32>,
     /// The columns a new DOM hides (Settings › DOM › Columns); absent: none. The price column
     /// is never hidden, and the trail's column follows the trail.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "known_dom_cols"
+    )]
     pub dom_hidden: Vec<crate::pane_columns::DomCol>,
+}
+
+/// `dom_hidden` as saved, less any column this build doesn't know (a newer build's): skipped,
+/// so the file still loads.
+fn known_dom_cols<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<crate::pane_columns::DomCol>, D::Error> {
+    let names: Vec<serde_json::Value> = Vec::deserialize(d)?;
+    Ok(names
+        .into_iter()
+        .filter_map(|n| serde_json::from_value(n).ok())
+        .collect())
 }
 
 /// The DOM columns Settings › DOM › Columns offers: the ones a trader may hide, but the
@@ -779,7 +795,8 @@ pub fn number_step(unit: &str) -> i64 {
 
 /// A number setting's value after − (`up` false) or + from `cur`: to the next multiple of the
 /// step that way, held to `min..=max`; − from the least of an optional one turns it off, and +
-/// from off starts at one step (or the least). `None` when nothing changes.
+/// from off starts at one step (or the least). `None` when nothing changes. (A prop
+/// override's empty is its preset's value, not Off: its − / + stop at the least.)
 pub fn stepped(kind: Kind, cur: Option<i64>, up: bool) -> Option<Option<i64>> {
     let Kind::Number {
         min,
@@ -5278,5 +5295,11 @@ mod tests {
         assert_eq!(back, p.app.new_panes);
         let old: NewPanes = serde_json::from_str("{}").unwrap();
         assert!(old.dom_hidden.is_empty() && old.is_default());
+        // A newer build's column: skipped, the rest kept, the file loads.
+        let newer: NewPanes =
+            serde_json::from_str(r#"{"dom_hidden":["orders","sparkline"],"dom_trail":true}"#)
+                .unwrap();
+        assert_eq!(newer.dom_hidden, [DomCol::Orders]);
+        assert!(newer.dom_trail);
     }
 }
