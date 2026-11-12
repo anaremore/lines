@@ -57,6 +57,13 @@ pub struct Conflict {
     pub other: Command,
 }
 
+impl Conflict {
+    /// Whether an order command is on either side (Enter then cancels, never moves the key).
+    pub fn trading(&self) -> bool {
+        keymap::trades(self.cmd) || keymap::trades(self.other)
+    }
+}
+
 /// What the page holds between frames.
 #[derive(Default)]
 pub(crate) struct KeysPage {
@@ -243,7 +250,15 @@ impl KeysPage {
         let plain = !m.control && !m.alt && !m.platform && !m.shift;
         if self.conflict.is_some() {
             match key {
-                "enter" if plain => self.press(Action::Replace, cx),
+                // Enter takes the default: Cancel when an order command is involved.
+                "enter" if plain => {
+                    let a = if self.conflict.as_ref().is_some_and(Conflict::trading) {
+                        Action::CancelConflict
+                    } else {
+                        Action::Replace
+                    };
+                    self.press(a, cx)
+                }
                 "escape" => self.press(Action::CancelConflict, cx),
                 _ => {}
             }
@@ -650,7 +665,7 @@ pub(crate) fn list(
                                 "keys-conflict-cancel".into(),
                                 "Cancel",
                                 Some(Action::CancelConflict),
-                                false,
+                                cf.trading(),
                                 t,
                                 cx,
                             ))
@@ -658,7 +673,7 @@ pub(crate) fn list(
                                 "keys-conflict-replace".into(),
                                 "Replace",
                                 Some(Action::Replace),
-                                true,
+                                !cf.trading(),
                                 t,
                                 cx,
                             )),
@@ -673,6 +688,11 @@ pub(crate) fn list(
                     .into_any_element()
             }
             (Some(cap), None) => {
+                // ⌫ removes only a key that may go (not a fixed one, not an emergency
+                // command's last).
+                let removable = cap.old.as_ref().is_some_and(|o| {
+                    !keymap::fixed(c, o) && !(keymap::keeps_a_key(c) && keys.len() <= 1)
+                });
                 let field = div()
                     .flex()
                     .flex_row()
@@ -712,12 +732,17 @@ pub(crate) fn list(
                         .into_any_element(),
                     None => field
                         .text_color(t.text_dim)
-                        .child("Press keys… (Esc cancels, ⌫ removes)")
+                        .child(if removable {
+                            "Press keys… (Esc cancels, ⌫ removes)"
+                        } else {
+                            "Press keys… (Esc cancels)"
+                        })
                         .into_any_element(),
                 }
             }
             (None, None) => {
-                let mut d = div().flex().flex_row().items_center().gap_1();
+                // A wider gap between combos than inside one: two keys never read as one.
+                let mut d = div().flex().flex_row().items_center().gap_3();
                 for (j, k) in keys.iter().enumerate() {
                     let action =
                         (!keymap::fixed(c, k)).then(|| Action::Capture(c, Some(k.clone())));
@@ -819,21 +844,12 @@ pub(crate) fn list(
                 "Symbol and timeframe typing in a pane",
                 vec!["A–Z".to_owned(), "0–9".to_owned()],
             ),
-            (
-                "DOM: center, grouping",
-                vec!["C".to_owned(), "G".to_owned()],
-            ),
+            ("DOM: center", vec!["C".to_owned()]),
+            ("DOM: grouping", vec!["G".to_owned()]),
             ("Chart: reset the view", vec!["Home".to_owned()]),
             ("Symbol picker", vec![ctrl.to_owned(), "K".to_owned()]),
-            (
-                "Picker: favorite, size",
-                vec![
-                    ctrl.to_owned(),
-                    "D".to_owned(),
-                    alt.to_owned(),
-                    "M".to_owned(),
-                ],
-            ),
+            ("Picker: favorite", vec![ctrl.to_owned(), "D".to_owned()]),
+            ("Picker: size", vec![alt.to_owned(), "M".to_owned()]),
             (
                 "Chart: volume profile",
                 vec![alt.to_owned(), "V R B G".to_owned()],
@@ -949,6 +965,22 @@ pub(crate) fn shot(page: &mut KeysPage, s: &str, cx: &mut App) -> Result<bool, S
 mod tests {
     use super::*;
     use crate::commands::TradeCmd;
+
+    /// Enter on a conflict that involves an order command cancels; otherwise it replaces.
+    #[test]
+    fn a_trading_conflict_defaults_to_cancel() {
+        let combo = Combo::parse("ctrl+shift+f12").unwrap();
+        let cf = |cmd, other| Conflict {
+            cmd,
+            old: None,
+            key: combo.clone(),
+            other,
+        };
+        let flat = Command::Trade(TradeCmd::Flatten);
+        assert!(cf(Command::NewTab, flat).trading());
+        assert!(cf(flat, Command::NewTab).trading());
+        assert!(!cf(Command::NewTab, Command::ToggleMagnet).trading());
+    }
 
     #[test]
     fn rows_filter_by_name_key_group_and_changed() {
