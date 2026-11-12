@@ -384,6 +384,13 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
             anyhow::bail!("--settings-set keys:{s:?}: keys:bind|capture|press|filter|chip");
         }
     }
+    for s in set {
+        if let Some(key) = s.strip_prefix(SELECT)
+            && schema::index_of(key).is_none()
+        {
+            anyhow::bail!("--settings-set {s:?}: no setting {key:?}");
+        }
+    }
     for s in set.iter().filter(|s| {
         !s.starts_with("account=")
             && !s.starts_with("keys:")

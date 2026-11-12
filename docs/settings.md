@@ -59,12 +59,12 @@ Every Settings row shows a brief description, always (at most 60 characters; own
 - **Cooldown length**: How long entries wait after the losing streak, in minutes.
 - **No entries before the close**: No new entries this many minutes before the session closes. Empty: off.
 - **News blackout**: Around high-importance releases that move the account's product (CPI, the jobs report, FOMC; official schedules bundled with Lines): Warn shows it; Block refuses new entries; Flatten also closes positions in affected products when the window opens. Exits are never blocked. While the calendar can't answer (out of date), Block and Flatten refuse entries.
-  The windows come from the economic calendar bundled with Lines. While that calendar is out of date and can't say whether a release is near, Block and Flatten refuse new entries (Warn only warns): the rule fails closed. Exits (orders that only reduce a position) are never blocked.
+  The rule fails closed: Warn only warns then, and an exit is any order that only reduces a position.
 - **News blackout: minutes before**: The blackout starts this many minutes before the release.
 - **News blackout: minutes after**: The blackout ends this many minutes after the release.
 - **News blackout: medium releases too**: The blackout also covers PPI, GDP and PCE (charts mark them either way).
 - **Prop rules**: Approximations, not a firm's official rules. During a breach rules can be tightened, not loosened, until the session resets.
-  This is the same tighten-only rule as a guardrail lockout.
+  A looser preset or override is accepted but applies from the next trade date (always, not only during a breach), so a breach can't be loosened away; a tighter one applies at once.
 - **Prop preset**: The preset's rules for this account; the rows below override single values. The account size is fixed.
 - **Prop rule values**: The preset's values in force: daily loss, trailing drawdown, max micros, profit target. Override… changes single values.
 - **Prop daily loss limit**: Whole dollars per trade date. Empty: the preset's.
@@ -79,7 +79,7 @@ Every Settings row shows a brief description, always (at most 60 characters; own
 - **Coinbase**: Public crypto prices (BTC/USD, ETH/USD). Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.
 - **Kraken**: Public crypto prices, spot and perpetuals. Connects only while a pane shows one; offline, those panes say so. Applies when Lines next starts.
 - **Databento**: CME futures through your own Databento account, billed by Databento. Off until your API key is set up (DATABENTO_API_KEY, or the OS keychain entry lines-databento); without it Lines makes no Databento requests. Applies when Lines next starts.
-  Lines reads the key from the `DATABENTO_API_KEY` environment variable, else from the OS keychain entry `lines-databento`. Settings never shows the key.
+  Lines reads the key from, in order: the `DATABENTO_API_KEY` environment variable (one run's override), the OS keychain entry `lines-databento` (where Settings › Connections saves a key entered there), or a file named by `LINES_DATABENTO_KEY_FILE`. The key is never shown, logged or written elsewhere (`crates/lines-databento/README.md`).
 - **Databento key**: Whether this run found your Databento API key (DATABENTO_API_KEY, or the OS keychain entry lines-databento; a key added later counts from the next start). The key itself is never shown.
 
 ## Plugins

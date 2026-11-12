@@ -316,7 +316,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         ("general", "settings-general-narrow-light-150", 700),
         ("appearance", "settings-appearance-narrow-light-150", 900),
         ("order-entry", "settings-order-entry-narrow-light-150", 1100),
-        ("accounts", "settings-accounts-narrow-light-150", 900),
+        ("accounts", "settings-accounts-narrow-light-150", 2000),
     ] {
         let mut set = s(
             name,
@@ -364,7 +364,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         (
             "settings-drop-preset-light",
             "accounts",
-            "--theme light --settings-size 860x700 --settings-set prop.preset=open",
+            "--theme light --settings-size 860x1400 --settings-set prop.preset=open",
         ),
         (
             "settings-drop-zone-150",

@@ -5076,10 +5076,10 @@ mod tests {
             assert!(n <= 60, "{}: {n} characters: {d:?}", st.key);
             assert!(!d.contains('\n'), "{}: a newline", st.key);
             assert!(d.trim() == d, "{}: spaces at an end", st.key);
-            // One sentence or fragment: at most one full stop, and only at the end (a
-            // "Empty: off." tail counts with its row's fragment).
+            // A fragment, or at most two short sentences on its one line ("Columns a new DOM
+            // shows. Price always shows."; the Keys row's), never a paragraph.
             let stops = d.matches(". ").count();
-            assert!(stops <= 1, "{}: {stops} sentences: {d:?}", st.key);
+            assert!(stops <= 1, "{}: {} sentences: {d:?}", st.key, stops + 1);
             assert!(
                 !d.starts_with("Off by default"),
                 "{}: ↺ shows the default",
