@@ -192,8 +192,12 @@ impl DropList {
 }
 
 /// A − / + step of a number `cur` by `step`, held to `min..=max`: to the next multiple of the
-/// step that way. `None` at its end (nothing changes).
+/// step that way. `None` at its end, and away from the range when `cur` is outside it (a
+/// saved value out of range: + never lowers it, − never raises it).
 pub fn step(cur: i64, step: i64, min: i64, max: i64, up: bool) -> Option<i64> {
+    if (up && cur >= max) || (!up && cur <= min) {
+        return None;
+    }
     let step = step.max(1);
     let next = if up {
         (cur.div_euclid(step) + 1).saturating_mul(step)
@@ -290,6 +294,11 @@ mod tests {
         assert_eq!(step(1, 10, 1, 500, false), None, "at the least");
         assert_eq!(step(500, 10, 1, 500, true), None, "at the most");
         assert_eq!(step(300, 25, 100, 1000, true), Some(325));
+        // Out of range (an old file): toward the range only.
+        assert_eq!(step(2000, 25, 100, 1000, true), None);
+        assert_eq!(step(2000, 25, 100, 1000, false), Some(1000));
+        assert_eq!(step(50, 25, 100, 1000, false), None);
+        assert_eq!(step(50, 25, 100, 1000, true), Some(100));
     }
 
     #[test]

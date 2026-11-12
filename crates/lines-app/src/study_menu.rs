@@ -1691,8 +1691,13 @@ impl StudyMenu {
     /// Keep the cursor on a focusable item after the items changed (an open list whose item
     /// went closes).
     pub fn clamp(&mut self, items: &[Item]) {
+        // An open list whose item went, or whose options changed under it (a level source
+        // learned a kind): closed, never a row toggling what another row now is.
         if let Some(d) = &self.drop
-            && !matches!(items.get(d.at), Some(Item::Drop { group, .. }) if *group == d.group)
+            && !matches!(items.get(d.at), Some(Item::Drop { group, options, .. })
+                if *group == d.group
+                    && options.len() == d.list.entries.len()
+                    && options.iter().zip(&d.list.entries).all(|(o, e)| o.label == e.label))
         {
             self.drop = None;
         }

@@ -31,12 +31,13 @@ pub const PRIORITY: usize = 4;
 /// list and menu.
 pub const BACKDROP_PRIORITY: usize = 1;
 /// Deferred-draw priority of a list opened inside a popover (the studies menu's): over the
-/// popover, its backdrop just under it (a press elsewhere in the popover closes only the list).
-pub const NESTED_PRIORITY: usize = OVERLAY_PRIORITY + 2;
+/// popover, its backdrop just under it (a press elsewhere in the popover closes only the list);
+/// under the window's overlays like every list.
+pub const NESTED_PRIORITY: usize = PRIORITY + 2;
 /// Deferred-draw priority of the window's own overlays (pane and tab menus, palette and
-/// prompts, the switch-all banner): over any open list, so a list never hides or takes the
-/// clicks of a menu opened after it.
-pub const OVERLAY_PRIORITY: usize = 5;
+/// prompts, the switch-all banner): over any open list (a nested one included), so a list never
+/// hides or takes the clicks of a menu opened after it.
+pub const OVERLAY_PRIORITY: usize = NESTED_PRIORITY + 1;
 
 /// Where a list `popup` (width, height) opens for a trigger at `trigger`, in a window
 /// `window` (width, height) big, all in window logical px: its top-left corner.

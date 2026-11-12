@@ -1112,9 +1112,13 @@ mod tests {
     /// Nothing draws over a backdrop but a popover (owner, 2026-11-10).
     #[test]
     fn backdrops_draw_under_lists_and_lists_under_overlays() {
-        use crate::dropdown::{BACKDROP_PRIORITY, OVERLAY_PRIORITY, PRIORITY};
+        use crate::dropdown::{BACKDROP_PRIORITY, NESTED_PRIORITY, OVERLAY_PRIORITY, PRIORITY};
         const { assert!(BACKDROP_PRIORITY < PRIORITY) };
         const { assert!(PRIORITY < OVERLAY_PRIORITY) };
+        // A list inside a popover: its backdrop over the popover, it over that, both under
+        // the window's overlays.
+        const { assert!(PRIORITY < NESTED_PRIORITY - 1) };
+        const { assert!(NESTED_PRIORITY < OVERLAY_PRIORITY) };
     }
 
     #[test]

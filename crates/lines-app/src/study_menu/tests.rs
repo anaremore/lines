@@ -1044,4 +1044,10 @@ fn level_kinds_are_a_multi_select() {
     m.clamp(&items);
     assert!(m.drop.is_some(), "the list stays open");
     assert!(labels(&items).contains(&"  Kinds: zone, varis ▾".to_owned()));
+    // The source learns a kind: the open list's rows would be stale, so it closes.
+    let mut grown = src.clone();
+    grown[0].kinds.push("anchor".into());
+    let items = m.items(&input(&set, &grown, &[]));
+    m.clamp(&items);
+    assert!(m.drop.is_none(), "options changed under the open list");
 }

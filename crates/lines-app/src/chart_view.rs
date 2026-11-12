@@ -1445,6 +1445,10 @@ impl ChartView {
     pub fn close_popover(&mut self, kind: Kind, cx: &mut Context<Self>) {
         match kind {
             Kind::Studies => {
+                // The draft keeps the editor, not an open list (its rows could be stale).
+                if let Some(m) = self.study_menu.as_mut() {
+                    m.drop = None;
+                }
                 if !popover::shut(&mut self.study_menu, &mut self.study_draft) {
                     return;
                 }
