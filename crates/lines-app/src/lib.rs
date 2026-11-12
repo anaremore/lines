@@ -662,6 +662,14 @@ struct Cli {
     /// demo.feed_url=http://100.71.4.20:7878`).
     #[arg(long, requires = "screenshot")]
     plugin_set: Vec<String>,
+    /// Screenshot: a plugin switch's question asked (`ID.KEY`, e.g. `demo.allow_remote`), in
+    /// the Studies menu (with `--studies-menu edit:levels:ID`) or Settings › Plugins.
+    #[arg(long, requires = "screenshot")]
+    plugin_ask: Option<String>,
+    /// Screenshot: a plugin choice's list open in Settings › Plugins (`ID.KEY`, e.g.
+    /// `demo.symbol`); in the Studies menu, `--studies-menu drop:levels:ID:Label`.
+    #[arg(long, requires = "screenshot")]
+    plugin_open: Option<String>,
     /// Screenshot: open a context menu, as a right click would: `pane`, `tab`, `order` (the
     /// focused chart's first working order, a stop if any) or `study:SPEC` (a legend row's, as
     /// `--legend-hover` names it); `:Label` with that row's submenu
@@ -2235,6 +2243,8 @@ where
                 hover_header: cli.hover_header,
                 legend_hover: cli.legend_hover.clone(),
                 plugin_set: cli.plugin_set.clone(),
+                plugin_ask: cli.plugin_ask.clone(),
+                plugin_open: cli.plugin_open.clone(),
                 context_menu: cli.context_menu.clone(),
                 update_shot: cli.update_shot.clone(),
                 ui_zoom: cli.ui_zoom,

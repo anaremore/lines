@@ -354,10 +354,13 @@ fn value_box(
         .px_2()
         .rounded_sm()
         .border_1()
-        .border_color(if typing || focused {
+        // Refused shows even with the keyboard on it (only typing outlines it in the accent).
+        .border_color(if typing {
             t.accent
         } else if refused {
             t.destructive
+        } else if focused {
+            t.accent
         } else {
             t.axis_line
         })
@@ -409,7 +412,7 @@ pub(crate) fn list(page: &PluginPage, t: &Theme, cx: &mut Context<SettingsWindow
                 div()
                     .text_size(crate::zoom::ui(11.0))
                     .text_color(t.text_dim)
-                    .child("Applies to every chart it serves."),
+                    .child("Its settings apply to every chart it serves."),
             );
         let mut group = "";
         for (j, r) in rows.iter().enumerate() {
@@ -562,18 +565,13 @@ pub(crate) fn list(page: &PluginPage, t: &Theme, cx: &mut Context<SettingsWindow
                     }),
             );
             // Under the control: why it was refused, else its help.
-            let under = match &r.refused {
-                Some(f) => div()
+            let under = match r.refused_line() {
+                Some(line) => div()
                     .flex()
                     .flex_row()
                     .gap_1()
                     .child(div().flex_none().text_color(t.destructive).child("!"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .text_color(t.text_main)
-                            .child(f.reason.clone()),
-                    ),
+                    .child(div().min_w_0().text_color(t.text_main).child(line)),
                 None => div().text_color(t.text_dim).child(r.spec.help),
             };
             card = card.child(

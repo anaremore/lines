@@ -1660,9 +1660,11 @@ impl StudyMenu {
                     };
                     let run = rows[i..].iter().take_while(simple).count();
                     if run >= 2 && !group.is_empty() {
+                        // Under the group's own heading: no name of their own in the label
+                        // column (never "Display" under "DISPLAY").
                         for x in &rows[i..i + run] {
                             out.push(Item::Control {
-                                group,
+                                group: "",
                                 label: x.spec.label.into(),
                                 on: setting::is_on(&x.value),
                                 swatch: Swatch::None,
@@ -1747,10 +1749,10 @@ impl StudyMenu {
                 }),
                 SettingKind::Secret => {}
             }
-            if let Some(f) = &r.refused
+            if let Some(line) = r.refused_line()
                 && typing.is_none()
             {
-                out.push(Item::Reason(f.reason.clone()));
+                out.push(Item::Reason(line));
             }
             i += 1;
         }
@@ -1922,15 +1924,29 @@ impl StudyMenu {
     /// Keep the cursor on a focusable item after the items changed (an open list whose item
     /// went closes).
     pub fn clamp(&mut self, items: &[Item]) {
-        // An open list whose item went, or whose options changed under it (a level source
-        // learned a kind): closed, never a row toggling what another row now is.
-        if let Some(d) = &self.drop
-            && !matches!(items.get(d.at), Some(Item::Drop { group, options, .. })
-                if *group == d.group
-                    && options.len() == d.list.entries.len()
-                    && options.iter().zip(&d.list.entries).all(|(o, e)| o.label == e.label))
-        {
-            self.drop = None;
+        // An open list follows its item when the lines above it change (a level source learned
+        // a kind); one whose item went, or whose options changed under it: closed, never a row
+        // toggling what another row now is.
+        if let Some(d) = &self.drop {
+            let same = |it: &Item| {
+                matches!(it, Item::Drop { group, options, .. }
+                    if *group == d.group
+                        && options.len() == d.list.entries.len()
+                        && options.iter().zip(&d.list.entries).all(|(o, e)| o.label == e.label))
+            };
+            if !items.get(d.at).is_some_and(same) {
+                match items.iter().position(same) {
+                    Some(at) => {
+                        if self.cursor == d.at {
+                            self.cursor = at;
+                        }
+                        if let Some(d) = self.drop.as_mut() {
+                            d.at = at;
+                        }
+                    }
+                    None => self.drop = None,
+                }
+            }
         }
         let f = Self::focusables(items);
         if f.is_empty() {

@@ -2292,7 +2292,7 @@ fn table() -> Vec<Setting> {
             PLUGINS_LIST,
             Sec::Plugins,
             "Installed plugins",
-            "Settings each installed plugin describes. A level source's apply to every chart it serves, at once.",
+            "Settings each installed plugin describes, applied at once.",
             Scope::App,
             Normal,
             Info,

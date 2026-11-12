@@ -90,6 +90,21 @@ impl Row {
             .map_or_else(|| setting::choice_label(&self.value), |(_, l)| l.clone())
     }
 
+    /// Why it was refused, and what is still in force: "From 1 s to 1 h · still 5 s".
+    pub fn refused_line(&self) -> Option<String> {
+        let f = self.refused.as_ref()?;
+        let now = if self.shown.is_empty() {
+            self.spec.placeholder.to_owned()
+        } else {
+            self.shown.clone()
+        };
+        Some(if now.is_empty() {
+            f.reason.clone()
+        } else {
+            format!("{} · still {now}", f.reason.trim_end_matches('.'))
+        })
+    }
+
     /// − / + from the value in force (`None` at an end, or for a kind without steps).
     pub fn step(&self, up: bool) -> Option<String> {
         setting::step(&self.spec, &self.value, up)
@@ -317,6 +332,59 @@ pub fn load(saved: &Saved) {
             .unwrap_or_default();
         levels::runtime::set_settings(s.id(), values);
     }
+}
+
+/// Screenshots (`--plugin-ask ID.KEY`, `--plugin-open ID.KEY`): a switch's question asked, a
+/// choice's list open, in whichever of the two places the shot shows.
+#[derive(Clone, Debug, Default)]
+pub struct Shot {
+    pub ask: Option<(String, &'static str)>,
+    pub open: Option<(String, &'static str)>,
+}
+
+fn shot_state() -> &'static Mutex<Shot> {
+    static S: Mutex<Shot> = Mutex::new(Shot {
+        ask: None,
+        open: None,
+    });
+    &S
+}
+
+/// The screenshot's question and open list (`set_shot`).
+pub fn shot() -> Shot {
+    shot_state()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// `ID.KEY` as a plugin and its setting's key (`&'static`: the spec's own).
+fn spec_key(id_key: &str) -> Result<(String, &'static str), String> {
+    let (id, key) = id_key
+        .split_once('.')
+        .ok_or_else(|| format!("{id_key}: expected ID.KEY"))?;
+    let s = levels::registered()
+        .into_iter()
+        .find(|s| s.id() == id)
+        .ok_or_else(|| format!("{id}: no such plugin"))?;
+    let k = s
+        .settings()
+        .iter()
+        .find(|x| x.key == key && x.shown())
+        .map(|x| x.key)
+        .ok_or_else(|| format!("{id} has no setting {key}"))?;
+    Ok((id.to_owned(), k))
+}
+
+/// Screenshots: ask `ask`'s question, open `open`'s list.
+#[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+pub fn set_shot(ask: Option<&str>, open: Option<&str>) -> Result<(), String> {
+    let s = Shot {
+        ask: ask.map(spec_key).transpose()?,
+        open: open.map(spec_key).transpose()?,
+    };
+    *shot_state().lock().unwrap_or_else(|e| e.into_inner()) = s;
+    Ok(())
 }
 
 /// Screenshots (`--plugin-set ID.KEY=VALUE`): set a value as typed, without saving: refused

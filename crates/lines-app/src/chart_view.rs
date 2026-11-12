@@ -1554,6 +1554,11 @@ impl ChartView {
         {
             m.cursor = i;
         }
+        // Screenshots: a plugin switch's question asked (a list open: `drop:levels:ID:Label`).
+        let shot = crate::plugin_settings::shot();
+        if let Some((src, key)) = shot.ask {
+            m.asking = Some((src, key));
+        }
         self.study_menu = Some(m);
         if let Some((r, tab)) = style {
             self.open_study_style(r, cx);
@@ -10549,6 +10554,13 @@ impl Render for ChartView {
         self.sync_symbol_studies(cx);
         self.sync_level_styles(cx);
         self.open_wanted_menu_drop(cx);
+        // The menu's lines can change between frames (a level source learns a kind): its
+        // cursor and an open list follow their items.
+        if let Some(mut m) = self.study_menu.take() {
+            let items = self.menu_items(&m, cx);
+            m.clamp(&items);
+            self.study_menu = Some(m);
+        }
         // Trade labels follow the P&L display (the poll that builds them has no app).
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()

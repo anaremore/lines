@@ -429,6 +429,16 @@ pub fn open_for_screenshot(
     let set = set.to_vec();
     let _ = h.update(cx, |v, _, cx| {
         v.section = section;
+        // A plugin switch's question asked, a choice's list open (`--plugin-ask`, `--plugin-open`).
+        let shot = crate::plugin_settings::shot();
+        if let Some((src, key)) = shot.ask {
+            v.plugins
+                .press(crate::plugins_view::Action::Set(src, key, "true".into()), cx);
+        }
+        if let Some((src, key)) = shot.open {
+            v.plugins
+                .press(crate::plugins_view::Action::Open(src, key), cx);
+        }
         for s in &set {
             if let Some(name) = s.strip_prefix("account=") {
                 if let Some(a) = v

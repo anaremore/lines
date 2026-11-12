@@ -1126,8 +1126,8 @@ fn a_sources_own_settings() {
             "  Symbol: Auto ▾",
             "  Refresh: − 5 s +",
             "## Display",
-            "  Display: Bands *",
-            "  Display: Stats *",
+            "  : Bands *",
+            "  : Stats *",
             "  Band width: − 1.00 +",
             "  Anchor offset: − from the map +",
         ]
@@ -1228,4 +1228,37 @@ fn a_sources_own_settings() {
         .unwrap();
     m.activate(&items, sym);
     assert_eq!(m.typing, None);
+}
+
+/// An open list follows its item when lines are added above it (a level source learns a kind
+/// while the list is open): still open, on the same setting.
+#[test]
+fn an_open_list_follows_its_item() {
+    use lines_feed::levels::demo::DemoLevels;
+    let set = StudySet::default();
+    let mut src = sources();
+    src[0].plugin = crate::plugin_settings::rows(&DemoLevels, None);
+    // No map yet: no kinds, no Kinds line.
+    src[0].kinds.clear();
+    let mut m = StudyMenu {
+        editing: Some(StudyRef::Levels("demo".into())),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let at = |items: &[Item]| {
+        items
+            .iter()
+            .position(|it| matches!(it, Item::Drop { group, .. } if *group == "Symbol"))
+            .unwrap()
+    };
+    let i = at(&items);
+    m.open_drop(&items, i);
+    // The map arrives with its kinds: the Kinds line above.
+    src[0].kinds = vec!["pivot".into(), "zone".into()];
+    let items2 = m.items(&input(&set, &src, &[]));
+    m.clamp(&items2);
+    let j = at(&items2);
+    assert_ne!(i, j, "the lines moved");
+    assert_eq!(m.drop.as_ref().map(|d| d.at), Some(j));
+    assert_eq!(m.cursor, j);
 }
