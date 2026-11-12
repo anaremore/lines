@@ -840,6 +840,8 @@ pub enum Item {
         typed: Option<MenuCmd>,
         dim: bool,
         typing: bool,
+        /// Its value was refused (the reason is the next item): the destructive edge.
+        refused: bool,
     },
     /// A sub-heading inside an editor ("Source settings", a plugin's group).
     Section(String),
@@ -849,6 +851,8 @@ pub enum Item {
         text: String,
         placeholder: &'static str,
         typing: bool,
+        /// Its value was refused (the reason is the next item): the destructive edge.
+        refused: bool,
         cmd: MenuCmd,
     },
     /// Why the value above was refused (a plugin's field): its text stays, nothing applied.
@@ -1233,6 +1237,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 typed: None,
                 dim: false,
                 typing: false,
+                refused: false,
             })
         };
     }
@@ -1726,6 +1731,7 @@ impl StudyMenu {
                         typed: Some(edit(key, start)),
                         dim,
                         typing: typing.is_some(),
+                        refused: r.refused.is_some(),
                     });
                 }
                 SettingKind::Text | SettingKind::Url => out.push(Item::Field {
@@ -1734,6 +1740,7 @@ impl StudyMenu {
                         .map_or_else(|| r.text().to_owned(), |t| format!("{}\u{258f}", t.buf)),
                     placeholder: r.spec.placeholder,
                     typing: typing.is_some(),
+                    refused: r.refused.is_some(),
                     cmd: edit(key, r.text().to_owned()),
                 }),
                 SettingKind::Secret => {}

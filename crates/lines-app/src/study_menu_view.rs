@@ -262,6 +262,7 @@ pub fn render(
                 typed,
                 dim,
                 typing,
+                refused,
             } => {
                 // − value +: the keys' line outlines the value (← / → step it).
                 let button = |id: (&'static str, usize), text: &'static str, can: bool, part| {
@@ -316,6 +317,8 @@ pub fn render(
                             .border_1()
                             .border_color(if selected || *typing {
                                 t.accent
+                            } else if *refused {
+                                t.destructive
                             } else {
                                 t.axis_line
                             })
@@ -354,6 +357,7 @@ pub fn render(
                 text,
                 placeholder,
                 typing,
+                refused,
                 ..
             } => {
                 let empty = text.is_empty();
@@ -367,6 +371,8 @@ pub fn render(
                     .border_1()
                     .border_color(if selected || *typing {
                         t.accent
+                    } else if *refused {
+                        t.destructive
                     } else {
                         t.axis_line
                     })
