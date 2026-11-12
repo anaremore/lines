@@ -141,6 +141,8 @@ pub struct Options {
     pub extend_left: Option<bool>,
     pub extend_right: Option<bool>,
     pub axis_tag: Option<bool>,
+    /// An arrowhead at the end (trend lines, arrows, brush strokes).
+    pub arrow_end: Option<bool>,
     /// A level source's labels carry the price (`name : price`).
     pub label_price: Option<bool>,
 }
@@ -160,6 +162,8 @@ pub enum Control {
     ExtendLeft,
     ExtendRight,
     AxisTag,
+    /// The arrowhead: none (`false`) or at the end (`true`), one of a pair.
+    Arrowhead(bool),
     /// An optional part drawn (a checkbox).
     Shown,
     /// A level type's zone fill: its color, typing a custom one, its opacity.
@@ -249,6 +253,8 @@ pub fn tool_names(tool: Tool) -> (&'static str, &'static str) {
         Tool::VLine => ("Vertical line", "vertical lines"),
         Tool::Note => ("Text", "text"),
         Tool::Measure => ("Measure", "measures"),
+        Tool::Brush => ("Brush", "brushes"),
+        Tool::Arrow => ("Arrow", "arrows"),
     }
 }
 
@@ -446,6 +452,7 @@ impl StyleEditor {
             extend_left: l.then_some(s.extend_left),
             extend_right: r.then_some(s.extend_right),
             axis_tag: tool.has_axis_tag().then_some(s.axis_tag),
+            arrow_end: tool.has_arrowhead().then_some(s.arrow_end),
             label_price: None,
         };
         e.default_label = Some(format!("Save as default for {plural}"));
@@ -478,6 +485,7 @@ impl StyleEditor {
         s.extend_left = o.extend_left.unwrap_or(s.extend_left);
         s.extend_right = o.extend_right.unwrap_or(s.extend_right);
         s.axis_tag = o.axis_tag.unwrap_or(s.axis_tag);
+        s.arrow_end = o.arrow_end.unwrap_or(s.arrow_end);
         s.normalised()
     }
 
@@ -495,6 +503,7 @@ impl StyleEditor {
         o.extend_left = o.extend_left.map(|_| s.extend_left);
         o.extend_right = o.extend_right.map(|_| s.extend_right);
         o.axis_tag = o.axis_tag.map(|_| s.axis_tag);
+        o.arrow_end = o.arrow_end.map(|_| s.arrow_end);
     }
 
     // ---- rows -----------------------------------------------------------------------------
@@ -667,6 +676,15 @@ impl StyleEditor {
                 rows.push(Row {
                     label: "Price tag",
                     controls: vec![(Control::AxisTag, on)],
+                });
+            }
+            if let Some(on) = o.arrow_end {
+                rows.push(Row {
+                    label: "Arrowhead",
+                    controls: vec![
+                        (Control::Arrowhead(false), !on),
+                        (Control::Arrowhead(true), on),
+                    ],
                 });
             }
             if let Some(on) = o.label_price {
@@ -1029,6 +1047,13 @@ impl StyleEditor {
             Control::ExtendLeft => flip(&mut self.options.extend_left),
             Control::ExtendRight => flip(&mut self.options.extend_right),
             Control::AxisTag => flip(&mut self.options.axis_tag),
+            Control::Arrowhead(v) => match &mut self.options.arrow_end {
+                Some(on) if *on != v => {
+                    *on = v;
+                    true
+                }
+                _ => false,
+            },
             Control::Shown => match self.parts.get_mut(tab) {
                 Some(p) => flip(&mut p.shown),
                 None => false,
@@ -1286,6 +1311,8 @@ pub fn control_label(c: Control, names: &[&'static str]) -> String {
         Control::ExtendLeft => "Left".to_owned(),
         Control::ExtendRight => "Right".to_owned(),
         Control::AxisTag => "On the price axis".to_owned(),
+        Control::Arrowhead(false) => "None".to_owned(),
+        Control::Arrowhead(true) => "End".to_owned(),
         Control::Shown => "Drawn on the chart".to_owned(),
         Control::SaveDefault => "Save as default".to_owned(),
     }

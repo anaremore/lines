@@ -46,7 +46,23 @@ fn tabs_follow_the_tool() {
     };
     assert_eq!(
         rows(Tool::Trend),
-        ["Color", "Line", "Width", "Opacity", "Extend", ""]
+        [
+            "Color",
+            "Line",
+            "Width",
+            "Opacity",
+            "Extend",
+            "Arrowhead",
+            ""
+        ]
+    );
+    assert_eq!(
+        rows(Tool::Brush),
+        ["Color", "Line", "Width", "Opacity", "Arrowhead", ""]
+    );
+    assert_eq!(
+        rows(Tool::Arrow),
+        ["Color", "Line", "Width", "Opacity", "Arrowhead", ""]
     );
     assert_eq!(
         rows(Tool::HLine),

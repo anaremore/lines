@@ -8678,7 +8678,9 @@ impl ChartView {
         let text = if d.confirm_clear {
             clear_drawings_question(d.count(), self.instrument.symbol)
         } else if let Some(tool) = d.tool() {
-            let how = if tool.anchors() == 2 {
+            let how = if tool == Tool::Brush {
+                "press and drag to draw"
+            } else if tool.anchors() == 2 {
                 "click two points (or drag)"
             } else {
                 "click to place"
@@ -9945,7 +9947,7 @@ fn editor_key(k: &gpui::Keystroke) -> EditorKey {
 /// Each tool's style for new drawings from the settings ("Save as default for ..."; tools
 /// without one: the default style). No settings global (tests): all defaults.
 fn saved_tool_styles(cx: &App) -> crate::chart_draw::ToolStyles {
-    let mut out = [lines_core::drawings::Style::DEFAULT; Tool::ALL.len()];
+    let mut out = crate::chart_draw::tool_defaults();
     if cx.has_global::<crate::picker_view::AppSettings>() {
         let saved = &crate::picker_view::settings(cx).drawing_styles;
         for (i, tool) in Tool::ALL.iter().enumerate() {
@@ -11112,6 +11114,7 @@ mod tests {
             handles: [p0, p1],
             n_handles: 2,
             prices: [Price(0); 2],
+            pts: (0, 0),
         };
         let plot = (1000.0, 600.0);
         // Drawn right to left or left to right: the label starts at the left end.

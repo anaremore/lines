@@ -693,8 +693,8 @@ fn tick_bar_updates_do_not_allocate() {
 #[test]
 fn drawings_do_not_allocate() {
     use lines_core::drawings::{
-        Anchor, Drawing, MeasureParts, Style, TimeAxis, Tool, measure, pick, project, snap_anchor,
-        write_measure,
+        Anchor, Drawing, MeasureParts, Style, TimeAxis, Tool, measure, pick, project,
+        project_points, snap_anchor, write_measure,
     };
     use lines_core::instrument::Ratio;
     use lines_core::{BarsView, Derived, Timeframe};
@@ -742,6 +742,20 @@ fn drawings_do_not_allocate() {
     vp.set_size(1200.0, 700.0);
     vp.price_lo = 599_000.0;
     vp.price_hi = 602_000.0;
+    // Brush strokes: their points projected into one reserved buffer, hit along them.
+    let mut drawings = drawings;
+    for k in 0..4i64 {
+        let points: Vec<Anchor> = (0..200i64)
+            .map(|j| Anchor {
+                time: UtcMillis((k * 30 + j) * 60_000),
+                price: Price(600_000 + ((j * 37) % 40) * 25),
+            })
+            .collect();
+        let mut d = Drawing::stroke(points, Style::for_tool(Tool::Brush)).unwrap();
+        d.id = 1_000 + k as u64;
+        drawings.push(d);
+    }
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(4 * 200);
     let mut drawn = Vec::with_capacity(drawings.len());
     let n = allocs_during(|| {
         for frame in 0..300 {
@@ -751,8 +765,12 @@ fn drawings_do_not_allocate() {
             vp.right_index = view.len() as f64 - 1.0 - (frame % 50) as f64;
             vp.bar_px = [3.0, 7.0][frame % 2];
             drawn.clear();
+            pts.clear();
             for d in &drawings {
-                if let Some(p) = project(d, &axis, &vp) {
+                if let Some(mut p) = project(d, &axis, &vp) {
+                    if d.tool == Tool::Brush {
+                        p.pts = project_points(d, &axis, &vp, &mut pts);
+                    }
                     drawn.push(p);
                 }
             }
@@ -763,7 +781,7 @@ fn drawings_do_not_allocate() {
             }
             std::hint::black_box(pieces);
             let (x, y) = ((frame * 4) as f32, (frame * 2) as f32);
-            let _ = pick(&drawn, Some(3), x, y, 4.0, 5.0);
+            let _ = pick(&drawn, &pts, Some(3), x, y, 4.0, 5.0);
             let a = snap_anchor(&axis, &vp, 25, frame % 3 == 0, x as f64, y as f64);
             if let Some(a) = a {
                 let m = measure(drawings[0].a, a, &axis, &fmt, Ratio::new(50, 1));

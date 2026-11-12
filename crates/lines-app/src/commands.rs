@@ -327,7 +327,7 @@ pub enum DrawCmd {
 }
 
 impl DrawCmd {
-    pub const ALL: [DrawCmd; 18] = [
+    pub const ALL: [DrawCmd; 20] = [
         DrawCmd::Tool(Tool::HLine),
         DrawCmd::Tool(Tool::HRay),
         DrawCmd::Tool(Tool::Trend),
@@ -336,6 +336,8 @@ impl DrawCmd {
         DrawCmd::Tool(Tool::VLine),
         DrawCmd::Tool(Tool::Note),
         DrawCmd::Tool(Tool::Measure),
+        DrawCmd::Tool(Tool::Brush),
+        DrawCmd::Tool(Tool::Arrow),
         DrawCmd::PinMeasure,
         DrawCmd::Undo,
         DrawCmd::Redo,
@@ -578,6 +580,21 @@ pub const BINDINGS: &[Binding] = &[
         "u",
     ),
     // Alt+S: the selected drawing's style editor.
+    // Alt+P: the brush ("pen"; Alt+B stays the profile's); Alt+A: the arrow.
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::Brush)),
+        false,
+        false,
+        true,
+        "p",
+    ),
+    b(
+        Command::Draw(DrawCmd::Tool(Tool::Arrow)),
+        false,
+        false,
+        true,
+        "a",
+    ),
     b(Command::Draw(DrawCmd::Style), false, false, true, "s"),
     b(Command::Draw(DrawCmd::Undo), true, false, false, "z"),
     b(Command::Draw(DrawCmd::Redo), true, false, false, "y"),
@@ -1452,6 +1469,14 @@ mod tests {
             Some(Command::Draw(DrawCmd::Tool(Tool::VLine)))
         );
         assert_eq!(cmd("alt-n"), Some(Command::Draw(DrawCmd::Tool(Tool::Note))));
+        assert_eq!(
+            cmd("alt-p"),
+            Some(Command::Draw(DrawCmd::Tool(Tool::Brush)))
+        );
+        assert_eq!(
+            cmd("alt-a"),
+            Some(Command::Draw(DrawCmd::Tool(Tool::Arrow)))
+        );
         assert_eq!(cmd("alt-s"), Some(Command::Draw(DrawCmd::Style)));
         assert_eq!(
             cmd("alt-u"),

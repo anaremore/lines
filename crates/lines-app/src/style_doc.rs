@@ -104,6 +104,10 @@ pub struct StyleDoc {
     pub extend_right: bool,
     #[serde(default, skip_serializing_if = "not")]
     pub axis_tag: bool,
+    /// An arrowhead at the end (trend lines, arrows, brush strokes). Optional: absent is none,
+    /// so an arrow (head on by default) writes it.
+    #[serde(default, skip_serializing_if = "not")]
+    pub arrow_end: bool,
 }
 
 impl Default for StyleDoc {
@@ -144,6 +148,7 @@ impl StyleDoc {
             extend_left: s.extend_left,
             extend_right: s.extend_right,
             axis_tag: s.axis_tag,
+            arrow_end: s.arrow_end,
         }
     }
 
@@ -191,6 +196,7 @@ impl StyleDoc {
             extend_left: self.extend_left,
             extend_right: self.extend_right,
             axis_tag: self.axis_tag,
+            arrow_end: self.arrow_end,
         }
         .normalised()
     }
@@ -302,8 +308,10 @@ mod tests {
             extend_left: true,
             extend_right: true,
             axis_tag: true,
+            arrow_end: true,
         };
         let doc = StyleDoc::from_style(&s);
+        assert!(doc.arrow_end, "the arrowhead is written");
         // Older builds still see a dashed line in palette color 0.
         assert!(doc.dashed);
         assert_eq!(doc.color, 0);

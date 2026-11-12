@@ -1060,3 +1060,180 @@ fn delete_acts_only_on_a_shown_selection() {
     assert!(r.items().is_empty());
     assert!(!r.d.can_delete(), "nothing selected now");
 }
+
+/// The brush: press, drag and release draws one stroke, kept smoothed and simplified as times
+/// and prices (each point back on its pixel, its price on the tick grid, at most 512 points),
+/// selected, one undo step, the tool done; a click draws nothing; Esc mid-stroke drops it.
+#[test]
+fn the_brush_draws_a_stroke_in_data_space() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Brush);
+    assert!(r.down(100.0, 100.0));
+    // Down to a level, then up: one frame per pointer move.
+    let path: Vec<(f32, f32)> = (1..=300)
+        .map(|k| {
+            let x = 100.0 + k as f32;
+            let y = if k <= 150 {
+                100.0 + k as f32
+            } else {
+                250.0 - (k - 150) as f32 * 1.5
+            };
+            (x, y)
+        })
+        .collect();
+    for &(x, y) in &path {
+        r.frame(x, y);
+    }
+    let end = *path.last().unwrap();
+    assert!(r.up(end.0, end.1));
+    r.frame(end.0, end.1); // the stroke is kept on the next frame
+    let items = r.items();
+    assert_eq!(items.len(), 1);
+    let d = &items[0];
+    assert_eq!(d.tool, Tool::Brush);
+    assert!(
+        d.points.len() >= 3 && d.points.len() <= MAX_STROKE,
+        "{}",
+        d.points.len()
+    );
+    assert!(d.points.len() < 100, "simplified: {}", d.points.len());
+    assert!(d.on_grid(25));
+    assert_eq!((d.a, d.b), (d.points[0], *d.points.last().unwrap()));
+    assert_eq!(r.d.tool(), None);
+    assert_eq!(r.d.selected, Some(d.id));
+    // Back on screen: the first point where the press was, the last where it ended (within a
+    // pixel and a tick's height).
+    let axis = TimeAxis::new(BarsView::fixed(&r.bars, M));
+    let x0 = axis.x_of(&r.vp, d.points[0].time).unwrap();
+    let xn = axis.x_of(&r.vp, d.b.time).unwrap();
+    assert!(
+        (x0 - 100.0).abs() < 0.6 && (xn - end.0).abs() < 0.6,
+        "{x0} {xn}"
+    );
+    // Drawn: its points projected, and the stroke hit along itself only.
+    let p = r.d.drawn()[0];
+    assert_eq!((p.pts.1 - p.pts.0) as usize, d.points.len());
+    assert!(r.d.hit_at(175.0, 175.0).is_some(), "on the stroke");
+    assert!(
+        r.d.hit_at(250.0, 120.0).is_none(),
+        "inside its box, off the stroke"
+    );
+    // One undo step.
+    assert!(r.d.undo());
+    assert!(r.items().is_empty());
+    // A click draws nothing and leaves the brush chosen; Esc mid-stroke drops the stroke, the
+    // brush stays chosen too.
+    r.d.set_tool(Tool::Brush);
+    r.down(300.0, 200.0);
+    r.up(300.0, 200.0);
+    r.frame(300.0, 200.0);
+    assert!(r.items().is_empty());
+    assert_eq!(r.d.tool(), Some(Tool::Brush));
+    r.down(300.0, 200.0);
+    r.frame(340.0, 230.0);
+    assert!(r.d.cancel());
+    r.frame(360.0, 240.0);
+    assert!(r.items().is_empty());
+    assert_eq!(r.d.tool(), Some(Tool::Brush));
+}
+
+/// A brush stroke moves whole (every point by the same bars and ticks), and the arrow draws by
+/// two clicks with its head on.
+#[test]
+fn a_stroke_moves_whole_and_the_arrow_has_its_head() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Brush);
+    r.down(100.0, 100.0);
+    for k in 1..=60 {
+        r.frame(
+            100.0 + k as f32 * 2.0,
+            100.0 + (k as f32 * 0.2).sin() * 30.0,
+        );
+    }
+    r.up(220.0, 100.0);
+    r.frame(220.0, 100.0);
+    let before = r.items()[0].clone();
+    // Selected: drag it by its first point 30 px right and 40 px down.
+    let (x0, y0) = r.d.drawn()[0].handles[0];
+    assert!(r.down(x0, y0));
+    r.frame(x0 + 30.0, y0 + 40.0);
+    assert!(r.up(x0 + 30.0, y0 + 40.0));
+    let after = r.items()[0].clone();
+    assert_eq!(after.points.len(), before.points.len());
+    let dp = after.points[0].price.0 - before.points[0].price.0;
+    assert!(dp != 0);
+    assert!(
+        before
+            .points
+            .iter()
+            .zip(&after.points)
+            .all(|(b, a)| a.price.0 - b.price.0 == dp)
+    );
+    // The arrow: two clicks, head on.
+    r.d.selected = None;
+    r.d.set_tool(Tool::Arrow);
+    r.down(400.0, 300.0);
+    r.up(400.0, 300.0);
+    r.down(500.0, 200.0);
+    let arrow = r
+        .items()
+        .into_iter()
+        .find(|d| d.tool == Tool::Arrow)
+        .unwrap();
+    assert!(arrow.style.arrow_end);
+}
+
+/// A stroke is kept where it was drawn even when the view moves mid-stroke (a live bar, a
+/// fit): each sample goes to data space on the frame it arrived. Samples off the plot (a lower
+/// pane, the axes) and an off-plot release add nothing; a release the chart never saw keeps
+/// the stroke as drawn.
+#[test]
+fn a_stroke_stays_where_it_was_drawn() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Brush);
+    r.down(100.0, 100.0);
+    for k in 1..=40 {
+        r.frame(100.0 + k as f32 * 2.0, 100.0 + k as f32);
+    }
+    // Where the first half was drawn, in data space.
+    let axis = TimeAxis::new(BarsView::fixed(&r.bars, M));
+    let t40 = axis.time_at(r.vp.x_to_index(180.0)).unwrap();
+    // The view scrolls two bars and the price range shifts mid-stroke.
+    r.vp.right_index -= 2.0;
+    r.vp.price_lo += 100.0;
+    r.vp.price_hi += 100.0;
+    for k in 41..=80 {
+        r.frame(100.0 + k as f32 * 2.0, 100.0 + k as f32);
+    }
+    // A move below the plot (a lower pane): no point there; the release there neither.
+    r.frame(260.0, 900.0);
+    let below = r.d.on_up(260.0, 900.0, None);
+    assert!(below);
+    r.frame(260.0, 900.0);
+    let d = r.items().pop().unwrap();
+    let axis = TimeAxis::new(BarsView::fixed(&r.bars, M));
+    // The first half kept its times (the point near x=180 then is still at t40's minute).
+    assert!(
+        d.points.iter().any(|p| (p.time.0 - t40.0).abs() < 2 * M),
+        "the early part stayed on its bars"
+    );
+    // Nothing below the plot: every price inside the visible range then.
+    assert!(
+        d.points
+            .iter()
+            .all(|p| p.price.0 >= 599_000 && p.price.0 <= 601_100)
+    );
+    assert!(d.points.iter().all(|p| axis.x_of(&r.vp, p.time).is_some()));
+    // A lost release keeps the stroke as drawn.
+    r.d.set_tool(Tool::Brush);
+    r.down(300.0, 150.0);
+    for k in 1..=20 {
+        r.frame(300.0 + k as f32 * 3.0, 150.0 + k as f32 * 2.0);
+    }
+    assert!(r.d.release_lost());
+    r.frame(360.0, 190.0);
+    assert_eq!(
+        r.items().iter().filter(|d| d.tool == Tool::Brush).count(),
+        2
+    );
+}

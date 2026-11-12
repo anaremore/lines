@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use gpui::{App, Global};
-use lines_core::drawings::{Anchor, Drawing, DrawingId, DrawingSet, Tool};
+use lines_core::drawings::{Anchor, Drawing, DrawingId, DrawingSet, MAX_STROKE, Tool};
 use lines_core::{Price, Product, ProductId, UtcMillis};
 use serde::{Deserialize, Serialize};
 
@@ -71,12 +71,16 @@ pub struct AnchorDoc {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DrawingDoc {
     pub id: u64,
-    /// `hline`, `hray`, `trend`, `ray`, `rect`, `vline`, `note`, `measure`.
+    /// `hline`, `hray`, `trend`, `ray`, `rect`, `vline`, `note`, `measure`, `brush`, `arrow`.
     pub tool: String,
     pub a: AnchorDoc,
     /// The second anchor (two-anchor tools only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub b: Option<AnchorDoc>,
+    /// A brush stroke's points in order (`a` and `b` are its first and last). Optional: other
+    /// tools write none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub points: Vec<AnchorDoc>,
     /// Color, line, fill, text and options (all optional).
     #[serde(flatten)]
     pub style: StyleDoc,
@@ -121,6 +125,7 @@ impl DrawingsFile {
                     tool: d.tool.key().to_owned(),
                     a: anchor_doc(d.a),
                     b: (d.tool.anchors() == 2).then(|| anchor_doc(d.b)),
+                    points: d.points.iter().map(|&p| anchor_doc(p)).collect(),
                     style: StyleDoc::from_style(&d.style),
                     text: d.text.clone(),
                     extra: extras.get(&d.id).cloned().unwrap_or_default(),
@@ -161,7 +166,22 @@ impl DrawingsFile {
                     _ => a,
                 };
                 let style = doc.style.to_style();
-                let mut d = Drawing::new(tool, a, b, style);
+                let mut d = if tool == Tool::Brush {
+                    if doc.points.len() > MAX_STROKE {
+                        return Err(format!(
+                            "{} points (at most {MAX_STROKE})",
+                            doc.points.len()
+                        ));
+                    }
+                    let points = doc
+                        .points
+                        .iter()
+                        .map(|p| anchor(p, tick))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    Drawing::stroke(points, style).ok_or("a stroke needs two points")?
+                } else {
+                    Drawing::new(tool, a, b, style)
+                };
                 d.id = doc.id;
                 if tool == Tool::Note {
                     d.text = doc.text.chars().take(MAX_NOTE).collect();

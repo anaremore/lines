@@ -158,25 +158,25 @@ fn hit_testing_lines_zones_and_handles() {
     let p = project(&d, &axis, &vp).unwrap();
     let mid = ((p.p0.0 + p.p1.0) / 2.0, (p.p0.1 + p.p1.1) / 2.0);
     assert_eq!(
-        hit(&p, mid.0, mid.1 + 3.0, 4.0, false, 5.0),
+        hit(&p, &[], mid.0, mid.1 + 3.0, 4.0, false, 5.0),
         Some(Hit::Body)
     );
-    assert_eq!(hit(&p, mid.0, mid.1 + 30.0, 4.0, false, 5.0), None);
+    assert_eq!(hit(&p, &[], mid.0, mid.1 + 30.0, 4.0, false, 5.0), None);
     // Handles only when selected.
     assert_eq!(
-        hit(&p, p.p0.0 + 2.0, p.p0.1, 4.0, false, 5.0),
+        hit(&p, &[], p.p0.0 + 2.0, p.p0.1, 4.0, false, 5.0),
         Some(Hit::Body)
     );
     assert_eq!(
-        hit(&p, p.p0.0 + 2.0, p.p0.1, 4.0, true, 5.0),
+        hit(&p, &[], p.p0.0 + 2.0, p.p0.1, 4.0, true, 5.0),
         Some(Hit::Handle(0))
     );
     assert_eq!(
-        hit(&p, p.p1.0, p.p1.1 - 4.0, 4.0, true, 5.0),
+        hit(&p, &[], p.p1.0, p.p1.1 - 4.0, 4.0, true, 5.0),
         Some(Hit::Handle(1))
     );
     // A segment ends at its anchors.
-    assert_eq!(hit(&p, p.p1.0 + 30.0, p.p1.1, 4.0, false, 5.0), None);
+    assert_eq!(hit(&p, &[], p.p1.0 + 30.0, p.p1.1, 4.0, false, 5.0), None);
 
     // A ray goes on to the plot's edge; a zone is hit anywhere inside.
     let ray = Drawing {
@@ -191,7 +191,7 @@ fn hit_testing_lines_zones_and_handles() {
         p.p1.1 + 20.0 * (p.p1.1 - p.p0.1) / (p.p1.0 - p.p0.0),
     );
     assert_eq!(
-        hit(&r, beyond.0, beyond.1, 4.0, false, 5.0),
+        hit(&r, &[], beyond.0, beyond.1, 4.0, false, 5.0),
         Some(Hit::Body)
     );
     let zone = Drawing {
@@ -201,31 +201,31 @@ fn hit_testing_lines_zones_and_handles() {
     };
     let z = project(&zone, &axis, &vp).unwrap();
     // A zone is hit on its edges; inside it the chart keeps panning.
-    assert_eq!(hit(&z, mid.0, mid.1 - 20.0, 4.0, false, 5.0), None);
+    assert_eq!(hit(&z, &[], mid.0, mid.1 - 20.0, 4.0, false, 5.0), None);
     assert_eq!(
-        hit(&z, z.p0.0 + 2.0, mid.1, 4.0, false, 5.0),
+        hit(&z, &[], z.p0.0 + 2.0, mid.1, 4.0, false, 5.0),
         Some(Hit::Body)
     );
     assert_eq!(
-        hit(&z, mid.0, z.p1.1 - 1.0, 4.0, false, 5.0),
+        hit(&z, &[], mid.0, z.p1.1 - 1.0, 4.0, false, 5.0),
         Some(Hit::Body)
     );
 
     // `pick`: the selected drawing's handles, then the top-most (last drawn) body.
     let drawn = [p, z];
     assert_eq!(
-        pick(&drawn, None, z.p0.0, z.p0.1 - 30.0, 4.0, 5.0),
+        pick(&drawn, &[], None, z.p0.0, z.p0.1 - 30.0, 4.0, 5.0),
         Some((9, Hit::Body))
     );
     assert_eq!(
-        pick(&drawn, None, mid.0, mid.1, 4.0, 5.0),
+        pick(&drawn, &[], None, mid.0, mid.1, 4.0, 5.0),
         Some((7, Hit::Body))
     );
     assert_eq!(
-        pick(&drawn, Some(7), p.p0.0, p.p0.1, 4.0, 5.0),
+        pick(&drawn, &[], Some(7), p.p0.0, p.p0.1, 4.0, 5.0),
         Some((7, Hit::Handle(0)))
     );
-    assert_eq!(pick(&drawn, None, 5.0, 5.0, 4.0, 5.0), None);
+    assert_eq!(pick(&drawn, &[], None, 5.0, 5.0, 4.0, 5.0), None);
 }
 
 #[test]
@@ -530,4 +530,179 @@ fn tool_capabilities() {
     assert_eq!(Tool::Ray.extends(), (true, false));
     assert_eq!(Tool::VLine.extends(), (false, false));
     assert!(Tool::HLine.has_axis_tag() && !Tool::Trend.has_axis_tag());
+}
+
+/// A brush point goes to data space and back: time through the bars' axis (inside a bar's
+/// bucket by the fraction elapsed, beyond the bars by whole periods) and x again within a
+/// hair, on any timeframe; [`TimeAxis::time_at`] is `index_of`'s inverse.
+#[test]
+fn stroke_points_round_trip_through_data_space() {
+    let s = series();
+    let axis = TimeAxis::new(BarsView::fixed(s.bars(), M));
+    let vp = vp();
+    for x in [3.0f32, 101.5, 400.25, 713.0, 799.0] {
+        let i = vp.x_to_index(f64::from(x));
+        let t = axis.time_at(i).unwrap();
+        let back = axis.x_of(&vp, t).unwrap();
+        assert!((back - x).abs() < 0.05, "{x} -> {t:?} -> {back}");
+    }
+    // Beyond the newest bar and before the first: by whole periods.
+    for i in [-3.5, 125.25] {
+        let t = axis.time_at(i).unwrap();
+        assert!((axis.index_of(t).unwrap() - i).abs() < 1e-3, "{i}");
+    }
+    // A stroke drawn on 1-minute bars stays on its minutes on a 5-minute chart.
+    let pts: Vec<Anchor> = [(10.25, 600_100), (20.5, 600_300), (31.75, 600_050)]
+        .iter()
+        .map(|&(i, p)| Anchor {
+            time: axis.time_at(i).unwrap(),
+            price: Price(p),
+        })
+        .collect();
+    let d = Drawing::stroke(pts.clone(), Style::for_tool(Tool::Brush)).unwrap();
+    assert_eq!((d.a, d.b), (pts[0], pts[2]));
+    let mut five = Derived::new(Timeframe::Minutes(5), s.capacity());
+    five.update(&s, None);
+    let axis5 = TimeAxis::new(five.view());
+    for p in &pts {
+        let i5 = axis5.index_of(p.time).unwrap();
+        assert_eq!(axis5.time_at(i5).unwrap(), p.time, "the same minute back");
+    }
+    // Projected: every point, in order, into the frame's buffer.
+    let mut buf = Vec::with_capacity(16);
+    let r = project_points(&d, &axis, &vp, &mut buf);
+    assert_eq!(r, (0, 3));
+    assert!(buf.windows(2).all(|w| w[0].0 < w[1].0));
+}
+
+/// Smoothing then simplification keeps the ends, keeps every smoothed point within the
+/// tolerance of the result (here a quarter circle, sampled densely), drops a straight run to
+/// its ends, and caps the count however wiggly the stroke.
+#[test]
+fn stroke_simplification_bounds_and_cap() {
+    let arc: Vec<(f32, f32)> = (0..=400)
+        .map(|k| {
+            let a = k as f32 / 400.0 * std::f32::consts::FRAC_PI_2;
+            (200.0 * a.cos(), 200.0 * a.sin())
+        })
+        .collect();
+    let s = simplify_stroke(&arc, 1.0, MAX_STROKE);
+    assert_eq!(s.first(), arc.first());
+    assert_eq!(s.last(), arc.last());
+    assert!(s.len() < arc.len() / 4, "{} points", s.len());
+    // Every raw point is near the result (smoothing moves points by under a pixel here).
+    for p in &arc {
+        let d = s
+            .windows(2)
+            .map(|w| segment_distance(*p, w[0], w[1]))
+            .fold(f32::INFINITY, f32::min);
+        assert!(d <= 1.5, "{p:?} is {d} px off");
+    }
+    // A straight run: its two ends.
+    let line: Vec<(f32, f32)> = (0..100).map(|k| (k as f32, 2.0 * k as f32)).collect();
+    assert_eq!(simplify_stroke(&line, 1.0, MAX_STROKE).len(), 2);
+    // A zigzag that keeps every point at 1 px: capped.
+    let zig: Vec<(f32, f32)> = (0..5000)
+        .map(|k| (k as f32 * 3.0, if k % 2 == 0 { 0.0 } else { 40.0 }))
+        .collect();
+    let z = simplify_stroke(&zig, 1.0, MAX_STROKE);
+    assert!(z.len() <= MAX_STROKE && z.len() >= 2, "{}", z.len());
+    assert_eq!((z[0], *z.last().unwrap()), (zig[0], *zig.last().unwrap()));
+    // A press that didn't move.
+    assert_eq!(
+        simplify_stroke(&[(5.0, 5.0); 3], 1.0, MAX_STROKE),
+        vec![(5.0, 5.0)]
+    );
+}
+
+/// A thin stroke is hit along its segments within the tolerance, not across its bounding
+/// box; its handles (when selected) move it; arrows and trend lines hit as segments.
+#[test]
+fn hit_testing_a_thin_stroke() {
+    let s = series();
+    let axis = TimeAxis::new(BarsView::fixed(s.bars(), M));
+    let vp = vp();
+    let a = |i: f64, p: i64| Anchor {
+        time: axis.time_at(i).unwrap(),
+        price: Price(p),
+    };
+    // A V: down then up.
+    let mut d = Drawing::stroke(
+        vec![a(40.0, 600_600), a(60.0, 599_400), a(80.0, 600_600)],
+        Style::for_tool(Tool::Brush),
+    )
+    .unwrap();
+    d.id = 3;
+    let mut buf = Vec::with_capacity(16);
+    let mut p = project(&d, &axis, &vp).unwrap();
+    p.pts = project_points(&d, &axis, &vp, &mut buf);
+    let (x0, y0) = buf[0];
+    let (x1, y1) = buf[1];
+    let mid = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+    assert_eq!(
+        hit(&p, &buf, mid.0 + 2.0, mid.1, 4.0, false, 5.0),
+        Some(Hit::Body)
+    );
+    // Inside the V's box but far from both strokes: nothing (the chart pans).
+    assert_eq!(hit(&p, &buf, x1, y0 + 10.0, 4.0, false, 5.0), None);
+    // Selected, a press on its first point moves it whole.
+    assert_eq!(hit(&p, &buf, x0, y0, 4.0, true, 5.0), Some(Hit::Body));
+    let drawn = [p];
+    assert_eq!(
+        pick(&drawn, &buf, Some(3), x0, y0, 4.0, 5.0),
+        Some((3, Hit::Body))
+    );
+    assert_eq!(pick(&drawn, &buf, None, x1, y0 + 10.0, 4.0, 5.0), None);
+    // An arrow: a segment, its head on by default.
+    let arrow = Drawing::new(
+        Tool::Arrow,
+        a(10.0, 599_500),
+        a(30.0, 600_500),
+        Style::for_tool(Tool::Arrow),
+    );
+    assert!(arrow.style.arrow_end && !Style::for_tool(Tool::Trend).arrow_end);
+    let q = project(&arrow, &axis, &vp).unwrap();
+    let m = ((q.p0.0 + q.p1.0) / 2.0, (q.p0.1 + q.p1.1) / 2.0);
+    assert_eq!(hit(&q, &[], m.0, m.1, 4.0, false, 5.0), Some(Hit::Body));
+    assert!(
+        Tool::Arrow.has_arrowhead() && Tool::Brush.has_arrowhead() && Tool::Trend.has_arrowhead()
+    );
+    assert!(!Tool::Ray.has_arrowhead());
+}
+
+/// `time_at` inverts `index_of` on a view whose buckets aren't all one period: the newest
+/// bucket cut short (a session's close) and a gap between buckets.
+#[test]
+fn time_at_inverts_a_cut_short_last_bucket() {
+    let h = 3_600_000i64;
+    let base = t("2026-11-05T14:00:00Z").0;
+    let bar = |k: i64| Bar {
+        time: UtcMillis(base + k * 4 * h),
+        open: Price(600_000),
+        high: Price(600_100),
+        low: Price(599_900),
+        close: Price(600_000),
+        volume: Qty(1),
+    };
+    let bars = [bar(0), bar(1), bar(2)];
+    // 4h buckets; the last cut to one hour.
+    let ends = [
+        UtcMillis(base + 4 * h),
+        UtcMillis(base + 8 * h),
+        UtcMillis(base + 9 * h),
+    ];
+    let view = BarsView {
+        bars: &bars,
+        ends: Some(&ends),
+        period_ms: 4 * h,
+        trades: None,
+    };
+    let axis = TimeAxis::new(view);
+    for i in [0.25, 1.5, 2.2, 2.9, 3.5, -0.5] {
+        let t = axis.time_at(i).unwrap();
+        let back = axis.index_of(t).unwrap();
+        assert!((back - i).abs() < 1e-6, "{i} -> {t:?} -> {back}");
+    }
+    // Inside the cut-short bucket: by its own length (0.2 of an hour = 12 minutes).
+    assert_eq!(axis.time_at(2.2).unwrap().0, base + 8 * h + 12 * 60_000);
 }

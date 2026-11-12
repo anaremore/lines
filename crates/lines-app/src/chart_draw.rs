@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use gpui::{Bounds, Hsla, PathBuilder, Pixels, Window, fill, point, px, size};
 use lines_core::drawings::{
-    Anchor, Drawing, DrawingId, Hit, MeasureStats, Projected, Style, TimeAxis, Tool, measure, pick,
-    project, snap_anchor,
+    Anchor, Drawing, DrawingId, Hit, MAX_STROKE, MeasureStats, Projected, Style, TimeAxis, Tool,
+    grid_price, measure, pick, project, project_points, simplify_stroke, snap_anchor,
 };
 use lines_core::instrument::Ratio;
 use lines_core::style::DashPattern;
@@ -56,6 +56,16 @@ pub const HIT_TOL: f32 = 5.0;
 pub const HANDLE_R: f32 = 5.0;
 /// A press that moves less than this is a click (two-anchor tools: click, click).
 const CLICK_SLOP: f32 = 4.0;
+/// A brush stroke's simplification tolerance (logical px at draw time).
+const STROKE_EPS: f32 = 1.0;
+/// Raw points a brush stroke records while drawn (one per frame the pointer moved).
+const STROKE_RAW: usize = 8192;
+
+/// Each tool's style for new drawings before any saved default (`Style::for_tool`: an arrow's
+/// head on).
+pub fn tool_defaults() -> ToolStyles {
+    Tool::ALL.map(Style::for_tool)
+}
 
 /// What a press on a drawing started.
 #[derive(Clone, Debug)]
@@ -101,6 +111,8 @@ pub struct ChartDrawings {
     measure_drag: Option<MeasureDrag>,
     /// A note being typed at an anchor.
     note: Option<(Anchor, String)>,
+    /// A brush stroke being drawn.
+    stroke: Option<Stroke>,
     /// Each tool's style for new drawings (the saved defaults; the restyle keys change them
     /// for this session when nothing is selected).
     pub defaults: ToolStyles,
@@ -115,6 +127,8 @@ pub struct ChartDrawings {
     pointer: Option<(f32, f32)>,
     // ---- this frame (prepare → paint) ----
     drawn: Vec<Projected>,
+    /// Brush strokes' projected points (`Projected::pts` index it; grows only with them).
+    pts: Vec<(f32, f32)>,
     /// Note texts, by drawn index (copied once per change, not per frame).
     notes: Vec<(DrawingId, String)>,
     preview: Option<Projected>,
@@ -140,12 +154,14 @@ impl ChartDrawings {
             quick_at: None,
             measure_drag: None,
             note: None,
-            defaults: [Style::DEFAULT; Tool::ALL.len()],
+            stroke: None,
+            defaults: tool_defaults(),
             editor: None,
             restyled: None,
             confirm_clear: false,
             pointer: None,
             drawn: Vec::with_capacity(64),
+            pts: Vec::new(),
             notes: Vec::new(),
             preview: None,
             pinned: Vec::with_capacity(8),
@@ -197,7 +213,8 @@ impl ChartDrawings {
         self.typing()
             || match key {
                 "escape" => {
-                    self.tool.is_some()
+                    self.stroke.is_some()
+                        || self.tool.is_some()
                         || self.pending.is_some()
                         || self.measure_drag.is_some()
                         || self.measure.is_some()
@@ -220,6 +237,7 @@ impl ChartDrawings {
         self.measure_drag = None;
         self.pending = None;
         self.note = None;
+        self.stroke = None;
         self.measure = None;
         self.tool = (self.tool != Some(tool)).then_some(tool);
         if self.tool.is_some() {
@@ -235,6 +253,7 @@ impl ChartDrawings {
             self.tool = None;
             self.pending = None;
             self.note = None;
+            self.stroke = None;
             self.measure = None;
             self.measure_drag = None;
             self.selected = None;
@@ -256,7 +275,16 @@ impl ChartDrawings {
         if self.hidden {
             return None;
         }
-        pick(&self.drawn, self.selected, x, y, HIT_TOL, HANDLE_R).map(|(id, _)| id)
+        pick(
+            &self.drawn,
+            &self.pts,
+            self.selected,
+            x,
+            y,
+            HIT_TOL,
+            HANDLE_R,
+        )
+        .map(|(id, _)| id)
     }
 
     /// A double click at plot-local (`x`, `y`): the drawing whose style editor it opens. Never
@@ -503,6 +531,13 @@ impl ChartDrawings {
     /// pointer): a drag in progress is dropped, the drawing stays as it was.
     pub fn release_lost(&mut self) -> bool {
         self.dragged = None;
+        // A brush stroke ends where the pointer last was (kept, as on a release).
+        if let Some(st) = &mut self.stroke
+            && !st.done
+        {
+            st.done = true;
+            return true;
+        }
         // A measure drag ends where it was last drawn.
         let measured = self.measure_drag.take().is_some();
         // A Shift+drag whose release was missed ends where the pointer last was.
@@ -554,6 +589,9 @@ impl ChartDrawings {
 
     /// Esc: cancel the tool, then the measure, then the selection.
     pub fn cancel(&mut self) -> bool {
+        if self.stroke.take().is_some() {
+            return true; // the stroke goes; the brush stays chosen
+        }
         if self.tool.is_some() || self.pending.is_some() || self.note.is_some() {
             self.measure_drag = None;
             self.quick = false;
@@ -580,6 +618,13 @@ impl ChartDrawings {
     /// The pointer this frame (plot-local), or `None` off the plot.
     pub fn set_pointer(&mut self, p: Option<(f32, f32)>) {
         self.pointer = p;
+        // A brush stroke records the pointer each frame it moved (`prepare` keeps only what is
+        // on the plot, in data space).
+        if let (Some(st), Some(at)) = (&mut self.stroke, p)
+            && !st.done
+        {
+            st.sample(at);
+        }
     }
 
     /// Screenshots (`--move-measure`): the measure moved as a drag inside it from `from` to
@@ -643,6 +688,12 @@ impl ChartDrawings {
                 return true; // no bars yet: nothing to anchor to
             };
             match (tool.anchors(), self.pending) {
+                // The brush draws while the button is held (`set_pointer`); the release ends it.
+                _ if tool == Tool::Brush => {
+                    let mut st = Stroke::new();
+                    st.sample((x, y));
+                    self.stroke = Some(st);
+                }
                 (1, _) if tool == Tool::Note => {
                     self.note = Some((at, String::new()));
                     self.tool = None;
@@ -656,7 +707,15 @@ impl ChartDrawings {
             }
             return true;
         }
-        match pick(&self.drawn, self.selected, x, y, HIT_TOL, HANDLE_R) {
+        match pick(
+            &self.drawn,
+            &self.pts,
+            self.selected,
+            x,
+            y,
+            HIT_TOL,
+            HANDLE_R,
+        ) {
             // The selected drawing (a handle or its body) drags.
             Some((id, hit)) if Some(id) == self.selected => {
                 if let (Some(d), Some(from)) = (self.data.lock().get(id).cloned(), anchor) {
@@ -687,6 +746,14 @@ impl ChartDrawings {
 
     /// The press ended at plot-local (`x`, `y`). Returns whether it was the drawings'.
     pub fn on_up(&mut self, x: f32, y: f32, anchor: Option<Anchor>) -> bool {
+        if let Some(st) = &mut self.stroke {
+            // Where it was released, if on the plot (`prepare` drops points off it).
+            if anchor.is_some() {
+                st.sample((x, y));
+            }
+            st.done = true; // kept next frame (`prepare`)
+            return true;
+        }
         if self.quick {
             // The Shift+drag ends here: a measure if it moved (off the plot: where the pointer
             // last was on it); a Shift+click leaves nothing.
@@ -910,13 +977,25 @@ impl ChartDrawings {
             return None;
         }
         let (x, y) = self.pointer?;
-        pick(&self.drawn, self.selected, x, y, HIT_TOL, HANDLE_R).map(|(_, h)| h)
+        pick(
+            &self.drawn,
+            &self.pts,
+            self.selected,
+            x,
+            y,
+            HIT_TOL,
+            HANDLE_R,
+        )
+        .map(|(_, h)| h)
     }
 
     /// Whether drawing mode or a drag owns the pointer (the chart shows a crosshair cursor
     /// and doesn't pan).
     pub fn active(&self) -> bool {
-        self.tool.is_some() || self.drag.is_some() || self.measure_drag.is_some()
+        self.tool.is_some()
+            || self.drag.is_some()
+            || self.measure_drag.is_some()
+            || self.stroke.is_some()
     }
 
     // ---- per frame ------------------------------------------------------------------
@@ -935,12 +1014,46 @@ impl ChartDrawings {
         point_value: Ratio,
     ) {
         self.drawn.clear();
+        self.pts.clear();
         self.pinned.clear();
         self.preview = None;
         self.measure_drawn = None;
         self.note_drawn = None;
         if self.hidden {
             return;
+        }
+        // A brush stroke: each new sample to data space on the frame it arrived (a view that
+        // moves mid-stroke, a live bar or a fit, never shifts what was drawn); once released,
+        // smoothed and simplified on screen and kept as times and prices.
+        let mut kept: Option<Drawing> = None;
+        if let Some(st) = &mut self.stroke {
+            st.follow_view(axis, vp);
+            if st.done {
+                let simple = simplify_stroke(&st.screen, STROKE_EPS, MAX_STROKE);
+                let mut points: Vec<Anchor> = Vec::with_capacity(simple.len());
+                for (x, y) in simple {
+                    let Some(time) = axis.time_at(vp.x_to_index(f64::from(x))) else {
+                        continue;
+                    };
+                    let at = Anchor {
+                        time,
+                        price: grid_price(vp.y_to_price(f64::from(y)), tick),
+                    };
+                    if points.last() != Some(&at) {
+                        points.push(at);
+                    }
+                }
+                kept = Drawing::stroke(points, self.default_style(Tool::Brush));
+                // A click draws nothing and leaves the brush chosen (as Esc, and the other
+                // tools' first click); a stroke ends drawing mode.
+                if kept.is_some() {
+                    self.tool = None;
+                }
+                self.stroke = None;
+            }
+        }
+        if let Some(d) = kept {
+            self.add(d);
         }
         let pointer = self
             .pointer
@@ -953,6 +1066,10 @@ impl ChartDrawings {
         let set = self.data.lock();
         if self.drawn.capacity() < set.items().len() {
             self.drawn.reserve(set.items().len() - self.drawn.len());
+        }
+        let stroke_pts: usize = set.items().iter().map(|d| d.points.len()).sum();
+        if self.pts.capacity() < stroke_pts {
+            self.pts.reserve(stroke_pts - self.pts.len());
         }
         let notes_stale = set
             .items()
@@ -974,7 +1091,10 @@ impl ChartDrawings {
                 (_, Some(x)) if x.id == d.id => x,
                 _ => d,
             };
-            if let Some(p) = project(d, axis, vp) {
+            if let Some(mut p) = project(d, axis, vp) {
+                if d.tool == Tool::Brush {
+                    p.pts = project_points(d, axis, vp, &mut self.pts);
+                }
                 if d.tool == Tool::Measure {
                     // Grows only with the number of pinned measures on screen.
                     self.pinned
@@ -1051,11 +1171,19 @@ impl ChartDrawings {
     /// owns the shaped-text cache and the axis.
     pub fn paint(&self, origin: (f32, f32), hair: f32, t: &Theme, window: &mut Window) {
         for d in self.drawn.iter().chain(self.preview.as_ref()) {
-            paint_shape(d, None, t, origin, hair, window);
+            paint_shape(d, &self.pts, None, t, origin, hair, window);
+        }
+        // A brush stroke being drawn, in the brush's style (not for the eyedropper).
+        if let Some(st) = &self.stroke {
+            let s = self.default_style(Tool::Brush);
+            let color = t.style_color(s.line.color, &t.drawing, s.line.opacity);
+            let width = f32::from(s.line.width).max(hair);
+            let dash = drawing_dash(s.line.line, width);
+            paint_polyline(&st.screen, width, &dash, color, origin, false, window);
         }
         if let Some((m, stats)) = self.measure_drawn {
             let color = if stats.units >= 0 { t.up } else { t.down };
-            paint_shape(&m, Some(color), t, origin, hair, window);
+            paint_shape(&m, &self.pts, Some(color), t, origin, hair, window);
         }
         if let Some(id) = self.selected
             && let Some(d) = self.drawn.iter().find(|d| d.id == id)
@@ -1388,7 +1516,68 @@ fn dragged(drag: &Drag, at: Anchor, axis: &TimeAxis<'_>, tick: i64) -> Drawing {
             } else {
                 d.a
             };
+            for p in &mut d.points {
+                *p = shift(*p);
+            }
             d
+        }
+    }
+}
+
+/// A brush stroke being drawn: the pointer's samples (plot px, one per frame it moved), the
+/// same in data space (time, raw price; converted on the frame each arrived, only those on
+/// the plot), and that again on this frame's screen (the preview, and what is simplified on
+/// release). Buffers reserved at the press, never grown.
+struct Stroke {
+    raw: Vec<(f32, f32)>,
+    /// Samples converted so far.
+    conv: usize,
+    data: Vec<(UtcMillis, f64)>,
+    screen: Vec<(f32, f32)>,
+    /// The button was released (or the release was lost): kept next frame.
+    done: bool,
+}
+
+impl Stroke {
+    fn new() -> Stroke {
+        Stroke {
+            raw: Vec::with_capacity(STROKE_RAW),
+            conv: 0,
+            data: Vec::with_capacity(STROKE_RAW),
+            screen: Vec::with_capacity(STROKE_RAW),
+            done: false,
+        }
+    }
+
+    /// The pointer at `at`, if it moved (and the buffer has room).
+    fn sample(&mut self, at: (f32, f32)) {
+        let moved = self
+            .raw
+            .last()
+            .is_none_or(|l| (l.0 - at.0).abs().max((l.1 - at.1).abs()) >= 0.75);
+        if moved && self.raw.len() < self.raw.capacity() {
+            self.raw.push(at);
+        }
+    }
+
+    /// New samples to data space on this frame's view (those off the plot, over a lower pane
+    /// or an axis, dropped), then everything back to this frame's screen.
+    fn follow_view(&mut self, axis: &TimeAxis<'_>, vp: &Viewport) {
+        let (w, h) = (vp.width as f32, vp.height as f32);
+        for &(x, y) in &self.raw[self.conv..] {
+            if !(0.0..=w).contains(&x) || !(0.0..=h).contains(&y) {
+                continue;
+            }
+            if let Some(t) = axis.time_at(vp.x_to_index(f64::from(x))) {
+                self.data.push((t, vp.y_to_price(f64::from(y))));
+            }
+        }
+        self.conv = self.raw.len();
+        self.screen.clear();
+        for &(t, p) in &self.data {
+            if let Some(x) = axis.x_of(vp, t) {
+                self.screen.push((x, vp.price_to_y(p) as f32));
+            }
         }
     }
 }
@@ -1478,10 +1667,112 @@ fn paint_line(
     }
 }
 
+/// A polyline through `pts` (plot-local) in `dash`, one stroked path (GPUI tessellates it; no
+/// allocation of ours).
+fn paint_polyline(
+    pts: &[(f32, f32)],
+    width: f32,
+    dash: &DashPattern,
+    color: Hsla,
+    origin: (f32, f32),
+    record: bool,
+    window: &mut Window,
+) {
+    if pts.len() < 2 {
+        return;
+    }
+    let seg: [Pixels; 4] = dash.seg.map(px);
+    let mut path = PathBuilder::stroke(px(width));
+    if dash.n > 0 {
+        path = path.dash_array(&seg[..dash.n]);
+    }
+    let at = |p: (f32, f32)| point(px(origin.0 + p.0), px(origin.1 + p.1));
+    path.move_to(at(pts[0]));
+    for w in pts.windows(2) {
+        if record {
+            crate::eyedropper::segment(
+                (origin.0 + w[0].0, origin.1 + w[0].1),
+                (origin.0 + w[1].0, origin.1 + w[1].1),
+                width,
+                color,
+                "Drawing",
+            );
+        }
+        path.line_to(at(w[1]));
+    }
+    if let Ok(p) = path.build() {
+        window.paint_path(p, color);
+    }
+}
+
+/// An arrowhead's length and half its width for a line `width` px wide.
+fn head_size(width: f32) -> (f32, f32) {
+    (6.0 + 2.5 * width, 3.0 + 1.5 * width)
+}
+
+/// Where a line ending in an arrowhead at `tip` (coming from `from`) stops, so it never pokes
+/// past the head's sides: well inside the head, short of its tip.
+fn short_of_head(from: (f32, f32), tip: (f32, f32), width: f32) -> (f32, f32) {
+    let (dx, dy) = (tip.0 - from.0, tip.1 - from.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    let back = head_size(width).0 * 0.7;
+    if len <= back {
+        return tip;
+    }
+    (tip.0 - dx / len * back, tip.1 - dy / len * back)
+}
+
+/// A filled arrowhead with its tip exactly at `tip`, pointing from `from` (the shared head of
+/// trend lines, arrows and brush strokes).
+fn paint_head(
+    from: (f32, f32),
+    tip: (f32, f32),
+    width: f32,
+    color: Hsla,
+    origin: (f32, f32),
+    window: &mut Window,
+) {
+    let (dx, dy) = (tip.0 - from.0, tip.1 - from.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.5 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let (l, half) = head_size(width);
+    let (bx, by) = (tip.0 - ux * l, tip.1 - uy * l);
+    let at = |x: f32, y: f32| point(px(origin.0 + x), px(origin.1 + y));
+    let mut path = PathBuilder::fill();
+    path.move_to(at(tip.0, tip.1));
+    path.line_to(at(bx - uy * half, by + ux * half));
+    path.line_to(at(bx + uy * half, by - ux * half));
+    path.close();
+    if let Ok(p) = path.build() {
+        window.paint_path(p, color);
+    }
+}
+
+/// Where a stroke's arrowhead is aimed from: the index of the last point at least a head's
+/// length back from the end (else the first). The body is drawn to it, then a straight line
+/// short of the head, so no point inside the head pokes past its sides.
+fn aim(pts: &[(f32, f32)], width: f32) -> Option<usize> {
+    let tip = *pts.last()?;
+    if pts.len() < 2 {
+        return None;
+    }
+    let want = head_size(width).0;
+    Some(
+        pts[..pts.len() - 1]
+            .iter()
+            .rposition(|p| ((p.0 - tip.0).powi(2) + (p.1 - tip.1).powi(2)).sqrt() >= want)
+            .unwrap_or(0),
+    )
+}
+
 /// One drawing in its style (`color`: a fixed line color instead: the temporary measure's
-/// direction color).
+/// direction color). `pts`: the frame's brush point buffer.
 fn paint_shape(
     d: &Projected,
+    pts: &[(f32, f32)],
     color: Option<Hsla>,
     t: &Theme,
     origin: (f32, f32),
@@ -1492,9 +1783,40 @@ fn paint_shape(
     let line = color.unwrap_or_else(|| t.style_color(s.line.color, &t.drawing, s.line.opacity));
     let width = f32::from(s.line.width).max(hair);
     let dash = drawing_dash(s.line.line, width);
+    let head = s.arrow_end && d.tool.has_arrowhead();
     match d.tool {
-        Tool::HLine | Tool::HRay | Tool::VLine | Tool::Trend | Tool::Ray => {
+        Tool::Trend | Tool::Arrow if head => {
+            paint_line(
+                d.p0,
+                short_of_head(d.p0, d.p1, width),
+                width,
+                &dash,
+                line,
+                origin,
+                hair,
+                window,
+            );
+            paint_head(d.p0, d.p1, width, line, origin, window);
+        }
+        Tool::HLine | Tool::HRay | Tool::VLine | Tool::Trend | Tool::Ray | Tool::Arrow => {
             paint_line(d.p0, d.p1, width, &dash, line, origin, hair, window);
+        }
+        Tool::Brush => {
+            let s = pts
+                .get(d.pts.0 as usize..d.pts.1 as usize)
+                .unwrap_or_default();
+            match aim(s, width).filter(|_| head) {
+                Some(k) => {
+                    // The body to the point the head is aimed from, then straight on to just
+                    // short of the head.
+                    let (from, tip) = (s[k], s[s.len() - 1]);
+                    paint_polyline(&s[..=k], width, &dash, line, origin, true, window);
+                    let end = short_of_head(from, tip, width);
+                    paint_polyline(&[from, end], width, &dash, line, origin, true, window);
+                    paint_head(from, tip, width, line, origin, window);
+                }
+                None => paint_polyline(s, width, &dash, line, origin, true, window),
+            }
         }
         Tool::Rect | Tool::Measure => {
             let (x0, x1) = (d.p0.0.min(d.p1.0), d.p0.0.max(d.p1.0));
