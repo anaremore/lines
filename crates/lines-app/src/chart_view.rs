@@ -4456,7 +4456,7 @@ impl ChartView {
             // Its legs move with it (the setting on): their ghosts too.
             self.ct
                 .ghosts
-                .extend(crate::dom_trade::leg_ghosts(legs, from, d.to, id));
+                .extend(crate::dom_trade::leg_ghosts(legs, o.id, from, d.to, id));
         }
     }
 
@@ -5268,13 +5268,15 @@ impl ChartView {
             && let Ok(units) = self.instrument.price.scale.parse_decimal(at)
         {
             let with_legs = crate::picker_view::settings(cx).move_bracket();
-            self.ct.drag = crate::dom_orders::DragOrder::fixture(
-                &t.cache.read(),
-                account,
-                contract,
-                Price(units),
-                with_legs,
-            );
+            if let Some(s) = t.cache.try_read() {
+                self.ct.drag = crate::dom_orders::DragOrder::fixture(
+                    &s,
+                    account,
+                    contract,
+                    Price(units),
+                    with_legs,
+                );
+            }
         }
         // Screenshot fixtures: an order staged as the menu's "…with bracket" would (once the
         // chart can trade), its legs as given; and a flash.
@@ -5645,18 +5647,20 @@ impl ChartView {
                 }
             }
         }
-        // The order being dragged, moves awaiting the broker: dashed accent.
+        // The order being dragged (with the legs moving with it), moves awaiting the broker:
+        // long dashes in each order's role colour, as a staged order's (unsent).
         let drag = self.ct.drag;
-        for p in drag.iter().flat_map(|d| d.previews()).chain(
+        for (id, p) in drag.iter().flat_map(|d| d.previews()).chain(
             self.ct
                 .ghosts
                 .iter()
                 .filter(|g| g.qty.is_none())
-                .map(|g| g.price),
+                .map(|g| (g.order, g.price)),
         ) {
             let y = self.vp.price_to_y(p.0 as f64) as f32;
             if (0.0..=ph).contains(&y) {
-                dashed(window, y, t.accent, 5.0);
+                let c = self.ct.mark(id.0).map_or(t.accent, |m| self.mark_colour(m));
+                dashed(window, y, c, (6.0 * s).round());
             }
         }
         // The exit being added: dashed in its role's colour, with its tag-to-be.

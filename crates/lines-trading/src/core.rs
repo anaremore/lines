@@ -1478,9 +1478,15 @@ impl TradingCore {
                     "the moved stop or target would be off the tick grid",
                 ));
             }
+            // A limit entry, or a triggered stop-limit's (working as a limit).
+            let limit = match entry.kind {
+                OrderKind::Limit { .. } => true,
+                OrderKind::StopLimit { .. } => entry.triggered,
+                _ => false,
+            };
             if x.role == Role::StopLoss
+                && limit
                 && let Some(m) = self.marks.get(&entry.contract)
-                && let OrderKind::Limit { .. } = entry.kind
             {
                 // The entry fills now if it crosses the market; then its stop works at once.
                 let (fills_now, triggers) = match entry.side {

@@ -95,10 +95,15 @@ impl DragOrder {
         })
     }
 
-    /// Where the order and its legs are drawn while dragged.
-    pub fn previews(&self) -> impl Iterator<Item = Price> + '_ {
+    /// Where the order and its legs are drawn while dragged: each order and its new price.
+    pub fn previews(&self) -> impl Iterator<Item = (OrderId, Price)> + '_ {
         let d = self.to.0 - self.from.0;
-        std::iter::once(self.to).chain(self.legs.iter().flatten().map(move |(_, p)| Price(p.0 + d)))
+        std::iter::once((self.order, self.to)).chain(
+            self.legs
+                .iter()
+                .flatten()
+                .map(move |&(id, p)| (id, Price(p.0 + d))),
+        )
     }
 }
 
@@ -270,7 +275,12 @@ impl OrdersLayer {
             crate::order_resize::can_grow(o, working, position)
         });
         self.ghosts.retain(|g| {
-            match crate::dom_trade::ghost_outcome(g, s.order(g.order), s.result(g.command)) {
+            let (order, result) = (s.order(g.order), s.result(g.command));
+            let outcome = match g.leg {
+                Some(l) => crate::dom_trade::leg_outcome(g, l, order, result, s.order(l.entry)),
+                None => crate::dom_trade::ghost_outcome(g, order, result),
+            };
+            match outcome {
                 crate::dom_trade::GhostOutcome::Pending => true,
                 crate::dom_trade::GhostOutcome::Acked => false,
                 crate::dom_trade::GhostOutcome::Rejected(why) => {
@@ -523,22 +533,38 @@ impl OrdersLayer {
                     cx,
                 );
             }
-            // Ghosts and the order being dragged: a dashed accent outline at the new price.
+            // Ghosts and the order being dragged (with the legs moving with it): a dashed
+            // outline in the order's role colour at the new price on a faint tint of it (a held
+            // mark has none), its label inside when the row has no mark of its own.
             let ghost_here = self
                 .ghosts
                 .iter()
-                .any(|g| g.qty.is_none() && row_of(g.price.0, units) == row)
-                || self
-                    .drag
-                    .is_some_and(|d| d.previews().any(|p| row_of(p.0, units) == row));
-            if ghost_here {
-                outline(
-                    window,
-                    rect(ox + 1.0, y + 2.0, ow - 3.0, row_h - 4.0),
-                    t.accent,
-                    hair,
-                    true,
-                );
+                .filter(|g| g.qty.is_none())
+                .map(|g| (g.order, g.price))
+                .chain(self.drag.iter().flat_map(|d| d.previews()))
+                .find(|(_, p)| row_of(p.0, units) == row);
+            if let Some((id, _)) = ghost_here {
+                let mark = self.marks.iter().find(|m| m.id == id);
+                let c = mark.map_or(t.accent, |m| mark_colour(t, m));
+                let r = rect(ox + 1.0, y + 2.0, ow - 3.0, row_h - 4.0);
+                window.paint_quad(fill(r, c.opacity(0.16)));
+                outline(window, r, c, hair, true);
+                if n == 0
+                    && let Some(m) = mark
+                {
+                    buf.clear();
+                    let _ = mark_text(m, &mut buf);
+                    glyphs.paint_right(
+                        buf.as_str(),
+                        ox + ow - 7.0,
+                        y,
+                        row_h,
+                        t.text_main,
+                        true,
+                        window,
+                        cx,
+                    );
+                }
             }
         }
         // Refusals: a short tag in the orders cell of their row (`DENIED: closed`, or just

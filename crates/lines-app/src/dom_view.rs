@@ -677,10 +677,9 @@ impl DomView {
                     let from = Trading::try_global(cx)
                         .and_then(|t| t.cache.read().order(order).and_then(dom_trade::order_price))
                         .unwrap_or(price);
-                    self.orders.drag = Some(DragOrder {
-                        to: price,
-                        ..DragOrder::new(order, from, legs)
-                    });
+                    // At the order's own price until the pointer moves (with rows grouped, the
+                    // pressed row's start would preview a move the release won't send).
+                    self.orders.drag = Some(DragOrder::new(order, from, legs));
                 }
                 Ok(None) => return,
                 Err(why) => self.trade.flash(why),
@@ -754,7 +753,7 @@ impl DomView {
             // Its legs move with it (the setting on): their ghosts too.
             self.orders
                 .ghosts
-                .extend(dom_trade::leg_ghosts(legs, from, d.to, id));
+                .extend(dom_trade::leg_ghosts(legs, o.id, from, d.to, id));
         }
     }
 
@@ -1275,13 +1274,10 @@ impl DomView {
                 && let Ok(p) = self.product.price.scale.parse_decimal(at)
             {
                 let with_legs = crate::picker_view::settings(cx).move_bracket();
-                self.orders.drag = DragOrder::fixture(
-                    &tr.cache.read(),
-                    account,
-                    contract,
-                    lines_core::Price(p),
-                    with_legs,
-                );
+                if let Some(s) = tr.cache.try_read() {
+                    self.orders.drag =
+                        DragOrder::fixture(&s, account, contract, lines_core::Price(p), with_legs);
+                }
             }
             if tr.start_order_controls && self.orders.hover.is_none() {
                 self.orders.hover = self.orders.first_single(units);

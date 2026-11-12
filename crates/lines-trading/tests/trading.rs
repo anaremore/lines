@@ -2963,3 +2963,40 @@ fn an_entry_moved_to_fill_now_never_triggers_its_moved_stop() {
     );
     assert_eq!(r.state(sl), OrderState::Working);
 }
+
+/// One held exit gone (cancelled by hand) before the move: the other still moves with the
+/// entry. A move that also changes the quantity moves only the entry.
+#[test]
+fn a_move_with_one_exit_or_a_new_size_moves_what_it_can() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: tp,
+    })
+    .unwrap();
+    r.wait(LAT);
+    assert_eq!(move_to(&mut r, entry, 5999.00, true), vec![entry, sl]);
+    assert_eq!(price_of(&r, sl), px(5997.00));
+
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    let ids = r
+        .cmd(Command::ModifyOrder {
+            account: acct(),
+            order: entry,
+            qty: Some(Qty(3)),
+            price: Some(px(5999.00)),
+            move_bracket: true,
+        })
+        .unwrap();
+    r.wait(LAT);
+    assert_eq!(ids, vec![entry]);
+    assert_eq!(price_of(&r, entry), px(5999.00));
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6002.00), px(5998.00))
+    );
+}

@@ -1459,16 +1459,25 @@ impl ChartTradeState {
                 let position = s.position(account, contract).map_or(0, |p| p.qty);
                 crate::order_resize::can_grow(o, working, position)
             });
-        self.ghosts.retain(
-            |g| match ghost_outcome(g, s.order(g.order), s.result(g.command)) {
+        self.ghosts.retain(|g| {
+            match match g.leg {
+                Some(l) => crate::dom_trade::leg_outcome(
+                    g,
+                    l,
+                    s.order(g.order),
+                    s.result(g.command),
+                    s.order(l.entry),
+                ),
+                None => ghost_outcome(g, s.order(g.order), s.result(g.command)),
+            } {
                 GhostOutcome::Pending => true,
                 GhostOutcome::Acked => false,
                 GhostOutcome::Rejected(why) => {
                     refused.push((g.price, why));
                     false
                 }
-            },
-        );
+            }
+        });
         refused
     }
 
