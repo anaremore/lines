@@ -289,6 +289,9 @@ const RESET_W: f32 = 24.0;
 const MARKS_W: f32 = 8.0 + DOT_W + 8.0 + RESET_W + 8.0;
 /// A number field's narrowest.
 const NUMBER_W: f32 = 72.0;
+/// A number field's narrowest between its − and + (the three as wide as the field was alone,
+/// near enough: a row keeps its line).
+const NUMBER_STEP_W: f32 = 40.0;
 /// The tighter/looser rule, said once under the account picker.
 const RULE_NOTE: &str = "Tighter applies at once; looser waits for the next session.";
 
@@ -2388,6 +2391,8 @@ impl SettingsWindow {
                 let text = schema::flag_text(st, &self.facts)
                     .filter(|_| locked)
                     .unwrap_or(text);
+                let steps = !(locked || muted || editing || st.read_only())
+                    && steps_fit(i, self.win_w, crate::zoom::get());
                 let field = div()
                     .id(("number", i))
                     .flex_none()
@@ -2395,7 +2400,11 @@ impl SettingsWindow {
                         "tnum".into(),
                         1,
                     )])))
-                    .min_w(crate::zoom::ui(NUMBER_W))
+                    .min_w(crate::zoom::ui(if steps {
+                        NUMBER_STEP_W
+                    } else {
+                        NUMBER_W
+                    }))
                     .px_2()
                     .rounded_sm()
                     .border_1()
@@ -2421,7 +2430,7 @@ impl SettingsWindow {
                             cx.notify();
                         }),
                     );
-                self.stepper(i, *n, field, locked || muted || editing, cx)
+                self.stepper(i, *n, field, !steps, cx)
             }
             (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_buttons(i, cx),
             (Kind::Editor, _) if st.key == schema::DATA_FOLDER_KEY => self.data_buttons(i, cx),
@@ -2505,7 +2514,7 @@ impl SettingsWindow {
                     }
                 },
             );
-            (el, d.scroll.clone(), drop_view::cap())
+            (el, d.scroll.clone(), drop_view::cap(), t.panel)
         });
         crate::dropdown::dropdown_list(trigger, list)
             .lint_trigger(&label)
@@ -2588,7 +2597,8 @@ impl SettingsWindow {
                 .justify_center()
                 .rounded_sm()
                 .border_1()
-                .border_color(t.control_edge)
+                // At its end (Off, the least, the most): quieter, and nothing happens.
+                .border_color(if can { t.control_edge } else { t.axis_line })
                 .text_color(if can { t.text_main } else { t.text_dim })
                 .when(can, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
                 .child(if up { "+" } else { "−" })
@@ -4022,6 +4032,34 @@ fn content_line_w(win_w: f32, z: f32) -> f32 {
     w / z.max(0.1) - LINE_CHROME_W
 }
 
+/// The − / + pair and the field between them at its narrowest (100 % px: two 20 px buttons,
+/// the gaps, the field).
+const STEPPER_W: f32 = 2.0 * 20.0 + 2.0 * 4.0 + NUMBER_STEP_W;
+
+/// Whether number setting `i` gets − / + in a window `win_w` wide at zoom `z`: it is its line's
+/// only field (a line of two numbers and words is typed), and the pair fits beside the label's
+/// narrowest column, so the row keeps its one line (at 150 % in the default window it doesn't:
+/// the field alone, typed, as before).
+fn steps_fit(i: usize, win_w: f32, z: f32) -> bool {
+    let st = &schema::all()[i];
+    let fields = |l: &schema::Line| {
+        l.parts
+            .iter()
+            .filter(|p| matches!(p, schema::Part::Field(..)))
+            .count()
+    };
+    let alone = schema::page(st.section)
+        .iter()
+        .flat_map(|g| g.lines.iter())
+        .find(|l| {
+            l.parts
+                .iter()
+                .any(|p| matches!(p, schema::Part::Field(k, _) if *k == st.key))
+        })
+        .is_none_or(|l| fields(l) == 1);
+    alone && content_line_w(win_w, z) - LABEL_MIN_W - 8.0 >= STEPPER_W
+}
+
 /// A chip group's width estimated from its labels (100 % px): 9 px a character (the 13 px
 /// UI text measures about 8 px a character in IBM Plex Sans, a bold chip and digits a little
 /// more), each chip's padding (px_2) with 2 px to spare, and the group's border. Wide on
@@ -4211,6 +4249,22 @@ mod tests {
         assert_eq!(picks_summary(&l(&["Bid", "Ask", "Volume"]), 4), "3 of 4");
         assert_eq!(picks_summary(&l(&["Bid", "Ask"]), 4), "Bid, Ask");
         assert_eq!(picks_summary(&[], 4), "None");
+    }
+
+    /// − / + go beside a lone number when they fit by the label's narrowest column: at 100 %
+    /// in every window size, never at 150 % in the default one (the field alone keeps the row
+    /// on one line); never on a line of two numbers.
+    #[test]
+    fn steppers_only_where_they_fit() {
+        let at = |key: &str| schema::index_of(key).unwrap();
+        let daily = at("guard.max_daily_loss");
+        assert!(steps_fit(daily, SIZE.0, 1.0));
+        assert!(steps_fit(daily, MIN_SIZE.0, 1.0));
+        assert!(!steps_fit(daily, SIZE.0, 1.5));
+        assert!(
+            !steps_fit(at("guard.news_before"), SIZE.0, 1.0),
+            "two numbers"
+        );
     }
 
     /// At its smallest the window leaves a row's label column its full width, and the widest

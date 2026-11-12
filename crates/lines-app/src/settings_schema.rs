@@ -1562,7 +1562,7 @@ fn table() -> Vec<Setting> {
                 "dom.columns",
                 Sec::Dom,
                 "Columns",
-                "The columns a new DOM shows (the price always shows; the trail's follows the trail). Per DOM: right-click a column header, or the palette's \"Columns:\" commands.",
+                "The columns a new DOM shows. The price column always shows, and the trail column shows while the trail is on. Per DOM: right-click a column header, or the palette's \"Columns:\" commands.",
                 Scope::NewPanes,
                 Normal,
                 Picks(&DOM_COLUMN_NAMES),
