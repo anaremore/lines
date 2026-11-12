@@ -1,8 +1,8 @@
 //! The Settings window (decision 0021, roadmap 6c): Ctrl+, opens one window with a search
 //! box and the sections down the left under their groups (App, Panes, Trading, Data, About).
 //! Every row comes from `crate::settings_schema` and its pages (`schema::page`): no setting
-//! has its own form. Rows are quiet: one line each, the description only on the selected
-//! one; a ● marks a setting changed from its default (on its row and its section), and ↺
+//! has its own form. Rows are quiet: a label and its brief description, always shown, so a
+//! row's height never changes with the pointer or the keys (owner, 2026-11-12); a ● marks a setting changed from its default (on its row and its section), and ↺
 //! resets it. Most changes apply at once (Data folder's after a restart; no OK button);
 //! Ctrl+Z undoes. Loosening a guardrail asks first and takes effect at the next trade date
 //! (the trading core's rule), tightening applies now; Accounts says so once, under its one
@@ -387,6 +387,7 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
     for s in set.iter().filter(|s| {
         !s.starts_with("account=")
             && !s.starts_with("keys:")
+            && !s.starts_with(SELECT)
             && List::typed(s).is_none()
             && !s.starts_with(DATA_PICK)
             && drop_open(s).is_none()
@@ -412,6 +413,11 @@ fn drop_open(s: &str) -> Option<(usize, Option<&str>)> {
     schema::takes_custom(key).then_some(())?;
     Some((schema::index_of(key)?, Some(text)))
 }
+
+/// `--settings-set select=KEY`: that setting's row selected, nothing changed (a row's height
+/// selected and not, side by side).
+#[cfg(feature = "screenshot")]
+const SELECT: &str = "select=";
 
 /// `--settings-set` prefix: the data folder picked (`data.folder=pick:PATH`, the Move existing
 /// data / Start empty question), picked and refused for an open trade
@@ -450,6 +456,12 @@ pub fn open_for_screenshot(
             if s.starts_with("keys:") {
                 if let Err(e) = crate::keys_view::shot(&mut v.keys, s, cx) {
                     tracing::warn!("{e}");
+                }
+                continue;
+            }
+            if let Some(key) = s.strip_prefix(SELECT) {
+                if let Some(i) = schema::index_of(key) {
+                    v.select(i);
                 }
                 continue;
             }
@@ -2863,8 +2875,8 @@ impl SettingsWindow {
         self.edit = None;
     }
 
-    /// One line of a page: its label (the selected setting's description under it, only on
-    /// the selected line), then the ● slot, the control(s) and the ↺ slot. Lines under it:
+    /// One line of a page: its label (its description under it, always: selecting a line only
+    /// tints it, so no row grows), then the ● slot, the control(s) and the ↺ slot. Lines under it:
     /// what the core has in force, a Data line's flag or restart, a summary, a note.
     fn line_view(
         &self,
@@ -2950,15 +2962,20 @@ impl SettingsWindow {
                             .child(w)
                     })),
             );
-        // The description, on the selected line only.
-        if let Some(s) = sel {
+        // The description, on every line, selected or not (a line of two settings: its first
+        // with one). Static: a row is as tall selected, hovered or not.
+        if let Some(d) = idx
+            .iter()
+            .map(|&i| schema::all()[i].description)
+            .find(|d| !d.is_empty())
+        {
             left = left.child(
                 div()
                     .text_size(crate::zoom::ui(11.5))
                     .text_color(t.text_dim)
                     .relative()
-                    .children(crate::layout_rec::text_marker(schema::all()[s].description))
-                    .child(schema::all()[s].description),
+                    .children(crate::layout_rec::text_marker(d))
+                    .child(d),
             );
         }
         // Theme: System says what it shows now ("Now: Dark · Standard"), selected or not.

@@ -140,7 +140,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 #   --settings-set KEY=VALUE (repeatable; e.g. guard.max_daily_loss=1500 shows a loosening's confirmation;
 #   appearance.time_zone=list:TEXT opens the time zone's list with TEXT typed, appearance.ui_font=list:TEXT the
 #   UI font's; KEY=open opens a setting's dropdown, charts.timeframe=custom:TEXT (or dom.grouping=custom:TEXT)
-#   its "Custom…" field with TEXT typed),
+#   its "Custom…" field with TEXT typed; select=KEY selects that row and changes nothing),
 #   --settings-size WxH (the window's size, default 860x620; raised to the 640x420 minimum).
 #   --econ-calendar FILE (an economic calendar in the bundled file's format, read instead of the bundled one by
 #   the app and its trading cores: synthetic releases on synthetic data). Trading scripts: `guard news warn|block|flatten`.
