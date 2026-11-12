@@ -1378,6 +1378,17 @@ impl ChartView {
                     .iter()
                     .map(|k| !self.levels.kind_styled_shown(&id, k))
                     .collect(),
+                // Its own settings (app-wide: one feed serves every chart).
+                plugin: lines_feed::levels::registered()
+                    .iter()
+                    .find(|s| s.id() == id)
+                    .map(|s| {
+                        crate::plugin_settings::rows(
+                            &**s,
+                            crate::picker_view::settings(cx).plugins.get(&id),
+                        )
+                    })
+                    .unwrap_or_default(),
                 id,
                 label: label.to_owned(),
                 kinds,
@@ -1542,6 +1553,11 @@ impl ChartView {
             .filter(|_| style.is_some())
         {
             m.cursor = i;
+        }
+        // Screenshots: a plugin switch's question asked (a list open: `drop:levels:ID:Label`).
+        let shot = crate::plugin_settings::shot();
+        if let Some((src, key)) = shot.ask {
+            m.asking = Some((src, key));
         }
         self.study_menu = Some(m);
         if let Some((r, tab)) = style {
@@ -1757,6 +1773,7 @@ impl ChartView {
                 s.apply(&a);
                 self.set_study_set(s);
             }
+            Some(MenuCmd::Plugin(p)) => self.plugin_cmd(p, cx),
             Some(MenuCmd::ToggleSeparate) => {
                 let on = !self.separate_studies;
                 self.set_separate_studies(on, cx);
@@ -1809,6 +1826,44 @@ impl ChartView {
             self.study_menu = Some(m);
         }
         cx.notify();
+    }
+
+    /// A level source's own setting from the menu (`crate::plugin_settings`: app-wide; a
+    /// refused value is kept and shown with its reason, nothing applied).
+    fn plugin_cmd(&mut self, p: crate::study_menu::PluginCmd, cx: &mut Context<Self>) {
+        use crate::study_menu::PluginCmd;
+        match p {
+            PluginCmd::Set { source, key, value } => {
+                // A switch with a question asks first (turning on only).
+                let asks = lines_feed::levels::registered()
+                    .iter()
+                    .find(|s| s.id() == source)
+                    .and_then(|s| {
+                        crate::plugin_settings::rows(
+                            &**s,
+                            crate::picker_view::settings(cx).plugins.get(&source),
+                        )
+                        .into_iter()
+                        .find(|r| r.spec.key == key)
+                    })
+                    .is_some_and(|r| r.asks(&value));
+                if asks {
+                    if let Some(m) = self.study_menu.as_mut() {
+                        m.asking = Some((source, key));
+                    }
+                } else {
+                    // Refused: kept with its reason (shown in the menu and in Settings).
+                    let _ = crate::plugin_settings::set(cx, &source, key, &value);
+                }
+            }
+            PluginCmd::Discard { source, key } => crate::plugin_settings::discard(&source, key),
+            // Asked and answered: on, as is.
+            PluginCmd::Confirmed { source, key } => {
+                let _ = crate::plugin_settings::set(cx, &source, key, "true");
+            }
+            // The menu's own (`StudyMenu::local`).
+            PluginCmd::Edit { .. } | PluginCmd::Answer(_) => {}
+        }
     }
 
     /// Add a study layer (volume profile, …), painted above earlier layers.
@@ -10499,6 +10554,13 @@ impl Render for ChartView {
         self.sync_symbol_studies(cx);
         self.sync_level_styles(cx);
         self.open_wanted_menu_drop(cx);
+        // The menu's lines can change between frames (a level source learns a kind): its
+        // cursor and an open list follow their items.
+        if let Some(mut m) = self.study_menu.take() {
+            let items = self.menu_items(&m, cx);
+            m.clamp(&items);
+            self.study_menu = Some(m);
+        }
         // Trade labels follow the P&L display (the poll that builds them has no app).
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()

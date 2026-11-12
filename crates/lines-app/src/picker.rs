@@ -255,6 +255,12 @@ pub struct Settings {
     /// kept.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub level_styles: std::collections::BTreeMap<String, lines_indicators::PartStyles>,
+    /// Each plugin's settings, by plugin id (`crate::plugin_settings`): only values that
+    /// differ from its defaults, never secrets; a plugin this build doesn't have keeps its
+    /// values untouched. App-wide: a level source's values reach every chart it serves.
+    /// Optional.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub plugins: crate::plugin_settings::Saved,
     /// Prop rules per trading account, keyed by the account's name (the Settings window's
     /// Risk section). Optional: an account without an entry keeps its rules.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]

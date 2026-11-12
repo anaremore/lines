@@ -9,6 +9,7 @@ fn sources() -> Vec<SourceInfo> {
         series: Vec::new(),
         parents: Vec::new(),
         styled_off: Vec::new(),
+        plugin: Vec::new(),
     }]
 }
 
@@ -37,6 +38,10 @@ fn labels(items: &[Item]) -> Vec<String> {
             } => format!("  {group}: {label}{}", if *on { " *" } else { "" }),
             Item::Drop { group, label, .. } => format!("  {group}: {label} ▾"),
             Item::Step { group, label, .. } => format!("  {group}: − {label} +"),
+            Item::Section(s) => format!("## {s}"),
+            Item::Field { group, text, .. } => format!("  {group}: [{text}]"),
+            Item::Reason(r) => format!("  ! {r}"),
+            Item::Hint(h) => format!("  ({h})"),
             Item::Action { label, .. } => format!("+ {label}"),
         })
         .collect()
@@ -259,6 +264,7 @@ fn a_sources_series_studies_are_offered_added_and_removed() {
         ],
         parents: Vec::new(),
         styled_off: Vec::new(),
+        plugin: Vec::new(),
     }];
     let mut set = StudySet::default();
     let l = labels(&StudyMenu::default().items(&input(&set, &src, &[])));
@@ -707,6 +713,7 @@ fn kinds_hidden_through_their_parent() {
         kinds: vec!["open".into(), "mid".into(), "pivot".into()],
         parents: vec![Some("session"), Some("session"), None],
         styled_off: Vec::new(),
+        plugin: Vec::new(),
         series: Vec::new(),
     }];
     let mut set = StudySet::default();
@@ -735,6 +742,7 @@ fn a_type_off_in_style_reads_unchecked() {
         kinds: vec!["pivot".into(), "zone".into()],
         parents: Vec::new(),
         styled_off: vec![true, false],
+        plugin: Vec::new(),
         series: Vec::new(),
     }];
     let set = StudySet::default();
@@ -1022,6 +1030,7 @@ fn level_kinds_are_a_multi_select() {
         kinds: vec!["pivot".into(), "zone".into(), "varis".into()],
         parents: Vec::new(),
         styled_off: Vec::new(),
+        plugin: Vec::new(),
         series: Vec::new(),
     }];
     let mut set = StudySet::default();
@@ -1085,4 +1094,171 @@ fn multi_select_summaries_name_what_is_on() {
         drop_summary(&opts(&[false, true, false, false]), false),
         "Session or range"
     );
+}
+
+/// A level source's own settings under its editor ("Source settings"): drawn from its specs,
+/// grouped, every kind its control; typing a field and Esc; a switch's question and its
+/// answers. App-wide, so the menu says so once.
+#[test]
+fn a_sources_own_settings() {
+    use lines_feed::levels::demo::{DemoLevels, key};
+    let set = StudySet::default();
+    let mut src = sources();
+    src[0].plugin = crate::plugin_settings::rows(&DemoLevels, None);
+    let mut m = StudyMenu {
+        editing: Some(StudyRef::Levels("demo".into())),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let l = labels(&items);
+    let from = l
+        .iter()
+        .position(|s| s == "## Source settings")
+        .expect("section");
+    assert_eq!(
+        l[from..from + 12],
+        [
+            "## Source settings",
+            "  (For every chart: one Demo levels feed serves them all.)",
+            "## Connection",
+            "  Feed URL: [http://127.0.0.1:7878]",
+            "  Allow remote: Off",
+            "  Symbol: Auto ▾",
+            "  Refresh: − 5 s +",
+            "## Display",
+            "  : Bands *",
+            "  : Stats *",
+            "  Band width: − 1.00 +",
+            "  Anchor offset: − from the map +",
+        ]
+    );
+    // Lines' own switch for the source's labels isn't there.
+    assert!(!l.iter().any(|s| s.contains("Labels: On")));
+    // Enter on the address types it, from its text; Esc goes back (its refusal dropped).
+    let url = l.iter().position(|s| s.starts_with("  Feed URL")).unwrap();
+    let cmd = m.activate(&items, url).unwrap();
+    assert_eq!(
+        cmd,
+        MenuCmd::Plugin(PluginCmd::Edit {
+            source: "demo".into(),
+            key: key::FEED_URL,
+            text: "http://127.0.0.1:7878".into()
+        })
+    );
+    assert_eq!(m.local(cmd), None);
+    let items = m.items(&input(&set, &src, &[]));
+    assert!(
+        labels(&items)
+            .iter()
+            .any(|s| s == "  Feed URL: [http://127.0.0.1:7878\u{258f}]")
+    );
+    m.key(&items, "backspace", None);
+    m.key(&items, "9", Some("9"));
+    assert_eq!(
+        m.key(&items, "enter", None),
+        Some(MenuCmd::Plugin(PluginCmd::Set {
+            source: "demo".into(),
+            key: key::FEED_URL,
+            value: "http://127.0.0.1:7879".into()
+        }))
+    );
+    assert_eq!(m.typing, None);
+    m.local(MenuCmd::Plugin(PluginCmd::Edit {
+        source: "demo".into(),
+        key: key::FEED_URL,
+        text: "x".into(),
+    }));
+    assert_eq!(
+        m.key(&items, "escape", None),
+        Some(MenuCmd::Plugin(PluginCmd::Discard {
+            source: "demo".into(),
+            key: key::FEED_URL
+        }))
+    );
+    // A switch that asks: the question under it, then Turn on or Cancel.
+    m.asking = Some(("demo".into(), key::ALLOW_REMOTE));
+    let items = m.items(&input(&set, &src, &[]));
+    let l = labels(&items);
+    let at = l.iter().position(|s| s == "  Allow remote: Off").unwrap();
+    assert!(l[at + 1].starts_with("  (Allow a remote feed?"));
+    assert_eq!(l[at + 2], "+ Turn on allow remote");
+    assert_eq!(l[at + 3], "+ Cancel");
+    let yes = m.activate(&items, at + 2).unwrap();
+    // Answered: turned on as asked (never asked again: the chart applies it as is).
+    assert_eq!(
+        m.local(yes),
+        Some(MenuCmd::Plugin(PluginCmd::Confirmed {
+            source: "demo".into(),
+            key: key::ALLOW_REMOTE,
+        }))
+    );
+    assert_eq!(m.asking, None);
+    m.asking = Some(("demo".into(), key::ALLOW_REMOTE));
+    assert_eq!(m.local(MenuCmd::Plugin(PluginCmd::Answer(false))), None);
+    assert_eq!(m.asking, None);
+    // Typing ends with its editor (another study's, or none): no key lands in a field no
+    // longer shown, and a press elsewhere ends it too.
+    m.local(MenuCmd::Plugin(PluginCmd::Edit {
+        source: "demo".into(),
+        key: key::FEED_URL,
+        text: "x".into(),
+    }));
+    m.asking = Some(("demo".into(), key::ALLOW_REMOTE));
+    m.local(MenuCmd::Edit(StudyRef::Vwap(0)));
+    assert_eq!((m.typing.clone(), m.asking.clone()), (None, None));
+    m.editing = Some(StudyRef::Levels("demo".into()));
+    m.local(MenuCmd::Plugin(PluginCmd::Edit {
+        source: "demo".into(),
+        key: key::FEED_URL,
+        text: "x".into(),
+    }));
+    let items = m.items(&input(&set, &src, &[]));
+    // A press on the field being typed keeps what was typed.
+    m.key(&items, "y", Some("y"));
+    let url = labels(&items)
+        .iter()
+        .position(|s| s.starts_with("  Feed URL"))
+        .unwrap();
+    let cmd = m.activate(&items, url).unwrap();
+    assert_eq!(m.local(cmd), None);
+    assert_eq!(m.typing.as_ref().map(|t| t.buf.as_str()), Some("xy"));
+    let sym = labels(&items)
+        .iter()
+        .position(|s| s.starts_with("  Symbol"))
+        .unwrap();
+    m.activate(&items, sym);
+    assert_eq!(m.typing, None);
+}
+
+/// An open list follows its item when lines are added above it (a level source learns a kind
+/// while the list is open): still open, on the same setting.
+#[test]
+fn an_open_list_follows_its_item() {
+    use lines_feed::levels::demo::DemoLevels;
+    let set = StudySet::default();
+    let mut src = sources();
+    src[0].plugin = crate::plugin_settings::rows(&DemoLevels, None);
+    // No map yet: no kinds, no Kinds line.
+    src[0].kinds.clear();
+    let mut m = StudyMenu {
+        editing: Some(StudyRef::Levels("demo".into())),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let at = |items: &[Item]| {
+        items
+            .iter()
+            .position(|it| matches!(it, Item::Drop { group, .. } if *group == "Symbol"))
+            .unwrap()
+    };
+    let i = at(&items);
+    m.open_drop(&items, i);
+    // The map arrives with its kinds: the Kinds line above.
+    src[0].kinds = vec!["pivot".into(), "zone".into()];
+    let items2 = m.items(&input(&set, &src, &[]));
+    m.clamp(&items2);
+    let j = at(&items2);
+    assert_ne!(i, j, "the lines moved");
+    assert_eq!(m.drop.as_ref().map(|d| d.at), Some(j));
+    assert_eq!(m.cursor, j);
 }

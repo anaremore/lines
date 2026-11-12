@@ -17,8 +17,133 @@ use lines_core::style::{Color, FillStyle, LineStyle, LineType, Rgb};
 use super::{
     BoxFuture, ChartPrices, LevelContext, LevelFrame, LevelMap, LevelMeta, LevelSource, LevelStyle,
     LevelTransport, LevelType, LevelValue, RefreshMode, Series, SeriesColor, SeriesLineDef,
-    SeriesStudyDef, TypeStyle,
+    SeriesStudyDef, SettingKind, SettingSpec, SettingValues, TypeStyle,
 };
+
+/// The demo's setting keys.
+pub mod key {
+    pub const FEED_URL: &str = "feed_url";
+    pub const ALLOW_REMOTE: &str = "allow_remote";
+    pub const SYMBOL: &str = "symbol";
+    pub const REFRESH: &str = "refresh";
+    pub const BANDS: &str = "bands";
+    pub const STATS: &str = "stats";
+    pub const BAND_WIDTH: &str = "band_width";
+    pub const ANCHOR_OFFSET: &str = "anchor_offset";
+    pub const LABELS: &str = "labels";
+}
+
+/// The demo's settings: one of each kind, as a real source's would be (the generic settings UI
+/// and its tests use them). Its Connection settings change nothing (it is synthetic: nothing
+/// is fetched) but are checked as a real source's would be; its Display settings change the
+/// map.
+pub static SETTINGS: [SettingSpec; 9] = [
+    SettingSpec::new(
+        key::FEED_URL,
+        "Feed URL",
+        SettingKind::Url,
+        "http://127.0.0.1:7878",
+        "Where a real source would fetch from (the demo fetches nothing). This machine only unless remote is allowed.",
+    )
+    .group("Connection")
+    .connection(),
+    SettingSpec::new(
+        key::ALLOW_REMOTE,
+        "Allow remote",
+        SettingKind::Bool,
+        "false",
+        "Accept a feed URL that isn't this machine.",
+    )
+    .group("Connection")
+    .confirm("Allow a remote feed? Lines will fetch from the address you enter, on any network it can reach.")
+    .connection(),
+    SettingSpec::new(
+        key::SYMBOL,
+        "Symbol",
+        SettingKind::Choice(&["auto"]),
+        "auto",
+        "Auto follows the chart, or one symbol the feed lists.",
+    )
+    .group("Connection")
+    .connection(),
+    SettingSpec::new(
+        key::REFRESH,
+        "Refresh",
+        SettingKind::Seconds { min: 1, max: 3600 },
+        "5",
+        "How often a real source would poll.",
+    )
+    .group("Connection")
+    .connection(),
+    SettingSpec::new(
+        key::BANDS,
+        "Bands",
+        SettingKind::Bool,
+        "true",
+        "The VWAP band.",
+    )
+    .group("Display"),
+    SettingSpec::new(
+        key::STATS,
+        "Stats",
+        SettingKind::Bool,
+        "true",
+        "The legend's stats.",
+    )
+    .group("Display"),
+    SettingSpec::new(
+        key::BAND_WIDTH,
+        "Band width",
+        SettingKind::Number {
+            min: 5,
+            max: 500,
+            step: 5,
+            decimals: 2,
+            unit: "",
+            optional: false,
+        },
+        "1.00",
+        "The VWAP band's width, times its usual.",
+    )
+    .group("Display"),
+    SettingSpec::new(
+        key::ANCHOR_OFFSET,
+        "Anchor offset",
+        SettingKind::Number {
+            min: -40,
+            max: 40,
+            step: 1,
+            decimals: 0,
+            unit: "ticks",
+            optional: true,
+        },
+        "",
+        "Ticks from the anchor bar's open (empty: the map's own).",
+    )
+    .group("Display")
+    .placeholder("from the map"),
+    // Lines' own label switch does this.
+    SettingSpec::new(
+        key::LABELS,
+        "Labels",
+        SettingKind::Bool,
+        "true",
+        "Level names.",
+    )
+    .owned_by_lines(),
+];
+
+fn value<'a>(values: &'a SettingValues, key: &str) -> &'a str {
+    values.get(key).map_or_else(
+        || {
+            SETTINGS
+                .iter()
+                .find(|s| s.key == key)
+                .map_or("", |s| s.default)
+        },
+        String::as_str,
+    )
+}
 
 /// Two synthetic lower-pane studies (decision 0010: synthetic): three lines around 50 to 65 and one
 /// line swinging around zero, a value a minute over the synthetic sessions, with a gap.
@@ -293,6 +418,28 @@ impl LevelSource for DemoLevels {
     fn types(&self) -> &'static [LevelType] {
         &TYPES
     }
+    fn settings(&self) -> &'static [SettingSpec] {
+        &SETTINGS
+    }
+    fn choices(&self, key: &str) -> Option<Vec<(String, String)>> {
+        (key == key::SYMBOL).then(|| {
+            [("auto", "Auto"), ("ES", "ES"), ("MES", "MES")]
+                .map(|(v, l)| (v.to_owned(), l.to_owned()))
+                .to_vec()
+        })
+    }
+    fn check(&self, values: &SettingValues) -> Vec<(&'static str, String)> {
+        let url = value(values, key::FEED_URL);
+        let remote = super::setting::is_on(value(values, key::ALLOW_REMOTE));
+        if !remote && !super::setting::is_loopback_url(url) {
+            vec![(
+                key::FEED_URL,
+                "Not this machine. Turn on Allow remote to use another address.".to_owned(),
+            )]
+        } else {
+            Vec::new()
+        }
+    }
     fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
         Box::pin(async { Ok(Box::new(DemoTransport) as Box<dyn LevelTransport>) })
     }
@@ -307,6 +454,15 @@ impl LevelSource for DemoLevels {
             return Ok(None);
         };
         let doc: Doc = serde_json::from_slice(&f.body).map_err(|e| e.to_string())?;
+        let set = &ctx.settings;
+        let bands = super::setting::is_on(value(set, key::BANDS));
+        let stats = super::setting::is_on(value(set, key::STATS));
+        // Hundredths (the spec's 2 places); the anchor's ticks.
+        let width = super::setting::parse(&SETTINGS[6], value(set, key::BAND_WIDTH), None)
+            .ok()
+            .and_then(|w| w.replace('.', "").parse::<i64>().ok())
+            .unwrap_or(100);
+        let anchor_ticks = value(set, key::ANCHOR_OFFSET).trim().parse::<i64>().ok();
         let time = |s: &str| UtcMillis::parse_iso(s).ok_or_else(|| format!("bad time {s:?}"));
         let mut b = LevelMap::builder(ID, ctx.product.id, time(&doc.as_of)?);
         if let Some(c) = ctx.contract {
@@ -320,10 +476,14 @@ impl LevelSource for DemoLevels {
             };
             let label = r.label.as_deref();
             if let (Some(lo), Some(hi)) = (r.vwap_lower, r.vwap_upper) {
+                if !bands {
+                    continue;
+                }
+                let w = width as f64 / 100.0;
                 b = b.zone(
                     &r.kind,
-                    LevelValue::VwapOffset(lo as f64),
-                    LevelValue::VwapOffset(hi as f64),
+                    LevelValue::VwapOffset(lo as f64 * w),
+                    LevelValue::VwapOffset(hi as f64 * w),
                     label,
                     style,
                 );
@@ -351,9 +511,10 @@ impl LevelSource for DemoLevels {
         if let Some(a) = &doc.anchor
             && let Some(p) = prices.price_at(time(&a.at)?, 0)
         {
+            let offset = anchor_ticks.map_or(a.offset, |n| n * ctx.product.price.tick);
             b = b.level(
                 "anchor",
-                lines_core::levels::LevelShape::Line(LevelValue::Tick(Price(p.0 + a.offset))),
+                lines_core::levels::LevelShape::Line(LevelValue::Tick(Price(p.0 + offset))),
                 Some(&a.label),
                 LevelStyle {
                     rgba: rgba(&a.color)?,
@@ -392,11 +553,15 @@ impl LevelSource for DemoLevels {
         };
         b = b.legend(lines_core::levels::LevelLegend {
             title: Some("Synthetic".into()),
-            stats: vec![
-                stat("Range", "12.50", lines_core::levels::StatTone::Plain),
-                stat("Bias", "+1.5", lines_core::levels::StatTone::Up),
-                stat("Skew", "\u{2212}0.4", lines_core::levels::StatTone::Down),
-            ],
+            stats: if stats {
+                vec![
+                    stat("Range", "12.50", lines_core::levels::StatTone::Plain),
+                    stat("Bias", "+1.5", lines_core::levels::StatTone::Up),
+                    stat("Skew", "\u{2212}0.4", lines_core::levels::StatTone::Down),
+                ]
+            } else {
+                Vec::new()
+            },
         });
         b.build(ctx.product.price.tick)
             .map(Some)

@@ -20,6 +20,7 @@
 //! Fetching and decoding run on the levels runtime thread, never the UI thread.
 
 pub mod runtime;
+pub mod setting;
 
 #[cfg(any(test, feature = "demo-levels"))]
 pub mod demo;
@@ -51,9 +52,24 @@ pub enum RefreshMode {
     OneShot,
 }
 
-/// One setting a source needs (decision 0021: settings are data). The settings window will
-/// render these; until it lands, values come from the command line or defaults.
+/// One setting a source needs (decision 0021: settings are data). Lines draws every one
+/// itself, in the Studies menu's level editor and Settings › Plugins, from this description
+/// alone: the kinds are a closed set and a plugin never draws its own UI. Values are text
+/// ([`SettingValues`]); [`setting`] parses, checks, steps and formats them.
+///
+/// Build with [`SettingSpec::new`] and the `const` setters, so a field added later never breaks
+/// a source:
+///
+/// ```
+/// use lines_feed::levels::{SettingKind, SettingSpec};
+/// const REFRESH: SettingSpec = SettingSpec::new(
+///     "refresh", "Refresh", SettingKind::Seconds { min: 1, max: 60 }, "5", "How often to poll.",
+/// )
+/// .group("Connection")
+/// .connection();
+/// ```
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SettingSpec {
     /// Stable key, e.g. `service_url`.
     pub key: &'static str,
@@ -62,22 +78,106 @@ pub struct SettingSpec {
     /// Default, as text (`""`: none).
     pub default: &'static str,
     pub help: &'static str,
+    /// The heading it is listed under ("Connection"); consecutive settings of one group share
+    /// it. `""`: none.
+    pub group: &'static str,
+    /// Shown, dimmed, while an optional value is empty ("from the service"). `""`: none.
+    pub placeholder: &'static str,
+    /// Lines' own controls do this (a source's labels, zone fills or legend stats): never
+    /// shown; the source keeps its default.
+    pub owned_by_lines: bool,
+    /// A switch that asks before it turns on: the question. `""`: never asks. Turning it off
+    /// never asks.
+    pub confirm: &'static str,
+    /// Part of the connection (its address, the symbol fetched, how often): a change makes a
+    /// live source connect again. Any other change decodes the newest batch again, without a
+    /// fetch.
+    pub connection: bool,
 }
 
+impl SettingSpec {
+    pub const fn new(
+        key: &'static str,
+        label: &'static str,
+        kind: SettingKind,
+        default: &'static str,
+        help: &'static str,
+    ) -> SettingSpec {
+        SettingSpec {
+            key,
+            label,
+            kind,
+            default,
+            help,
+            group: "",
+            placeholder: "",
+            owned_by_lines: false,
+            confirm: "",
+            connection: false,
+        }
+    }
+
+    pub const fn group(mut self, group: &'static str) -> SettingSpec {
+        self.group = group;
+        self
+    }
+
+    pub const fn placeholder(mut self, placeholder: &'static str) -> SettingSpec {
+        self.placeholder = placeholder;
+        self
+    }
+
+    pub const fn owned_by_lines(mut self) -> SettingSpec {
+        self.owned_by_lines = true;
+        self
+    }
+
+    pub const fn confirm(mut self, question: &'static str) -> SettingSpec {
+        self.confirm = question;
+        self
+    }
+
+    pub const fn connection(mut self) -> SettingSpec {
+        self.connection = true;
+        self
+    }
+
+    /// Whether Lines shows it (not a secret, not one Lines' own controls do).
+    pub fn shown(&self) -> bool {
+        !self.owned_by_lines && self.kind != SettingKind::Secret
+    }
+}
+
+/// What a setting is, and so its control and its checks (a closed set).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SettingKind {
+    /// A text field.
     Text,
+    /// A text field holding an `http`/`https` URL (checked as one).
     Url,
     /// Never stored in workspace files or recordings, never displayed; the adapter reads it
     /// from the OS keychain or its environment variable itself.
     Secret,
+    /// A switch: `"true"` or `"false"`.
     Bool,
-    /// Whole seconds in `[min, max]`.
-    Seconds {
-        min: u32,
-        max: u32,
-    },
+    /// Whole seconds in `[min, max]`, shown in the unit that reads best ("90 s", "23 h") and
+    /// stepped in it.
+    Seconds { min: u32, max: u32 },
+    /// One of these values (the static list; [`LevelSource::choices`] may replace it with what
+    /// the source knows now). A value's label is its text, an initial capital.
     Choice(&'static [&'static str]),
+    /// A decimal in `[min, max]`, counted in steps of `10^-decimals` (exact: `min`, `max` and
+    /// `step` are in those units, so 0.05 with 2 decimals is `5`), shown with `decimals`
+    /// places and `unit` after it ("pt"), stepped by `step`. `optional`: empty is allowed
+    /// (shown as the spec's placeholder).
+    Number {
+        min: i64,
+        max: i64,
+        step: i64,
+        decimals: u8,
+        unit: &'static str,
+        optional: bool,
+    },
 }
 
 /// Setting values by key (secrets excluded).
@@ -221,6 +321,26 @@ pub trait LevelSource: Send + Sync + 'static {
     }
     fn settings(&self) -> &'static [SettingSpec] {
         &[]
+    }
+    /// A [`SettingKind::Choice`]'s options now, `(value, label)` (`None`: the spec's own
+    /// list), e.g. the symbols a service lists. Asked on the UI thread: answer from what the
+    /// source already knows, never by fetching.
+    fn choices(&self, key: &str) -> Option<Vec<(String, String)>> {
+        let _ = key;
+        None
+    }
+    /// Why these values can't be used together, `(key, reason)` for each refused value (e.g. a
+    /// remote address while remote access is off). Each value has already passed its kind's
+    /// own checks. A refused value is never applied.
+    fn check(&self, values: &SettingValues) -> Vec<(&'static str, String)> {
+        let _ = values;
+        Vec::new()
+    }
+    /// A default this source takes from outside Lines (its environment), for a key with no
+    /// saved value: Lines shows it as the value, marked "from the environment".
+    fn outside_default(&self, key: &str) -> Option<String> {
+        let _ = key;
+        None
     }
     /// The lower-pane line studies this source offers (its maps carry their [`Series`] by
     /// line key). Each is its own chart study (Studies › Add, on charts this source serves).

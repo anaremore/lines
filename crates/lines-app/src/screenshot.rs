@@ -90,6 +90,12 @@ pub struct Shot {
     pub hover_header: bool,
     /// The focused chart's legend row for this study shows its buttons (`--legend-hover`).
     pub legend_hover: Option<String>,
+    /// Plugins' settings set as typed (`--plugin-set ID.KEY=VALUE`).
+    pub plugin_set: Vec<String>,
+    /// A plugin switch's question asked (`--plugin-ask ID.KEY`).
+    pub plugin_ask: Option<String>,
+    /// A plugin choice's list open (`--plugin-open ID.KEY`).
+    pub plugin_open: Option<String>,
     /// A context menu opens (`--context-menu`).
     pub context_menu: Option<crate::pane_menu::ShotMenu>,
     /// The updater's state on the status line (`--update-shot`).
@@ -246,6 +252,9 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         bracket_position,
         hover_header,
         legend_hover,
+        plugin_set,
+        plugin_ask,
+        plugin_open,
         context_menu,
         update_shot,
         ui_zoom,
@@ -444,6 +453,16 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
                 }
             }
             cx.set_global(settings);
+            if let Err(e) =
+                crate::plugin_settings::set_shot(plugin_ask.as_deref(), plugin_open.as_deref())
+            {
+                fail(&anyhow::anyhow!("--plugin-ask / --plugin-open: {e}"));
+            }
+            for s in &plugin_set {
+                if let Err(e) = crate::plugin_settings::set_for_screenshot(cx, s) {
+                    fail(&anyhow::anyhow!("--plugin-set: {e}"));
+                }
+            }
             cx.set_global(crate::drawings_store::Drawings::ephemeral(
                 seed.into_iter().collect(),
             ));

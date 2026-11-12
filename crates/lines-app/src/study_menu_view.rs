@@ -198,9 +198,11 @@ pub fn render(
                         .items_start()
                         .gap_1()
                         .child(
+                            // As `group_line`: at least the column, one line.
                             div()
                                 .flex_none()
-                                .w(crate::zoom::ui(64.0))
+                                .min_w(crate::zoom::ui(64.0))
+                                .whitespace_nowrap()
                                 .text_size(crate::zoom::ui(11.0))
                                 .text_color(t.text_dim)
                                 .child(group),
@@ -257,6 +259,10 @@ pub fn render(
                 label,
                 less,
                 more,
+                typed,
+                dim,
+                typing,
+                refused,
             } => {
                 // − value +: the keys' line outlines the value (← / → step it).
                 let button = |id: (&'static str, usize), text: &'static str, can: bool, part| {
@@ -293,20 +299,34 @@ pub fn render(
                     .child(
                         // One width for every number, right-aligned in tabular digits: the
                         // values and the + buttons line up down the editor.
+                        // A plugin's number is typed with Enter or a click on it; empty, its
+                        // placeholder shows dimmed (never read as a value).
                         div()
-                            .w(crate::zoom::ui(64.0))
+                            .id(("step-value", i))
+                            .min_w(crate::zoom::ui(64.0))
                             .px_2()
                             .py(px(1.0))
                             .flex()
                             .justify_end()
+                            .whitespace_nowrap()
                             .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
                                 "tnum".into(),
                                 1,
                             )])))
                             .rounded_sm()
                             .border_1()
-                            .border_color(if selected { t.accent } else { t.axis_line })
-                            .text_color(t.text_main)
+                            .border_color(if selected || *typing {
+                                t.accent
+                            } else if *refused {
+                                t.destructive
+                            } else {
+                                t.axis_line
+                            })
+                            .text_color(if *dim { t.text_dim } else { t.text_main })
+                            .when(typed.is_some(), |d| {
+                                d.cursor_text()
+                                    .on_mouse_down(MouseButton::Left, click(i, MenuPart::Primary))
+                            })
                             .child(label.clone()),
                     )
                     .child(button(
@@ -316,6 +336,87 @@ pub fn render(
                         MenuPart::More,
                     ));
                 body = body.child(group_line(group, field.into_any_element(), t));
+                i += 1;
+            }
+            Item::Section(s) => {
+                // A sub-heading in the editor's value column ("Source settings", "Connection").
+                body = body.child(
+                    div()
+                        .px_3()
+                        .pl(crate::zoom::ui(32.0))
+                        .pt_2()
+                        .text_size(crate::zoom::ui(11.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(t.text_dim)
+                        .child(s.to_uppercase()),
+                );
+                i += 1;
+            }
+            Item::Field {
+                group,
+                text,
+                placeholder,
+                typing,
+                refused,
+                ..
+            } => {
+                let empty = text.is_empty();
+                let field = div()
+                    .id(("field", i))
+                    .flex_1()
+                    .min_w(crate::zoom::ui(160.0))
+                    .px_2()
+                    .py(px(1.0))
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(if selected || *typing {
+                        t.accent
+                    } else if *refused {
+                        t.destructive
+                    } else {
+                        t.axis_line
+                    })
+                    .text_size(crate::zoom::ui(12.0))
+                    .text_color(if empty { t.text_dim } else { t.text_main })
+                    .truncate()
+                    .cursor_text()
+                    .on_mouse_down(MouseButton::Left, click(i, MenuPart::Primary))
+                    .child(if empty {
+                        (*placeholder).to_owned()
+                    } else {
+                        text.clone()
+                    });
+                body = body.child(group_line(group, field.into_any_element(), t));
+                i += 1;
+            }
+            Item::Hint(h) => {
+                // A quiet line in the value column ("For every chart: …").
+                body = body.child(
+                    div()
+                        .px_3()
+                        .pl(crate::zoom::ui(32.0))
+                        .pb_1()
+                        .text_size(crate::zoom::ui(11.0))
+                        .text_color(t.text_dim)
+                        .child(h.clone()),
+                );
+                i += 1;
+            }
+            Item::Reason(r) => {
+                // Under the refused value, in the value column: the mark carries "refused"
+                // (never color alone), the words read in the main text.
+                body = body.child(
+                    div()
+                        .px_3()
+                        .pl(crate::zoom::ui(32.0 + 64.0 + 4.0))
+                        .pb_1()
+                        .flex()
+                        .flex_row()
+                        .gap_1()
+                        .text_size(crate::zoom::ui(11.0))
+                        .child(div().flex_none().text_color(t.destructive).child("!"))
+                        .child(div().min_w_0().text_color(t.text_main).child(r.clone())),
+                );
                 i += 1;
             }
             Item::Action { label, delete, .. } => {
@@ -438,9 +539,12 @@ fn group_line(group: &str, field: AnyElement, t: &Theme) -> gpui::Div {
         .items_center()
         .gap_1()
         .child(
+            // At least the column's width; a longer name (a plugin's "Allow remote") keeps one
+            // line, never wrapping under itself.
             div()
                 .flex_none()
-                .w(crate::zoom::ui(64.0))
+                .min_w(crate::zoom::ui(64.0))
+                .whitespace_nowrap()
                 .text_size(crate::zoom::ui(11.0))
                 .text_color(t.text_dim)
                 .child(group.to_owned()),
