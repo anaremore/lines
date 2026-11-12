@@ -629,6 +629,10 @@ struct Cli {
     /// Screenshot: the first single-order mark and tag show their − / size / +, as if hovered.
     #[arg(long, requires = "screenshot")]
     order_controls: bool,
+    /// Screenshot: charts and DOMs hold their newest working entry dragged to PRICE, its held
+    /// stop and target with it (Settings › Order entry): the drag's preview, nothing sent.
+    #[arg(long, requires = "screenshot", value_name = "PRICE")]
+    drag_order: Option<String>,
     /// Screenshot: the order size every symbol starts with (the Qty control, the Buy/Sell
     /// buttons).
     #[arg(long, requires = "screenshot")]
@@ -2206,6 +2210,7 @@ where
                 arm: cli.arm,
                 hotkeys: cli.hotkeys,
                 order_controls: cli.order_controls,
+                drag_order: cli.drag_order.clone(),
                 order_size: cli.order_size,
                 drawing_tools_dock: cli.drawing_tools.as_deref().map(|d| {
                     if d == "top" {

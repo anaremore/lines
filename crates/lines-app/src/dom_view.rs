@@ -1268,6 +1268,21 @@ impl DomView {
                     .flash(format!("{}: {why}", fmt.format::<32>(p).as_str()));
             }
             let units = self.row_units();
+            // Screenshot fixture: the newest working entry held dragged (nothing sent).
+            if self.orders.drag.is_none()
+                && let Some(at) = tr.start_drag_order.as_deref()
+                && let (Some(account), Some(contract)) = (self.trade.account.as_ref(), contract)
+                && let Ok(p) = self.product.price.scale.parse_decimal(at)
+            {
+                let with_legs = crate::picker_view::settings(cx).move_bracket();
+                self.orders.drag = DragOrder::fixture(
+                    &tr.cache.read(),
+                    account,
+                    contract,
+                    lines_core::Price(p),
+                    with_legs,
+                );
+            }
             if tr.start_order_controls && self.orders.hover.is_none() {
                 self.orders.hover = self.orders.first_single(units);
                 window.refresh();

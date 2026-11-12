@@ -56,6 +56,8 @@ pub struct Shot {
     pub hotkeys: bool,
     /// The first single-order mark and tag show their resize control (`--order-controls`).
     pub order_controls: bool,
+    /// Charts and DOMs hold their newest working entry dragged here (`--drag-order`).
+    pub drag_order: Option<String>,
     /// The order size symbols start with (`--order-size`).
     pub order_size: Option<u32>,
     /// Where the drawing toolbar sits (`--drawing-tools left|top`), as Settings › Charts sets it.
@@ -235,6 +237,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         arm,
         hotkeys,
         order_controls,
+        drag_order,
         order_size,
         drawing_tools_dock,
         max_order_qty,
@@ -311,6 +314,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
     trading.start_armed = arm;
     trading.start_hotkeys = hotkeys;
     trading.start_order_controls = order_controls;
+    trading.start_drag_order = drag_order;
     if demo_broker {
         trading.wait_for_venues();
         trading.start_account = Some(lines_trading::AccountId::new(crate::demo_broker::SIM));

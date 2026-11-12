@@ -69,6 +69,32 @@ impl DragOrder {
         }
     }
 
+    /// Screenshot fixture (`--drag-order PRICE`): the account's newest working entry on
+    /// `contract` held dragged to `to`, its held stop and target with it when `with_legs` (the
+    /// setting), as a press on it and a move would leave it. Nothing is sent.
+    pub fn fixture(
+        s: &crate::trading::TradeState,
+        account: &lines_trading::AccountId,
+        contract: lines_core::ContractKey,
+        to: Price,
+        with_legs: bool,
+    ) -> Option<DragOrder> {
+        let o = s
+            .open_orders(account, contract)
+            .filter(|o| o.role == lines_trading::Role::Entry)
+            .max_by_key(|o| o.id)?;
+        let from = crate::dom_trade::order_price(o)?;
+        let legs = if with_legs {
+            s.held_legs(o.id)
+        } else {
+            [None; 2]
+        };
+        Some(DragOrder {
+            to,
+            ..DragOrder::new(o.id, from, legs)
+        })
+    }
+
     /// Where the order and its legs are drawn while dragged.
     pub fn previews(&self) -> impl Iterator<Item = Price> + '_ {
         let d = self.to.0 - self.from.0;

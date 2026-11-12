@@ -5261,6 +5261,21 @@ impl ChartView {
             self.ct.adding = lines_core::geometry::order_tags::position_drag_exit(qty, avg, to)
                 .map(|target| crate::chart_trade::AddExit { target, to });
         }
+        // Screenshot fixture: the newest working entry held dragged (a preview, never sent).
+        if self.ct.drag.is_none()
+            && let Some(at) = t.start_drag_order.as_deref()
+            && let (Some(account), Some(contract)) = (self.trade.account.as_ref(), contract)
+            && let Ok(units) = self.instrument.price.scale.parse_decimal(at)
+        {
+            let with_legs = crate::picker_view::settings(cx).move_bracket();
+            self.ct.drag = crate::dom_orders::DragOrder::fixture(
+                &t.cache.read(),
+                account,
+                contract,
+                Price(units),
+                with_legs,
+            );
+        }
         // Screenshot fixtures: an order staged as the menu's "…with bracket" would (once the
         // chart can trade), its legs as given; and a flash.
         if let Some(spec) = self.stage_fixture.clone()

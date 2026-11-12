@@ -895,6 +895,9 @@ pub struct Trading {
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
+    /// Screenshot fixture (`--drag-order PRICE`): charts and DOMs hold their newest working
+    /// entry dragged to this price (`dom_orders::DragOrder::fixture`). Never set in the app.
+    pub start_drag_order: Option<String>,
     /// Screenshot fixture (`--panel-menu qty|bracket`): DOMs start with that trade panel list
     /// open. Never set in the app.
     pub start_panel_menu: Option<crate::trade_bar::PanelMenu>,
@@ -1600,6 +1603,7 @@ impl Trading {
             start_hotkeys: false,
             start_order_controls: false,
             start_account_menu: false,
+            start_drag_order: None,
             start_panel_menu: None,
             start_chain_ticket: None,
             start_editor: false,
