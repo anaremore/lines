@@ -177,6 +177,10 @@ pub struct Settings {
     /// absent (and the default, right) isn't written.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub order_tags_left: bool,
+    /// Settings › Order entry: dragging an unfilled bracket entry moves its held stop and
+    /// target with it (owner, 2026-11-12). Optional: absent is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub move_bracket: Option<bool>,
     /// The app-wide UI zoom in percent (`crate::zoom::STEPS`). Optional: absent is 100 %.
     #[serde(
         default,
@@ -323,6 +327,11 @@ pub const SETTINGS_FORMAT: Format = Format {
 };
 
 impl Settings {
+    /// Whether dragging an unfilled entry moves its stop and target too (on unless set off).
+    pub fn move_bracket(&self) -> bool {
+        self.move_bracket.unwrap_or(true)
+    }
+
     /// Missing file: defaults, no report. A file that can't be used is backed up and reported
     /// (`crate::versioned::load`); the last value says whether saving over `path` is safe.
     pub fn load(path: &Path) -> (Settings, Option<String>, bool) {

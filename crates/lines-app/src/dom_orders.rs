@@ -52,6 +52,28 @@ struct RowFlash {
 pub struct DragOrder {
     pub order: OrderId,
     pub to: Price,
+    /// Where the order was when the drag began, and the held exits that move with it (an
+    /// unfilled entry's, with the setting on): previewed at their price shifted by the move.
+    pub from: Price,
+    pub legs: [Option<(OrderId, Price)>; 2],
+}
+
+impl DragOrder {
+    /// A drag of `order` from `at`, moving `legs` with it.
+    pub fn new(order: OrderId, at: Price, legs: [Option<(OrderId, Price)>; 2]) -> DragOrder {
+        DragOrder {
+            order,
+            to: at,
+            from: at,
+            legs,
+        }
+    }
+
+    /// Where the order and its legs are drawn while dragged.
+    pub fn previews(&self) -> impl Iterator<Item = Price> + '_ {
+        let d = self.to.0 - self.from.0;
+        std::iter::once(self.to).chain(self.legs.iter().flatten().map(move |(_, p)| Price(p.0 + d)))
+    }
 }
 
 /// The narrowest mark that draws its − and + (each at least 20 px, with room for its size).
@@ -480,7 +502,9 @@ impl OrdersLayer {
                 .ghosts
                 .iter()
                 .any(|g| g.qty.is_none() && row_of(g.price.0, units) == row)
-                || self.drag.is_some_and(|d| row_of(d.to.0, units) == row);
+                || self
+                    .drag
+                    .is_some_and(|d| d.previews().any(|p| row_of(p.0, units) == row));
             if ghost_here {
                 outline(
                     window,

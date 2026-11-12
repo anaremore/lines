@@ -665,7 +665,22 @@ impl DomView {
         if col == DomColumn::Orders {
             let width = f(self.bounds.size.width) / crate::zoom::get();
             match self.mark_pressed(price, ev.position).order(width) {
-                Ok(Some(order)) => self.orders.drag = Some(DragOrder { order, to: price }),
+                Ok(Some(order)) => {
+                    // An unfilled entry's held legs move with it (the setting on): previewed.
+                    let legs = match Trading::try_global(cx) {
+                        Some(t) if crate::picker_view::settings(cx).move_bracket() => {
+                            t.cache.read().held_legs(order)
+                        }
+                        _ => [None; 2],
+                    };
+                    let from = Trading::try_global(cx)
+                        .and_then(|t| t.cache.read().order(order).and_then(dom_trade::order_price))
+                        .unwrap_or(price);
+                    self.orders.drag = Some(DragOrder {
+                        to: price,
+                        ..DragOrder::new(order, from, legs)
+                    });
+                }
                 Ok(None) => return,
                 Err(why) => self.trade.flash(why),
             }
@@ -720,7 +735,13 @@ impl DomView {
             self.trade.flash(why);
             return;
         }
-        if let Some(cmd) = dom_trade::drag_command(&o, d.to) {
+        let with_legs = crate::picker_view::settings(cx).move_bracket();
+        let legs = if with_legs {
+            t.cache.read().held_legs(o.id)
+        } else {
+            [None; 2]
+        };
+        if let Some(cmd) = dom_trade::drag_command(&o, d.to, with_legs) {
             let id = t.submit(lines_trading::Source::Dom, issued, cmd);
             self.orders.ghosts.push(Ghost {
                 order: o.id,
@@ -728,6 +749,10 @@ impl DomView {
                 command: id,
                 qty: None,
             });
+            // Its legs move with it (the setting on): their ghosts too.
+            self.orders
+                .ghosts
+                .extend(dom_trade::leg_ghosts(legs, from, d.to, id));
         }
     }
 

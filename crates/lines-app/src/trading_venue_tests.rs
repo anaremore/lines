@@ -257,6 +257,7 @@ fn a_read_only_venue_shows_its_state_and_refuses_every_command() {
             order: OrderId(700_001),
             qty: None,
             price: Some(Price(601_250)),
+            move_bracket: false,
         },
         TradeCommand::Flatten {
             account: sim.clone(),
