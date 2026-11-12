@@ -28,7 +28,7 @@ use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use super::{
     ChartPrices, LevelContext, LevelError, LevelFrame, LevelMap, LevelSource, RefreshMode,
-    SettingValues, decode_batch, encode_batch,
+    SettingSpec, SettingValues, decode_batch, encode_batch,
 };
 use crate::provider::Frame;
 use crate::recording::{Direction, FORMAT_VERSION, Header, Reader, Writer};
@@ -108,9 +108,43 @@ fn settings() -> &'static RwLock<HashMap<String, SettingValues>> {
     S.get_or_init(Default::default)
 }
 
-/// Setting values for a source (until the settings window, decision 0021). Never secrets.
+fn generations() -> &'static RwLock<HashMap<String, u64>> {
+    static G: OnceLock<RwLock<HashMap<String, u64>>> = OnceLock::new();
+    G.get_or_init(Default::default)
+}
+
+/// A source's setting values (the app's, from its settings; never secrets). Applied live: a
+/// change moves the source's [`settings_generation`], and each of its live tasks takes the new
+/// values on its next tick, connecting again if a [`SettingSpec::connection`] setting changed,
+/// else decoding its newest batch again (the map stays shown meanwhile). A replay keeps the
+/// values it started with.
 pub fn set_settings(source: &str, values: SettingValues) {
-    settings().write().insert(source.to_owned(), values);
+    let mut s = settings().write();
+    if s.get(source) == Some(&values) {
+        return;
+    }
+    s.insert(source.to_owned(), values);
+    drop(s);
+    *generations().write().entry(source.to_owned()).or_insert(0) += 1;
+}
+
+/// Moves each time [`set_settings`] changes the source's values.
+pub fn settings_generation(source: &str) -> u64 {
+    generations().read().get(source).copied().unwrap_or(0)
+}
+
+/// Whether a change from `old` to `new` reaches the connection (a [`SettingSpec::connection`]
+/// key changed, or a key the source doesn't describe).
+fn reconnects(specs: &[SettingSpec], old: &SettingValues, new: &SettingValues) -> bool {
+    let keys: std::collections::BTreeSet<&String> = old.keys().chain(new.keys()).collect();
+    keys.into_iter()
+        .filter(|k| old.get(*k) != new.get(*k))
+        .any(|k| {
+            specs
+                .iter()
+                .find(|s| s.key == k)
+                .is_none_or(|s| s.connection)
+        })
 }
 
 pub fn settings_for(source: &str) -> SettingValues {
@@ -641,15 +675,15 @@ fn header(source: &dyn LevelSource, ctx: &LevelContext) -> Header {
 
 pub(crate) async fn live(
     source: Arc<dyn LevelSource>,
-    ctx: LevelContext,
+    mut ctx: LevelContext,
     prices: Arc<dyn ChartPrices>,
     cell: Arc<LevelCell>,
     rec: Shared<Recorder>,
     last: Shared<(UtcMillis, Vec<LevelFrame>)>,
 ) {
-    let batch = |frames: &[LevelFrame]| {
+    let batch = |ctx: &LevelContext, frames: &[LevelFrame]| {
         let now = crate::now_utc();
-        let series_only = apply(&*source, &ctx, &*prices, &cell, frames, now);
+        let series_only = apply(&*source, ctx, &*prices, &cell, frames, now);
         // Under the recorder's lock, so a recording starting now (`begin`) writes this batch
         // either as its first or from here, never neither. A recording opens with the newest
         // whole refresh, never a series-only push (which decodes to nothing without a map).
@@ -662,12 +696,33 @@ pub(crate) async fn live(
         }
         drop(slot);
     };
+    // The app's settings, taken on each tick: `Some(true)` when a connection setting changed
+    // (connect again), `Some(false)` when another did (the newest batch is decoded again here,
+    // with no fetch, and not recorded again: a replay decodes the recorded batch as it was).
+    let id = source.id().to_owned();
+    let mut seen = settings_generation(&id);
+    let mut take_settings = |ctx: &mut LevelContext| -> Option<bool> {
+        let g = settings_generation(&id);
+        if g == seen {
+            return None;
+        }
+        seen = g;
+        let new = settings_for(&id);
+        let reconnect = reconnects(source.settings(), &ctx.settings, &new);
+        ctx.settings = new;
+        if !reconnect && let Some((_, frames)) = last.lock().clone() {
+            apply(&*source, ctx, &*prices, &cell, &frames, crate::now_utc());
+        }
+        Some(reconnect)
+    };
     let mut backoff = Duration::from_secs(1);
     let fail = |cell: &LevelCell, e: anyhow::Error| {
         tracing::warn!("levels {}: {e:#}", cell.read().source);
         cell.update(|s| s.error = Some(format!("{e:#}")));
     };
+    const TICK: Duration = Duration::from_secs(1);
     loop {
+        let _ = take_settings(&mut ctx);
         let mut t = match source.connect(&ctx).await {
             Ok(t) => t,
             Err(e) => {
@@ -677,13 +732,22 @@ pub(crate) async fn live(
                 continue;
             }
         };
+        // Connecting again for new settings: at once, with no backoff.
+        let mut for_settings = false;
         match source.refresh() {
             RefreshMode::OneShot => match t.fetch().await {
                 Ok(f) => {
-                    batch(&f);
-                    // Static: keep it. A one-shot map is never refreshed, so it never ages
-                    // past the source's threshold unless the source says it should.
-                    std::future::pending::<()>().await;
+                    batch(&ctx, &f);
+                    // Static: keep it (a one-shot map is never refreshed, so it never ages
+                    // past the source's threshold unless the source says it should), until
+                    // settings change.
+                    loop {
+                        tokio::time::sleep(TICK).await;
+                        if take_settings(&mut ctx) == Some(true) {
+                            for_settings = true;
+                            break;
+                        }
+                    }
                 }
                 Err(e) => fail(&cell, e),
             },
@@ -691,7 +755,7 @@ pub(crate) async fn live(
                 match t.fetch().await {
                     Ok(f) => {
                         backoff = Duration::from_secs(1);
-                        batch(&f);
+                        batch(&ctx, &f);
                     }
                     Err(e) => {
                         fail(&cell, e);
@@ -699,12 +763,17 @@ pub(crate) async fn live(
                     }
                 }
                 tokio::time::sleep(every).await;
+                if take_settings(&mut ctx) == Some(true) {
+                    for_settings = true;
+                    break;
+                }
             },
+            // Taken after each event (a stream that is quiet takes them at its next one).
             RefreshMode::Sse => loop {
                 match t.next_event().await {
                     Ok(Some(f)) => {
                         backoff = Duration::from_secs(1);
-                        batch(std::slice::from_ref(&f));
+                        batch(&ctx, std::slice::from_ref(&f));
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -712,7 +781,14 @@ pub(crate) async fn live(
                         break;
                     }
                 }
+                if take_settings(&mut ctx) == Some(true) {
+                    for_settings = true;
+                    break;
+                }
             },
+        }
+        if for_settings {
+            continue;
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(30));

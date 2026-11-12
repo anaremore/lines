@@ -639,7 +639,38 @@ pub enum MenuCmd {
     SaveDefault,
     /// This chart's own studies (a copy of its symbol's) on or off (decision 0039).
     ToggleSeparate,
+    /// A level source's own setting ("Source settings"; app-wide, `crate::plugin_settings`).
+    Plugin(PluginCmd),
     Close,
+}
+
+/// A change to a plugin's settings from the menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PluginCmd {
+    /// Set `key` to `value` (a switch asking first asks: [`StudyMenu::asking`]).
+    Set {
+        source: String,
+        key: &'static str,
+        value: String,
+    },
+    /// Start typing `key`, from `text`.
+    Edit {
+        source: String,
+        key: &'static str,
+        text: String,
+    },
+    /// The question answered: turn the switch on (`true`), or leave it.
+    Answer(bool),
+    /// Esc on a field: drop its refused value (the value in force shows again).
+    Discard { source: String, key: &'static str },
+}
+
+/// A plugin setting being typed in the menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Typing {
+    pub source: String,
+    pub key: &'static str,
+    pub buf: String,
 }
 
 /// A level source on the chart, as the menu shows it.
@@ -655,6 +686,8 @@ pub struct SourceInfo {
     /// Kinds whose type is turned off in the style editor (Show), in `kinds` order (empty:
     /// none).
     pub styled_off: Vec<bool>,
+    /// Its own settings ("Source settings", `crate::plugin_settings`; empty: none). App-wide.
+    pub plugin: Vec<crate::plugin_settings::Row>,
 }
 
 /// What the menu is built from.
@@ -797,12 +830,32 @@ pub enum Item {
         custom: Option<CustomTo>,
     },
     /// A number with − / +: its value's text and each step's command (`None` at its end).
+    /// `typed`: Enter (or a click on the value) types it (a plugin's numbers); `dim`: the
+    /// label is a placeholder; `typing`: being typed (the label is the text so far).
     Step {
         group: &'static str,
         label: String,
         less: Option<MenuCmd>,
         more: Option<MenuCmd>,
+        typed: Option<MenuCmd>,
+        dim: bool,
+        typing: bool,
     },
+    /// A sub-heading inside an editor ("Source settings", a plugin's group).
+    Section(String),
+    /// A text field (a plugin's text and URL settings): Enter or a click types it.
+    Field {
+        group: &'static str,
+        text: String,
+        placeholder: &'static str,
+        typing: bool,
+        cmd: MenuCmd,
+    },
+    /// Why the value above was refused (a plugin's field): its text stays, nothing applied.
+    Reason(String),
+    /// A quiet line in the editor's value column (a plugin's "For every chart: …", a switch's
+    /// question).
+    Hint(String),
     /// An "Add" catalog entry or a template action.
     Action {
         label: String,
@@ -950,7 +1003,10 @@ fn fold_drops(r: &StudyRef, out: &mut Vec<Item>, start: usize) {
 
 impl Item {
     pub fn focusable(&self) -> bool {
-        !matches!(self, Item::Header(_) | Item::Note(_))
+        !matches!(
+            self,
+            Item::Header(_) | Item::Note(_) | Item::Section(_) | Item::Reason(_) | Item::Hint(_)
+        )
     }
 }
 
@@ -966,6 +1022,10 @@ pub struct StudyMenu {
     pub naming: Option<String>,
     /// A dropdown's list, open.
     pub drop: Option<MenuDrop>,
+    /// A plugin setting being typed (Enter applies, Esc goes back).
+    pub typing: Option<Typing>,
+    /// A plugin switch's question, asked before it turns on: (source, key).
+    pub asking: Option<(String, &'static str)>,
 }
 
 pub fn reset_label(r: Reset) -> String {
@@ -1170,6 +1230,9 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 label: $label,
                 less: $less,
                 more: $more,
+                typed: None,
+                dim: false,
+                typing: false,
             })
         };
     }
@@ -1534,6 +1597,156 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
 }
 
 impl StudyMenu {
+    /// A level source's own settings under its controls ("Source settings": app-wide, one
+    /// feed serves every chart), drawn from its specs (`crate::plugin_settings`): a group's
+    /// switches as chips on one line (a lone switch, or one that asks, on its own), a choice as
+    /// a dropdown, seconds and numbers with − / + (Enter types one), text and addresses as
+    /// fields; a refused value keeps its text with the reason under it; a switch's question
+    /// under it until answered.
+    fn plugin_items(&self, s: &SourceInfo, out: &mut Vec<Item>) {
+        use lines_feed::levels::{SettingKind, setting};
+        if s.plugin.is_empty() {
+            return;
+        }
+        out.push(Item::Section("Source settings".into()));
+        out.push(Item::Hint(format!(
+            "For every chart: one {} feed serves them all.",
+            s.label
+        )));
+        let set = |key: &'static str, value: String| {
+            MenuCmd::Plugin(PluginCmd::Set {
+                source: s.id.clone(),
+                key,
+                value,
+            })
+        };
+        let edit = |key: &'static str, text: String| {
+            MenuCmd::Plugin(PluginCmd::Edit {
+                source: s.id.clone(),
+                key,
+                text,
+            })
+        };
+        let flip = |v: &str| if setting::is_on(v) { "false" } else { "true" }.to_owned();
+        let rows = &s.plugin;
+        let mut group = "";
+        let mut i = 0;
+        while i < rows.len() {
+            let r = &rows[i];
+            if r.spec.group != group {
+                group = r.spec.group;
+                if !group.is_empty() {
+                    out.push(Item::Section(group.to_owned()));
+                }
+            }
+            let key = r.spec.key;
+            let typing = self
+                .typing
+                .as_ref()
+                .filter(|t| t.source == s.id && t.key == key);
+            match r.spec.kind {
+                SettingKind::Bool => {
+                    let simple = |x: &&crate::plugin_settings::Row| {
+                        x.spec.kind == SettingKind::Bool
+                            && x.spec.group == group
+                            && x.spec.confirm.is_empty()
+                    };
+                    let run = rows[i..].iter().take_while(simple).count();
+                    if run >= 2 && !group.is_empty() {
+                        for x in &rows[i..i + run] {
+                            out.push(Item::Control {
+                                group,
+                                label: x.spec.label.into(),
+                                on: setting::is_on(&x.value),
+                                swatch: Swatch::None,
+                                cmd: set(x.spec.key, flip(&x.value)),
+                            });
+                        }
+                        i += run;
+                        continue;
+                    }
+                    let on = setting::is_on(&r.value);
+                    out.push(Item::Control {
+                        group: r.spec.label,
+                        label: if on { "On" } else { "Off" }.into(),
+                        on,
+                        swatch: Swatch::None,
+                        cmd: set(key, flip(&r.value)),
+                    });
+                    if self
+                        .asking
+                        .as_ref()
+                        .is_some_and(|(src, k)| *src == s.id && *k == key)
+                    {
+                        out.push(Item::Hint(r.spec.confirm.to_owned()));
+                        out.push(Item::Action {
+                            label: format!("Turn on {}", r.spec.label.to_lowercase()),
+                            cmd: MenuCmd::Plugin(PluginCmd::Answer(true)),
+                            delete: None,
+                        });
+                        out.push(Item::Action {
+                            label: "Cancel".into(),
+                            cmd: MenuCmd::Plugin(PluginCmd::Answer(false)),
+                            delete: None,
+                        });
+                    }
+                }
+                SettingKind::Choice(_) => out.push(Item::Drop {
+                    group: r.spec.label,
+                    label: r.choice_label(),
+                    multi: false,
+                    options: r
+                        .options
+                        .iter()
+                        .map(|(v, l)| Opt {
+                            label: l.clone(),
+                            on: v.eq_ignore_ascii_case(&r.value),
+                            cmd: set(key, v.clone()),
+                        })
+                        .collect(),
+                    custom: None,
+                }),
+                SettingKind::Seconds { .. } | SettingKind::Number { .. } => {
+                    // Typed from the value in its stored form (no unit), or the refused text.
+                    let start = match (&r.refused, r.spec.kind) {
+                        (Some(f), _) => f.text.clone(),
+                        (None, SettingKind::Seconds { .. }) => r.shown.clone(),
+                        (None, _) => r.value.clone(),
+                    };
+                    let (label, dim) = match typing {
+                        Some(t) => (format!("{}\u{258f}", t.buf), false),
+                        None if r.text().is_empty() => (r.spec.placeholder.to_owned(), true),
+                        None => (r.text().to_owned(), false),
+                    };
+                    out.push(Item::Step {
+                        group: r.spec.label,
+                        label,
+                        less: r.step(false).map(|v| set(key, v)),
+                        more: r.step(true).map(|v| set(key, v)),
+                        typed: Some(edit(key, start)),
+                        dim,
+                        typing: typing.is_some(),
+                    });
+                }
+                SettingKind::Text | SettingKind::Url => out.push(Item::Field {
+                    group: r.spec.label,
+                    text: typing
+                        .map_or_else(|| r.text().to_owned(), |t| format!("{}\u{258f}", t.buf)),
+                    placeholder: r.spec.placeholder,
+                    typing: typing.is_some(),
+                    cmd: edit(key, r.text().to_owned()),
+                }),
+                SettingKind::Secret => {}
+            }
+            if let Some(f) = &r.refused
+                && typing.is_none()
+            {
+                out.push(Item::Reason(f.reason.clone()));
+            }
+            i += 1;
+        }
+    }
+
     /// The menu's lines, top to bottom.
     pub fn items(&self, input: &MenuInput) -> Vec<Item> {
         let mut v = vec![Item::Header(input.scope.header().into())];
@@ -1627,6 +1840,11 @@ impl StudyMenu {
             });
             if editing {
                 controls(input, &r, &mut v);
+                if let StudyRef::Levels(id) = &r
+                    && let Some(s) = input.sources.iter().find(|s| s.id == *id)
+                {
+                    self.plugin_items(s, &mut v);
+                }
             }
         }
         // Whose studies these are, under them: this chart's own instead, or the symbol's again.
@@ -1833,7 +2051,12 @@ impl StudyMenu {
                 self.open_drop(items, i);
                 None
             }
-            Item::Control { cmd, .. } | Item::Action { cmd, .. } => Some(cmd.clone()),
+            Item::Control { cmd, .. } | Item::Action { cmd, .. } | Item::Field { cmd, .. } => {
+                Some(cmd.clone())
+            }
+            Item::Step {
+                typed: Some(cmd), ..
+            } => Some(cmd.clone()),
             _ => None,
         }
     }
@@ -1882,6 +2105,41 @@ impl StudyMenu {
         if let Some(d) = self.drop.as_mut() {
             let o = d.list.key(key, text, now);
             return self.drop_outcome(items, o);
+        }
+        if let Some(t) = self.typing.as_mut() {
+            match key {
+                "escape" => {
+                    let t = self.typing.take()?;
+                    return Some(MenuCmd::Plugin(PluginCmd::Discard {
+                        source: t.source,
+                        key: t.key,
+                    }));
+                }
+                "enter" => {
+                    let t = self.typing.take()?;
+                    return Some(MenuCmd::Plugin(PluginCmd::Set {
+                        source: t.source,
+                        key: t.key,
+                        value: t.buf,
+                    }));
+                }
+                "backspace" => {
+                    t.buf.pop();
+                }
+                _ => {
+                    if let Some(c) = text.filter(|c| !c.chars().any(char::is_control))
+                        && t.buf.chars().count() < 200
+                    {
+                        t.buf.push_str(c);
+                    }
+                }
+            }
+            return None;
+        }
+        // A question asked: Enter or Esc leaves it (the safe answer); the buttons answer.
+        if self.asking.is_some() && matches!(key, "escape") {
+            self.asking = None;
+            return None;
         }
         if let Some(name) = self.naming.as_mut() {
             match key {
@@ -1961,6 +2219,25 @@ impl StudyMenu {
             MenuCmd::StartSaveTemplate => {
                 self.naming = Some(String::new());
                 None
+            }
+            MenuCmd::Plugin(PluginCmd::Edit { source, key, text }) => {
+                self.asking = None;
+                self.typing = Some(Typing {
+                    source,
+                    key,
+                    buf: text,
+                });
+                None
+            }
+            MenuCmd::Plugin(PluginCmd::Answer(yes)) => {
+                let (source, key) = self.asking.take()?;
+                yes.then(|| {
+                    MenuCmd::Plugin(PluginCmd::Set {
+                        source,
+                        key,
+                        value: "true".into(),
+                    })
+                })
             }
             MenuCmd::Set(StudyAction::Remove(ref r)) if self.editing.as_ref() == Some(r) => {
                 self.editing = None;

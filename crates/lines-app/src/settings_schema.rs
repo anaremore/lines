@@ -27,13 +27,16 @@ pub enum Section {
     Accounts,
     /// Data: the sources (decision 0030).
     Connections,
+    /// Installed plugins' own settings, one entry per plugin (a level source is the first
+    /// kind). Not in the sidebar while none is installed.
+    Plugins,
     DataFolder,
     /// The version, rolling back an update (decision 0031) and diagnostics.
     About,
 }
 
 impl Section {
-    pub const ALL: [Section; 10] = [
+    pub const ALL: [Section; 11] = [
         Section::General,
         Section::Appearance,
         Section::Keys,
@@ -42,6 +45,7 @@ impl Section {
         Section::OrderEntry,
         Section::Accounts,
         Section::Connections,
+        Section::Plugins,
         Section::DataFolder,
         Section::About,
     ];
@@ -56,6 +60,7 @@ impl Section {
             Section::OrderEntry => "Order entry",
             Section::Accounts => "Accounts",
             Section::Connections => "Connections",
+            Section::Plugins => "Plugins",
             Section::DataFolder => "Data folder",
             Section::About => "About",
         }
@@ -67,7 +72,7 @@ impl Section {
             Section::General | Section::Appearance | Section::Keys => "APP",
             Section::Charts | Section::Dom => "PANES",
             Section::OrderEntry | Section::Accounts => "TRADING",
-            Section::Connections | Section::DataFolder => "DATA",
+            Section::Connections | Section::Plugins | Section::DataFolder => "DATA",
             Section::About => "",
         }
     }
@@ -136,6 +141,8 @@ impl Scope {
 
 /// The Connections section's list of sources (`connections_view` draws it).
 pub const CONNECTIONS_LIST: &str = "connections.list";
+/// Settings › Plugins' cards (`plugins_view`).
+pub const PLUGINS_LIST: &str = "plugins.list";
 /// The public sources' switches: rows for search and the palette, drawn on their cards.
 pub const SOURCE_SWITCHES: [&str; 3] = ["data.coinbase", "data.kraken", "data.databento"];
 
@@ -2280,6 +2287,18 @@ fn table() -> Vec<Setting> {
             ),
             Value::List(Vec::new()),
         ),
+        // Plugins: each installed plugin's own settings (drawn as cards by `plugins_view`).
+        s(
+            PLUGINS_LIST,
+            Sec::Plugins,
+            "Installed plugins",
+            "Settings each installed plugin describes. A level source's apply to every chart it serves, at once.",
+            Scope::App,
+            Normal,
+            Info,
+            |_, _, _| Value::Text(String::new()),
+            None,
+        ),
         // Connections: the sources (drawn as cards by `connections_view`, each with its switch;
         // the two switches below stay rows for search and the palette).
         s(
@@ -3164,6 +3183,9 @@ const CONNECTIONS: &[Group] = &[group(
         line!("data.databento_key"),
     ],
 )];
+/// Installed plugins' settings: a card per plugin (`plugins_view`, drawn under the list's
+/// line).
+const PLUGINS: &[Group] = &[group("", &[line!(PLUGINS_LIST)])];
 const DATA_FOLDER: &[Group] = &[group(
     "",
     &[
@@ -3196,6 +3218,7 @@ pub fn page(s: Section) -> &'static [Group] {
         Section::OrderEntry => ORDER_ENTRY,
         Section::Accounts => ACCOUNTS,
         Section::Connections => CONNECTIONS,
+        Section::Plugins => PLUGINS,
         Section::DataFolder => DATA_FOLDER,
         Section::About => ABOUT,
     }
@@ -3572,7 +3595,9 @@ mod tests {
                 "charts.trades",
                 "charts.drawing_tools",
                 "charts.drawing_tools_dock",
-                PROP_OVERRIDES_KEY
+                PROP_OVERRIDES_KEY,
+                // Settings › Plugins' cards (each plugin's own settings, nothing of the table's).
+                PLUGINS_LIST
             ]
         );
         assert_eq!(by_key("charts.trades").map(|s| s.section), Some(S::Charts));
@@ -3610,7 +3635,8 @@ mod tests {
         assert_eq!(
             groups,
             [
-                "APP", "APP", "APP", "PANES", "PANES", "TRADING", "TRADING", "DATA", "DATA", ""
+                "APP", "APP", "APP", "PANES", "PANES", "TRADING", "TRADING", "DATA", "DATA",
+                "DATA", ""
             ]
         );
     }

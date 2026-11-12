@@ -681,3 +681,143 @@ fn a_dropped_legend_warns_once_per_change() {
     assert!(!legend_newly_dropped(Some(&bad), &good));
     assert!(!legend_newly_dropped(None, &good));
 }
+
+/// A live source whose map is one line at its `n` setting (ticks) and whose `url` setting is
+/// part of its connection: it counts its connections.
+struct SettingsProbe(Arc<std::sync::atomic::AtomicUsize>);
+
+static PROBE_SETTINGS: [SettingSpec; 2] = [
+    SettingSpec::new(
+        "n",
+        "N",
+        SettingKind::Number {
+            min: 0,
+            max: 1000,
+            step: 1,
+            decimals: 0,
+            unit: "",
+            optional: false,
+        },
+        "4",
+        "",
+    ),
+    SettingSpec::new("url", "URL", SettingKind::Url, "http://127.0.0.1:1", "").connection(),
+];
+
+struct ProbeTransport;
+
+impl LevelTransport for ProbeTransport {
+    fn fetch(&mut self) -> BoxFuture<'_, Result<Vec<LevelFrame>>> {
+        Box::pin(async { Ok(vec![LevelFrame::new("probe", "{}")]) })
+    }
+}
+
+impl LevelSource for SettingsProbe {
+    fn id(&self) -> &'static str {
+        "settings-probe"
+    }
+    fn label(&self) -> &'static str {
+        "Settings probe"
+    }
+    fn serves(&self, _: &lines_core::Product) -> bool {
+        true
+    }
+    fn refresh(&self) -> RefreshMode {
+        RefreshMode::Poll(std::time::Duration::from_millis(20))
+    }
+    /// Runs live whatever another test set the process's mode to.
+    fn synthetic(&self) -> bool {
+        true
+    }
+    fn stale_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(3600)
+    }
+    fn settings(&self) -> &'static [SettingSpec] {
+        &PROBE_SETTINGS
+    }
+    fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Box::pin(async { Ok(Box::new(ProbeTransport) as Box<dyn LevelTransport>) })
+    }
+    fn decode(
+        &self,
+        ctx: &LevelContext,
+        _: &dyn ChartPrices,
+        _: Option<&LevelMap>,
+        _: &[LevelFrame],
+    ) -> Result<Option<LevelMap>, String> {
+        let n: i64 = ctx.setting(&PROBE_SETTINGS[0]).parse().map_err(|_| "n")?;
+        let tick = ctx.product.price.tick;
+        LevelMap::builder(self.id(), ctx.product.id, t("2026-11-05T14:30:00"))
+            .line(
+                "p",
+                LevelValue::Tick(Price(n * tick)),
+                Some("P"),
+                LevelStyle {
+                    rgba: 0xffffffff,
+                    weight: 1,
+                    dashed: false,
+                },
+            )
+            .build(tick)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Settings apply live: a change that isn't part of the connection decodes the newest batch
+/// again (no new connection); a connection setting connects again; the same values again do
+/// nothing (the generation moves only on a change).
+#[test]
+fn settings_apply_live() {
+    let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let src = Arc::new(SettingsProbe(connects.clone()));
+    let prices: Arc<dyn ChartPrices> = Arc::new(Fixed {
+        bars: Vec::new(),
+        now: None,
+    });
+    let h = runtime::acquire(src, es_ctx(), prices);
+    let line = |h: &runtime::LevelHandle| {
+        h.cell()
+            .read()
+            .map
+            .as_ref()
+            .and_then(|m| match m.levels.first()?.shape {
+                lines_core::levels::LevelShape::Line(LevelValue::Tick(p)) => Some(p.0),
+                _ => None,
+            })
+    };
+    let wait = |what: &str, ok: &dyn Fn() -> bool| {
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !ok() {
+            assert!(std::time::Instant::now() < end, "timed out: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+    wait("first map", &|| line(&h) == Some(4 * 25));
+    let c0 = connects.load(std::sync::atomic::Ordering::SeqCst);
+    let g0 = runtime::settings_generation("settings-probe");
+    let mut v = SettingValues::new();
+    v.insert("n".into(), "8".into());
+    runtime::set_settings("settings-probe", v.clone());
+    assert_eq!(runtime::settings_generation("settings-probe"), g0 + 1);
+    runtime::set_settings("settings-probe", v.clone());
+    assert_eq!(
+        runtime::settings_generation("settings-probe"),
+        g0 + 1,
+        "unchanged"
+    );
+    wait("decoded again", &|| line(&h) == Some(8 * 25));
+    assert_eq!(
+        connects.load(std::sync::atomic::Ordering::SeqCst),
+        c0,
+        "no new connection for a display setting"
+    );
+    v.insert("url".into(), "http://127.0.0.1:2".into());
+    runtime::set_settings("settings-probe", v);
+    wait("connected again", &|| {
+        connects.load(std::sync::atomic::Ordering::SeqCst) > c0
+    });
+    assert_eq!(line(&h), Some(8 * 25), "the map stays shown");
+    runtime::set_settings("settings-probe", SettingValues::new());
+}

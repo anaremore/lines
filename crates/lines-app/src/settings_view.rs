@@ -260,6 +260,8 @@ pub struct SettingsWindow {
     /// Settings › Connections (decision 0030): secrets read off-thread, a field being typed,
     /// a running Test.
     pub(crate) conn: crate::connections_view::ConnPage,
+    /// Settings › Plugins (`crate::plugins_view`).
+    pub(crate) plugins: crate::plugins_view::PluginPage,
     /// Accounts › Prop rules: the overrides are shown (Override…).
     overrides_open: bool,
     /// Parts hidden while their guardrail is off (the cooldown without a losing streak), as
@@ -885,6 +887,7 @@ impl SettingsWindow {
             scrolled: None,
             awaiting: Vec::new(),
             conn: Default::default(),
+            plugins: Default::default(),
             seen_revision: 0,
             overrides_open: false,
             dormant: Vec::new(),
@@ -984,6 +987,7 @@ impl SettingsWindow {
     /// editor): the account, product or section changed under it.
     fn drop_unfinished(&mut self) {
         self.conn.leave();
+        self.plugins.leave();
         self.edit = None;
         self.cancel_pending();
         self.editor = None;
@@ -1565,6 +1569,14 @@ impl SettingsWindow {
             self.editor_key(ev, cx);
             return;
         }
+        // Settings › Plugins: its fields, lists, questions and controls take the keys.
+        if self.section == Section::Plugins
+            && self.query.trim().is_empty()
+            && self.plugins.key(ev, cx)
+        {
+            cx.notify();
+            return;
+        }
         // A source's field being typed takes every key (Enter saves, Esc cancels).
         if self.conn.edit.is_some()
             && self.section == Section::Connections
@@ -1690,12 +1702,16 @@ impl SettingsWindow {
             ("up", ..) => self.row = self.row.saturating_sub(1),
             ("down", ..) => self.row = (self.row + 1).min(rows.len().saturating_sub(1)),
             ("tab", false, shift, false) => {
-                let k = Section::ALL
-                    .iter()
-                    .position(|s| *s == self.section)
-                    .unwrap_or(0);
-                let n = Section::ALL.len();
-                self.go_to(Section::ALL[if shift { (k + n - 1) % n } else { (k + 1) % n }]);
+                // The sidebar's sections (Plugins only while one is installed).
+                let all: Vec<Section> = Section::ALL
+                    .into_iter()
+                    .filter(|s| {
+                        *s != Section::Plugins || !crate::plugin_settings::plugins().is_empty()
+                    })
+                    .collect();
+                let k = all.iter().position(|s| *s == self.section).unwrap_or(0);
+                let n = all.len();
+                self.go_to(all[if shift { (k + n - 1) % n } else { (k + 1) % n }]);
             }
             ("escape", ..) => {
                 if self.query.is_empty() {
@@ -2154,7 +2170,12 @@ impl SettingsWindow {
             .border_r_1()
             .border_color(t.axis_line);
         let mut group = None;
+        let has_plugins = !crate::plugin_settings::plugins().is_empty();
         for (k, s) in Section::ALL.into_iter().enumerate() {
+            // Plugins only while one is installed.
+            if s == Section::Plugins && !has_plugins {
+                continue;
+            }
             // About stands alone: no header (not even an empty one).
             if group != Some(s.group()) && !s.group().is_empty() {
                 nav = nav.child(
@@ -3223,6 +3244,25 @@ impl SettingsWindow {
         row
     }
 
+    /// A press on the Plugins page.
+    pub(crate) fn plugin_action(&mut self, a: crate::plugins_view::Action, cx: &mut Context<Self>) {
+        self.plugins.press(a, cx);
+        cx.notify();
+    }
+
+    /// A row of an open plugin choice's list clicked.
+    pub(crate) fn plugin_pick(&mut self, k: usize, cx: &mut Context<Self>) {
+        if let Some(o) = self.plugins.open.take()
+            && let Some(v) = o.values.get(k)
+        {
+            self.plugins.press(
+                crate::plugins_view::Action::Set(o.source, o.key, v.clone()),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
     /// A press on the Connections page (decision 0030).
     pub(crate) fn conn_action(
         &mut self,
@@ -3806,6 +3846,10 @@ impl Render for SettingsWindow {
                     // Settings › Connections: a card per source (decision 0030).
                     k if k == schema::CONNECTIONS_LIST => {
                         out.push(crate::connections_view::list(&v.conn, &v.theme, cx))
+                    }
+                    // Settings › Plugins: a card per installed plugin.
+                    k if k == schema::PLUGINS_LIST => {
+                        out.push(crate::plugins_view::list(&v.plugins, &v.theme, cx))
                     }
                     _ => {}
                 }

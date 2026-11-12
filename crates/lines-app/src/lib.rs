@@ -65,6 +65,8 @@ mod paper_reset;
 mod persist;
 mod picker;
 mod picker_view;
+mod plugin_settings;
+mod plugins_view;
 mod pnl;
 mod popover;
 mod positions;
@@ -655,6 +657,11 @@ struct Cli {
     /// on the chart), `profile`, `footprint` or `levels:ID`.
     #[arg(long, requires = "screenshot", value_parser = legend::study_spec_arg)]
     legend_hover: Option<String>,
+    /// Screenshot: set a plugin's setting as typed, `ID.KEY=VALUE` (repeatable): a refused
+    /// value shows refused, with its reason, as in the app (e.g. `--plugin-set
+    /// demo.feed_url=http://100.71.4.20:7878`).
+    #[arg(long, requires = "screenshot")]
+    plugin_set: Vec<String>,
     /// Screenshot: open a context menu, as a right click would: `pane`, `tab`, `order` (the
     /// focused chart's first working order, a stop if any) or `study:SPEC` (a legend row's, as
     /// `--legend-hover` names it); `:Label` with that row's submenu
@@ -2227,6 +2234,7 @@ where
                 bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
                 legend_hover: cli.legend_hover.clone(),
+                plugin_set: cli.plugin_set.clone(),
                 context_menu: cli.context_menu.clone(),
                 update_shot: cli.update_shot.clone(),
                 ui_zoom: cli.ui_zoom,
@@ -2282,6 +2290,8 @@ where
         Some(writer.clone()),
     );
     let mut reports: Vec<String> = settings_report.into_iter().collect();
+    // Plugins' saved settings, before any chart attaches a level source.
+    plugin_settings::load(&settings.settings.plugins);
     // Data folder moves and problems (they were logged at startup).
     reports.extend(data_notices);
     if zone_flag.is_none() {
