@@ -94,6 +94,9 @@ pub struct Shot {
     pub update_shot: Option<String>,
     /// The UI zoom (`--ui-zoom`).
     pub ui_zoom: Option<u16>,
+    /// `--ui-zoom-to`: after a first frame at `ui_zoom`, the zoom changes to this, as a key
+    /// press would (what was measured at the first zoom must follow).
+    pub ui_zoom_to: Option<u16>,
     /// `--ui-font`: the UI font (else the built-in IBM Plex Sans, whatever is saved).
     pub ui_font: Option<String>,
     /// A workspace prompt opens (`--prompt palette[:QUERY]|open|save`).
@@ -243,6 +246,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         context_menu,
         update_shot,
         ui_zoom,
+        ui_zoom_to,
         ui_font,
         prompt,
         panel_at,
@@ -455,6 +459,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
                 settings_shot,
                 download,
                 strategies,
+                ui_zoom_to,
             ) {
                 fail(&e);
             }
@@ -490,6 +495,7 @@ fn capture(
     settings_shot: Option<SettingsShot>,
     download: Option<(String, (f32, f32))>,
     strategies: Option<std::sync::Arc<crate::strategy_panel::DemoStrategies>>,
+    ui_zoom_to: Option<u16>,
 ) -> Result<()> {
     let handle = workspace::open_doc_window(
         &window,
@@ -543,6 +549,16 @@ fn capture(
     let download_window =
         download.map(|(state, size)| (crate::download_view::shot::open(&state, size, cx), size));
     cx.spawn(async move |cx| {
+        if let Some(pct) = ui_zoom_to {
+            // A frame at the first zoom (what it measures is kept), then the change as
+            // Ctrl+= makes it.
+            let _ = cx.update_window(handle.into(), |_, window, cx| window.draw(cx).clear(cx));
+            cx.update(|cx| {
+                if crate::zoom::set(pct) {
+                    crate::workspace::applied_ui_zoom(cx);
+                }
+            });
+        }
         let mut wrote = vec![shoot(cx, handle.into(), (w, h), &out, scale).await];
         if let Some((hw, size)) = download_window {
             let stem = out

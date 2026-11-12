@@ -5077,7 +5077,7 @@ pub(crate) fn zoom_command(cmd: Command, cx: &mut App) {
     set_ui_zoom(crate::zoom::step(crate::zoom::percent(), dir), cx);
 }
 
-/// Every window at this zoom now, saved; a brief notice says the new size ("110%").
+/// Every window at this zoom now, saved.
 pub(crate) fn set_ui_zoom(pct: u16, cx: &mut App) {
     if !crate::zoom::set(pct) {
         return;
@@ -5087,11 +5087,10 @@ pub(crate) fn set_ui_zoom(pct: u16, cx: &mut App) {
     applied_ui_zoom(cx);
 }
 
-/// After the zoom changed (a key, the palette, Settings): say so and redraw every window.
+/// After the zoom changed (a key, the palette, Settings): redraw every window. No notice: the
+/// new size shows itself, and a notice is the footer's warning item ("!"), where every step
+/// stayed listed for its few seconds ("! 110% · 125% · 150%").
 pub(crate) fn applied_ui_zoom(cx: &mut App) {
-    if cx.has_global::<Workspace>() {
-        notice(format!("{}%", crate::zoom::percent()), cx);
-    }
     cx.refresh_windows();
 }
 

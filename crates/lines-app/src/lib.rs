@@ -656,6 +656,10 @@ struct Cli {
     /// Appearance sets it; the chart's own time and price zoom are unchanged.
     #[arg(long, requires = "screenshot", value_parser = zoom::parse_step)]
     ui_zoom: Option<u16>,
+    /// Screenshot: after a first frame at --ui-zoom, change the UI zoom to this (as Ctrl+=
+    /// would): what panes measured at the first zoom must follow.
+    #[arg(long, requires = "screenshot", value_parser = zoom::parse_step)]
+    ui_zoom_to: Option<u16>,
     /// Screenshot: open a workspace prompt: `palette` (`palette:QUERY` typed into it), `open`
     /// (Open workspace) or `save` (Save workspace as).
     #[arg(long, requires = "screenshot")]
@@ -2214,6 +2218,7 @@ where
                 context_menu: cli.context_menu.clone(),
                 update_shot: cli.update_shot.clone(),
                 ui_zoom: cli.ui_zoom,
+                ui_zoom_to: cli.ui_zoom_to,
                 ui_font: cli.ui_font.clone(),
                 prompt: cli.prompt.clone(),
                 panel_at: cli.panel_at,

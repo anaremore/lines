@@ -429,11 +429,6 @@ pub fn build_time_grid(
             continue;
         }
         let x = vp.index_to_x(i as f64);
-        if let Some((lx, room, _)) = last
-            && x - lx < room
-        {
-            continue;
-        }
         let day = local.0.div_euclid(DAY);
         let label = if last.is_some_and(|(_, _, d)| d == day) {
             if step < MIN {
@@ -451,6 +446,14 @@ pub fn build_time_grid(
             TimeLabel::TimeSeconds => space.time_px * 1.5,
             _ => space.time_px,
         };
+        // Each label's room is its width and a gap. The larger of the two neighbours' rooms
+        // keeps them apart whether labels start at their line or are centered on it (under
+        // footprint columns): a short label before a wide one never touches it.
+        if let Some((lx, prev, _)) = last
+            && x - lx < prev.max(room)
+        {
+            continue;
+        }
         out.push(TimeGridLine {
             time: t,
             x: slot_x(vp, i as f64, scale_factor),
@@ -798,6 +801,38 @@ mod tests {
             // Device-pixel snapping moves each line by at most half a device pixel.
             assert!((w[1].x - w[0].x) as f64 >= room - 1.0, "{w:?}");
             assert!(w[1].time > w[0].time);
+        }
+    }
+
+    /// With the label widths measured at 150 % (half again as wide), the step grows to match
+    /// and no label reaches the next one. (That they are measured again on a zoom change is
+    /// `chart_view`'s `axis_spacing_is_measured_again_after_a_zoom_change`.)
+    #[test]
+    fn time_labels_keep_apart_at_150_percent() {
+        let b = bars(2000);
+        let mut vp = Viewport::default();
+        vp.on_data(&b, 25);
+        let base = GridSpace::default();
+        let zoomed = GridSpace {
+            price_px: base.price_px * 1.5,
+            time_px: base.time_px * 1.5,
+            date_time_px: base.date_time_px * 1.5,
+        };
+        let step = |space: &GridSpace| time_step(&vp, 60_000, space.time_px);
+        assert!(step(&zoomed) >= step(&base));
+        let mut out = Vec::with_capacity(MAX_GRID_LINES);
+        build_time_grid(&b, &vp, 60_000, 1.0, &zoomed, &DisplayTz::utc(), &mut out);
+        assert!(out.len() >= 2);
+        let room = |l: TimeLabel| match l {
+            TimeLabel::DateTime => zoomed.date_time_px,
+            TimeLabel::TimeSeconds => zoomed.time_px * 1.5,
+            _ => zoomed.time_px,
+        };
+        // Apart by the larger of the two rooms: labels centered on their line (under footprint
+        // columns) never touch either, a short one before a wide one included.
+        for w in out.windows(2) {
+            let need = room(w[0].label).max(room(w[1].label));
+            assert!((w[1].x - w[0].x) as f64 >= need - 1.0, "{w:?}");
         }
     }
 
