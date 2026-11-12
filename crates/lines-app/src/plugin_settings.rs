@@ -276,7 +276,16 @@ pub fn set(cx: &mut gpui::App, id: &str, key: &str, text: &str) -> Result<(), St
 }
 
 /// Save plugin `id`'s values and apply them live.
-fn apply(cx: &mut gpui::App, id: &str, values: SettingValues) {
+fn apply(cx: &mut gpui::App, id: &str, mut values: SettingValues) {
+    // Never a secret, even one written into the file by hand.
+    if let Some(s) = levels::registered().into_iter().find(|s| s.id() == id) {
+        values.retain(|k, _| {
+            s.settings()
+                .iter()
+                .find(|x| x.key == k.as_str())
+                .is_none_or(|x| x.kind != SettingKind::Secret)
+        });
+    }
     levels::runtime::set_settings(id, values.clone());
     crate::picker_view::update_settings(cx, |s| {
         if values.is_empty() {
@@ -347,8 +356,13 @@ mod tests {
             .collect()
     }
 
-    // Tests use the demo source, whose refusals are kept by its id: each test its own keys
-    // where it leaves refusals behind, and every test cleans up.
+    // Tests use the demo source, whose refusals are kept by its id in one process-wide map:
+    // they run one at a time (`serial`), and every test cleans up.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static S: Mutex<()> = Mutex::new(());
+        S.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn clean() {
         for k in [
             key::FEED_URL,
@@ -362,6 +376,7 @@ mod tests {
 
     #[test]
     fn rows_show_every_kind_but_secrets_and_lines_own() {
+        let _serial = serial();
         let d = DemoLevels;
         let rows = rows(&d, Some(&saved(&[(key::REFRESH, "82800")])));
         let keys: Vec<&str> = rows.iter().map(|r| r.spec.key).collect();
@@ -385,6 +400,7 @@ mod tests {
 
     #[test]
     fn only_values_that_differ_are_saved() {
+        let _serial = serial();
         let d = DemoLevels;
         let s = change(&d, &SettingValues::new(), key::BAND_WIDTH, "1.5").unwrap();
         assert_eq!(s, saved(&[(key::BAND_WIDTH, "1.50")]));
@@ -398,6 +414,7 @@ mod tests {
 
     #[test]
     fn a_refused_value_applies_nothing_and_says_why() {
+        let _serial = serial();
         let d = DemoLevels;
         let base = SettingValues::new();
         // Out of range: refused, never clamped.
@@ -444,6 +461,7 @@ mod tests {
 
     #[test]
     fn a_default_typed_in_another_form_isnt_saved() {
+        let _serial = serial();
         let d = DemoLevels;
         let s = change(&d, &SettingValues::new(), key::BAND_WIDTH, "1").unwrap();
         assert!(s.is_empty(), "1 is the default 1.00");
@@ -452,6 +470,7 @@ mod tests {
 
     #[test]
     fn a_switch_with_a_question_asks_only_to_turn_on() {
+        let _serial = serial();
         let d = DemoLevels;
         let r = rows(&d, None);
         let remote = r.iter().find(|r| r.spec.key == key::ALLOW_REMOTE).unwrap();
@@ -466,6 +485,7 @@ mod tests {
 
     #[test]
     fn secrets_are_never_set_or_loaded() {
+        let _serial = serial();
         struct WithSecret;
         static S: [SettingSpec; 1] = [SettingSpec::new(
             "token",

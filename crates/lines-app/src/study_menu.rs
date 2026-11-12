@@ -2000,6 +2000,7 @@ impl StudyMenu {
 
     /// Row `k` of the open list clicked.
     pub fn drop_choose(&mut self, items: &[Item], k: usize) -> Option<MenuCmd> {
+        self.typing = None;
         let o = self.drop.as_mut()?.list.choose(k);
         self.drop_outcome(items, o)
     }
@@ -2045,6 +2046,7 @@ impl StudyMenu {
     /// − (`up` false) or + on item `i` (a [`Item::Step`]).
     pub fn nudge(&mut self, items: &[Item], i: usize, up: bool) -> Option<MenuCmd> {
         self.cursor = i;
+        self.typing = None;
         match items.get(i)? {
             Item::Step { less, more, .. } => if up { more } else { less }.clone(),
             _ => None,
@@ -2054,8 +2056,21 @@ impl StudyMenu {
     /// The primary command of item `i` (a click on it, or Enter).
     pub fn activate(&mut self, items: &[Item], i: usize) -> Option<MenuCmd> {
         self.cursor = i;
-        // A press elsewhere ends typing (a press on the field itself types it again).
-        self.typing = None;
+        // A press elsewhere ends typing (on the field itself, typing goes on).
+        let own = |cmd: &MenuCmd| {
+            matches!(cmd, MenuCmd::Plugin(PluginCmd::Edit { source, key, .. })
+                if self.typing.as_ref().is_some_and(|t| t.source == *source && t.key == *key))
+        };
+        let keep = match items.get(i) {
+            Some(Item::Field { cmd, .. }) => own(cmd),
+            Some(Item::Step {
+                typed: Some(cmd), ..
+            }) => own(cmd),
+            _ => false,
+        };
+        if !keep {
+            self.typing = None;
+        }
         match items.get(i)? {
             Item::Study { r, .. } => Some(MenuCmd::Edit(r.clone())),
             Item::Drop { .. } => {
@@ -2075,6 +2090,7 @@ impl StudyMenu {
     /// The eye of a study row (Space).
     pub fn eye(&mut self, items: &[Item], i: usize) -> Option<MenuCmd> {
         self.cursor = i;
+        self.typing = None;
         match items.get(i)? {
             Item::Study { r, .. } => Some(MenuCmd::Set(StudyAction::ToggleHidden(r.clone()))),
             Item::Control { cmd, .. } => Some(cmd.clone()),
@@ -2089,6 +2105,7 @@ impl StudyMenu {
     /// Delete on an item: remove a study, delete a template.
     pub fn delete(&mut self, items: &[Item], i: usize) -> Option<MenuCmd> {
         self.cursor = i;
+        self.typing = None;
         match items.get(i)? {
             Item::Study { r, .. } => Some(MenuCmd::Set(StudyAction::Remove(r.clone()))),
             Item::Action {
@@ -2237,6 +2254,14 @@ impl StudyMenu {
             }
             MenuCmd::Plugin(PluginCmd::Edit { source, key, text }) => {
                 self.asking = None;
+                // A press on the field being typed keeps what was typed.
+                if self
+                    .typing
+                    .as_ref()
+                    .is_some_and(|t| t.source == source && t.key == key)
+                {
+                    return None;
+                }
                 self.typing = Some(Typing {
                     source,
                     key,

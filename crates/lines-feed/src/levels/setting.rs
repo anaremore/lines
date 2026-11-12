@@ -187,6 +187,8 @@ pub fn step(spec: &SettingSpec, value: &str, up: bool) -> Option<String> {
                 None => return None,
                 Some(Err(_)) => return None,
                 Some(Ok(n)) => {
+                    // A value out of range (an environment's) steps from its nearest end.
+                    let n = n.clamp(min, max);
                     let below = n.div_euclid(step) * step;
                     if up {
                         below + step
@@ -418,6 +420,11 @@ mod tests {
         assert_eq!(step(&m, "0.52", false), Some("0.50".into()));
         assert_eq!(step(&m, "0.05", false), None, "its least");
         assert_eq!(step(&m, "10.00", true), None, "its most");
+        assert_eq!(
+            step(&m, "20.00", false),
+            Some("9.95".into()),
+            "out of range: from its end"
+        );
         let r = spec(RI);
         assert_eq!(
             step(&r, "", true),

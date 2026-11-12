@@ -63,6 +63,9 @@ pub(crate) enum Action {
     Open(String, &'static str),
     /// The question answered: turn on (`true`), or leave it.
     Answer(bool),
+    /// A control that can't act now (a step at its end): keeps its place in the keyboard's
+    /// order, so the focus never moves to another setting under it.
+    Nothing,
 }
 
 impl PluginPage {
@@ -78,7 +81,11 @@ impl PluginPage {
     /// A press (`plugin_action`): the page's own part; `Some` for the window to apply.
     pub(crate) fn press(&mut self, a: Action, cx: &mut App) {
         match a {
+            Action::Nothing => {}
             Action::Set(src, key, value) => {
+                // Another press ends typing and closes a list.
+                self.edit = None;
+                self.open = None;
                 let asks = row_of(&src, key, cx).is_some_and(|r| r.asks(&value));
                 if asks {
                     self.asking = Some((src, key));
@@ -94,6 +101,7 @@ impl PluginPage {
                 self.edit = Some(Edit { source, key, buf });
             }
             Action::Open(source, key) => {
+                self.edit = None;
                 let Some(r) = row_of(&source, key, cx) else {
                     return;
                 };
@@ -254,7 +262,7 @@ fn button(
     t: &Theme,
     cx: &mut Context<SettingsWindow>,
 ) -> AnyElement {
-    let focused = action.as_ref().is_some_and(|a| ctl.take(a));
+    let focused = ctl.take(action.as_ref().unwrap_or(&Action::Nothing));
     let can = action.is_some();
     div()
         .id(SharedString::from(id))

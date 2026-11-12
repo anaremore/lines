@@ -1213,6 +1213,15 @@ fn a_sources_own_settings() {
         text: "x".into(),
     }));
     let items = m.items(&input(&set, &src, &[]));
+    // A press on the field being typed keeps what was typed.
+    m.key(&items, "y", Some("y"));
+    let url = labels(&items)
+        .iter()
+        .position(|s| s.starts_with("  Feed URL"))
+        .unwrap();
+    let cmd = m.activate(&items, url).unwrap();
+    assert_eq!(m.local(cmd), None);
+    assert_eq!(m.typing.as_ref().map(|t| t.buf.as_str()), Some("xy"));
     let sym = labels(&items)
         .iter()
         .position(|s| s.starts_with("  Symbol"))

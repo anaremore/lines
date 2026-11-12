@@ -622,11 +622,26 @@ fn redecode(
     frames: &[LevelFrame],
 ) {
     let prev = cell.read().map.clone();
-    if let Ok(Some(m)) = source.decode(ctx, prices, prev.as_deref(), frames)
-        && m.product == ctx.product.id
-        && m.source == source.id()
-    {
-        cell.update(|s| s.map = Some(Arc::new(m)));
+    match source.decode(ctx, prices, prev.as_deref(), frames) {
+        Ok(Some(m)) if m.product == ctx.product.id && m.source == source.id() => {
+            cell.update(|s| {
+                // Levels the new settings refuse (or no longer refuse) say so; their time
+                // is not renewed either way.
+                let was = s.levels_refused;
+                s.levels_refused = m.levels_refused.is_some();
+                if m.levels_refused.is_some() {
+                    s.error = m.levels_refused.clone();
+                } else if was {
+                    s.error = None;
+                }
+                s.map = Some(Arc::new(m));
+            });
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(
+            "levels {}: the newest batch, decoded again with new settings: {e}",
+            source.id()
+        ),
     }
 }
 
