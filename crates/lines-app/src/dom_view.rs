@@ -219,6 +219,7 @@ impl TradePane for DomView {
                         price: leg.price,
                         command,
                         qty: Some(leg.qty),
+                        leg: None,
                     });
                 }
             }
@@ -748,6 +749,7 @@ impl DomView {
                 price: d.to,
                 command: id,
                 qty: None,
+                leg: None,
             });
             // Its legs move with it (the setting on): their ghosts too.
             self.orders

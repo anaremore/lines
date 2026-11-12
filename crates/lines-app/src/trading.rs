@@ -484,7 +484,6 @@ impl TradeState {
             .filter(move |o| &o.account == account && o.contract == contract)
     }
 
-    /// An order, open or recently finished.
     /// A bracket move the broker made for the entry alone (it names only the entry while the
     /// entry still has held exits): said once, on the entry's row.
     fn only_the_entry(&mut self, n: &Note, ids: &[OrderId], now: Instant) {
@@ -531,6 +530,7 @@ impl TradeState {
         out
     }
 
+    /// An order, open or recently finished.
     pub fn order(&self, id: OrderId) -> Option<&Order> {
         self.orders
             .get(&id)
@@ -2173,6 +2173,9 @@ pub enum Step {
     Print(ContractKey, Price, lines_core::Qty),
     /// Tag the newest closed trade (the journal's by-tag view).
     Tag(Vec<String>),
+    /// Move the account's newest working entry to this price, with its held stop and target
+    /// (as a drag does with "Move stop and target with the entry" on).
+    Move(AccountId, Price),
     /// A press of Reset paper account (`crate::paper_reset`): once arms it, twice sends it.
     Reset {
         account: AccountId,
@@ -2198,6 +2201,8 @@ pub enum Step {
 /// - `strategy N` (add instance N on the account and contract, arm it, send what follows as
 ///   it), `manual` (send as a person again), `halt N` (pause N at its daily loss), `future SYM`
 ///   (another product's front month from there on, to hold several at once);
+/// - `move PRICE`: the account's newest working entry moves there, its held stop and target
+///   by the same ticks (a drag with the setting on);
 /// - `reset` / `reset journal`: a press of Reset paper account on the account (keeping, or
 ///   clearing, its journal): once shows its confirmation armed, twice sends it.
 pub fn parse_script(
@@ -2229,6 +2234,7 @@ pub fn parse_script(
         match w.as_slice() {
             [] => {}
             ["ack"] => out.push(Step::Ack),
+            ["move", p] => out.push(Step::Move(account.clone(), price(p)?)),
             ["option", date, strike, right] => {
                 let bad = || anyhow!("option expiry {date:?}: YYYY-MM-DD");
                 let d: Vec<&str> = date.split('-').collect();
@@ -2523,6 +2529,33 @@ impl Trading {
                     let at = Instant::now() + Duration::from_secs(presses);
                     if let Err(e) = self.press_reset_at(account, *journal, Source::Palette, at) {
                         tracing::warn!("script reset: {e}");
+                    }
+                }
+                Step::Move(account, to) => {
+                    self.settle();
+                    let entry = self
+                        .cache
+                        .read()
+                        .orders
+                        .values()
+                        .filter(|o| &o.account == account && o.role == lines_trading::Role::Entry)
+                        .map(|o| o.id)
+                        .max();
+                    match entry {
+                        Some(order) => {
+                            self.submit(
+                                source,
+                                Instant::now(),
+                                TradeCommand::ModifyOrder {
+                                    account: account.clone(),
+                                    order,
+                                    qty: None,
+                                    price: Some(*to),
+                                    move_bracket: true,
+                                },
+                            );
+                        }
+                        None => tracing::warn!("script move: no working entry"),
                     }
                 }
                 Step::Account(_) => {}

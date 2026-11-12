@@ -2876,3 +2876,90 @@ fn a_broker_without_bracket_moves_moves_only_the_entry() {
         (px(6007.00), px(6002.00))
     );
 }
+
+/// The entry fills while the move waits out the broker's latency: its exits are working by
+/// then, sized to the position, and stay where they were; only the entry moves.
+#[test]
+fn an_entry_filled_before_its_move_keeps_its_exits() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    let ids = r
+        .cmd(Command::ModifyOrder {
+            account: acct(),
+            order: entry,
+            qty: None,
+            price: Some(px(5999.00)),
+            move_bracket: true,
+        })
+        .unwrap();
+    assert_eq!(ids, vec![entry, tp, sl]);
+    r.trade(5999.75, 1);
+    r.wait(LAT);
+    assert_eq!(r.core.order(entry).unwrap().filled, Qty(1));
+    assert_eq!(price_of(&r, entry), px(5999.00));
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6002.00), px(5998.00))
+    );
+    for x in [tp, sl] {
+        assert_eq!(r.state(x), OrderState::Working, "working for the 1 filled");
+    }
+}
+
+/// A stop the trader moved just before the entry's move keeps that move: the broker shifts
+/// each exit from where it rests when the move takes effect.
+#[test]
+fn a_leg_moved_just_before_keeps_its_own_move() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    r.cmd(Command::ModifyOrder {
+        account: acct(),
+        order: sl,
+        qty: None,
+        price: Some(px(5997.00)),
+        move_bracket: false,
+    })
+    .unwrap();
+    move_to(&mut r, entry, 5999.00, true);
+    assert_eq!(price_of(&r, entry), px(5999.00));
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6001.00), px(5996.00))
+    );
+}
+
+/// An entry dragged across the market fills at once: refused if its moved stop would then
+/// trigger at once (the trade would open and close for a loss); allowed when the stop stays
+/// below the market.
+#[test]
+fn an_entry_moved_to_fill_now_never_triggers_its_moved_stop() {
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
+    // The core's market (its bid and ask, as the panes' feeds send them).
+    r.market(
+        es(),
+        &[MarketInput::Bid(px(6000.75)), MarketInput::Ask(px(6001.00))],
+    );
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    let refused = r.cmd(Command::ModifyOrder {
+        account: acct(),
+        order: entry,
+        qty: None,
+        price: Some(px(6004.00)),
+        move_bracket: true,
+    });
+    assert!(refused.is_err(), "{refused:?}");
+    assert_eq!(price_of(&r, entry), px(6000.00));
+    assert_eq!(price_of(&r, sl), px(5998.00));
+    // To the ask: it fills, its stop at 5999.00 under the bid, its target at 6003.00.
+    move_to(&mut r, entry, 6001.00, true);
+    assert_eq!(r.state(entry), OrderState::Filled);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6003.00), px(5999.00))
+    );
+    assert_eq!(r.state(sl), OrderState::Working);
+}

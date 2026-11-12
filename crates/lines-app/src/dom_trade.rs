@@ -662,6 +662,7 @@ pub fn leg_ghosts(
         price: Price(p.0 + d),
         command,
         qty: None,
+        leg: Some(p),
     })
 }
 
@@ -708,6 +709,9 @@ pub struct Ghost {
     /// A resize: the order's new total. Acked by that, not by a price it already rests at; and
     /// nothing is drawn for it (the mark or tag updates when the order reports it).
     pub qty: Option<Qty>,
+    /// A held stop or target moving with its entry: where it rested before. Acked once it rests
+    /// anywhere else (the broker moves it by the entry's ticks from where it is then).
+    pub leg: Option<Price>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -720,6 +724,9 @@ pub enum GhostOutcome {
     Rejected(String),
 }
 
+/// Why a stop or target didn't move with its entry: the entry filled first.
+pub const LEG_STAYED: &str = "the entry filled first: its stop and target stayed";
+
 /// What became of a drag: from the order as the core now reports it and the command's
 /// result, if it arrived.
 pub fn ghost_outcome(
@@ -727,14 +734,24 @@ pub fn ghost_outcome(
     order: Option<&Order>,
     result: Option<&Result<Vec<OrderId>, Reject>>,
 ) -> GhostOutcome {
+    if let Some(was) = g.leg {
+        return match (result, order) {
+            // Refused: the entry's ghost says why. Not moved by this broker (it moved only the
+            // entry; the flash says so), or gone: nothing more.
+            (Some(Err(_)), _) => GhostOutcome::Acked,
+            (Some(Ok(ids)), _) if !ids.contains(&g.order) => GhostOutcome::Acked,
+            (_, None) => GhostOutcome::Acked,
+            (_, Some(o)) if !o.is_open() => GhostOutcome::Acked,
+            (_, Some(o)) if order_price(o) != Some(was) => GhostOutcome::Acked,
+            // Working where it was: the entry filled before the move took effect.
+            (_, Some(o)) if !matches!(o.state, OrderState::Submitted | OrderState::Acked) => {
+                GhostOutcome::Rejected(LEG_STAYED.into())
+            }
+            _ => GhostOutcome::Pending,
+        };
+    }
     if let Some(Err(r)) = result {
         return GhostOutcome::Rejected(r.message.clone());
-    }
-    // A leg the broker didn't move (it moved only the entry; the flash says so): nothing more.
-    if let Some(Ok(ids)) = result
-        && !ids.contains(&g.order)
-    {
-        return GhostOutcome::Acked;
     }
     match order {
         // A resize's order finished meanwhile: nothing was refused.
@@ -770,7 +787,7 @@ pub fn position_row(avg_price: f64, tick: i64, units: i64) -> i64 {
 /// full message stays in the header). Known reasons by their wording, else the message's
 /// first word, at most 9 characters.
 pub fn short_reason(message: &str) -> &str {
-    const KNOWN: [(&str, &str); 18] = [
+    const KNOWN: [(&str, &str); 19] = [
         // First: whatever else it mentions, the cancel is what failed.
         ("cancel refused", "no cancel"),
         ("no answer to", "no cancel"),
@@ -789,6 +806,7 @@ pub fn short_reason(message: &str) -> &str {
         ("no market price", "no price"),
         ("liquidity", "no liq"),
         ("entries locked", "disabled"),
+        ("filled first", "stayed"),
         ("filled", "filled"),
     ];
     let lower = message.to_ascii_lowercase();
@@ -1705,11 +1723,43 @@ mod tests {
             ghost_outcome(leg, Some(&held_leg), Some(&only_entry)),
             GhostOutcome::Acked
         );
+        // Moved with it: acked once it rests anywhere but where it was (a stop the trader
+        // moved meanwhile keeps that move, shifted).
+        let all: Result<Vec<OrderId>, Reject> = Ok(vec![OrderId(7), OrderId(8), OrderId(9)]);
+        let at = |p: i64, state| {
+            let mut x = order(state, OrderKind::Limit { price: Price(p) });
+            x.id = OrderId(8);
+            x
+        };
+        assert_eq!(
+            ghost_outcome(leg, Some(&at(600_150, OrderState::Acked)), Some(&all)),
+            GhostOutcome::Pending
+        );
+        assert_eq!(
+            ghost_outcome(leg, Some(&at(599_850, OrderState::Acked)), Some(&all)),
+            GhostOutcome::Acked
+        );
+        // The entry filled before the move took effect: the leg works where it was.
+        assert_eq!(
+            ghost_outcome(leg, Some(&at(600_150, OrderState::Working)), Some(&all)),
+            GhostOutcome::Rejected(LEG_STAYED.into())
+        );
+        assert_eq!(short_reason(LEG_STAYED), "stayed");
+        // The move refused: the entry's ghost says why, the leg's just goes.
+        let refused: Result<Vec<OrderId>, Reject> = Err(Reject::new(
+            lines_trading::RejectCode::Invalid,
+            "the moved stop or target would be off the tick grid",
+        ));
+        assert_eq!(
+            ghost_outcome(leg, Some(&at(600_150, OrderState::Acked)), Some(&refused)),
+            GhostOutcome::Acked
+        );
         let g = Ghost {
             order: OrderId(7),
             price: Price(599_900),
             command: CommandId(1),
             qty: None,
+            leg: None,
         };
         // A resize: the order already rests at its price, so only its quantity acks it, and a
         // refusal still shows.
@@ -1718,6 +1768,7 @@ mod tests {
             price: Price(599_950),
             command: CommandId(2),
             qty: Some(Qty(4)),
+            leg: None,
         };
         assert_eq!(ghost_outcome(&sized, Some(&o), None), GhostOutcome::Pending);
         let mut resized = o.clone();

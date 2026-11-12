@@ -194,7 +194,8 @@ enum Pending {
     Request(BrokerRequest),
     MoveBracket {
         entry: (OrderId, Price),
-        exits: Vec<(OrderId, Price)>,
+        by: i64,
+        exits: Vec<OrderId>,
     },
 }
 
@@ -847,32 +848,38 @@ impl PaperBroker {
         }
     }
 
-    /// A bracket move at its time: while the entry is still unfilled and every exit still held,
-    /// the exits move, then the entry (one that now crosses the market fills against moved
-    /// exits); otherwise (the entry filled meanwhile: its exits are working, sized to the
-    /// position) only the entry, as a plain modify. The exits move together or not at all.
+    /// A bracket move at its time: while the entry is still unfilled, each exit still held
+    /// moves `by` from where it rests now (a stop or target the trader moved meanwhile keeps
+    /// that move), then the entry (one that now crosses the market fills against moved exits).
+    /// The exits move together or not at all (each checked first). Once the entry has a fill,
+    /// its exits are working, sized to the position, and only the entry moves.
     fn move_bracket_now(
         &mut self,
         now: UtcMillis,
         entry: (OrderId, Price),
-        exits: &[(OrderId, Price)],
+        by: i64,
+        exits: &[OrderId],
     ) {
         let unfilled = self
             .orders
             .get(&entry.0)
             .is_some_and(|po| po.order.filled.0 == 0);
-        let held = exits
-            .iter()
-            .all(|(id, _)| self.orders.get(id).is_some_and(|po| po.held));
+        let mut moves = Vec::with_capacity(exits.len());
         let mut valid = true;
-        for &(id, p) in exits {
-            let contract = self.orders.get(&id).map(|po| po.order.contract);
-            valid &= contract
-                .and_then(|c| self.spec(c))
-                .is_some_and(|s| s.on_tick_grid(p));
+        for id in exits {
+            let Some(po) = self.orders.get(id).filter(|po| po.held) else {
+                continue;
+            };
+            let contract = po.order.contract;
+            let Some(p) = crate::broker::modified_price(&po.order) else {
+                continue;
+            };
+            let to = Price(p.0 + by);
+            valid &= self.spec(contract).is_some_and(|s| s.on_tick_grid(to));
+            moves.push((*id, to));
         }
-        if unfilled && held && valid {
-            for &(id, p) in exits {
+        if unfilled && valid {
+            for (id, p) in moves {
                 self.modify(now, id, None, Some(p));
             }
         }
@@ -1338,7 +1345,8 @@ impl Broker for PaperBroker {
         &mut self,
         now: UtcMillis,
         entry: (OrderId, Price),
-        exits: &[(OrderId, Price)],
+        by: i64,
+        exits: &[OrderId],
         _ctx: &crate::broker::RequestContext,
     ) {
         let due = UtcMillis(now.0 + self.cfg.latency_ms.max(0));
@@ -1346,6 +1354,7 @@ impl Broker for PaperBroker {
             due,
             Pending::MoveBracket {
                 entry,
+                by,
                 exits: exits.to_vec(),
             },
         ));
@@ -1429,7 +1438,9 @@ impl Broker for PaperBroker {
             let at = if due.0 == i64::MIN { now } else { due };
             match req {
                 Pending::Request(r) => self.handle(at, r),
-                Pending::MoveBracket { entry, exits } => self.move_bracket_now(at, entry, &exits),
+                Pending::MoveBracket { entry, by, exits } => {
+                    self.move_bracket_now(at, entry, by, &exits)
+                }
             }
         }
         if std::mem::take(&mut self.rewound) {

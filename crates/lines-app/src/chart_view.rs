@@ -4451,6 +4451,7 @@ impl ChartView {
                 price: d.to,
                 command: id,
                 qty: None,
+                leg: None,
             });
             // Its legs move with it (the setting on): their ghosts too.
             self.ct
@@ -9746,6 +9747,7 @@ impl ChartView {
             price,
             command,
             qty: Some(qty),
+            leg: None,
         });
     }
 }

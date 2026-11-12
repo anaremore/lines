@@ -298,18 +298,20 @@ pub trait Broker: Send {
     fn moves_brackets(&self) -> bool {
         false
     }
-    /// Move a bracket's unfilled entry to `entry.1` and its held exits to their new prices
-    /// together: all of them or none. Called only when [`Broker::moves_brackets`]; the core
-    /// has checked every price. If the entry fills before this takes effect, its exits are
-    /// working by then and only the entry moves. The default does nothing.
+    /// Move a bracket's unfilled entry to `entry.1` and its held `exits` by `by` price units
+    /// each (from wherever each rests when this takes effect), together. Called only when
+    /// [`Broker::moves_brackets`]; the core has checked every price. If the entry fills before
+    /// this takes effect, its exits are working by then and only the entry moves (the app sees
+    /// the exits activated where they were). The default does nothing.
     fn move_bracket(
         &mut self,
         now: UtcMillis,
         entry: (OrderId, Price),
-        exits: &[(OrderId, Price)],
+        by: i64,
+        exits: &[OrderId],
         ctx: &RequestContext,
     ) {
-        let _ = (now, entry, exits, ctx);
+        let _ = (now, entry, by, exits, ctx);
     }
 }
 
