@@ -1051,3 +1051,38 @@ fn level_kinds_are_a_multi_select() {
     m.clamp(&items);
     assert!(m.drop.is_none(), "options changed under the open list");
 }
+
+/// A multi-select's field names what is on when it can: "None", "All", one or two names, "All
+/// but X" with one off, else a count.
+#[test]
+fn multi_select_summaries_name_what_is_on() {
+    let opts = |on: &[bool]| -> Vec<Opt> {
+        ["Show", "Session or range", "Partial from", "Gaps"]
+            .iter()
+            .zip(on)
+            .map(|(l, on)| Opt {
+                label: (*l).into(),
+                on: *on,
+                cmd: MenuCmd::Close,
+            })
+            .collect()
+    };
+    assert_eq!(drop_summary(&opts(&[false; 4]), true), "None");
+    assert_eq!(drop_summary(&opts(&[true; 4]), true), "All");
+    assert_eq!(
+        drop_summary(&opts(&[true, false, false, false]), true),
+        "Show"
+    );
+    assert_eq!(
+        drop_summary(&opts(&[true, false, true, false]), true),
+        "Show, Partial from"
+    );
+    assert_eq!(
+        drop_summary(&opts(&[true, true, true, false]), true),
+        "All but Gaps"
+    );
+    assert_eq!(
+        drop_summary(&opts(&[false, true, false, false]), false),
+        "Session or range"
+    );
+}

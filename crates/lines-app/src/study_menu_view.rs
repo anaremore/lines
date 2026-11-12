@@ -226,6 +226,8 @@ pub fn render(
                     crate::layout_rec::POPUP,
                     t,
                 )
+                // As tall as a chip: every editor line keeps one pitch.
+                .py(px(1.0))
                 .text_size(crate::zoom::ui(12.0))
                 .on_mouse_down(MouseButton::Left, click(i, MenuPart::Primary));
                 let list = open.map(|d| {
@@ -261,7 +263,8 @@ pub fn render(
                     div()
                         .id(id)
                         .flex_none()
-                        .w(crate::zoom::ui(20.0))
+                        .w(crate::zoom::ui(22.0))
+                        .py(px(1.0))
                         .flex()
                         .justify_center()
                         .rounded_sm()
@@ -288,11 +291,18 @@ pub fn render(
                         MenuPart::Less,
                     ))
                     .child(
+                        // One width for every number, right-aligned in tabular digits: the
+                        // values and the + buttons line up down the editor.
                         div()
-                            .min_w(crate::zoom::ui(48.0))
+                            .w(crate::zoom::ui(64.0))
                             .px_2()
+                            .py(px(1.0))
                             .flex()
                             .justify_end()
+                            .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                                "tnum".into(),
+                                1,
+                            )])))
                             .rounded_sm()
                             .border_1()
                             .border_color(if selected { t.accent } else { t.axis_line })

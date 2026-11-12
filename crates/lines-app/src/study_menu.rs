@@ -880,8 +880,8 @@ fn drop_kind(r: &StudyRef, group: &str) -> Option<(bool, Option<CustomTo>)> {
     })
 }
 
-/// A dropdown's field: the option in force (one pick); "None", "All", one or two names, or
-/// "N of M" (several).
+/// A dropdown's field: the option in force (one pick); "None", "All", one or two names,
+/// "All but X" (one off), or "N of M" (several).
 pub fn drop_summary(options: &[Opt], multi: bool) -> String {
     let on: Vec<&str> = options
         .iter()
@@ -895,6 +895,10 @@ pub fn drop_summary(options: &[Opt], multi: bool) -> String {
         (true, on) if on.len() == options.len() && on.len() > 2 => "All".to_owned(),
         (true, [a]) => (*a).to_owned(),
         (true, [a, b]) => format!("{a}, {b}"),
+        (true, on) if on.len() + 1 == options.len() => match options.iter().find(|o| !o.on) {
+            Some(off) => format!("All but {}", off.label),
+            None => format!("{} of {}", on.len(), options.len()),
+        },
         (true, on) => format!("{} of {}", on.len(), options.len()),
     }
 }
