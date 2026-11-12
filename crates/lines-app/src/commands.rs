@@ -779,10 +779,15 @@ pub fn command_for(k: &Keystroke) -> Option<Command> {
     if ctrl && !m.shift && !m.alt && key.len() == 1 && (b'1'..=b'9').contains(&key.as_bytes()[0]) {
         return Some(Command::SelectTab((key.as_bytes()[0] - b'1') as usize));
     }
-    BINDINGS
-        .iter()
-        .find(|b| b.ctrl == ctrl && b.shift == m.shift && b.alt == m.alt && b.key == key)
-        .map(|b| b.cmd)
+    // The effective table (the defaults plus the user's changes, `crate::keymap`): built when
+    // the settings change; this reads it under a lock and allocates nothing.
+    let c = crate::keymap::with(|t| t.lookup(ctrl, m.shift, m.alt, key))?;
+    while_capturing(c, crate::keymap::capturing())
+}
+
+/// While Settings › Keys captures a key, no key sends or cancels an order, in any window.
+fn while_capturing(c: Command, capturing: bool) -> Option<Command> {
+    (!(capturing && crate::keymap::trades(c))).then_some(c)
 }
 
 /// Whether holding the key down repeats `cmd`. Never for arming or anything that sends or
@@ -795,9 +800,9 @@ pub fn repeats(cmd: Command) -> bool {
     )
 }
 
-/// The keys of a command's first binding, one per cap (`keycap`): modifiers first, in the
-/// platform's order (macOS: ⌥ ⇧ ⌘; elsewhere Ctrl Alt Shift), then the key. Empty when the
-/// command has no key.
+/// The keys of a command's first key in the effective table (`crate::keymap`: the defaults
+/// plus the user's changes), one per cap (`keycap`): modifiers first, in the platform's order
+/// (macOS: ⌥ ⇧ ⌘; elsewhere Ctrl Alt Shift), then the key. Empty when the command has no key.
 pub fn keys(c: Command) -> Vec<String> {
     keys_on(c, cfg!(target_os = "macos"))
 }
@@ -829,25 +834,8 @@ fn keys_on(c: Command, mac: bool) -> Vec<String> {
         }
         _ => {}
     }
-    let Some(b) = BINDINGS.iter().find(|b| b.cmd == c) else {
-        return Vec::new();
-    };
-    let key = match b.key {
-        "right" => "→".to_owned(),
-        "left" => "←".to_owned(),
-        "down" => "↓".to_owned(),
-        "tab" => "Tab".to_owned(),
-        "pagedown" => "PgDn".to_owned(),
-        "pageup" => "PgUp".to_owned(),
-        "up" => "↑".to_owned(),
-        "space" => "Space".to_owned(),
-        // A lone comma reads as punctuation in a row's hint: named, as macOS shows "⌘,".
-        "," if !mac => "Comma".to_owned(),
-        k => k.to_uppercase(),
-    };
-    let mut v = mods(b.ctrl, b.alt, b.shift);
-    v.push(key);
-    v
+    // The command's first key in the effective table (`crate::keymap`).
+    crate::keymap::with(|t| t.keys(c).next().map(|k| k.caps(mac))).unwrap_or_default()
 }
 
 /// A command's key as text ("Ctrl+Shift+F", "⇧⌘F"): for sentences ("Ctrl+Z undoes") and
@@ -1677,6 +1665,16 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn no_trading_key_runs_while_a_key_is_captured() {
+        for c in crate::keymap::bindable() {
+            assert_eq!(while_capturing(c, false), Some(c), "{c:?}");
+            let blocked = while_capturing(c, true).is_none();
+            assert_eq!(blocked, crate::keymap::trades(c), "{c:?}");
+        }
+        assert!(while_capturing(Command::Trade(TradeCmd::Flatten), true).is_none());
     }
 
     #[test]
