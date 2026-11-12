@@ -191,8 +191,6 @@ enum LabelKind {
     SeriesName,
     SeriesValue(u8),
     SeriesState,
-    /// A lower pane's close button (×).
-    PaneClose,
     CrossTime,
     Indicator,
     /// A drawing's price tag on the axis, its text in the drawing's color (when AA on the
@@ -231,6 +229,39 @@ impl LabelKind {
 
 /// A lower pane's × (logical px square): its hit target.
 const CLOSE_BOX: f32 = 20.0;
+
+/// A lower pane's title buttons, right to left: ×, gear, eye (`slot` boxes left of the ×).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum LowerButton {
+    Close,
+    Settings,
+    Hide,
+}
+
+/// The title button of a lower pane whose × is at `(bx, by)` (plot-local top-left) under
+/// (`x`, `y`): the ×, or the gear and eye left of it where the title has room for all three
+/// (where they are drawn).
+fn lower_button_at((bx, by): (f32, f32), x: f32, y: f32) -> Option<LowerButton> {
+    if y < by || y >= by + CLOSE_BOX {
+        return None;
+    }
+    LowerButton::ALL.into_iter().find(|b| {
+        let l = bx - f32::from(b.slot()) * CLOSE_BOX;
+        (*b == LowerButton::Close || bx > 8.0 + 2.0 * CLOSE_BOX) && x >= l && x < l + CLOSE_BOX
+    })
+}
+
+impl LowerButton {
+    const ALL: [LowerButton; 3] = [LowerButton::Close, LowerButton::Settings, LowerButton::Hide];
+
+    fn slot(self) -> u8 {
+        match self {
+            LowerButton::Close => 0,
+            LowerButton::Settings => 1,
+            LowerButton::Hide => 2,
+        }
+    }
+}
 
 /// Volume's title parts (`LabelKind::Volume`): its name alone, "Volume N", "avg N", "buy N",
 /// "sell N", "no side N".
@@ -499,8 +530,9 @@ pub struct ChartView {
     split: Option<crate::subpane::Stack>,
     /// Each lower pane's × as last drawn (plot-local top-left; `CLOSE_BOX` square).
     lower_close: [Option<(f32, f32)>; crate::subpane::MAX_PANES],
-    /// The lower pane whose × was pressed (removed on a release still on it).
-    pane_closing: Option<usize>,
+    /// The lower pane whose title button (×, eye, gear) was pressed: it acts on a release
+    /// still on it.
+    pane_closing: Option<(usize, LowerButton)>,
     /// Height above the time axis this frame (the plot plus any sub-pane).
     above_axis: f32,
     /// The pointer is in lower pane `k`, this far below its top: the crosshair's vertical
@@ -509,6 +541,17 @@ pub struct ChartView {
     /// The legend and readout block at the plot's top-left (width, bottom; plot-local), as
     /// the last render built it: the footprint draws no cell number under it.
     legend_band: std::cell::Cell<(f32, f32)>,
+    /// The legend's rows as last laid out (window px), for the hover controls
+    /// (`crate::legend::hit`): pushed by each row's prepaint, cleared by each render.
+    legend_hits: std::rc::Rc<std::cell::RefCell<Vec<(StudyRef, crate::legend::RowBox)>>>,
+    /// The legend row under the pointer: only it gets its buttons (hide, settings, remove).
+    legend_hover: Option<StudyRef>,
+    /// Screenshots (`--legend-hover`): the hovered row is fixed, not the pointer's.
+    legend_hover_pinned: bool,
+    /// A legend button pressed: it acts on a release still on it.
+    legend_press: Option<(StudyRef, crate::commands::StudyCmd)>,
+    /// The study whose legend row was last right-clicked: its menu's `StudyCmd`s act on it.
+    menu_study: Option<StudyRef>,
     /// Each level legend row's fit as last measured, with what it was measured for.
     legend_fits: std::cell::RefCell<Vec<(LegendFitKey, crate::levels_layer::LegendFit)>>,
     /// The footprint's reasons for candles as last rendered in the legend.
@@ -903,6 +946,11 @@ impl ChartView {
             fp_seen: Default::default(),
             trade_tip_seen: None,
             legend_band: std::cell::Cell::new((8.0 + legend_max_w(), readout_bottom())),
+            legend_hits: Default::default(),
+            legend_hover: None,
+            legend_hover_pinned: false,
+            legend_press: None,
+            menu_study: None,
             legend_fits: std::cell::RefCell::new(Vec::new()),
             visibility: fixture.visibility,
             picker,
@@ -1250,6 +1298,12 @@ impl ChartView {
 
     /// Replace this chart's studies (a template, the defaults, a menu change).
     pub fn set_study_set(&mut self, s: StudySet) {
+        // Rows move and their indices change: the hovered row is found again on the next move.
+        // Rows go or change kind: the hovered row is found again on the next move (a hide or a
+        // restyle keeps it, so its buttons stay under the pointer).
+        if !self.legend_hover_pinned && self.legend_hover.as_ref().is_some_and(|r| !s.lists(r)) {
+            self.legend_hover = None;
+        }
         // A restyle keeps the studies' engine nodes; anything else builds them anew.
         if s.indicators != self.studies.configs() && !self.studies.restyle(&s.indicators) {
             self.set_indicator_configs(s.indicators);
@@ -1876,6 +1930,8 @@ impl ChartView {
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // A press anywhere else: no legend button is pressed.
+        self.legend_press = None;
         // A popover open in another window: this press only closes it (never an order).
         if popover::press_closes_popover(cx) {
             cx.stop_propagation();
@@ -1929,9 +1985,9 @@ impl ChartView {
         // A lower pane's ×: its study goes (as Remove in the studies menu) on a release still
         // on the same × (a pan that starts there removes nothing).
         if region == Region::Sub
-            && let Some(k) = self.close_hit(x as f32, y as f32)
+            && let Some(hit) = self.close_hit(x as f32, y as f32)
         {
-            self.pane_closing = Some(k);
+            self.pane_closing = Some(hit);
             return;
         }
         if self
@@ -2216,6 +2272,21 @@ impl ChartView {
             }
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        // Del on the legend row under the pointer removes its study (Undo in the footer).
+        if plain
+            && k.key == "delete"
+            && !typing
+            && !self.drawings.typing()
+            && self.visibility.draws_labels()
+            && let Some(r) = self
+                .legend_hover
+                .clone()
+                .filter(|r| !matches!(r, StudyRef::Levels(_)))
+        {
+            self.remove_study(r, cx);
+            cx.stop_propagation();
             return;
         }
         // Drawings: a note being typed or a confirmation takes every key; Esc, Enter, Delete
@@ -2837,14 +2908,59 @@ impl ChartView {
 
     /// Study legends (VWAP …) and level-source rows, top left under the readout, unless the
     /// chart hides its study labels (render time).
-    fn legend(&self, t: &Theme, window: &mut Window) -> Option<gpui::AnyElement> {
+    fn legend(
+        &self,
+        t: &Theme,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::AnyElement> {
+        self.legend_hits.borrow_mut().clear();
         if !self.visibility.draws_labels() {
             // The readout still shows over the plot's top-left.
             self.legend_band
                 .set((8.0 + legend_max_w(), readout_bottom()));
             return None;
         }
-        let studies = self.studies.legend(t, &self.instrument);
+        let mut studies = self.studies.legend(t, &self.instrument);
+        // The volume profile's row: its mode (its numbers are on its own label).
+        let pc = self.profile.config();
+        if pc.mode != crate::profile::ProfileMode::Off {
+            let mode = match pc.mode {
+                crate::profile::ProfileMode::Session => "session",
+                crate::profile::ProfileMode::VisibleRange => "visible range",
+                crate::profile::ProfileMode::Composite => "composite",
+                crate::profile::ProfileMode::Off => "",
+            };
+            let row = div()
+                .flex()
+                .flex_row()
+                .gap_2()
+                .text_color(if pc.hidden { t.text_dim } else { t.text_main })
+                .child("Volume profile")
+                .child(div().text_color(t.text_dim).child(if pc.hidden {
+                    "· hidden"
+                } else {
+                    mode
+                }));
+            studies.push((StudyRef::Profile, row, pc.hidden));
+        }
+        let study_rows = studies.len();
+        let studies = (!studies.is_empty()).then(|| {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px(crate::zoom::ui(8.0))
+                .py(crate::zoom::ui(4.0))
+                .bg(t.label_bg)
+                .text_size(crate::zoom::ui(12.0))
+                .children(
+                    studies
+                        .into_iter()
+                        .map(|(r, row, hidden)| self.legend_row(r, row, hidden, true, t, cx))
+                        .collect::<Vec<_>>(),
+                )
+        });
         // The footprint's line: its mode and why bars are candles (as of the last frame;
         // paint re-renders when that changes).
         let fp = self.footprint.legend();
@@ -2868,6 +2984,25 @@ impl ChartView {
                     d.child(div().min_w_0().truncate().text_color(t.text_dim).child(n))
                 })
         });
+        let fp_conf = self.footprint.config();
+        let fp_hidden = fp_conf.hidden && fp_conf.mode != crate::footprint::FootprintMode::Off;
+        let fp = fp.or_else(|| {
+            // Hidden: listed, dimmed (one click from coming back).
+            fp_hidden.then(|| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .px(crate::zoom::ui(8.0))
+                    .py(crate::zoom::ui(4.0))
+                    .bg(t.label_bg)
+                    .text_size(crate::zoom::ui(12.0))
+                    .text_color(t.text_dim)
+                    .child(format!("Footprint · {}", fp_conf.mode.label()))
+                    .child("· hidden")
+            })
+        });
+        let fp = fp.map(|line| self.legend_row(StudyRef::Footprint, line, fp_hidden, true, t, cx));
         let rows = if self.levels.config.hide_labels {
             Vec::new()
         } else {
@@ -2880,7 +3015,7 @@ impl ChartView {
             usize::from(studies.is_some())
                 + usize::from(fp.is_some())
                 + usize::from(!rows.is_empty()),
-            self.studies.legend_rows()
+            study_rows
                 + usize::from(fp.is_some())
                 + rows.len()
                 + rows.iter().filter(|r| !r.stats.is_empty()).count(),
@@ -2977,71 +3112,84 @@ impl ChartView {
                 .border_1()
                 .border_color(t.axis_line)
                 .text_size(crate::zoom::ui(12.0))
-                .children(rows.into_iter().map(|(r, fit)| {
-                    let head = div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .min_w_0()
-                        .whitespace_nowrap()
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_color(if r.dim { t.text_dim } else { t.text_main })
-                                .child(r.label),
-                        )
-                        .when_some(fit.title, |d, title| {
-                            d.child(
-                                div()
-                                    .flex_shrink_0()
-                                    .text_color(t.text_dim)
-                                    .child(format!("· {title}")),
-                            )
-                        })
-                        .when(!r.text.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(if r.warn { t.text_main } else { t.text_dim })
-                                    .child(r.text),
-                            )
-                        });
-                    let dim = r.dim;
-                    let stats = (!r.stats.is_empty()).then(|| {
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_3()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .children(r.stats.into_iter().take(fit.stats).map(|s| {
-                                let value = match (dim, s.tone) {
-                                    (true, _) => t.text_dim,
-                                    (false, StatTone::Plain) => t.text_main,
-                                    (false, StatTone::Up) => t.legend_stat_text(t.up),
-                                    (false, StatTone::Down) => t.legend_stat_text(t.down),
-                                };
+                .children(
+                    rows.into_iter()
+                        .map(|(r, fit)| {
+                            let head = div()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .text_color(if r.dim { t.text_dim } else { t.text_main })
+                                        .child(r.label),
+                                )
+                                .when_some(fit.title, |d, title| {
+                                    d.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .text_color(t.text_dim)
+                                            .child(format!("· {title}")),
+                                    )
+                                })
+                                .when(!r.text.is_empty(), |d| {
+                                    d.child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(if r.warn {
+                                                t.text_main
+                                            } else {
+                                                t.text_dim
+                                            })
+                                            .child(r.text),
+                                    )
+                                });
+                            let dim = r.dim;
+                            let (id, hidden) = (r.id.clone(), r.hidden);
+                            let stats = (!r.stats.is_empty()).then(|| {
                                 div()
                                     .flex()
                                     .flex_row()
-                                    .gap_1()
-                                    .flex_shrink_0()
-                                    .child(div().text_color(t.text_dim).child(s.name))
-                                    .child(div().text_color(value).child(s.text))
-                            }))
-                            .when(fit.more, |d| {
-                                d.child(div().flex_shrink_0().text_color(t.text_dim).child("…"))
-                            })
-                    });
-                    div()
-                        .flex()
-                        .flex_col()
-                        .min_w_0()
-                        .child(head)
-                        .children(stats)
-                }))
+                                    .gap_3()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .children(r.stats.into_iter().take(fit.stats).map(|s| {
+                                        let value = match (dim, s.tone) {
+                                            (true, _) => t.text_dim,
+                                            (false, StatTone::Plain) => t.text_main,
+                                            (false, StatTone::Up) => t.legend_stat_text(t.up),
+                                            (false, StatTone::Down) => t.legend_stat_text(t.down),
+                                        };
+                                        div()
+                                            .flex()
+                                            .flex_row()
+                                            .gap_1()
+                                            .flex_shrink_0()
+                                            .child(div().text_color(t.text_dim).child(s.name))
+                                            .child(div().text_color(value).child(s.text))
+                                    }))
+                                    .when(fit.more, |d| {
+                                        d.child(
+                                            div().flex_shrink_0().text_color(t.text_dim).child("…"),
+                                        )
+                                    })
+                            });
+                            let row = div()
+                                .flex()
+                                .flex_col()
+                                .min_w_0()
+                                .child(head)
+                                .children(stats);
+                            // A source can't be removed from a chart, only hidden: no ×.
+                            self.legend_row(StudyRef::Levels(id), row, hidden, false, t, cx)
+                        })
+                        .collect::<Vec<_>>(),
+                )
         });
         Some(
             div()
@@ -3056,6 +3204,340 @@ impl ChartView {
                 .children(levels)
                 .into_any_element(),
         )
+    }
+
+    /// One legend row for study `r`: its content, a struck eye while `hidden`, and, only on
+    /// the row under the pointer, its buttons (hide or show, settings, remove when
+    /// `removable`). Its bounds are recorded at prepaint for the hover hit test.
+    fn legend_row(
+        &self,
+        r: StudyRef,
+        content: gpui::Div,
+        hidden: bool,
+        removable: bool,
+        t: &Theme,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        use crate::commands::StudyCmd;
+        use crate::icons::{self, Icon};
+        let hovered = self.legend_hover.as_ref() == Some(&r);
+        let hits = self.legend_hits.clone();
+        let key = r.clone();
+        // The buttons overhang the row by this much: their whole box is the row's.
+        let pad = crate::zoom::f(2.5);
+        // Icons are 20 px targets on 12 px text: they overhang the row, never grow it.
+        let overhang = crate::zoom::ui(-2.5);
+        let buttons = hovered.then(|| {
+            // Acts on a release still on the button (as a lower pane's ×): a press that turns
+            // into a drag does nothing, and the press never reaches the chart (no pan).
+            let button = |id: &'static str, icon: Icon, name: &str, cmd: StudyCmd| {
+                let (down, up) = (r.clone(), r.clone());
+                icons::button(id, icon, name, None, false, t)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |v, _: &MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            v.legend_press = Some((down.clone(), cmd));
+                        }),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(move |v, _: &MouseUpEvent, _, cx| {
+                            // Only the release of this button's own press: any other (a drag
+                            // of an order, a drawing, a pan ending here) is the chart's.
+                            if v.legend_press == Some((up.clone(), cmd)) {
+                                v.legend_press = None;
+                                cx.stop_propagation();
+                                v.legend_action(up.clone(), cmd, cx);
+                            }
+                        }),
+                    )
+            };
+            let (eye, eye_name) = if hidden {
+                (Icon::Hide, "Show")
+            } else {
+                (Icon::Show, "Hide")
+            };
+            let eye = button("legend-eye", eye, eye_name, StudyCmd::ToggleHidden);
+            let gear = button(
+                "legend-settings",
+                Icon::Settings,
+                "Settings",
+                StudyCmd::Settings,
+            );
+            let remove =
+                removable.then(|| button("legend-remove", Icon::Close, "Remove", StudyCmd::Remove));
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .my(overhang)
+                .child(eye)
+                .child(gear)
+                .children(remove)
+        });
+        // A hidden row's struck eye sits where its eye button does: hovering, hiding or
+        // showing never moves what the pointer aims at.
+        let slots = if removable { 3.0 } else { 2.0 };
+        let glyph = (hidden && !hovered).then(|| {
+            div()
+                .flex_none()
+                .flex()
+                .flex_row()
+                .my(overhang)
+                .w(px(icons::HIT * slots))
+                .child(icons::glyph(Icon::Hide, t.text_dim))
+        });
+        div()
+            .relative()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            // The row the buttons act on, marked (rows are close together).
+            .when(hovered, |d| d.bg(t.ghost_hover).rounded_sm())
+            .child(content.min_w_0())
+            .children(buttons.or(glyph).map(|g| g.ml_auto()))
+            .child(
+                canvas(
+                    move |b, _, _| {
+                        hits.borrow_mut().push((
+                            key,
+                            (
+                                f32::from(b.origin.x),
+                                f32::from(b.origin.y) - pad,
+                                f32::from(b.size.width),
+                                f32::from(b.size.height) + 2.0 * pad,
+                            ),
+                        ));
+                    },
+                    |_, (), _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+    }
+
+    /// The legend row under window point `p`, as last laid out.
+    fn legend_at(&self, p: Point<Pixels>) -> Option<StudyRef> {
+        crate::legend::hit(&self.legend_hits.borrow(), f32::from(p.x), f32::from(p.y)).cloned()
+    }
+
+    /// Screenshots (`--legend-hover`): the legend row of `spec` shows its buttons.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub fn pin_legend_hover(&mut self, spec: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        let r = crate::legend::study_spec(spec)?;
+        self.legend_hover = Some(r);
+        self.legend_hover_pinned = true;
+        cx.notify();
+        Ok(())
+    }
+
+    /// Screenshots (`--context-menu study:SPEC`): the menu a right click on that legend row
+    /// opens.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub fn study_menu_object(
+        &mut self,
+        spec: &str,
+    ) -> Result<crate::pane_menu::MenuObject, String> {
+        let r = crate::legend::study_spec(spec)?;
+        let o = self.study_object(&r);
+        self.menu_study = Some(r);
+        Ok(o)
+    }
+
+    /// Study `r`'s right-click menu (`crate::pane_menu::object_items`).
+    fn study_object(&self, r: &StudyRef) -> crate::pane_menu::MenuObject {
+        let set = self.study_set();
+        crate::pane_menu::MenuObject::Study {
+            title: self.study_title(&set, r),
+            hidden: set.is_hidden(r),
+            removable: !matches!(r, StudyRef::Levels(_)),
+            up: set.can_move(r, true),
+            down: set.can_move(r, false),
+        }
+    }
+
+    /// Study `r`'s name in a sentence ("Removed VWAP from ES charts").
+    fn study_name(&self, set: &StudySet, r: &StudyRef) -> String {
+        if let StudyRef::Levels(id) = r {
+            return self
+                .levels
+                .sources()
+                .into_iter()
+                .find(|(s, ..)| s == id)
+                .map_or_else(|| id.clone(), |(_, label, _)| label.to_owned());
+        }
+        crate::study_menu::short_name(set, r, &|c| {
+            crate::studies::ext_def(c).map(|d| d.name.to_owned())
+        })
+    }
+
+    /// Study `r`'s title on its menu: as the studies menu names it.
+    fn study_title(&self, set: &StudySet, r: &StudyRef) -> String {
+        match r {
+            StudyRef::Vwap(i) => match set.indicators.get(*i) {
+                Some(lines_indicators::IndicatorConfig::Vwap { spec, .. }) => {
+                    crate::study_menu::vwap_label(spec)
+                }
+                _ => self.study_name(set, r),
+            },
+            _ => self.study_name(set, r),
+        }
+    }
+
+    /// A legend row's action (its buttons, its menu, Del, a lower pane's title buttons).
+    fn legend_action(
+        &mut self,
+        r: StudyRef,
+        cmd: crate::commands::StudyCmd,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::commands::StudyCmd;
+        match cmd {
+            StudyCmd::ToggleHidden => {
+                let mut s = self.study_set();
+                s.apply(&StudyAction::ToggleHidden(r));
+                self.set_study_set(s);
+            }
+            StudyCmd::Move(up) => {
+                let mut s = self.study_set();
+                s.apply(&StudyAction::Move(r, up));
+                self.set_study_set(s);
+            }
+            StudyCmd::Settings => self.open_study_settings(r, cx),
+            StudyCmd::Remove => self.remove_study(r, cx),
+            // The workspace's: every chart of the tab (`study_copy`), and the footer's Undo.
+            StudyCmd::AddToTab | StudyCmd::Undo => {}
+        }
+        cx.notify();
+    }
+
+    /// A legend row menu's row (`Command::Study`), on the study it was opened on.
+    pub fn study_command(&mut self, cmd: crate::commands::StudyCmd, cx: &mut Context<Self>) {
+        if let Some(r) = self.menu_study.clone() {
+            self.legend_action(r, cmd, cx);
+        }
+    }
+
+    /// The study the legend row menu was opened on, as a copy for other charts.
+    pub fn study_copy(&self) -> Option<crate::study_menu::StudyCopy> {
+        self.study_set().copy_of(self.menu_study.as_ref()?)
+    }
+
+    /// Whether this chart shows its product's shared studies (decision 0039): those of
+    /// `product`, if given.
+    pub fn shares_studies_of(&self, product: u32) -> bool {
+        !self.separate_studies && self.instrument.id.0 == product
+    }
+
+    /// The product whose shared studies this chart shows, if it shows a symbol's set.
+    pub fn shared_product(&self) -> Option<u32> {
+        (!self.separate_studies).then_some(self.instrument.id.0)
+    }
+
+    /// Add another chart's study ("Add to every chart in this tab"), unless it is here.
+    pub fn add_study_copy(&mut self, c: &crate::study_menu::StudyCopy, cx: &mut Context<Self>) {
+        // Onto the symbol's newest set (a hidden pane hasn't rendered since it changed).
+        self.sync_symbol_studies(cx);
+        let mut s = self.study_set();
+        if s.add_copy(c) {
+            self.set_study_set(s);
+            // Its symbol's charts at once, though this one may not be drawn (a hidden pane).
+            self.sync_symbol_studies(cx);
+            cx.notify();
+        }
+    }
+
+    /// Remove study `r`, with Undo in the footer naming whose studies changed: the symbol's
+    /// (every chart of it) or this chart's own.
+    fn remove_study(&mut self, r: StudyRef, cx: &mut Context<Self>) {
+        // From the symbol's newest set (this chart may not have rendered since another chart
+        // changed it), and published at once (it may close before it renders again).
+        self.sync_symbol_studies(cx);
+        if let Some(undo) = self.removal(r) {
+            self.sync_symbol_studies(cx);
+            crate::workspace::offer_study_undo(undo, cx.entity().downgrade(), cx);
+        }
+        cx.notify();
+    }
+
+    /// Remove study `r`: the Undo that puts it back, if it was here.
+    fn removal(&mut self, r: StudyRef) -> Option<crate::legend::Undo> {
+        let before = self.study_set();
+        let mut after = before.clone();
+        after.apply(&StudyAction::Remove(r.clone()));
+        if after == before {
+            return None;
+        }
+        let text =
+            crate::legend::removed_text(&self.study_name(&before, &r), &self.studies_scope());
+        self.set_study_set(after.clone());
+        if !self.legend_hover_pinned {
+            self.legend_hover = None;
+        }
+        Some(crate::legend::Undo {
+            text,
+            before,
+            after,
+            until: Instant::now() + crate::notice::NOTICE_TTL,
+            product: self.shared_product(),
+            on: self.instrument.id.0,
+        })
+    }
+
+    /// Undo a removal (`crate::legend::Undo`): `true` if the studies were put back.
+    /// `None`: this chart no longer shows the studies it was removed from (another symbol, or
+    /// separate studies turned on or off since); `Some(false)`: they changed since.
+    pub fn undo_study(&mut self, u: &crate::legend::Undo, cx: &mut Context<Self>) -> Option<bool> {
+        if self.instrument.id.0 != u.on || self.shared_product() != u.product {
+            return None;
+        }
+        // Against the symbol's newest set: a change made on another chart since (this one
+        // perhaps not drawn) is never thrown away.
+        self.sync_symbol_studies(cx);
+        let Some(before) = u.restore(&self.study_set()).cloned() else {
+            return Some(false);
+        };
+        self.set_study_set(before);
+        // Every chart of the symbol at once, whether or not this one is drawn now.
+        self.sync_symbol_studies(cx);
+        cx.notify();
+        Some(true)
+    }
+
+    /// Open the studies menu on study `r`'s settings (its legend gear).
+    fn open_study_settings(&mut self, r: StudyRef, cx: &mut Context<Self>) {
+        self.picker.close();
+        self.anchoring = None;
+        self.close_popover(Kind::Studies, cx);
+        self.close_popover(Kind::Timeframe, cx);
+        self.close_popover(Kind::Account, cx);
+        self.close_popover(Kind::StyleEditor, cx);
+        self.study_draft = None;
+        let mut m = StudyMenu {
+            editing: Some(r.clone()),
+            ..StudyMenu::default()
+        };
+        let items = self.menu_items(&m, cx);
+        m.clamp(&items);
+        if let Some(i) = items
+            .iter()
+            .position(|it| matches!(it, Item::Study { r: x, .. } if *x == r))
+        {
+            m.cursor = i;
+        }
+        self.study_menu = Some(m);
+        popover::opened(
+            cx,
+            Kind::Studies,
+            |v: &mut Self, cx| v.close_popover(Kind::Studies, cx),
+            |v: &Self| v.study_menu.is_some(),
+        );
+        cx.notify();
     }
 
     /// External level sources on this chart, `(id, label, kinds)`, for menus.
@@ -3267,7 +3749,10 @@ impl ChartView {
 
     fn on_mouse_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
         let tag = self.ct.resize_hover.take().is_some();
-        if self.hover.take().is_some() || tag {
+        let row = !self.legend_hover_pinned && self.legend_hover.take().is_some();
+        // A press on a legend button that left the chart never acts on a later release.
+        self.legend_press = None;
+        if self.hover.take().is_some() || tag || row {
             cx.notify();
         }
     }
@@ -3287,6 +3772,19 @@ impl ChartView {
                 let w = w.min(crate::levels_layer::column_cap(beside) / zoom);
                 self.set_label_column(w, cx);
                 return;
+            }
+        }
+        // The legend row under the pointer: its buttons are built for it alone.
+        if ev.pressed_button.is_none() {
+            self.legend_press = None;
+        }
+        // (Not while a drag is under way: no buttons appear under a drag's release.)
+        if !self.legend_hover_pinned && (ev.pressed_button.is_none() || self.legend_press.is_some())
+        {
+            let row = self.legend_at(ev.position);
+            if row != self.legend_hover {
+                self.legend_hover = row;
+                cx.notify();
             }
         }
         let edge = self.region(ev.position) == Some(Region::ColumnEdge);
@@ -3403,6 +3901,8 @@ impl ChartView {
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.column_drag = None;
+        // Released off the legend button it was pressed on: nothing.
+        self.legend_press = None;
         // The release of a press that closed a popover does nothing here (no drawing finished).
         if popover::dismissing() {
             return;
@@ -3434,10 +3934,10 @@ impl ChartView {
             cx.notify();
             return;
         }
-        if let Some(k) = self.pane_closing.take() {
+        if let Some((k, b)) = self.pane_closing.take() {
             let (x, y) = self.local(ev.position);
-            if self.close_hit(x as f32, y as f32) == Some(k) {
-                self.remove_lower(k);
+            if self.close_hit(x as f32, y as f32) == Some((k, b)) {
+                self.lower_button(k, b, cx);
             }
             cx.notify();
             return;
@@ -6191,15 +6691,19 @@ impl ChartView {
         );
     }
 
-    /// Lower pane `k`'s × under plot-local (`x`, `y`), as last drawn.
-    fn close_hit(&self, x: f32, y: f32) -> Option<usize> {
-        self.lower_close.iter().position(|b| {
-            b.is_some_and(|(bx, by)| x >= bx && x < bx + CLOSE_BOX && y >= by && y < by + CLOSE_BOX)
-        })
+    /// Lower pane `k`'s title button under plot-local (`x`, `y`), as last drawn: its × at the
+    /// top-right, its gear and eye to the left of it.
+    fn close_hit(&self, x: f32, y: f32) -> Option<(usize, LowerButton)> {
+        self.lower_close
+            .iter()
+            .enumerate()
+            .find_map(|(k, b)| lower_button_at((*b)?, x, y).map(|b| (k, b)))
     }
 
-    /// Remove lower pane `k`'s study (its ×).
-    fn remove_lower(&mut self, k: usize) {
+    /// Lower pane `k`'s title button: remove its study (Undo in the footer), hide it (it is
+    /// listed in the legend, dimmed, to show again), or its settings.
+    fn lower_button(&mut self, k: usize, b: LowerButton, cx: &mut Context<Self>) {
+        use crate::commands::StudyCmd;
         use lines_indicators::IndicatorConfig as C;
         let Some((i, c)) = self.studies.lower_study(k) else {
             return;
@@ -6210,9 +6714,12 @@ impl ChartView {
             C::External { .. } => StudyRef::External(i),
             C::Vwap { .. } => return,
         };
-        let mut s = self.study_set();
-        s.apply(&StudyAction::Remove(r));
-        self.set_study_set(s);
+        let cmd = match b {
+            LowerButton::Close => StudyCmd::Remove,
+            LowerButton::Settings => StudyCmd::Settings,
+            LowerButton::Hide => StudyCmd::ToggleHidden,
+        };
+        self.legend_action(r, cmd, cx);
     }
 
     /// Lower pane `k` (`crate::subpane`) below the plot: background, the divider, the time
@@ -6350,31 +6857,37 @@ impl ChartView {
                 );
             }
         }
-        // Its × at the top-right: removes the study (a 20 px target).
+        // Its × at the top-right: removes the study (a 20 px target). While the pointer is in
+        // the pane, its gear (settings) and eye (hide) to the left of it.
         let (cbx, cby) = (pw - CLOSE_BOX - 2.0, s.sub_top + 2.0);
         if cbx > 8.0 {
             self.lower_close[k] = Some((cbx, cby));
-            let close = |b: &mut FixedStr<32>| {
-                let _ = b.write_str("×");
-            };
-            let w = f32::from(
-                self.label(LabelKind::PaneClose, 0, t.text_dim, window, close)
-                    .width,
-            );
-            let at = point(
-                px(ox + cbx + (CLOSE_BOX - w) * 0.5),
-                px(oy + cby + CLOSE_BOX * 0.5 - label_px() * 0.65),
-            );
-            self.paint_label(
-                LabelKind::PaneClose,
-                0,
-                at,
-                px(label_px() * 1.3),
-                t.text_dim,
-                window,
-                cx,
-                close,
-            );
+            let inside = cbx > 8.0 + 2.0 * CLOSE_BOX
+                && self
+                    .hover
+                    .is_some_and(|(_, y)| y >= s.sub_top && y < s.sub_top + s.sub_h);
+            // The same Lucide icons as the legend's buttons, lit under the pointer.
+            for b in LowerButton::ALL {
+                if b != LowerButton::Close && !inside {
+                    continue;
+                }
+                let bx = cbx - f32::from(b.slot()) * CLOSE_BOX;
+                let hot = self.hover.is_some_and(|(x, y)| {
+                    x >= bx && x < bx + CLOSE_BOX && y >= cby && y < cby + CLOSE_BOX
+                });
+                let icon = match b {
+                    LowerButton::Close => crate::icons::Icon::Close,
+                    LowerButton::Settings => crate::icons::Icon::Settings,
+                    LowerButton::Hide => crate::icons::Icon::Show,
+                };
+                crate::icons::paint(
+                    icon,
+                    rect(bx, cby, CLOSE_BOX, CLOSE_BOX),
+                    if hot { t.text_main } else { t.text_dim },
+                    window,
+                    cx,
+                );
+            }
         }
         // The axis beside it and the time axis below: borders; the visible range's ends and the
         // newest value.
@@ -6585,7 +7098,7 @@ impl ChartView {
         let (bx, by, bh) = (8.0, s.sub_top + 4.0, label_px() * 1.6);
         let gap = 12.0;
         const SAMPLE: f32 = 14.0;
-        let room = pw - bx - 16.0 - CLOSE_BOX;
+        let room = pw - bx - 16.0 - 3.0 * CLOSE_BOX;
         // Each line's drawn color (as styled; its theme role by default).
         let color_of = |i: usize| {
             let base = t.series[crate::series_pane::series_index(def.lines[i].color)];
@@ -6804,7 +7317,7 @@ impl ChartView {
         let pw = f32::from(self.plot.size.width);
         let (bx, by, bh) = (8.0, s.sub_top + 4.0, label_px() * 1.6);
         let gap = 12.0;
-        let room = pw - bx - 16.0 - CLOSE_BOX;
+        let room = pw - bx - 16.0 - 3.0 * CLOSE_BOX;
         // Widths first (shaping caches them), then the box, then the text.
         let mut widths = [0.0f32; 6];
         let mut used = 0.0;
@@ -7475,6 +7988,13 @@ impl ChartView {
     fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.menu_object = None;
         self.menu_price = None;
+        self.menu_study = None;
+        // A legend row: its study's menu.
+        if let Some(r) = self.legend_at(ev.position) {
+            self.menu_object = Some(self.study_object(&r));
+            self.menu_study = Some(r);
+            return;
+        }
         if self.region(ev.position) != Some(Region::Plot) {
             return;
         }
@@ -10083,7 +10603,7 @@ impl Render for ChartView {
                 )
                 .size_full(),
             )
-            .when_some(self.legend(&t, window), |d, l| d.child(l))
+            .when_some(self.legend(&t, window, cx), |d, l| d.child(l))
             .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
             .when_some(
                 crate::order_group_view::layer(self, window, &t, cx),
@@ -10703,6 +11223,13 @@ mod symbol_studies_tests {
     }
 
     /// A render's sync (and whether the 8 ms poll asked for one first).
+    /// The per-product generations are process-wide: these tests run one at a time, so
+    /// another test's ES edit is never taken for this one's.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn sync(c: &Entity<ChartView>, cx: &mut TestAppContext) -> bool {
         c.update(cx, |c, cx| {
             let asked = !c.separate_studies
@@ -10728,6 +11255,7 @@ mod symbol_studies_tests {
     /// its own, on top of the product's, and can take the product's set again.
     #[gpui::test]
     fn command_line_studies_never_overwrite_a_symbols_set(cx: &mut TestAppContext) {
+        let _serial = serial();
         cx.update(|cx| {
             cx.set_global(crate::picker_view::AppSettings::ephemeral());
             crate::symbol_studies::publish(
@@ -10768,8 +11296,156 @@ mod symbol_studies_tests {
         assert_eq!(indicators(&c, cx), vec![vwap("rth")]);
     }
 
+    /// The legend's actions act on the set the chart uses (decision 0039): on a symbol's,
+    /// removing or hiding changes every chart of it and the Undo names the symbol; Undo puts
+    /// it back exactly, on every chart; on separate studies only that chart changes.
+    #[gpui::test]
+    fn legend_actions_act_on_the_charts_set(cx: &mut TestAppContext) {
+        let _serial = serial();
+        use crate::commands::StudyCmd;
+        cx.update(|cx| cx.set_global(crate::picker_view::AppSettings::ephemeral()));
+        let a = chart(catalog::ES, cx);
+        let b = chart(catalog::ES, cx);
+        sync(&a, cx);
+        sync(&b, cx);
+        edit(&a, vwap("eth"), cx);
+        edit(&a, vwap("rth"), cx);
+        sync(&a, cx);
+        sync(&b, cx);
+        let both = vec![vwap("eth"), vwap("rth")];
+        assert_eq!(indicators(&b, cx), both);
+
+        // Hide on A: hidden on B too, configuration kept.
+        a.update(cx, |c, cx| {
+            c.legend_action(StudyRef::Vwap(1), StudyCmd::ToggleHidden, cx)
+        });
+        sync(&a, cx);
+        sync(&b, cx);
+        assert!(b.read_with(cx, |c, _| c.study_set().is_hidden(&StudyRef::Vwap(1))));
+        a.update(cx, |c, cx| {
+            c.legend_action(StudyRef::Vwap(1), StudyCmd::ToggleHidden, cx)
+        });
+        sync(&a, cx);
+        sync(&b, cx);
+        assert_eq!(indicators(&b, cx), both, "shown again exactly");
+
+        // Remove on A: gone from B; the Undo names ES's charts and restores both exactly.
+        let undo = a.update(cx, |c, _| c.removal(StudyRef::Vwap(0))).unwrap();
+        assert_eq!(undo.text, "Removed VWAP from ES charts");
+        sync(&a, cx);
+        sync(&b, cx);
+        assert_eq!(indicators(&b, cx), vec![vwap("rth")]);
+        assert_eq!(a.update(cx, |c, cx| c.undo_study(&undo, cx)), Some(true));
+        // B follows at once (published by A's undo, not at A's next render).
+        assert!(sync(&b, cx));
+        assert_eq!(indicators(&a, cx), both);
+        assert_eq!(indicators(&b, cx), both);
+        assert_eq!(
+            a.update(cx, |c, cx| c.undo_study(&undo, cx)),
+            Some(false),
+            "changed since: nothing undone"
+        );
+        // A chart showing another symbol since never takes it.
+        let undo = a.update(cx, |c, _| c.removal(StudyRef::Vwap(1))).unwrap();
+        sync(&a, cx);
+        a.update(cx, |c, cx| c.set_feed(feed(catalog::NQ), cx));
+        sync(&a, cx);
+        assert_eq!(a.update(cx, |c, cx| c.undo_study(&undo, cx)), None);
+        a.update(cx, |c, cx| c.set_feed(feed(catalog::ES), cx));
+        sync(&a, cx);
+        assert_eq!(a.update(cx, |c, cx| c.undo_study(&undo, cx)), Some(true));
+        sync(&a, cx);
+
+        // A change on B after the removal, A not drawn since: Undo on A refuses (B's change is
+        // never thrown away), and adding to A starts from the newest set too.
+        let full = a.read_with(cx, |c, _| c.study_set());
+        let undo = a.update(cx, |c, _| c.removal(StudyRef::Vwap(0))).unwrap();
+        sync(&a, cx);
+        sync(&b, cx);
+        edit(&b, vwap("weekly"), cx);
+        sync(&b, cx);
+        assert_eq!(a.update(cx, |c, cx| c.undo_study(&undo, cx)), Some(false));
+        assert_eq!(indicators(&a, cx), vec![vwap("rth"), vwap("weekly")]);
+        let copy = crate::study_menu::StudyCopy::Indicator(vwap("eth"));
+        a.update(cx, |c, cx| c.add_study_copy(&copy, cx));
+        sync(&b, cx);
+        let resets: Vec<_> = indicators(&b, cx)
+            .iter()
+            .map(|c| match c {
+                IndicatorConfig::Vwap { spec, .. } => spec.reset,
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            resets,
+            [
+                lines_indicators::Reset::Rth,
+                lines_indicators::Reset::Weekly,
+                lines_indicators::Reset::Eth
+            ],
+            "B's change kept, the copy added (in a free color)"
+        );
+        a.update(cx, |c, cx| {
+            c.set_study_set(full.clone());
+            c.sync_symbol_studies(cx);
+        });
+        sync(&b, cx);
+        assert_eq!(indicators(&b, cx), both);
+
+        // Separate studies on A: only A changes, and the Undo says so.
+        a.update(cx, |c, cx| c.set_separate_studies(true, cx));
+        let undo = a.update(cx, |c, _| c.removal(StudyRef::Vwap(1))).unwrap();
+        assert_eq!(undo.text, "Removed VWAP from this chart");
+        sync(&a, cx);
+        sync(&b, cx);
+        assert_eq!(indicators(&a, cx), vec![vwap("eth")]);
+        assert_eq!(indicators(&b, cx), both);
+        // Nothing to remove: no Undo.
+        assert!(a.update(cx, |c, _| c.removal(StudyRef::Vwap(5))).is_none());
+
+        // The volume profile round-trips through the chart's layers exactly.
+        a.update(cx, |c, _| {
+            let mut s = c.study_set();
+            s.profile.mode = crate::profile::ProfileMode::Session;
+            s.profile.value_area_percent = 68;
+            c.set_study_set(s);
+        });
+        let with = a.read_with(cx, |c, _| c.study_set());
+        let undo = a.update(cx, |c, _| c.removal(StudyRef::Profile)).unwrap();
+        assert_eq!(undo.text, "Removed Volume profile from this chart");
+        assert_eq!(undo.product, None, "separate: the chart's own");
+        assert_eq!(a.update(cx, |c, cx| c.undo_study(&undo, cx)), Some(true));
+        assert_eq!(a.read_with(cx, |c, _| c.study_set()), with);
+    }
+
+    /// A lower pane's title buttons: the ×, the gear one box left of it and the eye two,
+    /// each its own 20 px box, at the title's height only; a narrow title has only the ×.
+    #[test]
+    fn lower_pane_title_buttons() {
+        let at = (300.0, 100.0);
+        let b = |x, y| lower_button_at(at, x, y);
+        assert_eq!(b(300.0, 100.0), Some(LowerButton::Close));
+        assert_eq!(b(319.9, 119.9), Some(LowerButton::Close));
+        assert_eq!(b(299.9, 110.0), Some(LowerButton::Settings));
+        assert_eq!(b(280.0, 110.0), Some(LowerButton::Settings));
+        assert_eq!(b(279.9, 110.0), Some(LowerButton::Hide));
+        assert_eq!(b(260.0, 110.0), Some(LowerButton::Hide));
+        assert_eq!(b(259.9, 110.0), None);
+        assert_eq!(b(320.0, 110.0), None);
+        assert_eq!(b(290.0, 99.9), None);
+        assert_eq!(b(290.0, 120.0), None);
+        let narrow = (40.0, 0.0);
+        assert_eq!(lower_button_at(narrow, 45.0, 5.0), Some(LowerButton::Close));
+        assert_eq!(
+            lower_button_at(narrow, 30.0, 5.0),
+            None,
+            "no room: not drawn"
+        );
+    }
+
     #[gpui::test]
     fn charts_of_a_symbol_share_swap_and_separate(cx: &mut TestAppContext) {
+        let _serial = serial();
         cx.update(|cx| cx.set_global(crate::picker_view::AppSettings::ephemeral()));
         let a = chart(catalog::ES, cx);
         let b = chart(catalog::ES, cx);

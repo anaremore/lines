@@ -119,6 +119,19 @@ pub enum StudyAction {
     SetStyle(StudyRef, Vec<Look>),
     /// Replace every study with a template's (boxed: a study set is large).
     Replace(Box<StudySet>),
+    /// Draw a study one place earlier (`true`) or later in the chart's list (the legend's
+    /// "Move up / down"): only studies in the indicator list move; the others keep their place.
+    Move(StudyRef, bool),
+}
+
+/// One study taken from a chart to add to others ("Add to every chart in this tab"), shown.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StudyCopy {
+    Indicator(IndicatorConfig),
+    Profile(ProfileConfig),
+    Footprint(FootprintConfig),
+    /// A level source shown (it serves the charts it serves; nothing else to copy).
+    Levels(String),
 }
 
 fn next_color(set: &StudySet) -> u8 {
@@ -396,7 +409,214 @@ impl StudySet {
                 StudyRef::Levels(id) => self.styles.set_levels(id, looks),
             },
             StudyAction::Replace(set) => *self = (**set).clone(),
+            StudyAction::Move(r, up) => {
+                // Taken out and put back at its neighbour's place: the studies in between (drawn
+                // in lower panes, not listed) keep their order.
+                if let Some((i, j)) = self.neighbour(r, *up) {
+                    let c = self.indicators.remove(i);
+                    self.indicators.insert(j, c);
+                }
+            }
         }
+    }
+
+    /// Whether study `r` can move one place earlier (`up`) or later (`StudyAction::Move`).
+    pub fn can_move(&self, r: &StudyRef, up: bool) -> bool {
+        self.neighbour(r, up).is_some()
+    }
+
+    /// Study `r`'s index and its neighbour's that way among the studies drawn where it is
+    /// (on the chart, or in lower panes): a move swaps them, so the legend's order changes
+    /// with every move (`None`: an end, or not an indicator, or `r` names another kind).
+    fn neighbour(&self, r: &StudyRef, up: bool) -> Option<(usize, usize)> {
+        let i = match r {
+            StudyRef::Vwap(i)
+            | StudyRef::Delta(i)
+            | StudyRef::Volume(i)
+            | StudyRef::External(i) => *i,
+            StudyRef::Footprint | StudyRef::Profile | StudyRef::Levels(_) => return None,
+        };
+        let c = self.indicators.get(i)?;
+        let kind_ok = matches!(
+            (r, c),
+            (StudyRef::Vwap(_), IndicatorConfig::Vwap { .. })
+                | (StudyRef::Delta(_), IndicatorConfig::CumDelta { .. })
+                | (StudyRef::Volume(_), IndicatorConfig::Volume { .. })
+                | (StudyRef::External(_), IndicatorConfig::External { .. })
+        );
+        if !kind_ok {
+            return None;
+        }
+        // Among the rows the legend lists, so every move shows (a study drawn in a lower pane
+        // is titled there, not listed, and keeps its place).
+        if !legend_lists(c) {
+            return None;
+        }
+        let same = |j: &usize| legend_lists(&self.indicators[*j]);
+        let j = if up {
+            (0..i).rev().find(same)
+        } else {
+            (i + 1..self.indicators.len()).find(same)
+        }?;
+        Some((i, j))
+    }
+
+    /// Whether `r` still names a study of its kind here (a legend row's reference after a
+    /// change: the same kind at that index, the profile or footprint on, any level source).
+    pub fn names(&self, r: &StudyRef) -> bool {
+        match r {
+            StudyRef::Vwap(i) => {
+                matches!(self.indicators.get(*i), Some(IndicatorConfig::Vwap { .. }))
+            }
+            StudyRef::Delta(i) => {
+                matches!(
+                    self.indicators.get(*i),
+                    Some(IndicatorConfig::CumDelta { .. })
+                )
+            }
+            StudyRef::Volume(i) => {
+                matches!(
+                    self.indicators.get(*i),
+                    Some(IndicatorConfig::Volume { .. })
+                )
+            }
+            StudyRef::External(i) => {
+                matches!(
+                    self.indicators.get(*i),
+                    Some(IndicatorConfig::External { .. })
+                )
+            }
+            StudyRef::Footprint => self.footprint.mode != FootprintMode::Off,
+            StudyRef::Profile => self.profile.mode != ProfileMode::Off,
+            StudyRef::Levels(_) => true,
+        }
+    }
+
+    /// Whether `r` still names a study the legend lists (its row is still there).
+    pub fn lists(&self, r: &StudyRef) -> bool {
+        self.names(r)
+            && match r {
+                StudyRef::Vwap(i)
+                | StudyRef::Delta(i)
+                | StudyRef::Volume(i)
+                | StudyRef::External(i) => legend_lists(&self.indicators[*i]),
+                StudyRef::Footprint | StudyRef::Profile | StudyRef::Levels(_) => true,
+            }
+    }
+
+    /// Whether study `r` is hidden (`StudyAction::ToggleHidden`).
+    pub fn is_hidden(&self, r: &StudyRef) -> bool {
+        match r {
+            StudyRef::Vwap(i)
+            | StudyRef::Delta(i)
+            | StudyRef::Volume(i)
+            | StudyRef::External(i) => self.indicators.get(*i).is_some_and(|c| c.display().hidden),
+            StudyRef::Footprint => self.footprint.hidden,
+            StudyRef::Profile => self.profile.hidden,
+            StudyRef::Levels(id) => !self.levels.source_shown(id),
+        }
+    }
+
+    /// Study `r` as a copy for another chart (shown there), if it is on this one.
+    pub fn copy_of(&self, r: &StudyRef) -> Option<StudyCopy> {
+        Some(match r {
+            StudyRef::Vwap(i)
+            | StudyRef::Delta(i)
+            | StudyRef::Volume(i)
+            | StudyRef::External(i) => {
+                let mut c = self.indicators.get(*i)?.clone();
+                c.display_mut().hidden = false;
+                StudyCopy::Indicator(c)
+            }
+            StudyRef::Footprint => (self.footprint.mode != FootprintMode::Off).then(|| {
+                StudyCopy::Footprint(FootprintConfig {
+                    hidden: false,
+                    ..self.footprint
+                })
+            })?,
+            StudyRef::Profile => (self.profile.mode != ProfileMode::Off).then(|| {
+                StudyCopy::Profile(ProfileConfig {
+                    hidden: false,
+                    ..self.profile
+                })
+            })?,
+            StudyRef::Levels(id) => StudyCopy::Levels(id.clone()),
+        })
+    }
+
+    /// Add `copy` unless this set already has that study (the same VWAP, delta or series
+    /// spec; any Volume, the one per chart): `true` if it changed. A hidden one is shown. A
+    /// profile or footprint already on takes the copy's settings.
+    pub fn add_copy(&mut self, copy: &StudyCopy) -> bool {
+        let before = self.clone();
+        match copy {
+            StudyCopy::Indicator(c) => {
+                let same = |o: &IndicatorConfig| match (o, c) {
+                    (
+                        IndicatorConfig::Vwap { spec: a, .. },
+                        IndicatorConfig::Vwap { spec: b, .. },
+                    ) => a == b,
+                    (
+                        IndicatorConfig::CumDelta { spec: a, .. },
+                        IndicatorConfig::CumDelta { spec: b, .. },
+                    ) => a == b,
+                    (IndicatorConfig::Volume { .. }, IndicatorConfig::Volume { .. }) => true,
+                    (
+                        IndicatorConfig::External { spec: a, .. },
+                        IndicatorConfig::External { spec: b, .. },
+                    ) => a == b,
+                    _ => false,
+                };
+                match self.indicators.iter_mut().find(|o| same(o)) {
+                    Some(o) => o.display_mut().hidden = false,
+                    None => {
+                        let mut c = c.clone();
+                        // A VWAP takes the next free color here (never two the same).
+                        if let IndicatorConfig::Vwap { color, .. } = &mut c
+                            && self.indicators.iter().any(|o| matches!(o, IndicatorConfig::Vwap { color: k, .. } if k == color))
+                        {
+                            *color = next_color(self);
+                        }
+                        self.indicators.push(c);
+                    }
+                }
+            }
+            StudyCopy::Profile(p) => self.profile = *p,
+            StudyCopy::Footprint(f) => self.footprint = *f,
+            // Only that source: levels turned off as a whole on a chart stay off there.
+            StudyCopy::Levels(id) => self.levels.hidden_sources.retain(|s| s != id),
+        }
+        *self != before
+    }
+}
+
+/// An indicator the chart's legend lists: drawn on the chart with its label on, or hidden
+/// (listed, dimmed, one click from coming back, whatever its label setting; a hidden
+/// lower-pane study has no pane title).
+pub fn legend_lists(c: &IndicatorConfig) -> bool {
+    let d = c.display();
+    d.hidden || (d.label && !c.in_subpane())
+}
+
+/// A study's name in a sentence ("Removed VWAP from ES charts"): its kind, or a series' or
+/// a level source's own name (`named`: from the chart's sources).
+pub fn short_name(
+    set: &StudySet,
+    r: &StudyRef,
+    named: &dyn Fn(&IndicatorConfig) -> Option<String>,
+) -> String {
+    match r {
+        StudyRef::Vwap(_) => "VWAP".into(),
+        StudyRef::Delta(_) => "Cumulative delta".into(),
+        StudyRef::Volume(_) => "Volume".into(),
+        StudyRef::External(i) => set
+            .indicators
+            .get(*i)
+            .and_then(named)
+            .unwrap_or_else(|| "the series".into()),
+        StudyRef::Footprint => "Footprint".into(),
+        StudyRef::Profile => "Volume profile".into(),
+        StudyRef::Levels(id) => id.clone(),
     }
 }
 

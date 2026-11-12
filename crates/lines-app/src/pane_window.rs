@@ -78,6 +78,8 @@ fn command(cmd: Command) -> Option<Command> {
         Command::ToggleDrawingTools => Some(cmd),
         // An order tag's menu (no key reaches here with one).
         Command::Order(_) => Some(cmd),
+        // A legend row's menu; adding to every chart of a tab is the main window's.
+        Command::Study(s) if s != crate::commands::StudyCmd::AddToTab => Some(cmd),
         // The UI zoom is app-wide: its keys work from every window.
         Command::ZoomIn | Command::ZoomOut | Command::ZoomReset => Some(cmd),
         // The replay is app-wide too (Go to is the main window's prompt).
@@ -253,6 +255,14 @@ impl PaneWindow {
             Some(Command::Draw(d)) => {
                 if let PaneHandle::Chart(chart) = &self.handle {
                     chart.update(cx, |c, cx| c.drawing_command(d, cx));
+                }
+            }
+            Some(Command::Study(crate::commands::StudyCmd::Undo)) => {
+                crate::workspace::undo_study(cx);
+            }
+            Some(Command::Study(s)) => {
+                if let PaneHandle::Chart(chart) = &self.handle {
+                    chart.update(cx, |c, cx| c.study_command(s, cx));
                 }
             }
             Some(Command::Order(o)) => {

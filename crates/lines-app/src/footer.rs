@@ -156,6 +156,9 @@ pub enum LinkKind {
     Triggers,
     /// "Layout: trading": opens another layout (never reads as "trading is on").
     Layout,
+    /// "Removed VWAP from ES charts · Undo", for a few seconds after a study's removal. Never
+    /// hidden (not in [`LinkKind::ALL`]: the footer's menu doesn't list it).
+    Undo,
 }
 
 impl LinkKind {
@@ -177,6 +180,7 @@ impl LinkKind {
             LinkKind::CrosshairSync => "Crosshair sync",
             LinkKind::Triggers => "Option triggers",
             LinkKind::Layout => "Layout name",
+            LinkKind::Undo => "Undo",
         }
     }
 
@@ -189,6 +193,7 @@ impl LinkKind {
             LinkKind::CrosshairSync => "crosshair_sync",
             LinkKind::Triggers => "triggers",
             LinkKind::Layout => "layout",
+            LinkKind::Undo => "undo",
         }
     }
 

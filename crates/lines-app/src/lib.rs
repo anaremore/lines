@@ -46,6 +46,7 @@ mod keycap;
 mod latency_hud;
 mod layout;
 mod layout_rec;
+mod legend;
 mod levels_layer;
 mod logs;
 mod menu;
@@ -647,8 +648,14 @@ struct Cli {
     /// pane (no OS pointer involved).
     #[arg(long, requires = "screenshot")]
     hover_header: bool,
-    /// Screenshot: open a context menu, as a right click would: `pane`, `tab`, or `order` (the
-    /// focused chart's first working order, a stop if any); `:Label` with that row's submenu
+    /// Screenshot: the focused chart's legend row for this study shows its buttons as if the
+    /// pointer were over it: `vwap:N`, `volume:N`, `delta:N`, `external:N` (the study's index
+    /// on the chart), `profile`, `footprint` or `levels:ID`.
+    #[arg(long, requires = "screenshot", value_parser = legend::study_spec_arg)]
+    legend_hover: Option<String>,
+    /// Screenshot: open a context menu, as a right click would: `pane`, `tab`, `order` (the
+    /// focused chart's first working order, a stop if any) or `study:SPEC` (a legend row's, as
+    /// `--legend-hover` names it); `:Label` with that row's submenu
     /// open; `@X,Y` where (logical px): `--context-menu pane:Show@1400,300`.
     #[arg(long, requires = "screenshot", value_parser = pane_menu::parse_shot_menu)]
     context_menu: Option<pane_menu::ShotMenu>,
@@ -2215,6 +2222,7 @@ where
                 bracket_editor: cli.bracket_editor,
                 bracket_position: cli.bracket_position,
                 hover_header: cli.hover_header,
+                legend_hover: cli.legend_hover.clone(),
                 context_menu: cli.context_menu.clone(),
                 update_shot: cli.update_shot.clone(),
                 ui_zoom: cli.ui_zoom,

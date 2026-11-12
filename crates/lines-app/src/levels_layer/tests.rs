@@ -192,7 +192,15 @@ fn layer_places_filters_and_reports_freshness() {
     layer.config.toggle_source("demo");
     prepare(&mut layer, None);
     assert_eq!(layer.placed_per_source()[i], 0);
-    assert!(layer.legend().iter().all(|r| r.label != "Demo levels"));
+    // Hidden: still listed in the legend, dimmed, saying so (one click from coming back).
+    let rows = layer.legend();
+    let row = rows.iter().find(|r| r.label == "Demo levels").unwrap();
+    assert!(row.hidden && row.dim && row.stats.is_empty() && row.text == "· hidden");
+    assert_eq!(row.id, "demo");
+    // Levels off as a whole: no rows at all.
+    layer.config.hidden = true;
+    assert!(layer.legend().is_empty());
+    layer.config.hidden = false;
     layer.config.toggle_source("demo");
 
     // Stale: dimmed and labelled; missing: nothing drawn, "missing".

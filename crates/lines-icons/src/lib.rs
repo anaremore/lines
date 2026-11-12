@@ -25,6 +25,7 @@ macro_rules! icon {
 /// Every embedded icon, by Lucide name.
 pub const ICONS: &[IconFile] = &[
     icon!("ellipsis"),
+    icon!("eye"),
     icon!("eye-off"),
     icon!("log-in"),
     icon!("maximize"),
@@ -34,6 +35,7 @@ pub const ICONS: &[IconFile] = &[
     icon!("pin"),
     icon!("play"),
     icon!("ruler"),
+    icon!("settings"),
     icon!("skip-back"),
     icon!("skip-forward"),
     icon!("slash"),

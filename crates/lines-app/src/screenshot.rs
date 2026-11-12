@@ -88,6 +88,8 @@ pub struct Shot {
     pub bracket_position: Option<crate::BracketPositionArg>,
     /// The focused pane's header controls show (`--hover-header`).
     pub hover_header: bool,
+    /// The focused chart's legend row for this study shows its buttons (`--legend-hover`).
+    pub legend_hover: Option<String>,
     /// A context menu opens (`--context-menu`).
     pub context_menu: Option<crate::pane_menu::ShotMenu>,
     /// The updater's state on the status line (`--update-shot`).
@@ -243,6 +245,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         bracket_editor,
         bracket_position,
         hover_header,
+        legend_hover,
         context_menu,
         update_shot,
         ui_zoom,
@@ -454,6 +457,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
                 scale,
                 script,
                 hover_header,
+                legend_hover,
                 context_menu,
                 prompt,
                 settings_shot,
@@ -490,6 +494,7 @@ fn capture(
     scale: Option<f32>,
     script: Option<(Vec<crate::trading::Step>, lines_core::UtcMillis)>,
     hover_header: bool,
+    legend_hover: Option<String>,
     context_menu: Option<crate::pane_menu::ShotMenu>,
     prompt: Option<String>,
     settings_shot: Option<SettingsShot>,
@@ -504,6 +509,11 @@ fn capture(
     )?;
     if hover_header {
         handle.update(cx, |v, _, cx| v.hover_focused_pane(cx))?;
+    }
+    if let Some(spec) = legend_hover {
+        handle
+            .update(cx, |v, _, cx| v.hover_legend_row(&spec, cx))?
+            .map_err(|e| anyhow::anyhow!("--legend-hover: {e}"))?;
     }
     if let Some(m) = context_menu {
         handle.update(cx, |v, _, cx| v.screenshot_menu(m, cx))?;

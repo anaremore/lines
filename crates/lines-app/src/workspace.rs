@@ -172,6 +172,9 @@ pub struct Workspace {
     /// Problems and refusals shown inline in the footer (`crate::notice`: repeats counted,
     /// refusals expire, problems that need action stay until dismissed).
     pub notices: Notices,
+    /// A study just removed from a chart (its legend's ×, Del, its menu, a lower pane's ×):
+    /// Undo in the footer for `notice::NOTICE_TTL` (`crate::legend`).
+    study_undo: Option<(crate::legend::Undo, gpui::WeakEntity<ChartView>)>,
     /// Show the chart header's performance stats (feed rate, paints/s, paint time): a
     /// workspace preference, off by default.
     pub show_perf_stats: bool,
@@ -205,6 +208,7 @@ impl Workspace {
             open_positions: None,
             update_label: None,
             notices: Notices::default(),
+            study_undo: None,
             show_perf_stats: false,
             show_latency_hud: false,
             autosave: None,
@@ -1776,6 +1780,40 @@ impl WindowView {
                         f.focus(window, cx);
                     }
                     chart.update(cx, |c, cx| c.order_command(o, cx));
+                }
+            }
+            // A legend row's menu: that study, on the focused chart (where it was opened).
+            // The footer's Undo (any window's).
+            Command::Study(crate::commands::StudyCmd::Undo) => undo_study(cx),
+            Command::Study(s) => {
+                let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
+                    return;
+                };
+                if s == crate::commands::StudyCmd::AddToTab {
+                    let Some(copy) = chart.read(cx).study_copy() else {
+                        return;
+                    };
+                    // Charts sharing the source's symbol set already have it (and adding there
+                    // would show it on the source too, if it was hidden).
+                    let shared = chart.read(cx).shared_product();
+                    let charts: Vec<Entity<ChartView>> = self
+                        .tab()
+                        .handles()
+                        .filter_map(|h| match h {
+                            PaneHandle::Chart(c)
+                                if *c != chart
+                                    && !shared.is_some_and(|p| c.read(cx).shares_studies_of(p)) =>
+                            {
+                                Some(c.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    for c in charts {
+                        c.update(cx, |c, cx| c.add_study_copy(&copy, cx));
+                    }
+                } else {
+                    chart.update(cx, |c, cx| c.study_command(s, cx));
                 }
             }
             // Drawings are on charts; they belong to the chart's product.
@@ -3538,6 +3576,18 @@ impl WindowView {
         });
         // Links: what this tab isn't showing, and where to go.
         let mut links: Vec<(LinkKind, String, Option<Command>)> = Vec::new();
+        // A study just removed: Undo, first (never hidden by the footer's menu).
+        if let Some((u, _)) = ws
+            .study_undo
+            .as_ref()
+            .filter(|(u, _)| u.live(Instant::now()))
+        {
+            links.push((
+                LinkKind::Undo,
+                format!("{} · Undo", u.text),
+                Some(Command::Study(crate::commands::StudyCmd::Undo)),
+            ));
+        }
         if let Some(text) = ws.open_positions.and_then(crate::positions::open_label) {
             links.push((LinkKind::Positions, text, Some(Command::OpenPositions)));
         }
@@ -3591,7 +3641,7 @@ impl WindowView {
             Some(Command::Open),
         ));
         let hidden = ws.hidden_links.clone();
-        links.retain(|(k, _, _)| !hidden.contains(k));
+        links.retain(|(k, _, _)| *k == LinkKind::Undo || !hidden.contains(k));
         // Fit to the window, measured as drawn (11 px at the zoom).
         let size = crate::zoom::ui(11.0);
         // Measured bold: the badge is bold and the safety words semibold; a regular-weight
@@ -3812,7 +3862,16 @@ impl WindowView {
                     .when(cmd.is_some(), |d| {
                         d.cursor_pointer().hover(|s| s.text_color(t.accent))
                     })
-                    .child(text.clone())
+                    .map(|d| match text.strip_suffix(" · Undo") {
+                        // "Removed VWAP from ES charts · Undo": the action in the accent.
+                        Some(words) if kind == LinkKind::Undo => d
+                            .gap_1()
+                            .text_color(t.text_main)
+                            .child(words.to_owned())
+                            .child(div().text_color(t.text_dim).child("·"))
+                            .child(div().text_color(t.accent).child("Undo")),
+                        _ => d.child(text.clone()),
+                    })
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _: &MouseDownEvent, window, cx| {
@@ -3820,6 +3879,8 @@ impl WindowView {
                             if let Some(cmd) = cmd {
                                 this.run(cmd, window, cx);
                             }
+                            // This window's footer too (its own update is the one running).
+                            cx.notify();
                         }),
                     )
                     .on_mouse_down(
@@ -3990,6 +4051,19 @@ impl WindowView {
         cx: &mut Context<Self>,
     ) -> bool {
         let at = point(px(m.at.0), px(m.at.1));
+        if let Some(spec) = &m.study {
+            let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
+                shot_menu_failed("`study` needs a focused chart");
+            };
+            let o = chart
+                .update(cx, |c, _| c.study_menu_object(spec))
+                .unwrap_or_else(|e| shot_menu_failed(&e));
+            self.show_menu(
+                Menu::new(at, crate::pane_menu::object_items(&o)).unselected(),
+                cx,
+            );
+            return true;
+        }
         if m.order {
             let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
                 shot_menu_failed("`order` needs a focused chart");
@@ -4036,6 +4110,20 @@ impl WindowView {
             }
         }
         true
+    }
+
+    /// Screenshots (`--legend-hover SPEC`): the focused chart's legend row shows its buttons
+    /// as if the pointer were over it.
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+    pub(crate) fn hover_legend_row(
+        &mut self,
+        spec: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let Some(PaneHandle::Chart(chart)) = self.tab().focused_handle().cloned() else {
+            return Err("--legend-hover needs a focused chart".into());
+        };
+        chart.update(cx, |c, cx| c.pin_legend_hover(spec, cx))
     }
 
     /// Screenshots (`--hover-header`): show the focused pane's header controls as if the
@@ -4944,6 +5032,71 @@ fn tick_mode_notice_text() {
         "tick bars on this chart will restart at each session open (shown on a tick \
          timeframe; now 1h)"
     );
+}
+
+/// Offer Undo for a study removal in every window's footer, for `notice::NOTICE_TTL` (a
+/// newer removal replaces it). One timer, nothing ticking in between.
+pub(crate) fn offer_study_undo(
+    u: crate::legend::Undo,
+    chart: gpui::WeakEntity<ChartView>,
+    cx: &mut App,
+) {
+    if !cx.has_global::<Workspace>() {
+        return;
+    }
+    tracing::info!("{}", u.text);
+    cx.global_mut::<Workspace>().study_undo = Some((u, chart));
+    notify_windows(cx);
+    cx.spawn(async move |cx| {
+        cx.background_executor()
+            .timer(crate::notice::NOTICE_TTL + Duration::from_millis(20))
+            .await;
+        cx.update(|cx| {
+            let ws = cx.global_mut::<Workspace>();
+            if ws
+                .study_undo
+                .as_ref()
+                .is_some_and(|(u, _)| !u.live(Instant::now()))
+            {
+                ws.study_undo = None;
+                notify_windows(cx);
+            }
+        });
+    })
+    .detach();
+}
+
+/// The footer's Undo: the removed study back on its chart (the symbol's set follows), exactly
+/// as it was, unless its studies changed since.
+pub(crate) fn undo_study(cx: &mut App) {
+    if !cx.has_global::<Workspace>() {
+        return;
+    }
+    let Some((u, chart)) = cx.global_mut::<Workspace>().study_undo.take() else {
+        return;
+    };
+    let on_chart = chart
+        .upgrade()
+        .and_then(|c| c.update(cx, |c, cx| c.undo_study(&u, cx)));
+    let why = match (on_chart, u.product) {
+        (Some(true), _) => None,
+        (Some(false), _) => Some("those studies were changed again"),
+        // The chart closed, or shows other studies since: a symbol's set itself, while
+        // unchanged (every chart of the symbol follows).
+        (None, Some(p)) => {
+            if crate::symbol_studies::get(cx, p).is_some_and(|now| u.restore(&now).is_some()) {
+                crate::symbol_studies::publish(cx, p, u.before.clone());
+                None
+            } else {
+                Some("those studies were changed again")
+            }
+        }
+        (None, None) => Some("that chart's own studies are gone"),
+    };
+    if let Some(why) = why {
+        notice(format!("Not undone: {why}"), cx);
+    }
+    notify_windows(cx);
 }
 
 /// Show a notice that needs no action: it replaces an identical one (counted) and goes away
