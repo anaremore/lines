@@ -208,6 +208,116 @@ pub fn render(
                         .child(line),
                 );
             }
+            Item::Drop {
+                group,
+                label,
+                options,
+                ..
+            } => {
+                // One field: the value in force (or a summary) and ▾; open, its options float
+                // over the menu (`dropdown::dropdown_list`, nested), never moving its lines.
+                let open = menu.drop.as_ref().filter(|d| d.at == i);
+                let trigger = crate::drop_view::trigger(
+                    ("study-drop", i),
+                    label.clone(),
+                    selected,
+                    open.is_some(),
+                    false,
+                    crate::layout_rec::POPUP,
+                    t,
+                )
+                // As tall as a chip: every editor line keeps one pitch.
+                .py(px(1.0))
+                .text_size(crate::zoom::ui(12.0))
+                .on_mouse_down(MouseButton::Left, click(i, MenuPart::Primary));
+                let list = open.map(|d| {
+                    let checked = |k: usize| options.get(k).is_some_and(|o| o.on);
+                    let el = crate::drop_view::list(
+                        "study-drop-list",
+                        &d.list,
+                        &checked,
+                        crate::layout_rec::POPUP + 1,
+                        t,
+                        cx,
+                        |v: &mut ChartView, k, _, cx| v.menu_drop_row(k, cx),
+                    );
+                    (el, d.scroll.clone(), crate::drop_view::cap(), t.panel)
+                });
+                let field = crate::dropdown::dropdown_list(trigger, list)
+                    .nested()
+                    .lint_trigger(label)
+                    .on_dismiss(Box::new(cx.listener(
+                        |v: &mut ChartView, _: &MouseDownEvent, _, cx| v.menu_drop_close(cx),
+                    )));
+                body = body.child(group_line(group, field.into_any_element(), t));
+                i += 1;
+            }
+            Item::Step {
+                group,
+                label,
+                less,
+                more,
+            } => {
+                // − value +: the keys' line outlines the value (← / → step it).
+                let button = |id: (&'static str, usize), text: &'static str, can: bool, part| {
+                    div()
+                        .id(id)
+                        .flex_none()
+                        .w(crate::zoom::ui(22.0))
+                        .py(px(1.0))
+                        .flex()
+                        .justify_center()
+                        .rounded_sm()
+                        .border_1()
+                        .border_color(if can { t.control_edge } else { t.axis_line })
+                        .text_color(if can { t.text_main } else { t.text_dim })
+                        .when(can, |d| {
+                            d.cursor_pointer()
+                                .hover(|s| s.bg(t.ghost_selected))
+                                .on_mouse_down(MouseButton::Left, click(i, part))
+                        })
+                        .child(text)
+                };
+                let field = div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .text_size(crate::zoom::ui(12.0))
+                    .child(button(
+                        ("step-less", i),
+                        "−",
+                        less.is_some(),
+                        MenuPart::Less,
+                    ))
+                    .child(
+                        // One width for every number, right-aligned in tabular digits: the
+                        // values and the + buttons line up down the editor.
+                        div()
+                            .w(crate::zoom::ui(64.0))
+                            .px_2()
+                            .py(px(1.0))
+                            .flex()
+                            .justify_end()
+                            .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
+                                "tnum".into(),
+                                1,
+                            )])))
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(if selected { t.accent } else { t.axis_line })
+                            .text_color(t.text_main)
+                            .child(label.clone()),
+                    )
+                    .child(button(
+                        ("step-more", i),
+                        "+",
+                        more.is_some(),
+                        MenuPart::More,
+                    ));
+                body = body.child(group_line(group, field.into_any_element(), t));
+                i += 1;
+            }
             Item::Action { label, delete, .. } => {
                 body = body.child(
                     div()
@@ -315,6 +425,27 @@ pub fn render(
             },
         )
         .into_any_element()
+}
+
+/// An editor line: the setting's name in the label column, then its field.
+fn group_line(group: &str, field: AnyElement, t: &Theme) -> gpui::Div {
+    div()
+        .px_3()
+        .py(crate::zoom::ui(2.0))
+        .pl(crate::zoom::ui(32.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .child(
+            div()
+                .flex_none()
+                .w(crate::zoom::ui(64.0))
+                .text_size(crate::zoom::ui(11.0))
+                .text_color(t.text_dim)
+                .child(group.to_owned()),
+        )
+        .child(field)
 }
 
 /// The anchoring prompt over the plot (a click on a bar anchors; Esc cancels).

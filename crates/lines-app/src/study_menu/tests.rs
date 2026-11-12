@@ -35,9 +35,23 @@ fn labels(items: &[Item]) -> Vec<String> {
             Item::Control {
                 group, label, on, ..
             } => format!("  {group}: {label}{}", if *on { " *" } else { "" }),
+            Item::Drop { group, label, .. } => format!("  {group}: {label} ▾"),
+            Item::Step { group, label, .. } => format!("  {group}: − {label} +"),
             Item::Action { label, .. } => format!("+ {label}"),
         })
         .collect()
+}
+
+/// A control's state and command by its label: a chip, or an option in a dropdown.
+fn option(items: &[Item], name: &str) -> Option<(bool, MenuCmd)> {
+    items.iter().find_map(|it| match it {
+        Item::Control { label, on, cmd, .. } if label == name => Some((*on, cmd.clone())),
+        Item::Drop { options, .. } => options
+            .iter()
+            .find(|o| o.label == name)
+            .map(|o| (o.on, o.cmd.clone())),
+        _ => None,
+    })
 }
 
 /// Roadmap 10e: cumulative delta (one per chart, its own sub-pane) and the footprint are
@@ -90,7 +104,9 @@ fn cumulative_delta_and_footprint_are_studies() {
         .items(&input(&set, &src, &[]))
         .iter()
         .filter_map(|i| match i {
-            Item::Control { group, .. } => Some(*group),
+            Item::Control { group, .. } | Item::Drop { group, .. } | Item::Step { group, .. } => {
+                Some(*group)
+            }
             _ => None,
         })
         .collect();
@@ -195,7 +211,7 @@ fn volume_is_a_study_with_its_options() {
         "an overlay is in the price plot"
     );
     let l = labels(&m.items(&input(&set, &src, &[])));
-    assert!(l.contains(&"  Length: 20 *".to_owned()), "{l:?}");
+    assert!(l.contains(&"  Length: − 20 bars +".to_owned()), "{l:?}");
     assert!(l.contains(&"  Label: Show in legend *".to_owned()), "{l:?}");
     assert!(
         l.contains(&"Volume · buy/sell · average 20 · overlay".to_owned()),
@@ -362,17 +378,11 @@ fn editor_controls_are_commands_and_keys_navigate() {
     let items = m.items(&input(&set, &src, &[]));
     let l = labels(&items);
     assert_eq!(
-        &l[1..22],
+        &l[1..16],
         [
             "VWAP ETH",
-            "  Anchor: ETH *",
-            "  Anchor: RTH",
-            "  Anchor: Week",
-            "  Anchor: Month",
-            "  Anchor: From a bar…",
-            "  Bands: 1σ",
-            "  Bands: 2σ",
-            "  Bands: 3σ",
+            "  Anchor: ETH ▾",
+            "  Bands: None ▾",
             "  Color: 1 *",
             "  Color: 2",
             "  Color: 3",
@@ -387,17 +397,38 @@ fn editor_controls_are_commands_and_keys_navigate() {
             "+ Use separate studies on this chart",
         ]
     );
-    // Down three times: Reset RTH → Week → ... ; Enter applies.
+    // Down to Anchor; Enter opens its list at the anchor in force, Enter there picks it.
     m.key(&items, "down", None);
+    assert_eq!(m.key(&items, "enter", None), None);
+    assert_eq!(m.drop.as_ref().map(|d| (d.at, d.list.lit)), Some((2, 0)));
     assert_eq!(
         m.key(&items, "enter", None),
         Some(MenuCmd::Set(StudyAction::SetReset(0, Reset::Eth)))
     );
+    assert!(m.drop.is_none(), "a pick closes the list");
+    // Space opens it too; ↓ then Enter picks the next.
+    assert_eq!(m.key(&items, "space", None), None);
     m.key(&items, "down", None);
-    let c = m.key(&items, "space", None).unwrap(); // Space activates a control too
+    let c = m.key(&items, "enter", None).unwrap();
     assert_eq!(c, MenuCmd::Set(StudyAction::SetReset(0, Reset::Rth)));
-    // Anchored… asks for a click on a bar.
-    assert_eq!(m.activate(&items, 6), Some(MenuCmd::BeginAnchor(Some(0))));
+    // Esc closes an open list, not the menu.
+    m.activate(&items, 2);
+    assert_eq!(m.key(&items, "escape", None), None);
+    assert!(m.drop.is_none() && m.editing.is_some());
+    // From a bar… asks for a click on a bar.
+    m.activate(&items, 2);
+    assert_eq!(
+        m.drop_choose(&items, 4),
+        Some(MenuCmd::BeginAnchor(Some(0)))
+    );
+    // Bands: several at once; a toggle keeps the list open.
+    m.activate(&items, 3);
+    assert_eq!(
+        m.drop_choose(&items, 1),
+        Some(MenuCmd::Set(StudyAction::ToggleBand(0, 2)))
+    );
+    assert!(m.drop.is_some(), "a toggle keeps the list open");
+    m.drop = None;
     // The eye hides; Delete removes; Esc closes the editor, then the menu.
     assert_eq!(
         m.eye(&items, 1),
@@ -617,7 +648,7 @@ fn a_closed_menu_reopens_with_its_draft() {
     again.clamp(&again.items(&input(&set, &src, &[])));
     assert_eq!(again, before);
     let l = labels(&again.items(&input(&set, &src, &[])));
-    assert_eq!(l[2], "  Anchor: ETH *", "the editor is open again");
+    assert_eq!(l[2], "  Anchor: ETH ▾", "the editor is open again");
     // Once reopened the draft is used up: closing a finished menu starts fresh next time.
     assert_eq!(draft, None);
 }
@@ -685,15 +716,7 @@ fn kinds_hidden_through_their_parent() {
         ..StudyMenu::default()
     };
     let items = m.items(&input(&set, &src, &[]));
-    let row = |name: &str| {
-        items
-            .iter()
-            .find_map(|it| match it {
-                Item::Control { label, on, cmd, .. } if label == name => Some((*on, cmd.clone())),
-                _ => None,
-            })
-            .unwrap()
-    };
+    let row = |name: &str| option(&items, name).unwrap();
     assert!(!row("open").0 && !row("mid").0 && row("pivot").0);
     let MenuCmd::Set(a) = row("mid").1 else {
         panic!("not a change");
@@ -720,12 +743,7 @@ fn a_type_off_in_style_reads_unchecked() {
         ..StudyMenu::default()
     };
     let items = m.items(&input(&set, &src, &[]));
-    let on = |name: &str| {
-        items.iter().find_map(|it| match it {
-            Item::Control { label, on, .. } if label == name => Some(*on),
-            _ => None,
-        })
-    };
+    let on = |name: &str| option(&items, name).map(|(on, _)| on);
     assert_eq!(on("pivot (off in Style…)"), Some(false));
     assert_eq!(on("zone"), Some(true));
 }
@@ -781,14 +799,16 @@ fn session_choices_name_the_calendars_opens() {
         editing: Some(StudyRef::Vwap(0)),
         ..StudyMenu::default()
     };
-    let l = labels(&m.items(&inp));
+    let items = m.items(&inp);
+    let l = labels(&items);
     assert!(
-        l.contains(&"  Anchor: ETH (6:00 pm ET open) *".to_owned()),
+        l.contains(&"  Anchor: ETH (6:00 pm ET open) ▾".to_owned()),
         "{l:#?}"
     );
-    assert!(
-        l.contains(&"  Anchor: RTH (9:30 am ET open)".to_owned()),
-        "{l:#?}"
+    assert_eq!(
+        option(&items, "RTH (9:30 am ET open)").map(|(on, _)| on),
+        Some(false),
+        "in the Anchor list"
     );
     m.editing = None;
     let l = labels(&m.items(&inp));
@@ -840,4 +860,229 @@ fn placing_volume_adds_one_where_asked() {
         };
         assert_eq!(spec.overlay, overlay);
     }
+}
+
+/// The audited control groups are one field each (owner-approved controls, 2026-11-11): the
+/// VWAP's anchor and bands, the profile's mode, labels and grouping, the footprint's grouping,
+/// a level source's kinds; numbers have − / +. The rest stay chips.
+#[test]
+fn audited_groups_are_dropdowns_and_steps() {
+    use crate::footprint::FootprintMode;
+    use lines_indicators::DeltaReset;
+    let src = sources();
+    let mut set = StudySet::default();
+    set.apply(&StudyAction::AddVwap(Reset::Eth));
+    set.apply(&StudyAction::AddDelta(DeltaReset::Eth));
+    set.apply(&StudyAction::AddFootprint(FootprintMode::BidAsk));
+    set.apply(&StudyAction::AddProfile(
+        crate::profile::ProfileMode::Session,
+    ));
+    let kinds = |r: StudyRef| -> Vec<(String, &'static str)> {
+        let m = StudyMenu {
+            editing: Some(r),
+            ..StudyMenu::default()
+        };
+        m.items(&input(&set, &src, &[]))
+            .iter()
+            .filter_map(|i| match i {
+                Item::Control { group, .. } => Some(("chips".into(), *group)),
+                Item::Drop {
+                    group,
+                    multi,
+                    custom,
+                    ..
+                } => Some((
+                    format!(
+                        "drop{}{}",
+                        if *multi { " multi" } else { "" },
+                        if custom.is_some() { " custom" } else { "" }
+                    ),
+                    *group,
+                )),
+                Item::Step { group, .. } => Some(("step".into(), *group)),
+                _ => None,
+            })
+            .collect()
+    };
+    let has = |v: &[(String, &str)], kind: &str, group: &str| {
+        v.iter().any(|(k, g)| k == kind && *g == group)
+    };
+    let vwap = kinds(StudyRef::Vwap(0));
+    assert!(has(&vwap, "drop", "Anchor") && has(&vwap, "drop multi", "Bands"));
+    assert!(has(&vwap, "chips", "Color") && has(&vwap, "chips", "Width"));
+    let profile = kinds(StudyRef::Profile);
+    assert!(has(&profile, "drop", "Mode") && has(&profile, "drop multi", "Label"));
+    assert!(has(&profile, "drop custom", "Grouping") && has(&profile, "chips", "Session"));
+    let fp = kinds(StudyRef::Footprint);
+    assert!(has(&fp, "drop custom", "Grouping") && has(&fp, "chips", "Show"));
+    assert!(has(&fp, "step", "Imbalance") && has(&fp, "step", "Min volume"));
+    assert!(has(&kinds(StudyRef::Delta(1)), "chips", "Reset"));
+    assert!(has(
+        &kinds(StudyRef::Levels("demo".into())),
+        "drop multi",
+        "Kinds"
+    ));
+}
+
+/// Grouping's "Custom…": typed ticks per row set it (and it is then listed, in force); a bad
+/// value sets nothing and keeps the field.
+#[test]
+fn a_typed_grouping_sets_it() {
+    use crate::footprint::FootprintMode;
+    let src = sources();
+    let mut set = StudySet::default();
+    set.apply(&StudyAction::AddFootprint(FootprintMode::BidAsk));
+    let mut m = StudyMenu {
+        editing: Some(StudyRef::Footprint),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let at = items
+        .iter()
+        .position(|i| {
+            matches!(
+                i,
+                Item::Drop {
+                    group: "Grouping",
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    m.activate(&items, at);
+    m.key(&items, "end", None);
+    assert_eq!(
+        m.key(&items, "enter", None),
+        None,
+        "Custom… opens its field"
+    );
+    for bad in ["0", "x"] {
+        m.key(&items, bad, Some(bad));
+        assert_eq!(m.key(&items, "enter", None), None, "{bad}");
+        assert!(m.drop.is_some(), "the field stays");
+        m.key(&items, "backspace", None);
+    }
+    m.key(&items, "4", Some("4"));
+    let cmd = m.key(&items, "enter", None);
+    assert_eq!(
+        cmd,
+        Some(MenuCmd::Set(StudyAction::SetFootprintGrouping(Some(4))))
+    );
+    assert!(m.drop.is_none());
+    let Some(MenuCmd::Set(a)) = cmd else {
+        unreachable!()
+    };
+    set.apply(&a);
+    let items = m.items(&input(&set, &src, &[]));
+    assert!(labels(&items).contains(&"  Grouping: 4 ▾".to_owned()));
+    assert_eq!(option(&items, "4").map(|(on, _)| on), Some(true));
+}
+
+/// − / + (and ← / → on the line) step a footprint's imbalance by 25 % and its least volume by
+/// one, stopping at their ends.
+#[test]
+fn steps_nudge_footprint_numbers() {
+    use crate::footprint::FootprintMode;
+    let src = sources();
+    let mut set = StudySet::default();
+    set.apply(&StudyAction::AddFootprint(FootprintMode::BidAsk));
+    let mut m = StudyMenu {
+        editing: Some(StudyRef::Footprint),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let at = |g: &str| {
+        items
+            .iter()
+            .position(|i| matches!(i, Item::Step { group, .. } if *group == g))
+            .unwrap()
+    };
+    let pct = set.footprint.imbalance_pct;
+    assert_eq!(
+        m.nudge(&items, at("Imbalance"), true),
+        Some(MenuCmd::Set(StudyAction::SetImbalanceRatio(pct + 25)))
+    );
+    m.cursor = at("Min volume");
+    let min = set.footprint.imbalance_min;
+    assert_eq!(
+        m.key(&items, "right", None),
+        Some(MenuCmd::Set(StudyAction::SetImbalanceMin(min + 1)))
+    );
+    set.apply(&StudyAction::SetImbalanceMin(1));
+    let items = m.items(&input(&set, &src, &[]));
+    assert_eq!(m.nudge(&items, m.cursor, false), None, "at its least");
+}
+
+/// A level source's kinds (RS Levels' among them) are one multi-select: its field counts them.
+#[test]
+fn level_kinds_are_a_multi_select() {
+    let src = vec![SourceInfo {
+        id: "rs".into(),
+        label: "RS Levels".into(),
+        kinds: vec!["pivot".into(), "zone".into(), "varis".into()],
+        parents: Vec::new(),
+        styled_off: Vec::new(),
+        series: Vec::new(),
+    }];
+    let mut set = StudySet::default();
+    let mut m = StudyMenu {
+        editing: Some(StudyRef::Levels("rs".into())),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    assert!(labels(&items).contains(&"  Kinds: All ▾".to_owned()));
+    let at = items
+        .iter()
+        .position(|i| matches!(i, Item::Drop { group: "Kinds", .. }))
+        .unwrap();
+    m.activate(&items, at);
+    let Some(MenuCmd::Set(a)) = m.key(&items, "space", Some(" ")) else {
+        panic!("Space toggles a kind");
+    };
+    set.apply(&a);
+    let items = m.items(&input(&set, &src, &[]));
+    m.clamp(&items);
+    assert!(m.drop.is_some(), "the list stays open");
+    assert!(labels(&items).contains(&"  Kinds: zone, varis ▾".to_owned()));
+    // The source learns a kind: the open list's rows would be stale, so it closes.
+    let mut grown = src.clone();
+    grown[0].kinds.push("anchor".into());
+    let items = m.items(&input(&set, &grown, &[]));
+    m.clamp(&items);
+    assert!(m.drop.is_none(), "options changed under the open list");
+}
+
+/// A multi-select's field names what is on when it can: "None", "All", one or two names, "All
+/// but X" with one off, else a count.
+#[test]
+fn multi_select_summaries_name_what_is_on() {
+    let opts = |on: &[bool]| -> Vec<Opt> {
+        ["Show", "Session or range", "Partial from", "Gaps"]
+            .iter()
+            .zip(on)
+            .map(|(l, on)| Opt {
+                label: (*l).into(),
+                on: *on,
+                cmd: MenuCmd::Close,
+            })
+            .collect()
+    };
+    assert_eq!(drop_summary(&opts(&[false; 4]), true), "None");
+    assert_eq!(drop_summary(&opts(&[true; 4]), true), "All");
+    assert_eq!(
+        drop_summary(&opts(&[true, false, false, false]), true),
+        "Show"
+    );
+    assert_eq!(
+        drop_summary(&opts(&[true, false, true, false]), true),
+        "Show, Partial from"
+    );
+    assert_eq!(
+        drop_summary(&opts(&[true, true, true, false]), true),
+        "All but Gaps"
+    );
+    assert_eq!(
+        drop_summary(&opts(&[false, true, false, false]), false),
+        "Session or range"
+    );
 }

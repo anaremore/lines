@@ -30,10 +30,14 @@ pub const PRIORITY: usize = 4;
 /// Flatten and Cancel all included (nothing draws over a backdrop but a popover), under every
 /// list and menu.
 pub const BACKDROP_PRIORITY: usize = 1;
+/// Deferred-draw priority of a list opened inside a popover (the studies menu's): over the
+/// popover, its backdrop just under it (a press elsewhere in the popover closes only the list);
+/// under the window's overlays like every list.
+pub const NESTED_PRIORITY: usize = PRIORITY + 2;
 /// Deferred-draw priority of the window's own overlays (pane and tab menus, palette and
-/// prompts, the switch-all banner): over any open list, so a list never hides or takes the
-/// clicks of a menu opened after it.
-pub const OVERLAY_PRIORITY: usize = 5;
+/// prompts, the switch-all banner): over any open list (a nested one included), so a list never
+/// hides or takes the clicks of a menu opened after it.
+pub const OVERLAY_PRIORITY: usize = NESTED_PRIORITY + 1;
 
 /// Where a list `popup` (width, height) opens for a trigger at `trigger`, in a window
 /// `window` (width, height) big, all in window logical px: its top-left corner.
@@ -86,6 +90,7 @@ pub fn dropdown(trigger: impl IntoElement, popup: Option<AnyElement>) -> Dropdow
         list: None,
         dismiss: None,
         priority: PRIORITY,
+        backdrop: BACKDROP_PRIORITY,
         lint_trigger: None,
     }
 }
@@ -111,6 +116,7 @@ pub fn dropdown_list(trigger: impl IntoElement, list: Option<OpenList>) -> Dropd
         list,
         dismiss: None,
         priority: PRIORITY,
+        backdrop: BACKDROP_PRIORITY,
         lint_trigger: None,
     }
 }
@@ -122,6 +128,8 @@ pub struct Dropdown {
     list: Option<OpenList>,
     dismiss: Option<OnDismiss>,
     priority: usize,
+    /// Its backdrop's priority (`popover::defer_backdrop`).
+    backdrop: usize,
     /// Screenshots: the open list is recorded for the layout lint as a popup of the control
     /// labelled so (`crate::layout_rec`).
     lint_trigger: Option<String>,
@@ -132,6 +140,14 @@ impl Dropdown {
     /// (`popover::defer_backdrop`, the popover rule).
     pub fn on_dismiss(mut self, dismiss: OnDismiss) -> Self {
         self.dismiss = Some(dismiss);
+        self
+    }
+
+    /// Open inside a popover (the studies menu): drawn over it ([`NESTED_PRIORITY`]), its
+    /// backdrop over the popover too.
+    pub fn nested(mut self) -> Self {
+        self.priority = NESTED_PRIORITY;
+        self.backdrop = NESTED_PRIORITY - 1;
         self
     }
 
@@ -289,7 +305,7 @@ impl Element for Dropdown {
         // Under the list, over everything else: a press outside closes it and does only that.
         if let Some(dismiss) = self.dismiss.take() {
             let list = Rect::new(x, y, at.w, at.h);
-            crate::popover::defer_backdrop(window, cx, BACKDROP_PRIORITY, &[list], dismiss);
+            crate::popover::defer_backdrop(window, cx, self.backdrop, &[list], dismiss);
         }
         // Deferred: drawn after (over) the rest of the window, and not clipped by the header
         // or the pane.

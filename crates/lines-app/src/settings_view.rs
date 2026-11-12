@@ -2488,7 +2488,7 @@ impl SettingsWindow {
         let t = self.theme;
         let open = self.drop.as_ref().filter(|d| d.i == i);
         let label = text.clone();
-        let trigger = drop_view::trigger(("drop", i), text, focused, open.is_some(), locked, &t)
+        let trigger = drop_view::trigger(("drop", i), text, focused, open.is_some(), locked, 0, &t)
             .when(!locked, |d| {
                 d.on_mouse_down(
                     MouseButton::Left,
@@ -2505,6 +2505,7 @@ impl SettingsWindow {
                 "drop-list",
                 &d.list,
                 &checked,
+                crate::layout_rec::POPUP,
                 &t,
                 cx,
                 |v: &mut Self, k, _, cx| {
@@ -2541,7 +2542,7 @@ impl SettingsWindow {
         };
         let open = self.list_pick.as_ref().is_some_and(|(l, _)| *l == list);
         let label = text.clone();
-        let trigger = drop_view::trigger(("list", i), text, focused, open, false, &t)
+        let trigger = drop_view::trigger(("list", i), text, focused, open, false, 0, &t)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |v, _, _, cx| {

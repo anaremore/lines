@@ -1110,6 +1110,21 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     e.args
         .extend(["--studies-menu".into(), "style:vwap:0:2".into()]);
     v.push(e);
+    // The studies menu's lists (owner-approved controls, 2026-11-11), floating over the menu:
+    // the VWAP's bands (several at once, dark), the profile's grouping with Custom… (light,
+    // 150 %), and the footprint's − / + numbers beside its grouping list (dark).
+    for (name, theme, menu) in [
+        ("studies-drop-vwap-bands", "dark", "drop:vwap:0:Bands"),
+        (
+            "studies-drop-profile-grouping-light-150",
+            "light --ui-zoom 150",
+            "drop:profile:Grouping",
+        ),
+    ] {
+        let mut e = studies(name, theme, "");
+        e.args.extend(["--studies-menu".into(), menu.into()]);
+        v.push(e);
+    }
     // Volume (owner-approved 2026-11-09): plain bars in a lower pane under cumulative delta's
     // (two stacked lower panes, quick set); colored by candle, split and averaged (light,
     // colorblind); as an overlay; its editor open.
@@ -1191,6 +1206,12 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             ],
         )
     };
+    v.push(footprint(
+        "studies-drop-footprint-grouping",
+        "standard",
+        "footprint-styled.json",
+        "drop:footprint:Grouping",
+    ));
     v.push(footprint(
         "study-style-footprint-dark-cb",
         "cb",

@@ -54,7 +54,7 @@ pub enum Outcome {
     Close,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DropList {
     pub entries: Vec<Entry>,
     pub multi: bool,
@@ -191,6 +191,23 @@ impl DropList {
     }
 }
 
+/// A − / + step of a number `cur` by `step`, held to `min..=max`: to the next multiple of the
+/// step that way. `None` at its end, and away from the range when `cur` is outside it (a
+/// saved value out of range: + never lowers it, − never raises it).
+pub fn step(cur: i64, step: i64, min: i64, max: i64, up: bool) -> Option<i64> {
+    if (up && cur >= max) || (!up && cur <= min) {
+        return None;
+    }
+    let step = step.max(1);
+    let next = if up {
+        (cur.div_euclid(step) + 1).saturating_mul(step)
+    } else {
+        (cur - 1).div_euclid(step) * step
+    }
+    .clamp(min, max);
+    (next != cur).then_some(next)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +283,22 @@ mod tests {
         assert_eq!(l.typing, None);
         assert_eq!(l.key("escape", None, t), Outcome::Close);
         assert_eq!(l.choose(0), Outcome::Pick(0));
+    }
+
+    #[test]
+    fn steps_go_to_the_next_multiple_within_the_range() {
+        assert_eq!(step(20, 10, 1, 500, true), Some(30));
+        assert_eq!(step(25, 10, 1, 500, true), Some(30));
+        assert_eq!(step(25, 10, 1, 500, false), Some(20));
+        assert_eq!(step(10, 10, 1, 500, false), Some(1));
+        assert_eq!(step(1, 10, 1, 500, false), None, "at the least");
+        assert_eq!(step(500, 10, 1, 500, true), None, "at the most");
+        assert_eq!(step(300, 25, 100, 1000, true), Some(325));
+        // Out of range (an old file): toward the range only.
+        assert_eq!(step(2000, 25, 100, 1000, true), None);
+        assert_eq!(step(2000, 25, 100, 1000, false), Some(1000));
+        assert_eq!(step(50, 25, 100, 1000, false), None);
+        assert_eq!(step(50, 25, 100, 1000, true), Some(100));
     }
 
     #[test]

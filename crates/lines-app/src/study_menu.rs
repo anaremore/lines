@@ -785,6 +785,24 @@ pub enum Item {
         swatch: Swatch,
         cmd: MenuCmd,
     },
+    /// A setting of several options in one field (owner-approved controls, 2026-11-11): the
+    /// value in force (one pick) or a summary (several, `multi`), its options in a floating
+    /// list (`crate::drop_list`).
+    Drop {
+        group: &'static str,
+        label: String,
+        multi: bool,
+        options: Vec<Opt>,
+        /// A last option "Custom…" for a typed value.
+        custom: Option<CustomTo>,
+    },
+    /// A number with − / +: its value's text and each step's command (`None` at its end).
+    Step {
+        group: &'static str,
+        label: String,
+        less: Option<MenuCmd>,
+        more: Option<MenuCmd>,
+    },
     /// An "Add" catalog entry or a template action.
     Action {
         label: String,
@@ -792,6 +810,142 @@ pub enum Item {
         /// Delete key / "delete" affordance (templates).
         delete: Option<MenuCmd>,
     },
+}
+
+/// One option of an [`Item::Drop`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opt {
+    pub label: String,
+    pub on: bool,
+    pub cmd: MenuCmd,
+}
+
+/// What a typed "Custom…" value sets.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum CustomTo {
+    ProfileGrouping,
+    FootprintGrouping,
+}
+
+/// A footprint's imbalance ratio's most (%), and its least volume's most: − / + stop there.
+pub const MAX_IMBALANCE_PCT: u32 = 1_000;
+pub const MAX_IMBALANCE_MIN: i64 = 10_000;
+
+/// The most ticks per row a typed grouping takes (as a DOM's).
+pub const MAX_GROUPING: u32 = 10_000;
+
+impl CustomTo {
+    /// The command for typed `text`, if it is a whole number of ticks in range.
+    pub fn cmd(self, text: &str) -> Option<MenuCmd> {
+        let g = text
+            .trim()
+            .parse::<u32>()
+            .ok()
+            .filter(|g| (1..=MAX_GROUPING).contains(g))?;
+        Some(MenuCmd::Set(match self {
+            CustomTo::ProfileGrouping => StudyAction::SetProfileGrouping(Some(g)),
+            CustomTo::FootprintGrouping => StudyAction::SetFootprintGrouping(Some(g)),
+        }))
+    }
+}
+
+/// The open [`Item::Drop`]'s list: the item it belongs to (an index into the menu's items,
+/// and its group, checked when the items change), its rows and keys, its scroll.
+#[derive(Clone, Debug)]
+pub struct MenuDrop {
+    pub at: usize,
+    pub group: &'static str,
+    pub list: crate::drop_list::DropList,
+    pub scroll: gpui::ScrollHandle,
+}
+
+impl PartialEq for MenuDrop {
+    fn eq(&self, o: &MenuDrop) -> bool {
+        (self.at, self.group, &self.list) == (o.at, o.group, &o.list)
+    }
+}
+impl Eq for MenuDrop {}
+
+/// Which of a study's control groups are one field (`multi`: several on at once; `custom`: a
+/// typed value too): the audited rows. The rest stay chips.
+fn drop_kind(r: &StudyRef, group: &str) -> Option<(bool, Option<CustomTo>)> {
+    Some(match (r, group) {
+        (StudyRef::Vwap(_), "Anchor") | (StudyRef::Profile, "Mode") => (false, None),
+        (StudyRef::Vwap(_), "Bands")
+        | (StudyRef::Profile, "Label")
+        | (StudyRef::Levels(_), "Kinds") => (true, None),
+        (StudyRef::Profile, "Grouping") => (false, Some(CustomTo::ProfileGrouping)),
+        (StudyRef::Footprint, "Grouping") => (false, Some(CustomTo::FootprintGrouping)),
+        _ => return None,
+    })
+}
+
+/// A dropdown's field: the option in force (one pick); "None", "All", one or two names,
+/// "All but X" (one off), or "N of M" (several).
+pub fn drop_summary(options: &[Opt], multi: bool) -> String {
+    let on: Vec<&str> = options
+        .iter()
+        .filter(|o| o.on)
+        .map(|o| o.label.as_str())
+        .collect();
+    match (multi, on.as_slice()) {
+        (false, [first, ..]) => (*first).to_owned(),
+        (false, []) => "—".to_owned(),
+        (true, []) => "None".to_owned(),
+        (true, on) if on.len() == options.len() && on.len() > 2 => "All".to_owned(),
+        (true, [a]) => (*a).to_owned(),
+        (true, [a, b]) => format!("{a}, {b}"),
+        (true, on) if on.len() + 1 == options.len() => match options.iter().find(|o| !o.on) {
+            Some(off) => format!("All but {}", off.label),
+            None => format!("{} of {}", on.len(), options.len()),
+        },
+        (true, on) => format!("{} of {}", on.len(), options.len()),
+    }
+}
+
+/// Fold each audited group of chips in `out[start..]` into one [`Item::Drop`].
+fn fold_drops(r: &StudyRef, out: &mut Vec<Item>, start: usize) {
+    let tail = out.split_off(start);
+    let mut it = tail.into_iter().peekable();
+    while let Some(item) = it.next() {
+        let Item::Control {
+            group,
+            label,
+            on,
+            swatch,
+            cmd,
+        } = item
+        else {
+            out.push(item);
+            continue;
+        };
+        let Some((multi, custom)) = drop_kind(r, group) else {
+            out.push(Item::Control {
+                group,
+                label,
+                on,
+                swatch,
+                cmd,
+            });
+            continue;
+        };
+        let mut options = vec![Opt { label, on, cmd }];
+        while let Some(Item::Control { group: g, .. }) = it.peek() {
+            if *g != group {
+                break;
+            }
+            if let Some(Item::Control { label, on, cmd, .. }) = it.next() {
+                options.push(Opt { label, on, cmd });
+            }
+        }
+        out.push(Item::Drop {
+            group,
+            label: drop_summary(&options, multi),
+            multi,
+            options,
+            custom,
+        });
+    }
 }
 
 impl Item {
@@ -810,6 +964,8 @@ pub struct StudyMenu {
     pub editing: Option<StudyRef>,
     /// A template name being typed.
     pub naming: Option<String>,
+    /// A dropdown's list, open.
+    pub drop: Option<MenuDrop>,
 }
 
 pub fn reset_label(r: Reset) -> String {
@@ -828,9 +984,6 @@ pub fn vwap_label(spec: &VwapSpec) -> String {
     }
     s
 }
-
-/// The average lengths Volume's editor offers (20 is the default).
-pub const VOLUME_LENGTHS: [u16; 5] = [10, 20, 50, 100, 200];
 
 /// Volume's row: its name and the options that are on.
 pub fn volume_label(v: &VolumeSpec) -> String {
@@ -976,12 +1129,16 @@ fn vwap_swatch(c: &IndicatorConfig) -> Swatch {
 }
 
 fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
+    let start = out.len();
     controls_of(input, r, out);
+    fold_drops(r, out, start);
     // Every study ends with its styles (one entry: the parts are the style editor's tabs).
-    if out
-        .last()
-        .is_some_and(|i| matches!(i, Item::Control { .. }))
-    {
+    if out.last().is_some_and(|i| {
+        matches!(
+            i,
+            Item::Control { .. } | Item::Drop { .. } | Item::Step { .. }
+        )
+    }) {
         out.push(Item::Control {
             group: "Style",
             label: "Style…".into(),
@@ -994,15 +1151,28 @@ fn controls(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
 
 fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
     let set = |a| MenuCmd::Set(a);
-    let mut c = |group: &'static str, label: String, on: bool, swatch: Swatch, cmd: MenuCmd| {
-        out.push(Item::Control {
-            group,
-            label,
-            on,
-            swatch,
-            cmd,
-        })
-    };
+    macro_rules! c {
+        ($group:expr, $label:expr, $on:expr, $swatch:expr, $cmd:expr $(,)?) => {
+            out.push(Item::Control {
+                group: $group,
+                label: $label,
+                on: $on,
+                swatch: $swatch,
+                cmd: $cmd,
+            })
+        };
+    }
+    // A number with − / + (`drop_list::step`).
+    macro_rules! step {
+        ($group:expr, $label:expr, $less:expr, $more:expr $(,)?) => {
+            out.push(Item::Step {
+                group: $group,
+                label: $label,
+                less: $less,
+                more: $more,
+            })
+        };
+    }
     match r {
         StudyRef::Delta(i) => {
             let Some(IndicatorConfig::CumDelta { spec, display, .. }) =
@@ -1017,7 +1187,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             }
             resets.push((DeltaReset::None, "None"));
             for (r, name) in resets {
-                c(
+                c!(
                     "Reset",
                     name.into(),
                     spec.reset == r,
@@ -1025,7 +1195,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     set(StudyAction::SetDeltaReset(i, r)),
                 );
             }
-            c(
+            c!(
                 "Label",
                 "Show title".into(),
                 display.label,
@@ -1046,7 +1216,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             };
             // Split draws each side in its direction's shape and color: no candle colors then.
             if !v.split {
-                c(
+                c!(
                     "Color",
                     "By candle".into(),
                     v.color_by_candle,
@@ -1054,7 +1224,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     with(&|n| n.color_by_candle = !n.color_by_candle),
                 );
             }
-            c(
+            c!(
                 "Average",
                 "Show".into(),
                 v.average,
@@ -1062,17 +1232,14 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 with(&|n| n.average = !n.average),
             );
             if v.average {
-                for len in VOLUME_LENGTHS {
-                    c(
-                        "Length",
-                        format!("{len}"),
-                        v.average_len == len,
-                        Swatch::None,
-                        with(&|n| n.average_len = len),
-                    );
-                }
+                let len = i64::from(v.average_len);
+                let to = |up| {
+                    crate::drop_list::step(len, 10, 1, i64::from(VolumeSpec::MAX_LEN), up)
+                        .map(|n| with(&|s| s.average_len = n as u16))
+                };
+                step!("Length", format!("{len} bars"), to(false), to(true));
             }
-            c(
+            c!(
                 "Split",
                 "Buy / sell".into(),
                 v.split,
@@ -1080,7 +1247,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 with(&|n| n.split = !n.split),
             );
             for (overlay, name) in [(false, "Pane"), (true, "Overlay")] {
-                c(
+                c!(
                     "Display",
                     name.into(),
                     v.overlay == overlay,
@@ -1088,7 +1255,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     with(&|n| n.overlay = overlay),
                 );
             }
-            c(
+            c!(
                 "Label",
                 if v.overlay {
                     "Show in legend"
@@ -1106,7 +1273,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             else {
                 return;
             };
-            c(
+            c!(
                 "Label",
                 "Show title".into(),
                 display.label,
@@ -1121,7 +1288,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 FootprintMode::Delta,
                 FootprintMode::Volume,
             ] {
-                c(
+                c!(
                     "Show",
                     m.label().into(),
                     f.mode == m,
@@ -1129,25 +1296,19 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     set(StudyAction::SetFootprintMode(m)),
                 );
             }
-            for r in [200u32, 300, 400] {
-                c(
-                    "Imbalance",
-                    format!("{}%", r),
-                    f.imbalance_pct == r,
-                    Swatch::None,
-                    set(StudyAction::SetImbalanceRatio(r)),
-                );
-            }
-            for m in [1i64, 5, 10, 25] {
-                c(
-                    "Min volume",
-                    format!("{m}"),
-                    f.imbalance_min == m,
-                    Swatch::None,
-                    set(StudyAction::SetImbalanceMin(m)),
-                );
-            }
-            c(
+            let pct = i64::from(f.imbalance_pct);
+            let ratio = |up| {
+                crate::drop_list::step(pct, 25, 100, i64::from(MAX_IMBALANCE_PCT), up)
+                    .map(|r| set(StudyAction::SetImbalanceRatio(r as u32)))
+            };
+            step!("Imbalance", format!("{pct}%"), ratio(false), ratio(true));
+            let min = f.imbalance_min;
+            let least = |up| {
+                crate::drop_list::step(min, 1, 1, MAX_IMBALANCE_MIN, up)
+                    .map(|m| set(StudyAction::SetImbalanceMin(m)))
+            };
+            step!("Min volume", format!("{min}"), least(false), least(true));
+            c!(
                 "Grouping",
                 "Auto".into(),
                 f.grouping.is_none(),
@@ -1155,10 +1316,23 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 set(StudyAction::SetFootprintGrouping(None)),
             );
             for g in lines_core::ladder::GROUPING_PRESETS {
-                c(
+                c!(
                     "Grouping",
                     format!("{g}"),
                     f.grouping == Some(g),
+                    Swatch::None,
+                    set(StudyAction::SetFootprintGrouping(Some(g))),
+                );
+            }
+            // A typed one ("Custom…"): listed, in force.
+            if let Some(g) = f
+                .grouping
+                .filter(|g| !lines_core::ladder::GROUPING_PRESETS.contains(g))
+            {
+                c!(
+                    "Grouping",
+                    format!("{g}"),
+                    true,
                     Swatch::None,
                     set(StudyAction::SetFootprintGrouping(Some(g))),
                 );
@@ -1185,7 +1359,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             ]);
             // "Anchor": where the VWAP starts (the Add list's terms).
             for (r, name) in resets {
-                c(
+                c!(
                     "Anchor",
                     name,
                     spec.reset == r,
@@ -1193,7 +1367,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     set(StudyAction::SetReset(i, r)),
                 );
             }
-            c(
+            c!(
                 "Anchor",
                 "From a bar…".into(),
                 matches!(spec.reset, Reset::Anchored { .. }),
@@ -1201,9 +1375,9 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 MenuCmd::BeginAnchor(Some(i)),
             );
             for k in 1..=3u8 {
-                c(
+                c!(
                     "Bands",
-                    format!("{k}σ"),
+                    format!("±{k}σ"),
                     spec.bands.has(k),
                     Swatch::None,
                     set(StudyAction::ToggleBand(i, k)),
@@ -1215,7 +1389,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 Some(Swatch::Custom(_))
             );
             for k in 0..4u8 {
-                c(
+                c!(
                     "Color",
                     format!("{}", k + 1),
                     *color == k && !custom,
@@ -1224,7 +1398,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 );
             }
             for (w, name) in [(1u8, "Thin"), (2, "Normal"), (3, "Thick"), (4, "Heavy")] {
-                c(
+                c!(
                     "Width",
                     name.into(),
                     display.width == w,
@@ -1232,7 +1406,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     set(StudyAction::SetWidth(i, w)),
                 );
             }
-            c(
+            c!(
                 "Label",
                 "Show in legend".into(),
                 display.label,
@@ -1247,7 +1421,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 (ProfileMode::VisibleRange, "Visible range"),
                 (ProfileMode::Composite, "Composite"),
             ] {
-                c(
+                c!(
                     "Mode",
                     name.into(),
                     p.mode == m,
@@ -1260,7 +1434,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 sessions.push((ProfileSession::Rth, "RTH"));
             }
             for (s, name) in sessions {
-                c(
+                c!(
                     "Session",
                     name.into(),
                     p.session == s,
@@ -1268,14 +1442,14 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     set(StudyAction::SetProfileSession(s)),
                 );
             }
-            c(
+            c!(
                 "Split",
                 "Buy / sell".into(),
                 p.split,
                 Swatch::None,
                 set(StudyAction::ToggleProfileSplit),
             );
-            c(
+            c!(
                 "Grouping",
                 "Auto".into(),
                 p.grouping.is_none(),
@@ -1283,7 +1457,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 set(StudyAction::SetProfileGrouping(None)),
             );
             for g in lines_core::ladder::GROUPING_PRESETS {
-                c(
+                c!(
                     "Grouping",
                     format!("{g}"),
                     p.grouping == Some(g),
@@ -1291,8 +1465,21 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     set(StudyAction::SetProfileGrouping(Some(g))),
                 );
             }
+            // A typed one ("Custom…"): listed, in force.
+            if let Some(g) = p
+                .grouping
+                .filter(|g| !lines_core::ladder::GROUPING_PRESETS.contains(g))
+            {
+                c!(
+                    "Grouping",
+                    format!("{g}"),
+                    true,
+                    Swatch::None,
+                    set(StudyAction::SetProfileGrouping(Some(g))),
+                );
+            }
             for part in crate::profile::ProfileLabelPart::ALL {
-                c(
+                c!(
                     "Label",
                     part.label().into(),
                     p.label_part(part),
@@ -1323,9 +1510,9 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 } else {
                     k.clone()
                 };
-                c("Kinds", label, shown && !off, Swatch::None, set(action));
+                c!("Kinds", label, shown && !off, Swatch::None, set(action));
             }
-            c(
+            c!(
                 "Labels",
                 "Show labels".into(),
                 input.set.levels.labels_shown(id),
@@ -1334,7 +1521,7 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
             );
             // Where every study label on the chart goes (not only this source's).
             for p in crate::levels_layer::LabelPlace::ALL {
-                c(
+                c!(
                     "Level labels",
                     p.label().into(),
                     input.set.levels.label_place == p,
@@ -1505,8 +1692,19 @@ impl StudyMenu {
             .collect()
     }
 
-    /// Keep the cursor on a focusable item after the items changed.
+    /// Keep the cursor on a focusable item after the items changed (an open list whose item
+    /// went closes).
     pub fn clamp(&mut self, items: &[Item]) {
+        // An open list whose item went, or whose options changed under it (a level source
+        // learned a kind): closed, never a row toggling what another row now is.
+        if let Some(d) = &self.drop
+            && !matches!(items.get(d.at), Some(Item::Drop { group, options, .. })
+                if *group == d.group
+                    && options.len() == d.list.entries.len()
+                    && options.iter().zip(&d.list.entries).all(|(o, e)| o.label == e.label))
+        {
+            self.drop = None;
+        }
         let f = Self::focusables(items);
         if f.is_empty() {
             self.cursor = 0;
@@ -1539,11 +1737,102 @@ impl StudyMenu {
             .map(|p| add + p)
     }
 
+    /// Open item `i`'s list (a [`Item::Drop`]), lit at its option in force; again: close it.
+    pub fn open_drop(&mut self, items: &[Item], i: usize) {
+        let Some(Item::Drop {
+            group,
+            multi,
+            options,
+            custom,
+            ..
+        }) = items.get(i)
+        else {
+            return;
+        };
+        if self.drop.as_ref().is_some_and(|d| d.at == i) {
+            self.drop = None;
+            return;
+        }
+        let rows = options
+            .iter()
+            .map(|o| crate::drop_list::Entry::new(o.label.clone()))
+            .collect();
+        let at = if *multi {
+            None
+        } else {
+            options.iter().position(|o| o.on)
+        };
+        self.cursor = i;
+        self.drop = Some(MenuDrop {
+            at: i,
+            group,
+            list: crate::drop_list::DropList::new(rows, *multi, custom.is_some(), at),
+            scroll: gpui::ScrollHandle::new(),
+        });
+    }
+
+    /// Row `k` of the open list clicked.
+    pub fn drop_choose(&mut self, items: &[Item], k: usize) -> Option<MenuCmd> {
+        let o = self.drop.as_mut()?.list.choose(k);
+        self.drop_outcome(items, o)
+    }
+
+    /// What a key or a click in the open list does: a pick runs its option and closes, a
+    /// toggle runs it and stays open, a typed value runs if it is one (else the field stays).
+    fn drop_outcome(&mut self, items: &[Item], o: crate::drop_list::Outcome) -> Option<MenuCmd> {
+        use crate::drop_list::Outcome;
+        let d = self.drop.as_ref()?;
+        let Some(Item::Drop {
+            options, custom, ..
+        }) = items.get(d.at)
+        else {
+            self.drop = None;
+            return None;
+        };
+        match o {
+            Outcome::None => None,
+            Outcome::Close => {
+                self.drop = None;
+                None
+            }
+            Outcome::Pick(k) => {
+                self.drop = None;
+                options.get(k).map(|o| o.cmd.clone())
+            }
+            Outcome::Toggle(k) => {
+                if let Some(d) = self.drop.as_mut() {
+                    d.list.lit = k;
+                }
+                options.get(k).map(|o| o.cmd.clone())
+            }
+            Outcome::Submit(text) => {
+                let cmd = custom.and_then(|c| c.cmd(&text));
+                if cmd.is_some() {
+                    self.drop = None;
+                }
+                cmd
+            }
+        }
+    }
+
+    /// − (`up` false) or + on item `i` (a [`Item::Step`]).
+    pub fn nudge(&mut self, items: &[Item], i: usize, up: bool) -> Option<MenuCmd> {
+        self.cursor = i;
+        match items.get(i)? {
+            Item::Step { less, more, .. } => if up { more } else { less }.clone(),
+            _ => None,
+        }
+    }
+
     /// The primary command of item `i` (a click on it, or Enter).
     pub fn activate(&mut self, items: &[Item], i: usize) -> Option<MenuCmd> {
         self.cursor = i;
         match items.get(i)? {
             Item::Study { r, .. } => Some(MenuCmd::Edit(r.clone())),
+            Item::Drop { .. } => {
+                self.open_drop(items, i);
+                None
+            }
             Item::Control { cmd, .. } | Item::Action { cmd, .. } => Some(cmd.clone()),
             _ => None,
         }
@@ -1555,6 +1844,10 @@ impl StudyMenu {
         match items.get(i)? {
             Item::Study { r, .. } => Some(MenuCmd::Set(StudyAction::ToggleHidden(r.clone()))),
             Item::Control { cmd, .. } => Some(cmd.clone()),
+            Item::Drop { .. } => {
+                self.open_drop(items, i);
+                None
+            }
             _ => None,
         }
     }
@@ -1574,6 +1867,22 @@ impl StudyMenu {
     /// A key while the menu is open (`text`: the character typed, if printable and without
     /// Ctrl/Alt). Returns the command to run, if any; the menu state is updated in place.
     pub fn key(&mut self, items: &[Item], key: &str, text: Option<&str>) -> Option<MenuCmd> {
+        self.key_at(items, key, text, std::time::Instant::now())
+    }
+
+    /// [`StudyMenu::key`] at `now` (an open list's typing jumps by time).
+    pub fn key_at(
+        &mut self,
+        items: &[Item],
+        key: &str,
+        text: Option<&str>,
+        now: std::time::Instant,
+    ) -> Option<MenuCmd> {
+        // An open list takes every key (Esc closes it, not the menu).
+        if let Some(d) = self.drop.as_mut() {
+            let o = d.list.key(key, text, now);
+            return self.drop_outcome(items, o);
+        }
         if let Some(name) = self.naming.as_mut() {
             match key {
                 "escape" => self.naming = None,
@@ -1607,6 +1916,10 @@ impl StudyMenu {
             }
             "up" => self.step(items, -1),
             "down" | "tab" => self.step(items, 1),
+            // A number's − / +.
+            "left" | "right" if matches!(items.get(self.cursor), Some(Item::Step { .. })) => {
+                return self.nudge(items, self.cursor, key == "right");
+            }
             "enter" => return self.activate(items, self.cursor),
             "space" => return self.eye(items, self.cursor),
             "delete" => return self.delete(items, self.cursor),
