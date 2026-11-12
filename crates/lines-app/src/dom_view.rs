@@ -776,7 +776,15 @@ impl DomView {
         if let Some(d) = self.orders.drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.orders.drag = None;
-            } else if let Some(to) = self.row_at(ev.position)
+            } else if let Some(row) = self.row_at(ev.position)
+                // On the order's own row (rows grouped): its own price, as the release sends
+                // nothing there.
+                && let units = self.row_units()
+                && let to = if dom_trade::row_of(row.0, units) == dom_trade::row_of(d.from.0, units) {
+                    d.from
+                } else {
+                    row
+                }
                 && to != d.to
             {
                 self.orders.drag = Some(DragOrder { to, ..d });

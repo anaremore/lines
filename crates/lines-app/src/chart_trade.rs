@@ -1473,7 +1473,8 @@ impl ChartTradeState {
                 GhostOutcome::Pending => true,
                 GhostOutcome::Acked => false,
                 GhostOutcome::Rejected(why) => {
-                    refused.push((g.price, why));
+                    // A leg that stayed: where it still is.
+                    refused.push((g.leg.map_or(g.price, |l| l.was), why));
                     false
                 }
             }

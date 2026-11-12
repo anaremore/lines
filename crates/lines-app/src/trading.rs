@@ -496,8 +496,7 @@ impl TradeState {
                 account: n.account.clone(),
                 contract: self.orders.get(entry).map(|o| o.contract),
                 price: n.price,
-                message: "only the entry moved: this broker can't move its stop and target with it"
-                    .into(),
+                message: "only the entry moved; this broker left its stop and target".into(),
                 at: now,
             });
         }

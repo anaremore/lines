@@ -11,8 +11,9 @@
 //! - **held** (a bracket exit waiting for its entry): a dashed outline, dim;
 //! - **working**: a solid block in the side's colour;
 //! - **partially filled**: an outline with the filled share solid, and `filled/qty`;
-//! - a stop is prefixed `S`; a **ghost** (dragged, not yet confirmed) is a dashed accent
-//!   outline at the new price while the order stays at its old one;
+//! - a stop is prefixed `S`; a **ghost** (dragged, not yet confirmed) is a dashed outline in
+//!   its order's role colour on the selection fill, with its label, at the new price while the
+//!   order stays at its old one;
 //! - the **position** is a bracket of lines around the price cell of the average price's row
 //!   plus `L n` / `S n` in the orders column;
 //! - a **rejection** is a warning bar across its row with the reason, for a few seconds.
@@ -284,7 +285,8 @@ impl OrdersLayer {
                 crate::dom_trade::GhostOutcome::Pending => true,
                 crate::dom_trade::GhostOutcome::Acked => false,
                 crate::dom_trade::GhostOutcome::Rejected(why) => {
-                    refused.push((g.price, why));
+                    // A leg that stayed: where it still is.
+                    refused.push((g.leg.map_or(g.price, |l| l.was), why));
                     false
                 }
             }
@@ -534,8 +536,8 @@ impl OrdersLayer {
                 );
             }
             // Ghosts and the order being dragged (with the legs moving with it): a dashed
-            // outline in the order's role colour at the new price on a faint tint of it (a held
-            // mark has none), its label inside when the row has no mark of its own.
+            // outline in the order's role colour at the new price on the selection fill (a held
+            // mark has none), its label inside when the row has no mark or position label.
             let ghost_here = self
                 .ghosts
                 .iter()
@@ -547,9 +549,10 @@ impl OrdersLayer {
                 let mark = self.marks.iter().find(|m| m.id == id);
                 let c = mark.map_or(t.accent, |m| mark_colour(t, m));
                 let r = rect(ox + 1.0, y + 2.0, ow - 3.0, row_h - 4.0);
-                window.paint_quad(fill(r, c.opacity(0.16)));
+                window.paint_quad(fill(r, t.ghost_selected));
                 outline(window, r, c, hair, true);
                 if n == 0
+                    && pos_row != Some(row)
                     && let Some(m) = mark
                 {
                     buf.clear();
