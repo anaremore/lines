@@ -366,6 +366,7 @@ fn an_add_resizes_both_legs_and_keeps_a_moved_price() {
         order: s,
         qty: None,
         price: Some(px(5999.00)),
+        move_bracket: false,
     })
     .unwrap();
     r.wait(LAT);

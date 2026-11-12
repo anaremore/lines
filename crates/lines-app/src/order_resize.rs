@@ -127,6 +127,7 @@ pub fn plan(
                 order: leg.id,
                 qty: Some(qty),
                 price: None,
+                move_bracket: false,
             },
         });
     }

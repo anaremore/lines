@@ -219,6 +219,7 @@ impl TradePane for DomView {
                         price: leg.price,
                         command,
                         qty: Some(leg.qty),
+                        leg: None,
                     });
                 }
             }
@@ -665,7 +666,21 @@ impl DomView {
         if col == DomColumn::Orders {
             let width = f(self.bounds.size.width) / crate::zoom::get();
             match self.mark_pressed(price, ev.position).order(width) {
-                Ok(Some(order)) => self.orders.drag = Some(DragOrder { order, to: price }),
+                Ok(Some(order)) => {
+                    // An unfilled entry's held legs move with it (the setting on): previewed.
+                    let legs = match Trading::try_global(cx) {
+                        Some(t) if crate::picker_view::settings(cx).move_bracket() => {
+                            t.cache.read().held_legs(order)
+                        }
+                        _ => [None; 2],
+                    };
+                    let from = Trading::try_global(cx)
+                        .and_then(|t| t.cache.read().order(order).and_then(dom_trade::order_price))
+                        .unwrap_or(price);
+                    // At the order's own price until the pointer moves (with rows grouped, the
+                    // pressed row's start would preview a move the release won't send).
+                    self.orders.drag = Some(DragOrder::new(order, from, legs));
+                }
                 Ok(None) => return,
                 Err(why) => self.trade.flash(why),
             }
@@ -720,14 +735,25 @@ impl DomView {
             self.trade.flash(why);
             return;
         }
-        if let Some(cmd) = dom_trade::drag_command(&o, d.to) {
+        let with_legs = crate::picker_view::settings(cx).move_bracket();
+        let legs = if with_legs {
+            t.cache.read().held_legs(o.id)
+        } else {
+            [None; 2]
+        };
+        if let Some(cmd) = dom_trade::drag_command(&o, d.to, with_legs) {
             let id = t.submit(lines_trading::Source::Dom, issued, cmd);
             self.orders.ghosts.push(Ghost {
                 order: o.id,
                 price: d.to,
                 command: id,
                 qty: None,
+                leg: None,
             });
+            // Its legs move with it (the setting on): their ghosts too.
+            self.orders
+                .ghosts
+                .extend(dom_trade::leg_ghosts(legs, o.id, from, d.to, id));
         }
     }
 
@@ -750,7 +776,15 @@ impl DomView {
         if let Some(d) = self.orders.drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.orders.drag = None;
-            } else if let Some(to) = self.row_at(ev.position)
+            } else if let Some(row) = self.row_at(ev.position)
+                // On the order's own row (rows grouped): its own price, as the release sends
+                // nothing there.
+                && let units = self.row_units()
+                && let to = if dom_trade::row_of(row.0, units) == dom_trade::row_of(d.from.0, units) {
+                    d.from
+                } else {
+                    row
+                }
                 && to != d.to
             {
                 self.orders.drag = Some(DragOrder { to, ..d });
@@ -1241,6 +1275,18 @@ impl DomView {
                     .flash(format!("{}: {why}", fmt.format::<32>(p).as_str()));
             }
             let units = self.row_units();
+            // Screenshot fixture: the newest working entry held dragged (nothing sent).
+            if self.orders.drag.is_none()
+                && let Some(at) = tr.start_drag_order.as_deref()
+                && let (Some(account), Some(contract)) = (self.trade.account.as_ref(), contract)
+                && let Ok(p) = self.product.price.scale.parse_decimal(at)
+            {
+                let with_legs = crate::picker_view::settings(cx).move_bracket();
+                if let Some(s) = tr.cache.try_read() {
+                    self.orders.drag =
+                        DragOrder::fixture(&s, account, contract, lines_core::Price(p), with_legs);
+                }
+            }
             if tr.start_order_controls && self.orders.hover.is_none() {
                 self.orders.hover = self.orders.first_single(units);
                 window.refresh();

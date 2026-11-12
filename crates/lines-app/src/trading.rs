@@ -158,6 +158,9 @@ struct Note {
     /// Its refusal isn't a DENIED flash: the pane that sent it shows the answer itself (the
     /// bracket mode: a confirmation, or its own message).
     silent: bool,
+    /// A modify asked to move the bracket's held exits too (`move_bracket`): when the broker
+    /// moved only the entry, it says so once.
+    move_bracket: bool,
 }
 
 /// The UI's copy of the trading state, built from events only.
@@ -211,6 +214,9 @@ impl TradeState {
         match e {
             Event::Command { id, result, .. } => {
                 let note = self.notes.remove(&id);
+                if let (Ok(ids), Some(n)) = (&result, note.as_ref()) {
+                    self.only_the_entry(n, ids, now);
+                }
                 if let (Err(r), Some(n)) = (&result, note.as_ref().filter(|n| !n.silent)) {
                     self.flashes.push_back(Flash {
                         kind: FlashKind::Denied,
@@ -427,7 +433,11 @@ impl TradeState {
                 });
                 true
             }
-            Some(Ok(_)) => false,
+            Some(Ok(ids)) => {
+                let ids = ids.clone();
+                self.only_the_entry(&n, &ids, now);
+                false
+            }
             None => {
                 self.notes.insert(id, n);
                 false
@@ -472,6 +482,51 @@ impl TradeState {
         self.orders
             .values()
             .filter(move |o| &o.account == account && o.contract == contract)
+    }
+
+    /// A bracket move the broker made for the entry alone (it names only the entry while the
+    /// entry still has held exits): said once, on the entry's row.
+    fn only_the_entry(&mut self, n: &Note, ids: &[OrderId], now: Instant) {
+        if n.move_bracket
+            && let [entry] = ids
+            && self.held_legs(*entry).iter().any(Option::is_some)
+        {
+            self.flashes.push_back(Flash {
+                kind: FlashKind::Warning,
+                account: n.account.clone(),
+                contract: self.orders.get(entry).map(|o| o.contract),
+                price: n.price,
+                message: "only the entry moved; this broker left its stop and target".into(),
+                at: now,
+            });
+        }
+    }
+
+    /// The held exits of entry `entry` that move with it (`Command::ModifyOrder::move_bracket`):
+    /// its stop and target while it has no fill and they are held. Their ids and prices.
+    pub fn held_legs(&self, entry: OrderId) -> [Option<(OrderId, Price)>; 2] {
+        let mut out = [None; 2];
+        let Some(e) = self.orders.get(&entry) else {
+            return out;
+        };
+        if e.role != lines_trading::Role::Entry || e.filled.0 != 0 {
+            return out;
+        }
+        let legs = self.orders.values().filter(|x| {
+            x.parent == Some(entry)
+                && matches!(
+                    x.role,
+                    lines_trading::Role::TakeProfit | lines_trading::Role::StopLoss
+                )
+                && matches!(
+                    x.state,
+                    lines_trading::OrderState::Submitted | lines_trading::OrderState::Acked
+                )
+        });
+        for (slot, x) in out.iter_mut().zip(legs) {
+            *slot = lines_trading::broker::modified_price(x).map(|p| (x.id, p));
+        }
+        out
     }
 
     /// An order, open or recently finished.
@@ -839,6 +894,9 @@ pub struct Trading {
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
+    /// Screenshot fixture (`--drag-order PRICE`): charts and DOMs hold their newest working
+    /// entry dragged to this price (`dom_orders::DragOrder::fixture`). Never set in the app.
+    pub start_drag_order: Option<String>,
     /// Screenshot fixture (`--panel-menu qty|bracket`): DOMs start with that trade panel list
     /// open. Never set in the app.
     pub start_panel_menu: Option<crate::trade_bar::PanelMenu>,
@@ -1544,6 +1602,7 @@ impl Trading {
             start_hotkeys: false,
             start_order_controls: false,
             start_account_menu: false,
+            start_drag_order: None,
             start_panel_menu: None,
             start_chain_ticket: None,
             start_editor: false,
@@ -1880,6 +1939,7 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
                 contract: Some(*contract),
                 price: None,
                 silent: true,
+                move_bracket: false,
             });
         }
         TradeCommand::AddStrategy(_)
@@ -1901,6 +1961,13 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         contract,
         price,
         silent: false,
+        move_bracket: matches!(
+            cmd,
+            TradeCommand::ModifyOrder {
+                move_bracket: true,
+                ..
+            }
+        ),
     })
 }
 
@@ -2109,6 +2176,9 @@ pub enum Step {
     Print(ContractKey, Price, lines_core::Qty),
     /// Tag the newest closed trade (the journal's by-tag view).
     Tag(Vec<String>),
+    /// Move the account's newest working entry to this price, with its held stop and target
+    /// (as a drag does with "Move stop and target with the entry" on).
+    Move(AccountId, Price),
     /// A press of Reset paper account (`crate::paper_reset`): once arms it, twice sends it.
     Reset {
         account: AccountId,
@@ -2134,6 +2204,8 @@ pub enum Step {
 /// - `strategy N` (add instance N on the account and contract, arm it, send what follows as
 ///   it), `manual` (send as a person again), `halt N` (pause N at its daily loss), `future SYM`
 ///   (another product's front month from there on, to hold several at once);
+/// - `move PRICE`: the account's newest working entry moves there, its held stop and target
+///   by the same ticks (a drag with the setting on);
 /// - `reset` / `reset journal`: a press of Reset paper account on the account (keeping, or
 ///   clearing, its journal): once shows its confirmation armed, twice sends it.
 pub fn parse_script(
@@ -2165,6 +2237,7 @@ pub fn parse_script(
         match w.as_slice() {
             [] => {}
             ["ack"] => out.push(Step::Ack),
+            ["move", p] => out.push(Step::Move(account.clone(), price(p)?)),
             ["option", date, strike, right] => {
                 let bad = || anyhow!("option expiry {date:?}: YYYY-MM-DD");
                 let d: Vec<&str> = date.split('-').collect();
@@ -2461,6 +2534,33 @@ impl Trading {
                         tracing::warn!("script reset: {e}");
                     }
                 }
+                Step::Move(account, to) => {
+                    self.settle();
+                    let entry = self
+                        .cache
+                        .read()
+                        .orders
+                        .values()
+                        .filter(|o| &o.account == account && o.role == lines_trading::Role::Entry)
+                        .map(|o| o.id)
+                        .max();
+                    match entry {
+                        Some(order) => {
+                            self.submit(
+                                source,
+                                Instant::now(),
+                                TradeCommand::ModifyOrder {
+                                    account: account.clone(),
+                                    order,
+                                    qty: None,
+                                    price: Some(*to),
+                                    move_bracket: true,
+                                },
+                            );
+                        }
+                        None => tracing::warn!("script move: no working entry"),
+                    }
+                }
                 Step::Account(_) => {}
             }
         }
@@ -2570,6 +2670,121 @@ mod tests {
             f.message,
             "still working: cancel refused: too late to cancel"
         );
+    }
+
+    /// A drag that asked to move the bracket, on a broker that moved only the entry (the
+    /// result names only it while its exits are still held): one WARNING says so. Its held
+    /// exits are what `held_legs` gives the chart and the DOM to preview.
+    #[test]
+    fn a_bracket_moved_without_its_legs_says_so_once() {
+        use lines_core::{ContractKey, Month, Price, Qty, UtcMillis};
+        use lines_trading::{Order, OrderId, OrderKind, OrderState, Role, Side};
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let account = AccountId::new("paper-1");
+        let order = |id: u64, role, parent, kind, side| Order {
+            id: OrderId(id),
+            account: account.clone(),
+            contract: k,
+            side,
+            qty: Qty(2),
+            kind,
+            state: if role == Role::Entry {
+                OrderState::Working
+            } else {
+                OrderState::Acked
+            },
+            filled: Qty(0),
+            fill_value: 0,
+            role,
+            parent,
+            oco: None,
+            triggered: false,
+            created: UtcMillis(0),
+            updated: UtcMillis(0),
+            reduce_only: false,
+            overfill: Qty(0),
+        };
+        let mut s = TradeState::default();
+        let now = Instant::now();
+        let lim = |p| OrderKind::Limit { price: Price(p) };
+        s.apply(
+            Event::Order(order(1, Role::Entry, None, lim(600_000), Side::Buy)),
+            now,
+        );
+        s.apply(
+            Event::Order(order(
+                2,
+                Role::TakeProfit,
+                Some(OrderId(1)),
+                lim(600_200),
+                Side::Sell,
+            )),
+            now,
+        );
+        s.apply(
+            Event::Order(order(
+                3,
+                Role::StopLoss,
+                Some(OrderId(1)),
+                OrderKind::Stop {
+                    trigger: Price(599_800),
+                },
+                Side::Sell,
+            )),
+            now,
+        );
+        assert_eq!(
+            s.held_legs(OrderId(1)),
+            [
+                Some((OrderId(2), Price(600_200))),
+                Some((OrderId(3), Price(599_800)))
+            ]
+        );
+        let cmd = TradeCommand::ModifyOrder {
+            account: account.clone(),
+            order: OrderId(1),
+            qty: None,
+            price: Some(Price(599_900)),
+            move_bracket: true,
+        };
+        let n = note_for(&cmd).unwrap();
+        assert!(n.move_bracket);
+        // All three moved: nothing to say.
+        s.note(CommandId(1), n.clone(), now);
+        s.apply(
+            Event::Command {
+                id: CommandId(1),
+                source: lines_trading::Source::Dom,
+                at: UtcMillis(0),
+                result: Ok(vec![OrderId(1), OrderId(2), OrderId(3)]),
+            },
+            now,
+        );
+        assert!(s.flashes.is_empty());
+        // Only the entry: one WARNING, on its contract.
+        s.note(CommandId(2), n, now);
+        s.apply(
+            Event::Command {
+                id: CommandId(2),
+                source: lines_trading::Source::Dom,
+                at: UtcMillis(0),
+                result: Ok(vec![OrderId(1)]),
+            },
+            now,
+        );
+        assert_eq!(s.flashes.len(), 1);
+        let f = s.flashes.back().unwrap();
+        assert_eq!(f.kind, FlashKind::Warning);
+        assert!(
+            f.message.starts_with("only the entry moved"),
+            "{}",
+            f.message
+        );
+        // A filled entry has no held legs to move.
+        let mut filled = order(1, Role::Entry, None, lim(600_000), Side::Buy);
+        filled.filled = Qty(1);
+        s.apply(Event::Order(filled), now);
+        assert_eq!(s.held_legs(OrderId(1)), [None, None]);
     }
 
     #[test]

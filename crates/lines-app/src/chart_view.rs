@@ -3932,6 +3932,7 @@ impl ChartView {
         if ev.pressed_button != Some(MouseButton::Left) && self.drawings.release_lost() {
             cx.notify();
         }
+        let with_legs = crate::picker_view::settings(cx).move_bracket();
         if let Some((part, grab, before)) = self.ct.staged_drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 // Released where the chart never saw it: keep where it was dragged to.
@@ -3945,7 +3946,7 @@ impl ChartView {
                 ) {
                     // From the order as pressed, so a leg pulled from a handle is that leg.
                     *s = before;
-                    s.move_part(part, Price(to.0 + grab));
+                    s.move_part(part, Price(to.0 + grab), with_legs);
                 }
             }
             cx.notify();
@@ -4132,7 +4133,7 @@ impl ChartView {
                 crate::chart_trade::Release::Nothing => {}
                 crate::chart_trade::Release::Place(a) => self.place_exit(a, cx),
                 crate::chart_trade::Release::Move { order, to } => {
-                    self.drop_order(crate::dom_orders::DragOrder { order, to }, cx)
+                    self.drop_order(crate::dom_orders::DragOrder::new(order, to, [None; 2]), cx)
                 }
             }
             cx.notify();
@@ -4290,10 +4291,13 @@ impl ChartView {
                     let tick = self.instrument.price.tick;
                     let at = lines_core::geometry::snap_price(&self.vp, y, tick);
                     self.ct.grab = at.map_or(0, |p| m.price.0 - p.0);
-                    self.ct.drag = Some(crate::dom_orders::DragOrder {
-                        order: m.id,
-                        to: m.price,
-                    });
+                    let legs = if crate::picker_view::settings(cx).move_bracket() {
+                        crate::trading::Trading::try_global(cx)
+                            .map_or([None; 2], |t| t.cache.read().held_legs(m.id))
+                    } else {
+                        [None; 2]
+                    };
+                    self.ct.drag = Some(crate::dom_orders::DragOrder::new(m.id, m.price, legs));
                 }
             }
             // × cancels on release, and only if the pointer is still on that ×.
@@ -4422,7 +4426,16 @@ impl ChartView {
         let Some(o) = order else {
             return;
         };
-        let Some(cmd) = crate::dom_trade::drag_command(&o, d.to) else {
+        let with_legs = crate::picker_view::settings(cx).move_bracket();
+        let legs = if with_legs {
+            t.cache.read().held_legs(o.id)
+        } else {
+            [None; 2]
+        };
+        let Some(from) = crate::dom_trade::order_price(&o) else {
+            return;
+        };
+        let Some(cmd) = crate::dom_trade::drag_command(&o, d.to, with_legs) else {
             return; // it didn't move
         };
         // A stop never moves across the market (it would trigger at once): refused here, shown
@@ -4438,7 +4451,12 @@ impl ChartView {
                 price: d.to,
                 command: id,
                 qty: None,
+                leg: None,
             });
+            // Its legs move with it (the setting on): their ghosts too.
+            self.ct
+                .ghosts
+                .extend(crate::dom_trade::leg_ghosts(legs, o.id, from, d.to, id));
         }
     }
 
@@ -5243,6 +5261,23 @@ impl ChartView {
             self.ct.adding = lines_core::geometry::order_tags::position_drag_exit(qty, avg, to)
                 .map(|target| crate::chart_trade::AddExit { target, to });
         }
+        // Screenshot fixture: the newest working entry held dragged (a preview, never sent).
+        if self.ct.drag.is_none()
+            && let Some(at) = t.start_drag_order.as_deref()
+            && let (Some(account), Some(contract)) = (self.trade.account.as_ref(), contract)
+            && let Ok(units) = self.instrument.price.scale.parse_decimal(at)
+        {
+            let with_legs = crate::picker_view::settings(cx).move_bracket();
+            if let Some(s) = t.cache.try_read() {
+                self.ct.drag = crate::dom_orders::DragOrder::fixture(
+                    &s,
+                    account,
+                    contract,
+                    Price(units),
+                    with_legs,
+                );
+            }
+        }
         // Screenshot fixtures: an order staged as the menu's "…with bracket" would (once the
         // chart can trade), its legs as given; and a flash.
         if let Some(spec) = self.stage_fixture.clone()
@@ -5612,18 +5647,20 @@ impl ChartView {
                 }
             }
         }
-        // The order being dragged, moves awaiting the broker: dashed accent.
-        let drag = self.ct.drag.map(|d| d.to);
-        for p in drag.into_iter().chain(
+        // The order being dragged (with the legs moving with it), moves awaiting the broker:
+        // long dashes in each order's role colour, as a staged order's (unsent).
+        let drag = self.ct.drag;
+        for (id, p) in drag.iter().flat_map(|d| d.previews()).chain(
             self.ct
                 .ghosts
                 .iter()
                 .filter(|g| g.qty.is_none())
-                .map(|g| g.price),
+                .map(|g| (g.order, g.price)),
         ) {
             let y = self.vp.price_to_y(p.0 as f64) as f32;
             if (0.0..=ph).contains(&y) {
-                dashed(window, y, t.accent, 5.0);
+                let c = self.ct.mark(id.0).map_or(t.accent, |m| self.mark_colour(m));
+                dashed(window, y, c, (6.0 * s).round());
             }
         }
         // The exit being added: dashed in its role's colour, with its tag-to-be.
@@ -9729,6 +9766,7 @@ impl ChartView {
             price,
             command,
             qty: Some(qty),
+            leg: None,
         });
     }
 }

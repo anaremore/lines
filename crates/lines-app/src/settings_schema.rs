@@ -1646,6 +1646,24 @@ fn table() -> Vec<Setting> {
         ),
         with_default(
             s(
+                "trading.move_bracket",
+                Sec::OrderEntry,
+                "Move stop and target with the entry",
+                "Dragging an unfilled entry moves its stop and target too.",
+                Scope::App,
+                Trading,
+                Toggle,
+                |p, _, _| Value::Bool(p.app.move_bracket.unwrap_or(true)),
+                Some(|p, _, v| {
+                    // On is the default: written only when off.
+                    p.app.move_bracket = (!want_bool(v)?).then_some(false);
+                    Ok(())
+                }),
+            ),
+            Value::Bool(true),
+        ),
+        with_default(
+            s(
                 "trading.disable_on_focus_loss",
                 Sec::OrderEntry,
                 "Disable trading when a DOM loses focus",
@@ -3099,6 +3117,7 @@ const ORDER_ENTRY: &[Group] = &[
             line!("trading.default_qty"),
             line!("trading.pnl"),
             line!("trading.order_tags"),
+            line!("trading.move_bracket"),
         ],
     ),
     Group {
@@ -3580,7 +3599,8 @@ mod tests {
         }
         // Keys added since, in window order: the light palette (Appearance), the UI font
         // (decision 0036, on Appearance), trade history on new charts and the drawing
-        // toolbar's two (Charts), and the only key the regrouping adds, the prop values line
+        // toolbar's two (Charts), moving the bracket with the entry (Order entry), and the
+        // only key the regrouping adds, the prop values line
         // the overrides fold behind (a button, nothing saved).
         let new: Vec<&str> = all()
             .iter()
@@ -3595,6 +3615,7 @@ mod tests {
                 "charts.trades",
                 "charts.drawing_tools",
                 "charts.drawing_tools_dock",
+                "trading.move_bracket",
                 PROP_OVERRIDES_KEY,
                 // Settings › Plugins' cards (each plugin's own settings, nothing of the table's).
                 PLUGINS_LIST

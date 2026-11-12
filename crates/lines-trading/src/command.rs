@@ -57,6 +57,12 @@ pub enum Command {
         qty: Option<Qty>,
         #[serde(default, with = "opt_price_serde")]
         price: Option<Price>,
+        /// An entry's new price moves its bracket's held exits by the same ticks, as one
+        /// change (owner, 2026-11-12): only while the entry has no fill and its exits are held,
+        /// and only on a broker that moves them together ([`crate::broker::Broker::moves_brackets`]);
+        /// otherwise only the entry moves (the result then names only it). Optional.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        move_bracket: bool,
     },
     CancelOrder {
         account: AccountId,

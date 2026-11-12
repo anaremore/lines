@@ -104,6 +104,9 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # --shift-drag X0,Y0:X1,Y1 replays a Shift+drag on the first chart (plot-local px, as --cursor), released: the measure it leaves.
 # --drag-position Y previews the position line dragged to plot-local Y (the stop or target it would set, with its P&L; nothing is placed).
 # --order-controls shows the first single-order mark's and tag's − / size / +, as if hovered.
+# --drag-order PRICE holds charts' and DOMs' newest working entry dragged to PRICE, its held
+# stop and target with it (Settings › Order entry): the drag's preview, nothing sent. The --paper
+# step `move PRICE` sends that move (the newest working entry, with its held exits).
 # --order-size N starts every symbol at that order size; --max-order-qty N sets the paper accounts' largest allowed order (a larger size shows "max N"), over Settings › Accounts › Largest order for that run.
 # --replay-bar shows the replay bar paused at --at (an interactive replay always has it); --replay-playing shows it as playing.
 # --order-strip shows the order strip on the first chart; --strip-pick buy|sell shows it with that limit's price pick armed.

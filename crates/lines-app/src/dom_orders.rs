@@ -11,8 +11,9 @@
 //! - **held** (a bracket exit waiting for its entry): a dashed outline, dim;
 //! - **working**: a solid block in the side's colour;
 //! - **partially filled**: an outline with the filled share solid, and `filled/qty`;
-//! - a stop is prefixed `S`; a **ghost** (dragged, not yet confirmed) is a dashed accent
-//!   outline at the new price while the order stays at its old one;
+//! - a stop is prefixed `S`; a **ghost** (dragged, not yet confirmed) is a dashed outline in
+//!   its order's role colour on the selection fill, with its label, at the new price while the
+//!   order stays at its old one;
 //! - the **position** is a bracket of lines around the price cell of the average price's row
 //!   plus `L n` / `S n` in the orders column;
 //! - a **rejection** is a warning bar across its row with the reason, for a few seconds.
@@ -52,6 +53,59 @@ struct RowFlash {
 pub struct DragOrder {
     pub order: OrderId,
     pub to: Price,
+    /// Where the order was when the drag began, and the held exits that move with it (an
+    /// unfilled entry's, with the setting on): previewed at their price shifted by the move.
+    pub from: Price,
+    pub legs: [Option<(OrderId, Price)>; 2],
+}
+
+impl DragOrder {
+    /// A drag of `order` from `at`, moving `legs` with it.
+    pub fn new(order: OrderId, at: Price, legs: [Option<(OrderId, Price)>; 2]) -> DragOrder {
+        DragOrder {
+            order,
+            to: at,
+            from: at,
+            legs,
+        }
+    }
+
+    /// Screenshot fixture (`--drag-order PRICE`): the account's newest working entry on
+    /// `contract` held dragged to `to`, its held stop and target with it when `with_legs` (the
+    /// setting), as a press on it and a move would leave it. Nothing is sent.
+    pub fn fixture(
+        s: &crate::trading::TradeState,
+        account: &lines_trading::AccountId,
+        contract: lines_core::ContractKey,
+        to: Price,
+        with_legs: bool,
+    ) -> Option<DragOrder> {
+        let o = s
+            .open_orders(account, contract)
+            .filter(|o| o.role == lines_trading::Role::Entry)
+            .max_by_key(|o| o.id)?;
+        let from = crate::dom_trade::order_price(o)?;
+        let legs = if with_legs {
+            s.held_legs(o.id)
+        } else {
+            [None; 2]
+        };
+        Some(DragOrder {
+            to,
+            ..DragOrder::new(o.id, from, legs)
+        })
+    }
+
+    /// Where the order and its legs are drawn while dragged: each order and its new price.
+    pub fn previews(&self) -> impl Iterator<Item = (OrderId, Price)> + '_ {
+        let d = self.to.0 - self.from.0;
+        std::iter::once((self.order, self.to)).chain(
+            self.legs
+                .iter()
+                .flatten()
+                .map(move |&(id, p)| (id, Price(p.0 + d))),
+        )
+    }
 }
 
 /// The narrowest mark that draws its − and + (each at least 20 px, with room for its size).
@@ -222,11 +276,17 @@ impl OrdersLayer {
             crate::order_resize::can_grow(o, working, position)
         });
         self.ghosts.retain(|g| {
-            match crate::dom_trade::ghost_outcome(g, s.order(g.order), s.result(g.command)) {
+            let (order, result) = (s.order(g.order), s.result(g.command));
+            let outcome = match g.leg {
+                Some(l) => crate::dom_trade::leg_outcome(g, l, order, result, s.order(l.entry)),
+                None => crate::dom_trade::ghost_outcome(g, order, result),
+            };
+            match outcome {
                 crate::dom_trade::GhostOutcome::Pending => true,
                 crate::dom_trade::GhostOutcome::Acked => false,
                 crate::dom_trade::GhostOutcome::Rejected(why) => {
-                    refused.push((g.price, why));
+                    // A leg that stayed: where it still is.
+                    refused.push((g.leg.map_or(g.price, |l| l.was), why));
                     false
                 }
             }
@@ -475,20 +535,39 @@ impl OrdersLayer {
                     cx,
                 );
             }
-            // Ghosts and the order being dragged: a dashed accent outline at the new price.
+            // Ghosts and the order being dragged (with the legs moving with it): a dashed
+            // outline in the order's role colour at the new price on the selection fill (a held
+            // mark has none), its label inside when the row has no mark or position label.
             let ghost_here = self
                 .ghosts
                 .iter()
-                .any(|g| g.qty.is_none() && row_of(g.price.0, units) == row)
-                || self.drag.is_some_and(|d| row_of(d.to.0, units) == row);
-            if ghost_here {
-                outline(
-                    window,
-                    rect(ox + 1.0, y + 2.0, ow - 3.0, row_h - 4.0),
-                    t.accent,
-                    hair,
-                    true,
-                );
+                .filter(|g| g.qty.is_none())
+                .map(|g| (g.order, g.price))
+                .chain(self.drag.iter().flat_map(|d| d.previews()))
+                .find(|(_, p)| row_of(p.0, units) == row);
+            if let Some((id, _)) = ghost_here {
+                let mark = self.marks.iter().find(|m| m.id == id);
+                let c = mark.map_or(t.accent, |m| mark_colour(t, m));
+                let r = rect(ox + 1.0, y + 2.0, ow - 3.0, row_h - 4.0);
+                window.paint_quad(fill(r, t.ghost_selected));
+                outline(window, r, c, hair, true);
+                if n == 0
+                    && pos_row != Some(row)
+                    && let Some(m) = mark
+                {
+                    buf.clear();
+                    let _ = mark_text(m, &mut buf);
+                    glyphs.paint_right(
+                        buf.as_str(),
+                        ox + ow - 7.0,
+                        y,
+                        row_h,
+                        t.text_main,
+                        true,
+                        window,
+                        cx,
+                    );
+                }
             }
         }
         // Refusals: a short tag in the orders cell of their row (`DENIED: closed`, or just

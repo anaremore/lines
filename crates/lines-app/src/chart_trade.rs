@@ -965,12 +965,17 @@ impl Staged {
         }
     }
 
-    /// Move a part to `to` (a snapped price). The entry takes its legs with it, so the risk
-    /// and reward it was staged with stay as they were.
-    pub fn move_part(&mut self, part: StagedPart, to: Price) {
+    /// Move a part to `to` (a snapped price). With `with_legs` (the setting "Move stop and
+    /// target with the entry") the entry takes its legs with it, so the risk and reward it was
+    /// staged with stay as they were; without, only the entry moves.
+    pub fn move_part(&mut self, part: StagedPart, to: Price, with_legs: bool) {
         match part {
             StagedPart::Entry => {
-                let d = to.0 - self.order.price.0;
+                let d = if with_legs {
+                    to.0 - self.order.price.0
+                } else {
+                    0
+                };
                 self.order.price = to;
                 self.stop = self.stop.map(|p| Price(p.0 + d));
                 self.target = self.target.map(|p| Price(p.0 + d));
@@ -1454,16 +1459,26 @@ impl ChartTradeState {
                 let position = s.position(account, contract).map_or(0, |p| p.qty);
                 crate::order_resize::can_grow(o, working, position)
             });
-        self.ghosts.retain(
-            |g| match ghost_outcome(g, s.order(g.order), s.result(g.command)) {
+        self.ghosts.retain(|g| {
+            match match g.leg {
+                Some(l) => crate::dom_trade::leg_outcome(
+                    g,
+                    l,
+                    s.order(g.order),
+                    s.result(g.command),
+                    s.order(l.entry),
+                ),
+                None => ghost_outcome(g, s.order(g.order), s.result(g.command)),
+            } {
                 GhostOutcome::Pending => true,
                 GhostOutcome::Acked => false,
                 GhostOutcome::Rejected(why) => {
-                    refused.push((g.price, why));
+                    // A leg that stayed: where it still is.
+                    refused.push((g.leg.map_or(g.price, |l| l.was), why));
                     false
                 }
-            },
-        );
+            }
+        });
         refused
     }
 
@@ -2589,7 +2604,7 @@ mod tests {
         assert!(!s.bracketable);
         assert_eq!((s.stop, s.target), (None, None));
         assert_eq!(s.wanted_handles(), [false, false]);
-        s.move_part(StagedPart::Stop, p(6016.00));
+        s.move_part(StagedPart::Stop, p(6016.00), true);
         assert_eq!(s.stop, None, "no leg can be dragged out");
         assert!(matches!(
             staged_command(&s, &c),
@@ -2629,11 +2644,16 @@ mod tests {
         // 5 units a px: 6.3 px from the top is off the grid, and lands on a 25-unit tick.
         let to = lines_core::geometry::snap_price(&vp, 6.3, 25).unwrap();
         assert_eq!(to.0 % 25, 0);
-        s.move_part(StagedPart::Target, to);
+        s.move_part(StagedPart::Target, to, true);
         assert_eq!(s.target, Some(to));
-        s.move_part(StagedPart::Stop, p(6008.00));
-        s.move_part(StagedPart::Entry, p(6009.00));
+        s.move_part(StagedPart::Stop, p(6008.00), true);
+        s.move_part(StagedPart::Entry, p(6009.00), true);
         assert_eq!(s.order.price, p(6009.00));
+        assert_eq!(s.stop, Some(p(6007.00)));
+        assert_eq!(s.target, Some(Price(to.0 - 100)));
+        // The setting "Move stop and target with the entry" off: only the entry moves.
+        s.move_part(StagedPart::Entry, p(6010.00), false);
+        assert_eq!(s.order.price, p(6010.00));
         assert_eq!(s.stop, Some(p(6007.00)));
         assert_eq!(s.target, Some(Price(to.0 - 100)));
     }
@@ -2662,8 +2682,8 @@ mod tests {
     #[test]
     fn place_builds_one_command() {
         let (mut s, c) = staged(0, true, buy_at(6010.00));
-        s.move_part(StagedPart::Target, p(6018.00));
-        s.move_part(StagedPart::Stop, p(6006.00));
+        s.move_part(StagedPart::Target, p(6018.00), true);
+        s.move_part(StagedPart::Stop, p(6006.00), true);
         let Ok(TradeCommand::PlaceBracket(b)) = staged_command(&s, &c) else {
             panic!("bracket")
         };
@@ -2884,7 +2904,7 @@ mod tests {
             ..ChartTradeState::default()
         };
         if let Some(s) = st.staged.as_mut() {
-            s.move_part(StagedPart::Stop, p(6008.00));
+            s.move_part(StagedPart::Stop, p(6008.00), true);
         }
         assert_eq!(st.discard(DISCARDED_HIDDEN), Some(DISCARDED_HIDDEN));
         assert_eq!(st.staged, None);

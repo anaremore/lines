@@ -1821,6 +1821,7 @@ pub fn breakeven(
             order: s.0,
             qty: None,
             price: Some(be),
+            move_bracket: false,
         })
         .collect();
     if cmds.is_empty() {
@@ -5743,6 +5744,7 @@ mod tests {
                 order: OrderId(7),
                 qty: None,
                 price: Some(Price(599_975)),
+                move_bracket: false,
             }],
             "only the sell stop, to the next tick at or above the average"
         );

@@ -188,11 +188,22 @@ pub fn option_session_open(product: lines_core::ProductId, now: UtcMillis) -> bo
         .is_none_or(|cal| cal.session_at(now, SessionKind::Rth).is_some())
 }
 
+/// A request waiting out the simulated latency: the broker's own, or a bracket move
+/// (`Broker::move_bracket`: the entry and its held exits, together).
+enum Pending {
+    Request(BrokerRequest),
+    MoveBracket {
+        entry: (OrderId, Price),
+        by: i64,
+        exits: Vec<OrderId>,
+    },
+}
+
 pub struct PaperBroker {
     cfg: PaperConfig,
     accounts: BTreeMap<AccountId, PaperAccount>,
     orders: BTreeMap<OrderId, PaperOrder>,
-    pending: VecDeque<(UtcMillis, BrokerRequest)>,
+    pending: VecDeque<(UtcMillis, Pending)>,
     markets: HashMap<ContractKey, Market>,
     specs: HashMap<ContractKey, ContractSpec>,
     out: Vec<BrokerEvent>,
@@ -837,6 +848,44 @@ impl PaperBroker {
         }
     }
 
+    /// A bracket move at its time: while the entry is still unfilled, each exit still held
+    /// moves `by` from where it rests now (a stop or target the trader moved meanwhile keeps
+    /// that move), then the entry (one that now crosses the market fills against moved exits).
+    /// The exits move together or not at all (each checked first). Once the entry has a fill,
+    /// its exits are working, sized to the position, and only the entry moves.
+    fn move_bracket_now(
+        &mut self,
+        now: UtcMillis,
+        entry: (OrderId, Price),
+        by: i64,
+        exits: &[OrderId],
+    ) {
+        let unfilled = self
+            .orders
+            .get(&entry.0)
+            .is_some_and(|po| po.order.filled.0 == 0);
+        let mut moves = Vec::with_capacity(exits.len());
+        let mut valid = true;
+        for id in exits {
+            let Some(po) = self.orders.get(id).filter(|po| po.held) else {
+                continue;
+            };
+            let contract = po.order.contract;
+            let Some(p) = crate::broker::modified_price(&po.order) else {
+                continue;
+            };
+            let to = Price(p.0 + by);
+            valid &= self.spec(contract).is_some_and(|s| s.on_tick_grid(to));
+            moves.push((*id, to));
+        }
+        if unfilled && valid {
+            for (id, p) in moves {
+                self.modify(now, id, None, Some(p));
+            }
+        }
+        self.modify(now, entry.0, None, Some(entry.1));
+    }
+
     fn modify(&mut self, now: UtcMillis, id: OrderId, qty: Option<Qty>, price: Option<Price>) {
         let Some(po) = self.orders.get(&id) else {
             self.reject(id, "no such open order", now);
@@ -1285,7 +1334,30 @@ impl Broker for PaperBroker {
 
     fn request(&mut self, now: UtcMillis, req: BrokerRequest) {
         let due = UtcMillis(now.0 + self.cfg.latency_ms.max(0));
-        self.pending.push_back((due, req));
+        self.pending.push_back((due, Pending::Request(req)));
+    }
+
+    fn moves_brackets(&self) -> bool {
+        true
+    }
+
+    fn move_bracket(
+        &mut self,
+        now: UtcMillis,
+        entry: (OrderId, Price),
+        by: i64,
+        exits: &[OrderId],
+        _ctx: &crate::broker::RequestContext,
+    ) {
+        let due = UtcMillis(now.0 + self.cfg.latency_ms.max(0));
+        self.pending.push_back((
+            due,
+            Pending::MoveBracket {
+                entry,
+                by,
+                exits: exits.to_vec(),
+            },
+        ));
     }
 
     fn rewound(&mut self) {
@@ -1364,7 +1436,12 @@ impl Broker for PaperBroker {
             let (due, req) = self.pending.pop_front().expect("checked");
             // A request made due by a jump back (`rewound`) happens now; others at their time.
             let at = if due.0 == i64::MIN { now } else { due };
-            self.handle(at, req);
+            match req {
+                Pending::Request(r) => self.handle(at, r),
+                Pending::MoveBracket { entry, by, exits } => {
+                    self.move_bracket_now(at, entry, by, &exits)
+                }
+            }
         }
         if std::mem::take(&mut self.rewound) {
             let ids: Vec<OrderId> = self.orders.keys().copied().collect();

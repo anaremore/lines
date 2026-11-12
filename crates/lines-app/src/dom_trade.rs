@@ -635,15 +635,44 @@ pub fn row_of(price: i64, units: i64) -> i64 {
 // ---- drag to modify ----------------------------------------------------------------------
 
 /// The modify command for dragging order `o` to `to` (a row's displayed price); `None` when it
-/// didn't move or can't be moved (a market order).
-pub fn drag_command(o: &Order, to: Price) -> Option<TradeCommand> {
+/// didn't move or can't be moved (a market order). `with_legs`: the setting "Move stop and
+/// target with the entry" (an entry's held exits move with it, in the core).
+pub fn drag_command(o: &Order, to: Price, with_legs: bool) -> Option<TradeCommand> {
     let from = order_price(o)?;
     (o.is_open() && from != to).then(|| TradeCommand::ModifyOrder {
         account: o.account.clone(),
         order: o.id,
         qty: None,
         price: Some(to),
+        move_bracket: with_legs && o.role == lines_trading::Role::Entry,
     })
+}
+
+/// The ghosts of a dragged entry's legs (moved with it): each held exit at its price shifted by
+/// the entry's move, under the drag's command.
+pub fn leg_ghosts(
+    legs: [Option<(OrderId, Price)>; 2],
+    entry: OrderId,
+    from: Price,
+    to: Price,
+    command: CommandId,
+) -> impl Iterator<Item = Ghost> {
+    let d = to.0 - from.0;
+    legs.into_iter()
+        .flatten()
+        .enumerate()
+        .map(move |(k, (order, p))| Ghost {
+            order,
+            price: Price(p.0 + d),
+            command,
+            qty: None,
+            leg: Some(Leg {
+                was: p,
+                entry,
+                entry_to: to,
+                says: k == 0,
+            }),
+        })
 }
 
 /// Why moving stop `o` to `to` is refused: a stop must stay on the far side of the market
@@ -689,6 +718,21 @@ pub struct Ghost {
     /// A resize: the order's new total. Acked by that, not by a price it already rests at; and
     /// nothing is drawn for it (the mark or tag updates when the order reports it).
     pub qty: Option<Qty>,
+    /// A held stop or target moving with its entry (`leg_outcome`).
+    pub leg: Option<Leg>,
+}
+
+/// A held stop or target's ghost, moving with its entry.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Leg {
+    /// Where it rested before. Acked once it rests anywhere else (the broker moves it by the
+    /// entry's ticks from where it is then).
+    pub was: Price,
+    /// Its entry, and the entry's new price: once the entry rests there the move is done.
+    pub entry: OrderId,
+    pub entry_to: Price,
+    /// The one of the bracket's leg ghosts that says when they stayed (said once).
+    pub says: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -701,6 +745,42 @@ pub enum GhostOutcome {
     Rejected(String),
 }
 
+/// Why a stop or target didn't move with its entry: the entry filled first.
+pub const LEG_STAYED: &str = "the entry filled first: its stop and target stayed";
+
+/// What became of a leg's ghost (`Ghost::leg`): from the leg and its entry as the core now
+/// reports them and the command's result, if it arrived.
+pub fn leg_outcome(
+    g: &Ghost,
+    leg: Leg,
+    order: Option<&Order>,
+    result: Option<&Result<Vec<OrderId>, Reject>>,
+    entry: Option<&Order>,
+) -> GhostOutcome {
+    match (result, order) {
+        // Refused: the entry's ghost says why. Not moved by this broker (it moved only the
+        // entry; the flash says so), or gone: nothing more.
+        (Some(Err(_)), _) => GhostOutcome::Acked,
+        (Some(Ok(ids)), _) if !ids.contains(&g.order) => GhostOutcome::Acked,
+        (_, None) => GhostOutcome::Acked,
+        (_, Some(o)) if !o.is_open() => GhostOutcome::Acked,
+        (_, Some(o)) if order_price(o) != Some(leg.was) => GhostOutcome::Acked,
+        // Working where it was: the entry filled before the move took effect (said once).
+        (_, Some(o)) if !matches!(o.state, OrderState::Submitted | OrderState::Acked) => {
+            if leg.says {
+                GhostOutcome::Rejected(LEG_STAYED.into())
+            } else {
+                GhostOutcome::Acked
+            }
+        }
+        // The entry moved: the move took effect (the leg's own net move may be none).
+        _ if entry.is_some_and(|e| !e.is_open() || order_price(e) == Some(leg.entry_to)) => {
+            GhostOutcome::Acked
+        }
+        _ => GhostOutcome::Pending,
+    }
+}
+
 /// What became of a drag: from the order as the core now reports it and the command's
 /// result, if it arrived.
 pub fn ghost_outcome(
@@ -708,6 +788,9 @@ pub fn ghost_outcome(
     order: Option<&Order>,
     result: Option<&Result<Vec<OrderId>, Reject>>,
 ) -> GhostOutcome {
+    if let Some(leg) = g.leg {
+        return leg_outcome(g, leg, order, result, None);
+    }
     if let Some(Err(r)) = result {
         return GhostOutcome::Rejected(r.message.clone());
     }
@@ -745,7 +828,7 @@ pub fn position_row(avg_price: f64, tick: i64, units: i64) -> i64 {
 /// full message stays in the header). Known reasons by their wording, else the message's
 /// first word, at most 9 characters.
 pub fn short_reason(message: &str) -> &str {
-    const KNOWN: [(&str, &str); 18] = [
+    const KNOWN: [(&str, &str); 19] = [
         // First: whatever else it mentions, the cancel is what failed.
         ("cancel refused", "no cancel"),
         ("no answer to", "no cancel"),
@@ -764,6 +847,7 @@ pub fn short_reason(message: &str) -> &str {
         ("no market price", "no price"),
         ("liquidity", "no liq"),
         ("entries locked", "disabled"),
+        ("filled first", "stayed"),
         ("filled", "filled"),
     ];
     let lower = message.to_ascii_lowercase();
@@ -1634,8 +1718,8 @@ mod tests {
         };
         let o = order(OrderState::Working, lim);
         // Same row: nothing to send.
-        assert_eq!(drag_command(&o, Price(599_950)), None);
-        let cmd = drag_command(&o, Price(599_900)).unwrap();
+        assert_eq!(drag_command(&o, Price(599_950), true), None);
+        let cmd = drag_command(&o, Price(599_900), true).unwrap();
         assert_eq!(
             cmd,
             TradeCommand::ModifyOrder {
@@ -1643,13 +1727,117 @@ mod tests {
                 order: OrderId(7),
                 qty: None,
                 price: Some(Price(599_900)),
+                move_bracket: false,
             }
+        );
+        // An entry with the setting on asks the core to move its held legs; off, it doesn't;
+        // a stop or target never does (only an entry carries a bracket).
+        let mut entry = o.clone();
+        entry.role = lines_trading::Role::Entry;
+        let ask = |o: &Order, on| match drag_command(o, Price(599_900), on) {
+            Some(TradeCommand::ModifyOrder { move_bracket, .. }) => move_bracket,
+            _ => unreachable!(),
+        };
+        assert!(ask(&entry, true));
+        assert!(!ask(&entry, false));
+        assert!(!ask(&o, true));
+        // Its legs' ghosts: each shifted by the entry's move, under the drag's command.
+        let legs = [
+            Some((OrderId(8), Price(600_150))),
+            Some((OrderId(9), Price(599_750))),
+        ];
+        let ghosts: Vec<Ghost> = leg_ghosts(
+            legs,
+            OrderId(7),
+            Price(599_950),
+            Price(599_900),
+            CommandId(3),
+        )
+        .collect();
+        assert_eq!(
+            ghosts
+                .iter()
+                .map(|g| (g.order, g.price))
+                .collect::<Vec<_>>(),
+            [(OrderId(8), Price(600_100)), (OrderId(9), Price(599_700))]
+        );
+        // A broker that moved only the entry names only it: the legs' ghosts just go.
+        let leg = &ghosts[0];
+        let only_entry: Result<Vec<OrderId>, Reject> = Ok(vec![OrderId(7)]);
+        let mut held_leg = order(OrderState::Acked, lim);
+        held_leg.id = OrderId(8);
+        assert_eq!(
+            ghost_outcome(leg, Some(&held_leg), Some(&only_entry)),
+            GhostOutcome::Acked
+        );
+        // Moved with it: acked once it rests anywhere but where it was (a stop the trader
+        // moved meanwhile keeps that move, shifted).
+        let all: Result<Vec<OrderId>, Reject> = Ok(vec![OrderId(7), OrderId(8), OrderId(9)]);
+        let at = |p: i64, state| {
+            let mut x = order(state, OrderKind::Limit { price: Price(p) });
+            x.id = OrderId(8);
+            x
+        };
+        assert_eq!(
+            ghost_outcome(leg, Some(&at(600_150, OrderState::Acked)), Some(&all)),
+            GhostOutcome::Pending
+        );
+        assert_eq!(
+            ghost_outcome(leg, Some(&at(599_850, OrderState::Acked)), Some(&all)),
+            GhostOutcome::Acked
+        );
+        // The entry filled before the move took effect: the leg works where it was.
+        assert_eq!(
+            ghost_outcome(leg, Some(&at(600_150, OrderState::Working)), Some(&all)),
+            GhostOutcome::Rejected(LEG_STAYED.into())
+        );
+        // Said once: the other leg's ghost just goes.
+        assert_eq!(
+            ghost_outcome(
+                &ghosts[1],
+                Some(&at(599_750, OrderState::Working)),
+                Some(&all)
+            ),
+            GhostOutcome::Acked
+        );
+        // The entry rests at its new price: done, even where the leg's net move was none (a
+        // stop the trader moved back by as much just before).
+        let mut entry_now = order(
+            OrderState::Acked,
+            OrderKind::Limit {
+                price: Price(599_900),
+            },
+        );
+        entry_now.id = OrderId(7);
+        let l = leg.leg.unwrap();
+        let held_at = at(600_150, OrderState::Acked);
+        assert_eq!(
+            leg_outcome(leg, l, Some(&held_at), Some(&all), Some(&entry_now)),
+            GhostOutcome::Acked
+        );
+        entry_now.kind = OrderKind::Limit {
+            price: Price(599_950),
+        };
+        assert_eq!(
+            leg_outcome(leg, l, Some(&held_at), Some(&all), Some(&entry_now)),
+            GhostOutcome::Pending
+        );
+        assert_eq!(short_reason(LEG_STAYED), "stayed");
+        // The move refused: the entry's ghost says why, the leg's just goes.
+        let refused: Result<Vec<OrderId>, Reject> = Err(Reject::new(
+            lines_trading::RejectCode::Invalid,
+            "the moved stop or target would be off the tick grid",
+        ));
+        assert_eq!(
+            ghost_outcome(leg, Some(&at(600_150, OrderState::Acked)), Some(&refused)),
+            GhostOutcome::Acked
         );
         let g = Ghost {
             order: OrderId(7),
             price: Price(599_900),
             command: CommandId(1),
             qty: None,
+            leg: None,
         };
         // A resize: the order already rests at its price, so only its quantity acks it, and a
         // refusal still shows.
@@ -1658,6 +1846,7 @@ mod tests {
             price: Price(599_950),
             command: CommandId(2),
             qty: Some(Qty(4)),
+            leg: None,
         };
         assert_eq!(ghost_outcome(&sized, Some(&o), None), GhostOutcome::Pending);
         let mut resized = o.clone();
@@ -1701,7 +1890,7 @@ mod tests {
             GhostOutcome::Rejected("order filled".into())
         );
         // Terminal orders can't be dragged.
-        assert_eq!(drag_command(&filled, Price(599_900)), None);
+        assert_eq!(drag_command(&filled, Price(599_900), true), None);
     }
 
     #[test]

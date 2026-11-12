@@ -905,7 +905,11 @@ impl TradingCore {
                 Ok(self.bracket_send(env, now, &b))
             }
             Command::ModifyOrder {
-                order, qty, price, ..
+                order,
+                qty,
+                price,
+                move_bracket,
+                ..
             } => {
                 let o = self.open_order(&account, order)?;
                 let exempt = self.triggers.exempt;
@@ -1077,9 +1081,30 @@ impl TradingCore {
                         self.check_option_kind(now, &account, o.contract, &kind, reducing)?;
                     }
                 }
+                // The bracket's held exits move with an unfilled entry, by the same ticks, as
+                // one change: every new price checked first (any refused refuses the whole).
+                // A new quantity too: only the entry (the exits are sized to it when it fills).
+                let legs = match price {
+                    Some(p) if move_bracket && qty.is_none_or(|q| q == o.qty) => {
+                        self.bracket_legs(&o, p)?
+                    }
+                    _ => Vec::new(),
+                };
                 if let Some(a) = self.accounts.get_mut(&account) {
                     a.modifies.push_back(now);
                 }
+                if !legs.is_empty()
+                    && self.broker.capabilities().oco
+                    && self.broker.moves_brackets()
+                    && let Some(p) = price
+                {
+                    self.send_bracket_move(env, now, (order, p), &legs);
+                    return Ok(std::iter::once(order)
+                        .chain(legs.iter().map(|(id, _)| *id))
+                        .collect());
+                }
+                // A broker that can't move them together: only the entry (the result names only
+                // it, so the app can say so); never the legs one by one.
                 self.send(
                     env,
                     now,
@@ -1409,6 +1434,114 @@ impl TradingCore {
         }
         self.send(env, now, BrokerRequest::Bracket { entry, exits });
         ids
+    }
+
+    /// The held exits of `entry` and where they go when it moves to `to`: each by the same
+    /// number of ticks. Empty unless `entry` is an unfilled bracket entry with held exits (after
+    /// any fill its exits are working, sized to the position, and stay where they are). An exit
+    /// whose new price isn't valid refuses the whole move.
+    ///
+    /// An entry moved to fill now (a limit across the market) would open the position against
+    /// its moved stop: refused if that stop would trigger at once.
+    fn bracket_legs(&mut self, entry: &Order, to: Price) -> Result<Vec<(OrderId, Price)>, Reject> {
+        if entry.role != Role::Entry || entry.filled.0 != 0 {
+            return Ok(Vec::new());
+        }
+        let Some(from) = crate::broker::modified_price(entry) else {
+            return Ok(Vec::new());
+        };
+        let delta = to.0 - from.0;
+        if delta == 0 {
+            return Ok(Vec::new());
+        }
+        let spec = self.spec(entry.contract).expect("known");
+        let mut legs = Vec::new();
+        let mut held: Vec<Order> = self
+            .orders
+            .values()
+            .filter(|x| {
+                x.parent == Some(entry.id)
+                    && matches!(x.role, Role::TakeProfit | Role::StopLoss)
+                    && matches!(x.state, OrderState::Submitted | OrderState::Acked)
+            })
+            .cloned()
+            .collect();
+        held.sort_by_key(|x| x.id);
+        for x in held {
+            let Some(p) = crate::broker::modified_price(&x) else {
+                continue;
+            };
+            let moved = Price(p.0 + delta);
+            if !spec.on_tick_grid(moved) {
+                return Err(Reject::new(
+                    RejectCode::Invalid,
+                    "the moved stop or target would be off the tick grid",
+                ));
+            }
+            // A limit entry, or a triggered stop-limit's (working as a limit).
+            let limit = match entry.kind {
+                OrderKind::Limit { .. } => true,
+                OrderKind::StopLimit { .. } => entry.triggered,
+                _ => false,
+            };
+            if x.role == Role::StopLoss
+                && limit
+                && let Some(m) = self.marks.get(&entry.contract)
+            {
+                // The entry fills now if it crosses the market; then its stop works at once.
+                let (fills_now, triggers) = match entry.side {
+                    Side::Buy => (
+                        m.ask.or(m.last).is_some_and(|a| to.0 >= a.0),
+                        m.bid.or(m.last).is_some_and(|b| moved.0 >= b.0),
+                    ),
+                    Side::Sell => (
+                        m.bid.or(m.last).is_some_and(|b| to.0 <= b.0),
+                        m.ask.or(m.last).is_some_and(|a| moved.0 <= a.0),
+                    ),
+                };
+                if fills_now && triggers {
+                    return Err(Reject::new(
+                        RejectCode::Invalid,
+                        "the entry would fill now and its moved stop trigger at once",
+                    ));
+                }
+            }
+            legs.push((x.id, moved));
+        }
+        Ok(legs)
+    }
+
+    /// Send a bracket move (`Broker::move_bracket`), as `send` does a request.
+    fn send_bracket_move(
+        &mut self,
+        env: &Envelope,
+        now: UtcMillis,
+        entry: (OrderId, Price),
+        exits: &[(OrderId, Price)],
+    ) {
+        let ctx = RequestContext::new(env.source, env.pane);
+        let by = self
+            .orders
+            .get(&entry.0)
+            .and_then(crate::broker::modified_price)
+            .map_or(0, |from| entry.1.0 - from.0);
+        let ids: Vec<OrderId> = exits.iter().map(|(id, _)| *id).collect();
+        self.broker.move_bracket(now, entry, by, &ids, &ctx);
+        let us = env.issued.elapsed().as_micros() as u64;
+        self.latency.record(us);
+        if lat::enabled()
+            && let Ok(mut h) = self.hud.try_lock()
+        {
+            h.saw(now);
+            h.click_sent.record(now.0, us);
+        }
+        tracing::info!(
+            target: "lines::latency",
+            command = env.id.0,
+            source = ?env.source,
+            click_to_sent_us = us,
+            "bracket move sent"
+        );
     }
 
     fn open_order(&self, account: &AccountId, id: OrderId) -> Result<Order, Reject> {

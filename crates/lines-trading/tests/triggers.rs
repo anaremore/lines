@@ -345,6 +345,7 @@ fn a_fired_entrys_limit_a_person_handles() {
         order,
         qty: None,
         price: Some(Price(250)),
+        move_bracket: false,
     })
     .unwrap();
     r.wait(10_000);
@@ -1070,6 +1071,7 @@ fn risk_limits_never_trap_a_fired_exit() {
         order: plain,
         qty: None,
         price: Some(Price(246)),
+        move_bracket: false,
     });
     assert_eq!(refused.unwrap_err().code, RejectCode::Risk);
     r.quote(Some(240), Some(242));
@@ -1973,6 +1975,7 @@ fn an_exit_at_its_own_bid_passes_the_guard() {
         order: id,
         qty: None,
         price: Some(Price(100)),
+        move_bracket: false,
     });
     assert_eq!(moved.unwrap_err().code, RejectCode::Risk);
     r.cmd(Command::CancelOrder {
