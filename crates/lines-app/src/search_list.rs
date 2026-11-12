@@ -5,8 +5,9 @@
 //! The list itself belongs to its setting: a [`Pick`] holds indices into it, and the setting
 //! gives the words each choice is searched by.
 
-/// Rows the list shows at once.
-pub const ROWS: usize = 8;
+/// Rows the list shows at once: with its search field and keys line, about as tall as a
+/// dropdown (`crate::drop_list::MAX_H`), so it fits above or below its field.
+pub const ROWS: usize = 6;
 
 /// Indices of `hays` (each choice's lowercase search words, in list order) matching `query`:
 /// every word typed is in the choice's words (case and `_`/space ignored). Choices where

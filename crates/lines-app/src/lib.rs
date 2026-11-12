@@ -29,6 +29,8 @@ mod download_days;
 mod download_view;
 mod drawing_toolbar;
 mod drawings_store;
+mod drop_list;
+mod drop_view;
 mod dropdown;
 mod econ_layer;
 mod econ_ui;

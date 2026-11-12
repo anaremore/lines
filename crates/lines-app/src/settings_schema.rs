@@ -178,9 +178,12 @@ pub enum Kind {
     },
     /// An inline editor opens (bracket presets).
     Editor,
-    /// Any number of catalog products, one check per product (`settings_view` renders a chip
-    /// per product; Left/Right move between them, Space toggles).
+    /// Any number of catalog products, one check per product (a multi-select dropdown,
+    /// `settings_view`).
     Products,
+    /// Any number of these named options (a multi-select dropdown); the value is a
+    /// [`Value::List`] of the names chosen, in this order.
+    Picks(&'static [&'static str]),
     /// Text only.
     Info,
 }
@@ -699,6 +702,109 @@ pub struct NewPanes {
     /// pane; absent: 1.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_qty: Option<u32>,
+    /// The columns a new DOM hides (Settings › DOM › Columns); absent: none. The price column
+    /// is never hidden, and the trail's column follows the trail.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dom_hidden: Vec<crate::pane_columns::DomCol>,
+}
+
+/// The DOM columns Settings › DOM › Columns offers: the ones a trader may hide, but the
+/// trail's (it follows the trail, its own row).
+pub const DOM_COLUMNS: [crate::pane_columns::DomCol; 4] = [
+    crate::pane_columns::DomCol::Orders,
+    crate::pane_columns::DomCol::Bid,
+    crate::pane_columns::DomCol::Ask,
+    crate::pane_columns::DomCol::Volume,
+];
+const DOM_COLUMN_NAMES: [&str; 4] = ["Orders", "Bid", "Ask", "Volume"];
+
+/// Whether a choice of `names` is a dropdown rather than buttons (owner-approved controls,
+/// 2026-11-11): five or more options, or three or more with a long one. Two options, and a
+/// few short ones (Theme, Dark palette, P&L display, News blackout), stay buttons.
+pub fn drops_down(names: &[&str]) -> bool {
+    names.len() >= 5 || names.len() >= 3 && names.iter().any(|n| n.chars().count() > 10)
+}
+
+/// A choice setting whose dropdown ends with "Custom…": any value its setter takes as
+/// [`Value::Text`] (a timeframe, a grouping), not only the ones listed.
+pub fn takes_custom(key: &str) -> bool {
+    matches!(key, "charts.timeframe" | "dom.grouping")
+}
+
+/// The header a choice's row sits under in its dropdown, if its list is grouped (Bar period:
+/// Minutes, Hours, Days, Ticks, Seconds, Volume, Range).
+pub fn choice_group(key: &str, name: &str) -> Option<&'static str> {
+    use lines_core::Timeframe as T;
+    if key != "charts.timeframe" {
+        return None;
+    }
+    Some(match T::parse(name)? {
+        T::Minutes(_) => "Minutes",
+        T::Hours(_) => "Hours",
+        T::Day | T::Week => "Days",
+        T::Ticks(_) => "Ticks",
+        T::Seconds(_) => "Seconds",
+        T::Volume(_) => "Volume",
+        T::Range(_) => "Range",
+    })
+}
+
+/// A typed Bar period: the listed name it equals (`1D` is `D`), else its own text (a tick,
+/// volume, range or seconds size; minute and hour bars are the listed ones).
+fn custom_timeframe(text: &str) -> Result<Option<String>, &'static str> {
+    let tf = lines_core::Timeframe::parse(text)
+        .ok_or("a listed timeframe, or ticks, volume, range or seconds: 750t, 2000v, 8r, 45s")?;
+    let listed = TIMEFRAME_NAMES
+        .iter()
+        .position(|n| lines_core::Timeframe::parse(n) == Some(tf));
+    Ok(match listed {
+        Some(0) => None,
+        Some(i) => Some(TIMEFRAME_NAMES[i].to_owned()),
+        None => Some(tf.to_string()),
+    })
+}
+
+/// The most ticks per row a DOM takes (`DomView::restore` holds a saved one to it).
+const MAX_GROUPING: u32 = 10_000;
+
+/// The step a number setting's − / + moves by: $100, 5 minutes, else 1 (contracts, trades,
+/// GiB, ...).
+pub fn number_step(unit: &str) -> i64 {
+    match unit {
+        "$" => 100,
+        "min" => 5,
+        _ => 1,
+    }
+}
+
+/// A number setting's value after − (`up` false) or + from `cur`: to the next multiple of the
+/// step that way, held to `min..=max`; − from the least of an optional one turns it off, and +
+/// from off starts at one step (or the least). `None` when nothing changes.
+pub fn stepped(kind: Kind, cur: Option<i64>, up: bool) -> Option<Option<i64>> {
+    let Kind::Number {
+        min,
+        max,
+        optional,
+        unit,
+    } = kind
+    else {
+        return None;
+    };
+    let s = number_step(unit);
+    let next = match (cur, up) {
+        (None, true) => Some(s.clamp(min, max)),
+        (None, false) => return None,
+        (Some(n), true) => Some((n.div_euclid(s) + 1).saturating_mul(s).clamp(min, max)),
+        (Some(n), false) if n <= min => {
+            if optional {
+                None
+            } else {
+                return None;
+            }
+        }
+        (Some(n), false) => Some(((n - 1).div_euclid(s) * s).clamp(min, max)),
+    };
+    (next != cur).then_some(next)
 }
 
 impl NewPanes {
@@ -714,10 +820,6 @@ const TIMEFRAME_NAMES: [&str; 23] = [
     "1m", "2m", "3m", "5m", "10m", "15m", "30m", "1h", "2h", "4h", "D", "W", "100t", "233t",
     "500t", "1000t", "2000t", "15s", "30s", "500v", "1000v", "4r", "10r",
 ];
-
-fn choice(names: &[&str], current: &str) -> usize {
-    names.iter().position(|n| *n == current).unwrap_or(0)
-}
 
 fn want_bool(v: Value) -> Result<bool, &'static str> {
     match v {
@@ -1265,14 +1367,24 @@ fn table() -> Vec<Setting> {
                 Normal,
                 Choice(&TIMEFRAME_NAMES),
                 |p, _, _| {
-                    Value::Choice(choice(
-                        &TIMEFRAME_NAMES,
-                        p.app.new_panes.timeframe.as_deref().unwrap_or("1m"),
-                    ))
+                    // A typed one ("Custom…") shows as itself.
+                    let saved = p.app.new_panes.timeframe.as_deref().unwrap_or("1m");
+                    match TIMEFRAME_NAMES.iter().position(|n| *n == saved) {
+                        Some(i) => Value::Choice(i),
+                        None if lines_core::Timeframe::parse(saved).is_some() => {
+                            Value::Text(saved.to_owned())
+                        }
+                        None => Value::Choice(0),
+                    }
                 },
                 Some(|p, _, v| {
-                    let i = want_choice(v, TIMEFRAME_NAMES.len())?;
-                    p.app.new_panes.timeframe = (i != 0).then(|| TIMEFRAME_NAMES[i].to_owned());
+                    p.app.new_panes.timeframe = match v {
+                        Value::Text(t) => custom_timeframe(&t)?,
+                        v => {
+                            let i = want_choice(v, TIMEFRAME_NAMES.len())?;
+                            (i != 0).then(|| TIMEFRAME_NAMES[i].to_owned())
+                        }
+                    };
                     Ok(())
                 }),
             ),
@@ -1372,11 +1484,23 @@ fn table() -> Vec<Setting> {
                 Choice(&GROUPING_NAMES),
                 |p, _, _| {
                     let g = p.app.new_panes.dom_grouping.unwrap_or(1);
-                    Value::Choice(GROUPINGS.iter().position(|x| *x == g).unwrap_or(0))
+                    match GROUPINGS.iter().position(|x| *x == g) {
+                        Some(i) => Value::Choice(i),
+                        // A typed one ("Custom…").
+                        None => Value::Text(g.to_string()),
+                    }
                 },
                 Some(|p, _, v| {
-                    let i = want_choice(v, GROUPINGS.len())?;
-                    p.app.new_panes.dom_grouping = (i != 0).then_some(GROUPINGS[i]);
+                    let g = match v {
+                        Value::Text(t) => t
+                            .trim()
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|g| (1..=MAX_GROUPING).contains(g))
+                            .ok_or("ticks per row: a whole number from 1 to 10,000")?,
+                        v => GROUPINGS[want_choice(v, GROUPINGS.len())?],
+                    };
+                    p.app.new_panes.dom_grouping = (g != 1).then_some(g);
                     Ok(())
                 }),
             ),
@@ -1416,16 +1540,42 @@ fn table() -> Vec<Setting> {
             ),
             Value::Bool(true),
         ),
-        s(
-            "dom.columns",
-            Sec::Dom,
-            "Columns",
-            "Shown, hidden and widths per DOM: right-click a column header (or the palette's \"Columns:\" commands).",
-            Scope::ReadOnly,
-            Normal,
-            Info,
-            |_, _, _| Value::Text("Per DOM, from its column header".to_owned()),
-            None,
+        with_default(
+            s(
+                "dom.columns",
+                Sec::Dom,
+                "Columns",
+                "The columns a new DOM shows (the price always shows; the trail's follows the trail). Per DOM: right-click a column header, or the palette's \"Columns:\" commands.",
+                Scope::NewPanes,
+                Normal,
+                Picks(&DOM_COLUMN_NAMES),
+                |p, _, _| {
+                    Value::List(
+                        DOM_COLUMNS
+                            .iter()
+                            .filter(|c| !p.app.new_panes.dom_hidden.contains(c))
+                            .map(|c| c.label().to_owned())
+                            .collect(),
+                    )
+                },
+                Some(|p, _, v| {
+                    let Value::List(shown) = v else {
+                        return Err("expected columns");
+                    };
+                    if shown
+                        .iter()
+                        .any(|n| !DOM_COLUMN_NAMES.contains(&n.as_str()))
+                    {
+                        return Err("not a DOM column");
+                    }
+                    p.app.new_panes.dom_hidden = DOM_COLUMNS
+                        .into_iter()
+                        .filter(|c| !shown.iter().any(|n| n == c.label()))
+                        .collect();
+                    Ok(())
+                }),
+            ),
+            Value::List(DOM_COLUMN_NAMES.map(str::to_owned).to_vec()),
         ),
         // Trading.
         with_default(
@@ -4999,5 +5149,134 @@ mod tests {
             None,
             "case and order don't matter"
         );
+    }
+
+    /// The rule picks exactly the audited rows (owner-approved, 2026-11-11): dropdowns for
+    /// Updates, Light palette, UI zoom, Bar period, Grouping and Prop preset; every other
+    /// choice stays buttons.
+    #[test]
+    fn the_audited_choices_drop_down() {
+        let drops: Vec<&str> = all()
+            .iter()
+            .filter(|s| matches!(s.kind, Kind::Choice(c) if drops_down(c)))
+            .map(|s| s.key)
+            .collect();
+        assert_eq!(
+            drops,
+            [
+                "general.updates",
+                "appearance.light_palette",
+                "appearance.ui_zoom",
+                "charts.timeframe",
+                "dom.grouping",
+                "prop.preset",
+            ]
+        );
+    }
+
+    /// − and + move by a step to its next multiple, held to the range; − from the least of an
+    /// optional one turns it off, + from off starts at a step.
+    #[test]
+    fn steps_move_to_the_next_multiple() {
+        let dollars = Kind::Number {
+            min: 1,
+            max: 1_000_000,
+            optional: true,
+            unit: "$",
+        };
+        assert_eq!(stepped(dollars, None, true), Some(Some(100)));
+        assert_eq!(stepped(dollars, None, false), None, "off stays off");
+        assert_eq!(stepped(dollars, Some(1_000), true), Some(Some(1_100)));
+        assert_eq!(stepped(dollars, Some(1_050), true), Some(Some(1_100)));
+        assert_eq!(stepped(dollars, Some(1_050), false), Some(Some(1_000)));
+        assert_eq!(stepped(dollars, Some(100), false), Some(Some(1)));
+        assert_eq!(stepped(dollars, Some(1), false), Some(None), "off");
+        assert_eq!(stepped(dollars, Some(1_000_000), true), None, "at the top");
+        let minutes = Kind::Number {
+            min: 0,
+            max: 120,
+            optional: false,
+            unit: "min",
+        };
+        assert_eq!(stepped(minutes, Some(15), true), Some(Some(20)));
+        assert_eq!(stepped(minutes, Some(3), false), Some(Some(0)));
+        assert_eq!(stepped(minutes, Some(0), false), None, "never off");
+        let qty = Kind::Number {
+            min: 1,
+            max: 999,
+            optional: false,
+            unit: "",
+        };
+        assert_eq!(stepped(qty, Some(1), true), Some(Some(2)));
+        assert_eq!(stepped(qty, Some(1), false), None);
+        assert_eq!(stepped(Kind::Toggle, Some(1), true), None);
+    }
+
+    /// "Custom…": a typed timeframe or grouping is saved, shown as itself, and a typed name of
+    /// a listed one is that one; a bad one is refused and changes nothing.
+    #[test]
+    fn custom_timeframes_and_groupings() {
+        let (mut p, t, f) = (Prefs::default(), Target::default(), Facts::default());
+        let tf = by_key("charts.timeframe").unwrap();
+        tf.apply(&mut p, &t, Value::Text("750T".into())).unwrap();
+        assert_eq!(p.app.new_panes.timeframe.as_deref(), Some("750t"));
+        assert_eq!((tf.get)(&p, &t, &f), Value::Text("750t".into()));
+        assert_eq!(tf.value_text(&(tf.get)(&p, &t, &f)), "750t");
+        // Minute and hour bars are the listed ones (`Timeframe::is_valid`).
+        assert!(tf.apply(&mut p, &t, Value::Text("7m".into())).is_err());
+        tf.apply(&mut p, &t, Value::Text("1D".into())).unwrap();
+        assert_eq!((tf.get)(&p, &t, &f), Value::Choice(10), "1D is D");
+        tf.apply(&mut p, &t, Value::Text(" 1m ".into())).unwrap();
+        assert_eq!(p.app.new_panes.timeframe, None, "the default saves nothing");
+        assert!(tf.apply(&mut p, &t, Value::Text("7x".into())).is_err());
+        assert_eq!(p.app.new_panes.timeframe, None);
+        let g = by_key("dom.grouping").unwrap();
+        g.apply(&mut p, &t, Value::Text("4".into())).unwrap();
+        assert_eq!(p.app.new_panes.dom_grouping, Some(4));
+        assert_eq!((g.get)(&p, &t, &f), Value::Text("4".into()));
+        g.apply(&mut p, &t, Value::Text("10".into())).unwrap();
+        assert_eq!((g.get)(&p, &t, &f), Value::Choice(3), "a listed one");
+        for bad in ["0", "10001", "x", "-2"] {
+            assert!(
+                g.apply(&mut p, &t, Value::Text(bad.into())).is_err(),
+                "{bad}"
+            );
+        }
+        assert_eq!(p.app.new_panes.dom_grouping, Some(10));
+        // A palette command still sets a listed one.
+        g.apply(&mut p, &t, Value::Choice(0)).unwrap();
+        assert_eq!(p.app.new_panes.dom_grouping, None);
+    }
+
+    /// Settings › DOM › Columns: the columns a new DOM shows, saved as the ones it hides
+    /// (optional: absent shows them all, and a file without it loads).
+    #[test]
+    fn new_dom_columns_round_trip() {
+        use crate::pane_columns::DomCol;
+        let (mut p, t, f) = (Prefs::default(), Target::default(), Facts::default());
+        let cols = by_key("dom.columns").unwrap();
+        let all = Value::List(vec![
+            "Orders".into(),
+            "Bid".into(),
+            "Ask".into(),
+            "Volume".into(),
+        ]);
+        assert_eq!((cols.get)(&p, &t, &f), all);
+        assert!(!cols.changed(&p, &t, &f));
+        cols.apply(&mut p, &t, Value::List(vec!["Bid".into(), "Ask".into()]))
+            .unwrap();
+        assert_eq!(p.app.new_panes.dom_hidden, [DomCol::Orders, DomCol::Volume]);
+        assert!(cols.changed(&p, &t, &f));
+        assert!(
+            cols.apply(&mut p, &t, Value::List(vec!["Price".into()]))
+                .is_err(),
+            "the price column always shows"
+        );
+        let json = serde_json::to_string(&p.app.new_panes).unwrap();
+        assert_eq!(json, r#"{"dom_hidden":["orders","volume"]}"#);
+        let back: NewPanes = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p.app.new_panes);
+        let old: NewPanes = serde_json::from_str("{}").unwrap();
+        assert!(old.dom_hidden.is_empty() && old.is_default());
     }
 }
