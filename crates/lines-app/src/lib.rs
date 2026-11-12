@@ -45,6 +45,8 @@ mod icons;
 mod journal_shots;
 mod journal_view;
 mod keycap;
+mod keymap;
+mod keys_view;
 mod latency_hud;
 mod layout;
 mod layout_rec;
@@ -2307,6 +2309,11 @@ where
     let mut reports: Vec<String> = settings_report.into_iter().collect();
     // Plugins' saved settings, before any chart attaches a level source.
     plugin_settings::load(&settings.settings.plugins);
+    // The effective keymap (the defaults plus the user's changes), before any key is read;
+    // what it can't use is reported, never fatal.
+    let (keys, skipped) = keymap::Keymap::with(&settings.settings.key_bindings);
+    keymap::install(keys);
+    reports.extend(skipped);
     // Data folder moves and problems (they were logged at startup).
     reports.extend(data_notices);
     if zone_flag.is_none() {

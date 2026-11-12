@@ -265,6 +265,11 @@ pub struct Settings {
     /// Optional.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub plugins: crate::plugin_settings::Saved,
+    /// Key bindings that differ from the defaults (`crate::keymap`): each changed command's
+    /// whole list of keys ("ctrl+shift+f"). Optional; unknown commands and keys are skipped
+    /// and reported when loading, never fatal.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub key_bindings: crate::keymap::Saved,
     /// Prop rules per trading account, keyed by the account's name (the Settings window's
     /// Risk section). Optional: an account without an entry keeps its rules.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
@@ -920,6 +925,28 @@ mod tests {
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains(r#""ui_font":"Calibri""#), "{json}");
         assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), s);
+    }
+
+    /// Key bindings: absent in older files (the defaults), written only when changed, and an
+    /// unknown command or key in the file reads (and is skipped by the keymap), never fatal.
+    #[test]
+    fn key_bindings_are_an_optional_setting() {
+        let empty = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!empty.contains("key_bindings"), "{empty}");
+        let old: Settings = serde_json::from_str(r#"{"recents":[1]}"#).unwrap();
+        assert!(old.key_bindings.is_empty());
+        let odd: Settings = serde_json::from_str(
+            r#"{"key_bindings":{"NoSuchCommand":["ctrl+shift+q"],"NewTab":["ctrl+alt+f11"]}}"#,
+        )
+        .unwrap();
+        let (m, skipped) = crate::keymap::Keymap::with(&odd.key_bindings);
+        assert_eq!(skipped.len(), 1, "{skipped:?}");
+        assert_eq!(
+            m.lookup(true, false, true, "f11"),
+            Some(crate::commands::Command::NewTab)
+        );
+        let json = serde_json::to_string(&odd).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap(), odd);
     }
 
     #[test]

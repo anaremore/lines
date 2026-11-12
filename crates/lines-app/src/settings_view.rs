@@ -262,6 +262,8 @@ pub struct SettingsWindow {
     pub(crate) conn: crate::connections_view::ConnPage,
     /// Settings › Plugins (`crate::plugins_view`).
     pub(crate) plugins: crate::plugins_view::PluginPage,
+    /// Settings › Keys (`crate::keys_view`).
+    pub(crate) keys: crate::keys_view::KeysPage,
     /// Accounts › Prop rules: the overrides are shown (Override…).
     overrides_open: bool,
     /// Parts hidden while their guardrail is off (the cooldown without a losing streak), as
@@ -287,8 +289,6 @@ const DOT_W: f32 = 12.0;
 const FADE_H: f32 = 16.0;
 /// The ↺ slot (its hit target, each way).
 const RESET_W: f32 = 24.0;
-/// A line's right end after its controls: the gap, ●, gap, ↺ and the line's padding.
-const MARKS_W: f32 = 8.0 + DOT_W + 8.0 + RESET_W + 8.0;
 /// A number field's narrowest.
 const NUMBER_W: f32 = 72.0;
 /// A number field's narrowest between its − and + (the three as wide as the field was alone,
@@ -378,8 +378,15 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
             }
         }
     }
+    for s in set.iter().filter_map(|s| s.strip_prefix("keys:")) {
+        let known = ["bind:", "capture:", "press:", "filter:", "chip:"];
+        if !known.iter().any(|k| s.starts_with(k)) {
+            anyhow::bail!("--settings-set keys:{s:?}: keys:bind|capture|press|filter|chip");
+        }
+    }
     for s in set.iter().filter(|s| {
         !s.starts_with("account=")
+            && !s.starts_with("keys:")
             && List::typed(s).is_none()
             && !s.starts_with(DATA_PICK)
             && drop_open(s).is_none()
@@ -440,6 +447,12 @@ pub fn open_for_screenshot(
                 .press(crate::plugins_view::Action::Open(src, key), cx);
         }
         for s in &set {
+            if s.starts_with("keys:") {
+                if let Err(e) = crate::keys_view::shot(&mut v.keys, s, cx) {
+                    tracing::warn!("{e}");
+                }
+                continue;
+            }
             if let Some(name) = s.strip_prefix("account=") {
                 if let Some(a) = v
                     .facts
@@ -565,6 +578,14 @@ fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
                 SettingsWindow::watch(cx);
             }
             observe_os_appearance(window, cx).detach();
+            // A key being captured ends when the window loses focus (no key is left blocked).
+            cx.observe_window_activation(window, |v: &mut SettingsWindow, window, cx| {
+                if !window.is_window_active() && v.keys.capturing() {
+                    v.keys.leave();
+                    cx.notify();
+                }
+            })
+            .detach();
             if let Some(i) = at {
                 v.show(i);
             }
@@ -912,6 +933,7 @@ impl SettingsWindow {
             awaiting: Vec::new(),
             conn: Default::default(),
             plugins: Default::default(),
+            keys: Default::default(),
             seen_revision: 0,
             overrides_open: false,
             dormant: Vec::new(),
@@ -1011,6 +1033,7 @@ impl SettingsWindow {
     /// editor): the account, product or section changed under it.
     fn drop_unfinished(&mut self) {
         self.conn.leave();
+        self.keys.leave();
         self.plugins.leave();
         self.edit = None;
         self.cancel_pending();
@@ -1589,6 +1612,15 @@ impl SettingsWindow {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
+        // Settings › Keys: a key being captured takes every key first (it never runs a
+        // command, not even the zoom's or Flatten); the page finds and moves otherwise.
+        if (self.keys.capturing()
+            || (self.section == Section::Keys && self.query.trim().is_empty()))
+            && self.keys.key(ev, cx)
+        {
+            cx.notify();
+            return;
+        }
         if self.editor.is_some() {
             self.editor_key(ev, cx);
             return;
@@ -3270,6 +3302,12 @@ impl SettingsWindow {
         row
     }
 
+    /// A press on the Keys page.
+    pub(crate) fn keys_action(&mut self, a: crate::keys_view::Action, cx: &mut Context<Self>) {
+        self.keys.press(a, cx);
+        cx.notify();
+    }
+
     /// A press on the Plugins page.
     pub(crate) fn plugin_action(&mut self, a: crate::plugins_view::Action, cx: &mut Context<Self>) {
         self.plugins.press(a, cx);
@@ -3475,38 +3513,6 @@ impl SettingsWindow {
     fn account_facts(&self) -> Option<String> {
         let n = self.account()?.account_size?;
         Some(format!("${} start", schema::grouped(n)))
-    }
-
-    fn keys_list(&self) -> AnyElement {
-        let t = self.theme;
-        let mut list = div().flex().flex_col().mt_1();
-        let mut seen = Vec::new();
-        for b in crate::commands::BINDINGS {
-            if seen.contains(&b.cmd) {
-                continue;
-            }
-            seen.push(b.cmd);
-            list = list.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .gap_2()
-                    // Text starts where every line's label does (its 2 px edge slot and gap); the
-                    // keys end where every line's controls do (before the ● and ↺ column).
-                    .pl(crate::zoom::ui(10.0))
-                    .pr(crate::zoom::ui(MARKS_W))
-                    .border_b_1()
-                    .border_color(t.axis_line)
-                    .child(
-                        div()
-                            .text_color(t.text_main)
-                            .child(crate::commands::label(b.cmd)),
-                    )
-                    .children(crate::keycap::caps(b.cmd, &t)),
-            );
-        }
-        list.into_any_element()
     }
 
     fn editor_view(&self) -> Option<AnyElement> {
@@ -3861,6 +3867,7 @@ impl Render for SettingsWindow {
             child += 1;
         }
         let mut selected_child = None;
+        let mut keys_first = None;
         // Blocks shown after a line: the preset editor, the time zone's and the UI font's
         // lists, the keys.
         let extras = |v: &Self, keys: &[usize], cx: &mut Context<Self>| -> Vec<AnyElement> {
@@ -3868,7 +3875,7 @@ impl Render for SettingsWindow {
             for &i in keys {
                 match schema::all()[i].key {
                     "trading.brackets" => out.extend(v.editor_view()),
-                    "keys.list" => out.push(v.keys_list()),
+                    "keys.list" => out.extend(crate::keys_view::list(&v.keys, &v.theme, cx)),
                     // Settings › Connections: a card per source (decision 0030).
                     k if k == schema::CONNECTIONS_LIST => {
                         out.push(crate::connections_view::list(&v.conn, &v.theme, cx))
@@ -3941,12 +3948,27 @@ impl Render for SettingsWindow {
                     let label = schema::line_label(line);
                     main = main.child(self.line_view(label, line.parts, line.sub, &prefs, cx));
                     child += 1;
+                    if line.keys().any(|k| k == "keys.list") {
+                        keys_first = Some(child);
+                    }
                     for e in extras(self, &keys, cx) {
                         main = main.child(e);
                         child += 1;
                     }
                 }
             }
+        }
+        // Settings › Keys: the focused (or capturing) row in view once it moved.
+        if self.keys.reveal
+            && let (Some(first), Some(i)) = (keys_first, self.keys.at.get())
+            && self.scroll.bounds().size.height > px(0.0)
+        {
+            self.scroll.scroll_to_item(first + i);
+            self.keys.reveal = false;
+            self.scrolled = Some((self.section, self.row, self.query.clone()));
+        } else if self.keys.reveal && keys_first.is_some() && self.keys.at.get().is_some() {
+            // Not laid out yet: the next frame.
+            cx.notify();
         }
         let at = (self.section, self.row, self.query.clone());
         // Only once the list has been laid out (a first frame has no viewport yet, and
