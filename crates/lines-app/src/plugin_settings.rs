@@ -339,6 +339,7 @@ pub fn load(saved: &Saved) {
 #[derive(Clone, Debug, Default)]
 pub struct Shot {
     pub ask: Option<(String, &'static str)>,
+    #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
     pub open: Option<(String, &'static str)>,
 }
 
