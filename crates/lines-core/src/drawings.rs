@@ -51,10 +51,18 @@ pub enum Tool {
     /// A price-range measure: ticks, points, $ per contract, bars and duration. Temporary
     /// unless pinned.
     Measure,
+    /// A freehand stroke (press, drag, release): its smoothed, simplified points
+    /// ([`Drawing::points`], at most [`MAX_STROKE`]); `a` and `b` are its first and last.
+    Brush,
+    /// A segment between two anchors with an arrowhead at the second (on by default).
+    Arrow,
 }
 
+/// The most points a brush stroke keeps (after smoothing and simplification).
+pub const MAX_STROKE: usize = 512;
+
 impl Tool {
-    pub const ALL: [Tool; 8] = [
+    pub const ALL: [Tool; 10] = [
         Tool::HLine,
         Tool::HRay,
         Tool::Trend,
@@ -63,13 +71,15 @@ impl Tool {
         Tool::VLine,
         Tool::Note,
         Tool::Measure,
+        Tool::Brush,
+        Tool::Arrow,
     ];
 
     /// Anchors placed to draw it: one click, or two (click, then click or drag-release).
     pub fn anchors(self) -> usize {
         match self {
             Tool::HLine | Tool::HRay | Tool::VLine | Tool::Note => 1,
-            Tool::Trend | Tool::Ray | Tool::Rect | Tool::Measure => 2,
+            Tool::Trend | Tool::Ray | Tool::Rect | Tool::Measure | Tool::Brush | Tool::Arrow => 2,
         }
     }
 
@@ -85,6 +95,8 @@ impl Tool {
             Tool::VLine => "vertical line",
             Tool::Note => "text",
             Tool::Measure => "measure",
+            Tool::Brush => "brush",
+            Tool::Arrow => "arrow",
         }
     }
 
@@ -99,6 +111,8 @@ impl Tool {
             Tool::VLine => "vline",
             Tool::Note => "note",
             Tool::Measure => "measure",
+            Tool::Brush => "brush",
+            Tool::Arrow => "arrow",
         }
     }
 
@@ -125,6 +139,8 @@ pub struct Style {
     pub extend_right: bool,
     /// The drawing's price on the price axis (horizontal lines and rays, a zone's two edges).
     pub axis_tag: bool,
+    /// An arrowhead at the end (trend lines, arrows, brush strokes; [`Tool::has_arrowhead`]).
+    pub arrow_end: bool,
 }
 
 impl Style {
@@ -138,7 +154,17 @@ impl Style {
         extend_left: false,
         extend_right: false,
         axis_tag: false,
+        arrow_end: false,
     };
+
+    /// A new `tool` drawing's style before any saved default: [`Style::DEFAULT`], with the
+    /// arrowhead on for an arrow.
+    pub fn for_tool(tool: Tool) -> Style {
+        Style {
+            arrow_end: tool == Tool::Arrow,
+            ..Style::DEFAULT
+        }
+    }
 
     /// In range (a file may hold anything): widths 1–4, opacities 10–100 %, palette indices
     /// wrapped, no study-only color.
@@ -215,6 +241,12 @@ impl Tool {
     pub fn has_stroke(self) -> bool {
         self != Tool::Note
     }
+
+    /// Whether it can end in an arrowhead (trend lines and brush strokes off by default,
+    /// arrows on).
+    pub fn has_arrowhead(self) -> bool {
+        matches!(self, Tool::Trend | Tool::Arrow | Tool::Brush)
+    }
 }
 
 pub type DrawingId = u64;
@@ -230,6 +262,8 @@ pub struct Drawing {
     pub style: Style,
     /// A note's text (empty for other tools).
     pub text: String,
+    /// A brush stroke's points in order, `a` first and `b` last (empty for other tools).
+    pub points: Vec<Anchor>,
 }
 
 impl Drawing {
@@ -242,7 +276,17 @@ impl Drawing {
             b,
             style,
             text: String::new(),
+            points: Vec::new(),
         }
+    }
+
+    /// A brush stroke through `points` (at least two; `a` and `b` are the first and last).
+    pub fn stroke(points: Vec<Anchor>, style: Style) -> Option<Drawing> {
+        let (&a, &b) = (points.first()?, points.last()?);
+        (points.len() >= 2).then(|| Drawing {
+            points,
+            ..Drawing::new(Tool::Brush, a, b, style)
+        })
     }
 
     /// The drawing with handle `i` (0 = `a`, 1 = `b`) moved to `at`.
@@ -262,7 +306,9 @@ impl Drawing {
     /// Whether it is on the tick grid (`tick` units); a file may hold anything.
     pub fn on_grid(&self, tick: i64) -> bool {
         let t = tick.max(1);
-        self.a.price.0 % t == 0 && self.b.price.0 % t == 0
+        self.a.price.0 % t == 0
+            && self.b.price.0 % t == 0
+            && self.points.iter().all(|p| p.price.0 % t == 0)
     }
 }
 
@@ -296,6 +342,25 @@ impl<'a> TimeAxis<'a> {
         }
         let len = (self.view.end(i).0 - start).max(1) as f64;
         Some(i as f64 + ((t.0 - start) as f64 / len).min(1.0))
+    }
+
+    /// The time at fractional index `i` ([`Self::index_of`]'s inverse): inside bar `k`'s
+    /// bucket by the fraction elapsed, outside the bars by whole periods. `None` without bars.
+    pub fn time_at(&self, i: f64) -> Option<UtcMillis> {
+        let bars = self.view.bars;
+        let (first, last) = (bars.first()?, bars.len() - 1);
+        let p = self.view.period_ms.max(1) as f64;
+        if i < 0.0 {
+            return Some(UtcMillis(first.time.0 + (i * p).round() as i64));
+        }
+        let k = (i.floor() as usize).min(last);
+        let start = bars[k].time.0;
+        let frac = i - k as f64;
+        if k == last {
+            return Some(UtcMillis(start + (frac * p).round() as i64));
+        }
+        let len = (self.view.end(k).0 - start).max(1) as f64;
+        Some(UtcMillis(start + (frac.min(1.0) * len).round() as i64))
     }
 
     /// The start of slot `slot`'s bar; outside the bars, extrapolated by whole periods.
@@ -369,6 +434,9 @@ pub struct Projected {
     pub n_handles: u8,
     /// The anchors' prices (for axis tags): `a`, `b`.
     pub prices: [Price; 2],
+    /// A brush stroke's projected points: their range in the frame's point buffer
+    /// ([`project_points`]); empty for other tools.
+    pub pts: (u32, u32),
 }
 
 /// Default size of a note's box before the chart measures its text (logical px).
@@ -391,6 +459,7 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
         handles: [(0.0, 0.0); 2],
         n_handles: 1,
         prices: [d.a.price, d.b.price],
+        pts: (0, 0),
     };
     let (ext_l, ext_r) = {
         let (l, r) = d.tool.extends();
@@ -449,7 +518,25 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
                 return None;
             }
         }
-        Tool::Trend | Tool::Ray => {
+        Tool::Brush => {
+            // Its first and last points as handles (the selection's marks), its extent for
+            // culling; the stroke itself is [`project_points`]'.
+            let (x0, x1) = (xa?, xb?);
+            out.handles = [(x0, ya), (x1, yb)];
+            out.n_handles = 2;
+            let (mut lo, mut hi, mut top, mut bottom) = (x0, x0, ya, ya);
+            for p in &d.points {
+                let x = axis.x_of(vp, p.time)?;
+                let y = y(p.price);
+                (lo, hi, top, bottom) = (lo.min(x), hi.max(x), top.min(y), bottom.max(y));
+            }
+            out.p0 = (lo, top);
+            out.p1 = (hi, bottom);
+            if hi < 0.0 || lo > w || bottom < 0.0 || top > h {
+                return None;
+            }
+        }
+        Tool::Trend | Tool::Ray | Tool::Arrow => {
             let (x0, x1) = (xa?, xb?);
             out.handles = [(x0, ya), (x1, yb)];
             out.n_handles = 2;
@@ -472,6 +559,89 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
         }
     }
     Some(out)
+}
+
+/// A brush stroke's points in plot-local px, appended to `out` (the frame's point buffer, which
+/// never grows past its capacity: points past it are dropped). Returns their range in `out`.
+pub fn project_points(
+    d: &Drawing,
+    axis: &TimeAxis<'_>,
+    vp: &Viewport,
+    out: &mut Vec<(f32, f32)>,
+) -> (u32, u32) {
+    let start = out.len();
+    for p in &d.points {
+        if out.len() >= out.capacity() {
+            break;
+        }
+        if let Some(x) = axis.x_of(vp, p.time) {
+            out.push((x, vp.price_to_y(p.price.0 as f64) as f32));
+        }
+    }
+    (start as u32, out.len() as u32)
+}
+
+/// A freehand stroke as kept (plot px, at draw time): smoothed (each inner point averaged with
+/// its neighbours, the ends kept), then simplified (Ramer-Douglas-Peucker: every smoothed
+/// point stays within `eps` px of the result), with the tolerance raised until at most `cap`
+/// points remain. The first and last points are always kept.
+pub fn simplify_stroke(raw: &[(f32, f32)], eps: f32, cap: usize) -> Vec<(f32, f32)> {
+    let cap = cap.max(2);
+    // Drop repeats (a press that didn't move draws nothing).
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(raw.len());
+    for &p in raw {
+        if pts.last() != Some(&p) {
+            pts.push(p);
+        }
+    }
+    if pts.len() <= 2 {
+        return pts;
+    }
+    let smooth: Vec<(f32, f32)> = (0..pts.len())
+        .map(|i| {
+            if i == 0 || i == pts.len() - 1 {
+                pts[i]
+            } else {
+                let (a, b, c) = (pts[i - 1], pts[i], pts[i + 1]);
+                ((a.0 + 2.0 * b.0 + c.0) / 4.0, (a.1 + 2.0 * b.1 + c.1) / 4.0)
+            }
+        })
+        .collect();
+    let mut eps = eps.max(0.01);
+    loop {
+        let out = rdp(&smooth, eps);
+        if out.len() <= cap {
+            return out;
+        }
+        eps *= 1.5;
+    }
+}
+
+/// Ramer-Douglas-Peucker on `pts` with tolerance `eps` (iterative, ends kept).
+fn rdp(pts: &[(f32, f32)], eps: f32) -> Vec<(f32, f32)> {
+    let n = pts.len();
+    let mut keep = vec![false; n];
+    keep[0] = true;
+    keep[n - 1] = true;
+    let mut stack = vec![(0usize, n - 1)];
+    while let Some((i, j)) = stack.pop() {
+        let (mut far, mut at) = (0.0f32, 0usize);
+        for k in i + 1..j {
+            let d = segment_distance(pts[k], pts[i], pts[j]);
+            if d > far {
+                (far, at) = (d, k);
+            }
+        }
+        if far > eps {
+            keep[at] = true;
+            stack.push((i, at));
+            stack.push((at, j));
+        }
+    }
+    pts.iter()
+        .zip(keep)
+        .filter_map(|(p, k)| k.then_some(*p))
+        .collect()
 }
 
 /// From `a` through `b` to where the line leaves the plot `[0, w] × [0, h]` (or `b` itself
@@ -523,9 +693,29 @@ pub fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
 
 /// Whether (`x`, `y`) is on `d`: a handle within `handle_r` (only when `handles` is set, i.e.
 /// the drawing is selected) or the drawing within `tol` (zones, measures and notes: anywhere
-/// inside).
-pub fn hit(d: &Projected, x: f32, y: f32, tol: f32, handles: bool, handle_r: f32) -> Option<Hit> {
+/// inside; a brush stroke on any of its segments, `pts` being the frame's point buffer). A
+/// brush stroke's handles only mark it: a press on one moves the stroke ([`Hit::Body`]).
+pub fn hit(
+    d: &Projected,
+    pts: &[(f32, f32)],
+    x: f32,
+    y: f32,
+    tol: f32,
+    handles: bool,
+    handle_r: f32,
+) -> Option<Hit> {
     let p = (x, y);
+    if d.tool == Tool::Brush {
+        let s = pts
+            .get(d.pts.0 as usize..d.pts.1 as usize)
+            .unwrap_or_default();
+        let on_handle = handles
+            && d.handles[..usize::from(d.n_handles)]
+                .iter()
+                .any(|&(hx, hy)| (x - hx).abs() <= handle_r && (y - hy).abs() <= handle_r);
+        let on = on_handle || s.windows(2).any(|w| segment_distance(p, w[0], w[1]) <= tol);
+        return on.then_some(Hit::Body);
+    }
     if handles {
         for i in 0..d.n_handles as usize {
             let (hx, hy) = d.handles[i];
@@ -560,6 +750,7 @@ pub fn hit(d: &Projected, x: f32, y: f32, tol: f32, handles: bool, handle_r: f32
 /// drawings from the last drawn (on top) back. Allocation-free.
 pub fn pick(
     drawn: &[Projected],
+    pts: &[(f32, f32)],
     selected: Option<DrawingId>,
     x: f32,
     y: f32,
@@ -568,14 +759,15 @@ pub fn pick(
 ) -> Option<(DrawingId, Hit)> {
     if let Some(s) = selected
         && let Some(d) = drawn.iter().find(|d| d.id == s)
-        && let Some(h @ Hit::Handle(_)) = hit(d, x, y, tol, true, handle_r)
+        && let Some(h) = hit(d, pts, x, y, tol, true, handle_r)
+        && (h != Hit::Body || d.tool == Tool::Brush)
     {
         return Some((s, h));
     }
     drawn
         .iter()
         .rev()
-        .find_map(|d| hit(d, x, y, tol, false, handle_r).map(|h| (d.id, h)))
+        .find_map(|d| hit(d, pts, x, y, tol, false, handle_r).map(|h| (d.id, h)))
 }
 
 // ---- measure ----------------------------------------------------------------------------

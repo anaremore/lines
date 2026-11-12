@@ -309,3 +309,70 @@ fn a_newer_files_unknown_fields_survive() {
     assert!(!doc.drawings[0].extra.contains_key("tool"));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A brush stroke and an arrow round-trip through the file: the stroke's points in order (its
+/// optional `points`), the arrowhead (an optional `arrow_end`); a file with neither (older
+/// drawings) loads as before. A stroke with more points than kept, or one point, is skipped,
+/// reported and kept as written.
+#[test]
+fn brush_strokes_and_arrows_round_trip() {
+    let p = |m: i64, price: i64| Anchor {
+        time: UtcMillis(t("2026-11-05T14:00:00Z").0 + m * 60_000 + 7_500),
+        price: Price(price),
+    };
+    let mut brush = Drawing::stroke(
+        vec![p(0, 600_000), p(3, 599_500), p(6, 599_250), p(9, 600_750)],
+        Style {
+            arrow_end: true,
+            ..Style::for_tool(Tool::Brush)
+        },
+    )
+    .unwrap();
+    brush.id = 7;
+    let mut arrow = Drawing::new(
+        Tool::Arrow,
+        p(1, 600_000),
+        p(8, 600_500),
+        Style::for_tool(Tool::Arrow),
+    );
+    arrow.id = 8;
+    let items = vec![brush.clone(), arrow.clone()];
+    let file = DrawingsFile::from_drawings(&es(), &items, &HashMap::new());
+    let json = String::from_utf8(file.encode()).unwrap();
+    assert!(
+        json.contains(r#""tool": "brush""#) || json.contains(r#""tool":"brush""#),
+        "{json}"
+    );
+    assert!(json.contains("arrow_end"), "{json}");
+    let Decoded::Ok { value: back, .. } = decode::<DrawingsFile>(&FORMAT, json.as_bytes()) else {
+        panic!("decodes")
+    };
+    let (loaded, skipped) = back.to_drawings(25);
+    assert!(skipped.is_empty(), "{skipped:?}");
+    assert_eq!(loaded, items);
+    assert_eq!(loaded[0].points.len(), 4);
+    assert!(loaded[1].style.arrow_end, "an arrow keeps its head");
+    // A trend line without the field: no head (as before).
+    let (old, _) = DrawingsFile::from_drawings(&es(), &sample(), &HashMap::new()).to_drawings(25);
+    assert!(
+        old.iter()
+            .all(|d| !d.style.arrow_end && d.points.is_empty())
+    );
+    // Too many points, or one: skipped, reported, kept as written.
+    let mut big = file.clone();
+    big.drawings[0].points = (0..600)
+        .map(|k| AnchorDoc {
+            time: format!("2026-11-05T14:{:02}:00.000Z", k % 60),
+            price: 600_000,
+        })
+        .collect();
+    big.drawings[1].points.clear();
+    let mut one = big.drawings[0].clone();
+    one.id = 9;
+    one.points.truncate(1);
+    big.drawings.push(one);
+    let (loaded, skipped) = big.to_drawings(25);
+    assert_eq!(loaded.len(), 1, "the arrow");
+    assert_eq!(skipped.len(), 2, "{skipped:?}");
+    assert_eq!(big.unusable(&loaded).len(), 2);
+}

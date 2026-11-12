@@ -50,7 +50,7 @@ pub struct ToolButton {
 pub const TRASH: &str = "icons/trash.svg";
 
 /// The tools, in order: line, horizontal, vertical, rectangle, text, measure.
-pub const TOOLS: [ToolButton; 6] = [
+pub const TOOLS: [ToolButton; 8] = [
     ToolButton {
         tool: Tool::Trend,
         name: "Trend line",
@@ -85,6 +85,18 @@ pub const TOOLS: [ToolButton; 6] = [
         tool: Tool::Measure,
         name: "Measure",
         icon: "icons/ruler.svg",
+        turns: 0,
+    },
+    ToolButton {
+        tool: Tool::Brush,
+        name: "Brush",
+        icon: "icons/pen-line.svg",
+        turns: 0,
+    },
+    ToolButton {
+        tool: Tool::Arrow,
+        name: "Arrow",
+        icon: "icons/move-up-right.svg",
         turns: 0,
     },
 ];
@@ -292,29 +304,29 @@ pub fn dock_now(width: Option<f32>, was: Option<Dock>, cx: &App) -> Option<Dock>
 mod tests {
     use super::*;
 
-    /// The row docked top needs 195 px at 100 % (the mock's 196 counted Delete's edge twice);
-    /// a narrower chart gets the column instead (never a wrapped or cut row); left stays left.
+    /// The row docked top needs 245 px at 100 % (eight tools and Delete); a narrower chart gets
+    /// the column instead (never a wrapped or cut row); left stays left.
     #[test]
     fn a_row_that_does_not_fit_becomes_the_column() {
-        assert_eq!(row_len(), 195.0);
-        assert_eq!(dock_for(Dock::Top, 195.0), Dock::Top);
-        assert_eq!(dock_for(Dock::Top, 194.0), Dock::Left);
+        assert_eq!(row_len(), 245.0);
+        assert_eq!(dock_for(Dock::Top, 245.0), Dock::Top);
+        assert_eq!(dock_for(Dock::Top, 244.0), Dock::Left);
         assert_eq!(dock_for(Dock::Left, 1000.0), Dock::Left);
         assert_eq!(dock_for(Dock::Left, 100.0), Dock::Left);
         // Back from the column only with a pixel to spare (no flip-flop on rounding).
         assert_eq!(
-            dock_from(Dock::Top, 195.5, Some(Dock::Left)),
+            dock_from(Dock::Top, 245.5, Some(Dock::Left)),
             Some(Dock::Left)
         );
         assert_eq!(
-            dock_from(Dock::Top, 196.0, Some(Dock::Left)),
+            dock_from(Dock::Top, 246.0, Some(Dock::Left)),
             Some(Dock::Top)
         );
         assert_eq!(
-            dock_from(Dock::Top, 195.0, Some(Dock::Top)),
+            dock_from(Dock::Top, 245.0, Some(Dock::Top)),
             Some(Dock::Top)
         );
-        assert_eq!(dock_from(Dock::Top, 195.0, None), Some(Dock::Top));
+        assert_eq!(dock_from(Dock::Top, 245.0, None), Some(Dock::Top));
         // Under 180 px the toolbar steps aside (never squeezing the price axis); back with a
         // pixel to spare.
         assert_eq!(dock_from(Dock::Left, 179.0, Some(Dock::Left)), None);
@@ -374,7 +386,9 @@ mod tests {
                 Tool::VLine,
                 Tool::Rect,
                 Tool::Note,
-                Tool::Measure
+                Tool::Measure,
+                Tool::Brush,
+                Tool::Arrow
             ]
         );
         let measure = TOOLS.iter().find(|b| b.tool == Tool::Measure).unwrap();
@@ -386,8 +400,8 @@ mod tests {
             assert!(crate::icons::Assets.load(path).unwrap().is_some(), "{path}");
         }
         const { assert!(BUTTON >= 20.0) };
-        // Each tool's key is the one its tooltip shows (Alt+T, H, L, Z, N, U).
-        for (b, key) in TOOLS.iter().zip(["T", "H", "L", "Z", "N", "U"]) {
+        // Each tool's key is the one its tooltip shows (Alt+T, H, L, Z, N, U, P, A).
+        for (b, key) in TOOLS.iter().zip(["T", "H", "L", "Z", "N", "U", "P", "A"]) {
             let keys = crate::commands::keys(Command::Draw(DrawCmd::Tool(b.tool)));
             assert_eq!(keys.len(), 2, "{}: {keys:?}", b.name);
             assert_eq!(keys[1], key, "{}", b.name);
