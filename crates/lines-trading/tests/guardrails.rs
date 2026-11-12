@@ -242,6 +242,7 @@ fn a_lockout_never_blocks_exits() {
             order: add,
             qty: Some(Qty(2)),
             price: None,
+            move_bracket: false,
         })
         .unwrap_err();
     assert_eq!(e.code, RejectCode::Guardrail);
@@ -254,6 +255,7 @@ fn a_lockout_never_blocks_exits() {
         order: exit,
         qty: None,
         price: Some(px(6011.00)),
+        move_bracket: false,
     })
     .expect("a price change");
     r.wait(LAT);

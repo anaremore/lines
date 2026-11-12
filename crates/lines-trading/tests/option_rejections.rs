@@ -287,6 +287,7 @@ fn growing_an_order_through_flat_is_refused() {
             order: id,
             qty: Some(Qty(3)),
             price: None,
+            move_bracket: false,
         })
         .unwrap_err();
     assert_eq!(
@@ -298,6 +299,7 @@ fn growing_an_order_through_flat_is_refused() {
         order: id,
         qty: Some(Qty(2)),
         price: None,
+        move_bracket: false,
     })
     .unwrap();
 }

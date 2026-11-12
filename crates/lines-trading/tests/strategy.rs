@@ -771,6 +771,7 @@ fn exits_are_never_limited_by_hours_size_or_rate() {
             order: stop[0],
             qty: None,
             price: Some(px(5990.0 + 0.25 * i as f64)),
+            move_bracket: false,
         })
         .expect("a stop adjustment");
         r.wait(30);
@@ -854,6 +855,7 @@ fn a_person_moving_its_entry_moves_it() {
         order: entry,
         qty: None,
         price: Some(px(5986.0)),
+        move_bracket: false,
     })
     .unwrap();
     r.wait(30);
@@ -910,6 +912,7 @@ fn a_paused_instance_cant_reprice_an_entry_into_a_fill() {
         order: entry,
         qty: None,
         price: Some(px(5986.0)),
+        move_bracket: false,
     })
     .unwrap();
     r.wait(30);
@@ -921,6 +924,7 @@ fn a_paused_instance_cant_reprice_an_entry_into_a_fill() {
             order: entry,
             qty: None,
             price: Some(px(6000.25)),
+            move_bracket: false,
         }))
         .contains("is paused")
     );
@@ -990,6 +994,7 @@ fn repricing_counts_other_closing_orders() {
             order: second,
             qty: None,
             price: Some(px(5999.75)),
+            move_bracket: false,
         }))
         .contains("is paused")
     );

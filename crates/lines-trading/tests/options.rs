@@ -520,6 +520,7 @@ fn the_guard_refuses_what_is_far_or_not_a_limit() {
         order: ok,
         qty: None,
         price: Some(Price(600)),
+        move_bracket: false,
     });
     assert_eq!(moved.unwrap_err().code, RejectCode::Risk);
     // A cheap option: the 10-tick floor, not a percentage of nothing.
@@ -653,6 +654,7 @@ fn a_modify_never_fills_outside_the_session() {
         order: id,
         qty: None,
         price: Some(Price(245)),
+        move_bracket: false,
     })
     .unwrap();
     r.wait(LAT + 1);

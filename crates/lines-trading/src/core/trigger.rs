@@ -1092,6 +1092,7 @@ impl TradingCore {
                         order,
                         qty: None,
                         price: Some(price),
+                        move_bracket: false,
                     },
                 )
             }

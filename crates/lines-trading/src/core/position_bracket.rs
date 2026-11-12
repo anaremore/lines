@@ -598,6 +598,7 @@ impl TradingCore {
                                 order: id,
                                 qty: Some(Qty(want)),
                                 price: None,
+                                move_bracket: false,
                             });
                             self.events.push(Event::Command {
                                 id: env.id,
@@ -761,6 +762,7 @@ impl TradingCore {
             order: id,
             qty: Some(qty),
             price: None,
+            move_bracket: false,
         });
         self.send(
             &env,

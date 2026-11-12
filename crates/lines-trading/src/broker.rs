@@ -17,6 +17,7 @@ use crate::command::Source;
 use crate::market::MarketInput;
 use crate::order::Order;
 use crate::position::Position;
+use crate::types::OrderKind;
 use crate::types::{AccountId, Money, OrderId, contract_serde, price_serde, qty_serde, time_serde};
 
 /// What a broker can do (decision 0018). A missing capability is a disabled control with a
@@ -290,5 +291,37 @@ pub trait Broker: Send {
     /// own and return `None`).
     fn saved_state(&self) -> Option<serde_json::Value> {
         None
+    }
+    /// Whether [`Broker::move_bracket`] moves an entry and its held bracket exits together, as
+    /// one change. The default: no (the core then moves only the entry, never the legs one by
+    /// one).
+    fn moves_brackets(&self) -> bool {
+        false
+    }
+    /// Move a bracket's unfilled entry to `entry.1` and its held exits to their new prices
+    /// together: all of them or none. Called only when [`Broker::moves_brackets`]; the core
+    /// has checked every price. If the entry fills before this takes effect, its exits are
+    /// working by then and only the entry moves. The default does nothing.
+    fn move_bracket(
+        &mut self,
+        now: UtcMillis,
+        entry: (OrderId, Price),
+        exits: &[(OrderId, Price)],
+        ctx: &RequestContext,
+    ) {
+        let _ = (now, entry, exits, ctx);
+    }
+}
+
+/// The price a modify changes on `o` (`Command::ModifyOrder`'s `price`): a limit's price, a
+/// stop's trigger, an untriggered stop-limit's trigger or a triggered one's limit. `None`: a
+/// market order.
+pub fn modified_price(o: &Order) -> Option<Price> {
+    match o.kind {
+        OrderKind::Limit { price } => Some(price),
+        OrderKind::Stop { trigger } => Some(trigger),
+        OrderKind::StopLimit { limit, .. } if o.triggered => Some(limit),
+        OrderKind::StopLimit { trigger, .. } => Some(trigger),
+        OrderKind::Market => None,
     }
 }

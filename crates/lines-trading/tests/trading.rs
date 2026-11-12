@@ -1178,6 +1178,7 @@ fn checklist_07_rate_limits_and_notional() {
             order: *id,
             qty: None,
             price: Some(px(5985.00 - i as f64)),
+            move_bracket: false,
         })
         .unwrap();
     }
@@ -1187,6 +1188,7 @@ fn checklist_07_rate_limits_and_notional() {
             order: ids[2],
             qty: None,
             price: Some(px(5984.00)),
+            move_bracket: false,
         })
         .unwrap_err();
     assert!(third.message.contains("modifies in a second"));
@@ -1789,6 +1791,7 @@ fn reduce_only_orders_cant_grow() {
             order: s,
             qty: Some(Qty(5)),
             price: None,
+            move_bracket: false,
         })
         .unwrap_err();
     assert_eq!(e.code, RejectCode::Invalid);
@@ -1800,6 +1803,7 @@ fn reduce_only_orders_cant_grow() {
             order: s,
             qty: None,
             price: Some(px(5991.00)),
+            move_bracket: false,
         })
         .is_ok()
     );
@@ -2078,6 +2082,7 @@ fn grow(r: &mut Rig, order: OrderId, qty: i64) -> Result<Vec<OrderId>, lines_tra
         order,
         qty: Some(Qty(qty)),
         price: None,
+        move_bracket: false,
     })
 }
 
@@ -2141,6 +2146,7 @@ fn growing_an_order_meets_risk_limits_and_the_contract_cap() {
             order: stop,
             qty: None,
             price: Some(px(5980.00)),
+            move_bracket: false,
         })
         .unwrap_err();
     assert_eq!(e.code, RejectCode::Risk, "{}", e.message);
@@ -2189,6 +2195,7 @@ fn a_stop_never_moves_across_the_market() {
         order: stop,
         qty: None,
         price: Some(px(p)),
+        move_bracket: false,
     };
     for p in [5999.75, 6010.00] {
         let e = r.cmd(modify(p)).unwrap_err();
@@ -2232,6 +2239,7 @@ fn a_held_bracket_stop_moves_before_its_entry_fills() {
         order: ids[2],
         qty: None,
         price: Some(px(6007.00)),
+        move_bracket: false,
     })
     .expect("a held stop isn't in the market");
 }
@@ -2275,6 +2283,7 @@ fn resize(r: &mut Rig, order: OrderId, qty: i64) -> Result<Vec<OrderId>, lines_t
         order,
         qty: Some(Qty(qty)),
         price: None,
+        move_bracket: false,
     })
 }
 
@@ -2632,4 +2641,238 @@ fn a_jump_back_cancels_before_the_replayed_trades() {
             "never filled on the replayed data: {states:?}"
         );
     }
+}
+
+/// The paper broker behind a venue that can't move a bracket's legs together (the trait's
+/// default): every request passes through, `move_bracket` is never offered.
+struct NoBracketMoves(PaperBroker);
+
+impl lines_trading::broker::Broker for NoBracketMoves {
+    fn name(&self) -> &str {
+        "no-bracket-moves"
+    }
+    fn capabilities(&self) -> lines_trading::broker::BrokerCaps {
+        self.0.capabilities()
+    }
+    fn request(&mut self, now: UtcMillis, req: lines_trading::broker::BrokerRequest) {
+        self.0.request(now, req)
+    }
+    fn market(&mut self, now: UtcMillis, contract: ContractKey, input: &MarketInput) {
+        self.0.market(now, contract, input)
+    }
+    fn poll(&mut self, now: UtcMillis, out: &mut Vec<lines_trading::broker::BrokerEvent>) {
+        self.0.poll(now, out)
+    }
+    fn next_wake(&self) -> Option<UtcMillis> {
+        self.0.next_wake()
+    }
+    fn snapshot(&self) -> lines_trading::broker::BrokerSnapshot {
+        self.0.snapshot()
+    }
+}
+
+fn bracket_of(r: &mut Rig, side: Side, kind: OrderKind, tp: f64, sl: f64) -> [OrderId; 3] {
+    let ids = r
+        .cmd(Command::PlaceBracket(BracketSpec {
+            entry: OrderSpec {
+                account: acct(),
+                contract: es(),
+                side,
+                qty: Qty(2),
+                kind,
+            },
+            take_profit: Some(px(tp)),
+            stop_loss: Some(px(sl)),
+        }))
+        .unwrap();
+    r.wait(LAT);
+    [ids[0], ids[1], ids[2]]
+}
+
+fn move_to(r: &mut Rig, order: OrderId, p: f64, with: bool) -> Vec<OrderId> {
+    let ids = r
+        .cmd(Command::ModifyOrder {
+            account: acct(),
+            order,
+            qty: None,
+            price: Some(px(p)),
+            move_bracket: with,
+        })
+        .unwrap();
+    r.wait(LAT);
+    ids
+}
+
+fn price_of(r: &Rig, id: OrderId) -> Price {
+    lines_trading::broker::modified_price(r.core.order(id).unwrap()).unwrap()
+}
+
+/// Item 13 (owner, 2026-11-12): moving an unfilled bracket entry moves its held stop and target
+/// by the same ticks, as one change, keeping their OCO link and their held state; a buy limit
+/// and a sell stop entry alike. After any fill the exits work for the position and stay; a
+/// cancelled entry has nothing to move; without the option only the entry moves.
+#[test]
+fn checklist_13_moving_an_entry_moves_its_held_bracket() {
+    // A buy limit 6000.00, target 6002.00, stop 5998.00: down 2.00.
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    let ids = move_to(&mut r, entry, 5998.00, true);
+    assert_eq!(ids, vec![entry, tp, sl], "the result names all three");
+    assert_eq!(price_of(&r, entry), px(5998.00));
+    assert_eq!(price_of(&r, tp), px(6000.00));
+    assert_eq!(price_of(&r, sl), px(5996.00));
+    for x in [tp, sl] {
+        assert_eq!(r.state(x), OrderState::Acked, "still held");
+    }
+    assert_eq!(
+        r.core.order(tp).unwrap().oco,
+        Some(sl),
+        "still one-cancels-other"
+    );
+    // Filled at its new price: the moved exits protect it.
+    r.book(&[(5997.75, 10)], &[(5998.00, 10)]);
+    r.trade(5997.75, 5);
+    assert_eq!(r.state(entry), OrderState::Filled);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    assert_eq!(price_of(&r, sl), px(5996.00));
+
+    // A sell stop entry 5995.00 (stop above, target below): up 1.25.
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.00, 10)], &[(6000.25, 10)]);
+    let stop = OrderKind::Stop {
+        trigger: px(5995.00),
+    };
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Sell, stop, 5990.00, 5998.00);
+    move_to(&mut r, entry, 5996.25, true);
+    assert_eq!(price_of(&r, entry), px(5996.25));
+    assert_eq!(price_of(&r, tp), px(5991.25));
+    assert_eq!(price_of(&r, sl), px(5999.25));
+
+    // Partially filled: the exits work for the 1 filled and stay where they are.
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    r.trade(5999.75, 1);
+    assert_eq!(r.core.order(entry).unwrap().filled, Qty(1));
+    let ids = move_to(&mut r, entry, 5999.00, true);
+    assert_eq!(ids, vec![entry], "only the entry");
+    assert_eq!(price_of(&r, entry), px(5999.00));
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6002.00), px(5998.00))
+    );
+
+    // Without the option (the setting off): only the entry.
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    assert_eq!(move_to(&mut r, entry, 5999.00, false), vec![entry]);
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6002.00), px(5998.00))
+    );
+
+    // A cancelled entry: nothing to move (refused, nothing changes).
+    r.cmd(Command::CancelOrder {
+        account: acct(),
+        order: entry,
+    })
+    .unwrap();
+    r.wait(LAT);
+    assert!(
+        r.cmd(Command::ModifyOrder {
+            account: acct(),
+            order: entry,
+            qty: None,
+            price: Some(px(5997.00)),
+            move_bracket: true,
+        })
+        .is_err()
+    );
+}
+
+/// A moved bracket survives a restart: the exits are saved at their new prices, held, and a
+/// fill of the entry after the restart activates them there.
+#[test]
+fn a_moved_bracket_survives_a_restart() {
+    let dir = std::env::temp_dir().join(format!("lines-trading-mb-{}", std::process::id()));
+    let path = dir.join("paper.json");
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    move_to(&mut r, entry, 5999.00, true);
+    let file = trading_file(&r.core, &paper(FillModel::TradeThrough)).unwrap();
+    persist::save(&path, &file).unwrap();
+    drop(r);
+
+    let file = persist::load(&path).unwrap().unwrap();
+    let broker = PaperBroker::from_state(file.paper.clone(), file.broker.clone());
+    let mut core = TradingCore::new(Box::new(broker));
+    for a in file.accounts {
+        core.add_account(a.config, Some(a.tracker));
+    }
+    core.set_next_order_id(file.next_order_id);
+    core.restore_in_flight(file.in_flight);
+    let mut r = Rig {
+        core,
+        t: UtcMillis::parse_iso("2026-11-10T15:05:00Z").unwrap().0,
+        events: Vec::new(),
+    };
+    r.core.rebuild(r.now());
+    r.collect();
+    assert_eq!(price_of(&r, entry), px(5999.00));
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6001.00), px(5997.00))
+    );
+    r.book(&[(5998.75, 10)], &[(5999.00, 10)]);
+    r.trade(5998.75, 5);
+    assert_eq!(r.core.position(&acct(), es()), 2);
+    // The moved target takes profit at its new price (traded through).
+    r.book(&[(6001.25, 10)], &[(6001.50, 10)]);
+    r.trade(6001.25, 5);
+    assert_eq!(r.state(tp), OrderState::Filled);
+    assert_eq!(r.fills(tp), vec![(px(6001.00), 2)]);
+    assert_eq!(r.core.position(&acct(), es()), 0);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A broker that can't move a bracket's legs together: only the entry moves (the result names
+/// only it, so the app can say so), never the legs one by one. A stop-limit entry moves its
+/// trigger and its exits by the same ticks.
+#[test]
+fn a_broker_without_bracket_moves_moves_only_the_entry() {
+    let mut b = PaperBroker::new(paper(FillModel::TradeThrough));
+    b.open_account(acct(), Money::whole(50_000));
+    let mut core = TradingCore::new(Box::new(NoBracketMoves(b)));
+    core.add_account(AccountConfig::paper("paper-1", 50_000), None);
+    let mut r = Rig {
+        core,
+        t: UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0,
+        events: Vec::new(),
+    };
+    r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, limit(6000.00), 6002.00, 5998.00);
+    assert_eq!(move_to(&mut r, entry, 5999.00, true), vec![entry]);
+    assert_eq!(price_of(&r, entry), px(5999.00));
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6002.00), px(5998.00))
+    );
+
+    // The paper broker itself, a buy stop-limit entry: its trigger and exits move together.
+    let mut r = Rig::new(FillModel::TradeThrough);
+    r.book(&[(6000.00, 10)], &[(6000.25, 10)]);
+    let sl_kind = OrderKind::StopLimit {
+        trigger: px(6003.00),
+        limit: px(6003.50),
+    };
+    let [entry, tp, sl] = bracket_of(&mut r, Side::Buy, sl_kind, 6006.00, 6001.00);
+    move_to(&mut r, entry, 6004.00, true);
+    assert_eq!(price_of(&r, entry), px(6004.00));
+    assert_eq!(
+        (price_of(&r, tp), price_of(&r, sl)),
+        (px(6007.00), px(6002.00))
+    );
 }

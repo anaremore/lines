@@ -453,6 +453,7 @@ fn adding_quantity_inside_the_window_is_an_entry() {
             order: id,
             qty: Some(Qty(2)),
             price: None,
+            move_bracket: false,
         })
         .expect_err("more quantity is an entry");
     assert_eq!(e.code, RejectCode::Guardrail, "{e:?}");
