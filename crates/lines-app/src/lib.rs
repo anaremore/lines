@@ -789,7 +789,9 @@ struct Cli {
     study_set: Option<PathBuf>,
     /// Screenshot: render with the studies menu open: `open`, or `edit:STUDY` for that
     /// study's editor, or `style:STUDY[:TAB]` for the style editor on its parts (tab 0 =
-    /// first). STUDY: `vwap:N`, `delta:N`, `volume:N`, `profile`, `footprint`, `levels:ID`.
+    /// first), or `drop:STUDY:GROUP` for its editor with that setting's list open (`Anchor`,
+    /// `Bands`, `Mode`, `Label`, `Grouping`, `Kinds`). STUDY: `vwap:N`, `delta:N`, `volume:N`,
+    /// `profile`, `footprint`, `levels:ID`.
     #[arg(long, requires = "screenshot")]
     studies_menu: Option<String>,
     /// Screenshot: the footer as if recording for SECS seconds (REC, the time, Stop recording).

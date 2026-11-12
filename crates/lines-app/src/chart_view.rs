@@ -409,6 +409,9 @@ pub enum MenuPart {
     Eye,
     /// Remove a study, delete a template.
     Delete,
+    /// A number's − / +.
+    Less,
+    More,
 }
 
 enum Drag {
@@ -466,6 +469,9 @@ pub struct ChartView {
     study_menu: Option<StudyMenu>,
     /// The studies menu's scroll (its fade shows while more is below).
     study_menu_scroll: gpui::ScrollHandle,
+    /// Screenshots (`--studies-menu drop:STUDY:GROUP`): the group whose list opens once the
+    /// menu lists it (a level source's kinds arrive after the menu opens).
+    menu_drop_wanted: Option<String>,
     /// The studies menu as it was when last closed without finishing (an editor open, a
     /// template name half typed): reopening restores it (the popover rule).
     study_draft: Option<StudyMenu>,
@@ -906,6 +912,7 @@ impl ChartView {
         let mut view = ChartView {
             study_menu: None,
             study_menu_scroll: gpui::ScrollHandle::new(),
+            menu_drop_wanted: None,
             editor_open: std::cell::Cell::new(false),
             study_style: None,
             styles_extra: serde_json::Map::new(),
@@ -1499,6 +1506,8 @@ impl ChartView {
         };
         let (editing, style) = match parts.as_slice() {
             ["edit", rest @ ..] => (study(rest).map(|(r, _)| r), None),
+            // `drop:STUDY:GROUP`: its editor, that group's list open.
+            ["drop", rest @ .., _] => (study(rest).map(|(r, _)| r), None),
             ["style", rest @ ..] => {
                 let s = study(rest);
                 (s.as_ref().map(|(r, _)| r.clone()), s)
@@ -1511,6 +1520,9 @@ impl ChartView {
         };
         let items = self.menu_items(&m, cx);
         m.clamp(&items);
+        if let ["drop", .., group] = parts.as_slice() {
+            self.menu_drop_wanted = Some((*group).to_owned());
+        }
         // On "Style…" (the draft the style editor steps back to).
         if let Some(i) = items
             .iter()
@@ -1658,9 +1670,49 @@ impl ChartView {
             MenuPart::Primary => m.activate(&items, i),
             MenuPart::Eye => m.eye(&items, i),
             MenuPart::Delete => m.delete(&items, i),
+            MenuPart::Less => m.nudge(&items, i, false),
+            MenuPart::More => m.nudge(&items, i, true),
         };
         self.study_menu = Some(m);
         self.run_menu(cmd, cx);
+    }
+
+    /// Screenshots: open the wanted group's list once the menu lists it.
+    fn open_wanted_menu_drop(&mut self, cx: &mut Context<Self>) {
+        let Some(want) = self.menu_drop_wanted.clone() else {
+            return;
+        };
+        let Some(mut m) = self.study_menu.take() else {
+            return;
+        };
+        let items = self.menu_items(&m, cx);
+        if let Some(i) = items
+            .iter()
+            .position(|it| matches!(it, Item::Drop { group, .. } if *group == want))
+        {
+            m.open_drop(&items, i);
+            self.menu_drop_wanted = None;
+        }
+        self.study_menu = Some(m);
+    }
+
+    /// Row `k` of the studies menu's open list clicked.
+    pub fn menu_drop_row(&mut self, k: usize, cx: &mut Context<Self>) {
+        let Some(mut m) = self.study_menu.take() else {
+            return;
+        };
+        let items = self.menu_items(&m, cx);
+        let cmd = m.drop_choose(&items, k);
+        self.study_menu = Some(m);
+        self.run_menu(cmd, cx);
+    }
+
+    /// A press outside the studies menu's open list: it closes (the menu stays).
+    pub fn menu_drop_close(&mut self, cx: &mut Context<Self>) {
+        if let Some(m) = self.study_menu.as_mut() {
+            m.drop = None;
+        }
+        cx.notify();
     }
 
     fn menu_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
@@ -1676,6 +1728,10 @@ impl ChartView {
         let items = self.menu_items(&m, cx);
         let query = m.query.clone();
         let cmd = m.key(&items, &k.key, text);
+        // An open list keeps its lit row in view.
+        if let Some(d) = &m.drop {
+            crate::drop_view::reveal(&d.scroll, &d.list, false);
+        }
         if m.query != query {
             let items = self.menu_items(&m, cx);
             m.follow_query(&items);
@@ -10438,6 +10494,7 @@ impl Render for ChartView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_symbol_studies(cx);
         self.sync_level_styles(cx);
+        self.open_wanted_menu_drop(cx);
         // Trade labels follow the P&L display (the poll that builds them has no app).
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()

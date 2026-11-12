@@ -14,12 +14,15 @@ use crate::theme::Theme;
 
 /// The trigger: `text` (the value in force, or a multi-select's summary) and ▾, outlined like a
 /// number field; `focused`: the keys' row (a main-text edge), `open`: its list is open (accent).
+/// `layer`: the layout lint's layer it records in (`crate::layout_rec`: 0 in a window, the
+/// popups' inside a popover).
 pub fn trigger(
     id: (&'static str, usize),
     text: String,
     focused: bool,
     open: bool,
     locked: bool,
+    layer: u8,
     t: &Theme,
 ) -> gpui::Stateful<gpui::Div> {
     div()
@@ -50,7 +53,7 @@ pub fn trigger(
                     crate::layout_rec::bordered(
                         lines_core::layout_lint::Kind::Chip,
                         text.clone(),
-                        0,
+                        layer,
                         "",
                         1.0,
                     )
@@ -62,13 +65,15 @@ pub fn trigger(
 }
 
 /// The open list. `checked(k)`: row `k` is the value in force (one pick) or on (several);
-/// `on_row(v, k, ..)`: row `k` clicked (a row index of `l`, "Custom…" included).
+/// `on_row(v, k, ..)`: row `k` clicked (a row index of `l`, "Custom…" included). `layer`: the
+/// layout lint's layer its rows record in (over what it covers).
 pub fn list<V: 'static>(
     id: &'static str,
     l: &DropList,
     checked: &dyn Fn(usize) -> bool,
+    layer: u8,
     t: &Theme,
-    cx: &mut Context<V>,
+    cx: &Context<V>,
     on_row: impl Fn(&mut V, usize, &mut Window, &mut Context<V>) + Clone + 'static,
 ) -> gpui::Stateful<gpui::Div> {
     let mut el = div()
@@ -158,7 +163,7 @@ pub fn list<V: 'static>(
                 .hover(move |s| s.bg(lit_bg).border_color(accent))
                 .text_color(t.text_main)
                 .relative()
-                .children(row_marker(&label))
+                .children(row_marker(&label, layer))
                 .child(div().w(crate::zoom::ui(12.0)).flex_none().child(mark))
                 .child(label)
                 .on_mouse_down(
@@ -176,7 +181,7 @@ pub fn list<V: 'static>(
 
 /// A row's record for the layout lint, on the popups' layer (it covers the rows under the list).
 /// A row the list's own scroll cuts is how a scrolling list looks: not recorded.
-fn row_marker(label: &str) -> Option<gpui::AnyElement> {
+fn row_marker(label: &str, layer: u8) -> Option<gpui::AnyElement> {
     if !crate::layout_rec::on() {
         return None;
     }
@@ -191,7 +196,7 @@ fn row_marker(label: &str) -> Option<gpui::AnyElement> {
                 crate::layout_rec::record(
                     window,
                     b,
-                    crate::layout_rec::Spec::text(&label).layer(crate::layout_rec::POPUP),
+                    crate::layout_rec::Spec::text(&label).layer(layer),
                 );
             },
             |_, _, _, _| {},
