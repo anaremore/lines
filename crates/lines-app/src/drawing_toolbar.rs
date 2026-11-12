@@ -49,7 +49,7 @@ pub struct ToolButton {
 /// Delete's icon.
 pub const TRASH: &str = "icons/trash.svg";
 
-/// The tools, in order: line, horizontal, vertical, rectangle, text, measure.
+/// The tools, in order: trend line, horizontal, vertical, rectangle, text, measure, brush, arrow.
 pub const TOOLS: [ToolButton; 8] = [
     ToolButton {
         tool: Tool::Trend,

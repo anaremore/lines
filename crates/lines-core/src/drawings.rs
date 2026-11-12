@@ -356,7 +356,8 @@ impl<'a> TimeAxis<'a> {
         let k = (i.floor() as usize).min(last);
         let start = bars[k].time.0;
         let frac = i - k as f64;
-        if k == last {
+        // Past the newest bucket: by whole periods from its start (as `index_of` reads it).
+        if k == last && frac >= 1.0 {
             return Some(UtcMillis(start + (frac * p).round() as i64));
         }
         let len = (self.view.end(k).0 - start).max(1) as f64;

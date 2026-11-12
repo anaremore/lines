@@ -111,9 +111,8 @@ pub struct ChartDrawings {
     measure_drag: Option<MeasureDrag>,
     /// A note being typed at an anchor.
     note: Option<(Anchor, String)>,
-    /// A brush stroke being drawn: its raw points (plot px, one per frame the pointer moved),
-    /// and whether the button was released (the next frame keeps it, in data space).
-    stroke: Option<(Vec<(f32, f32)>, bool)>,
+    /// A brush stroke being drawn.
+    stroke: Option<Stroke>,
     /// Each tool's style for new drawings (the saved defaults; the restyle keys change them
     /// for this session when nothing is selected).
     pub defaults: ToolStyles,
@@ -533,10 +532,10 @@ impl ChartDrawings {
     pub fn release_lost(&mut self) -> bool {
         self.dragged = None;
         // A brush stroke ends where the pointer last was (kept, as on a release).
-        if let Some((_, done)) = &mut self.stroke
-            && !*done
+        if let Some(st) = &mut self.stroke
+            && !st.done
         {
-            *done = true;
+            st.done = true;
             return true;
         }
         // A measure drag ends where it was last drawn.
@@ -619,14 +618,12 @@ impl ChartDrawings {
     /// The pointer this frame (plot-local), or `None` off the plot.
     pub fn set_pointer(&mut self, p: Option<(f32, f32)>) {
         self.pointer = p;
-        // A brush stroke records the pointer each frame it moved (off the plot: where it was).
-        if let (Some((raw, false)), Some(at)) = (&mut self.stroke, p)
-            && raw.len() < raw.capacity()
-            && raw
-                .last()
-                .is_none_or(|l| (l.0 - at.0).abs().max((l.1 - at.1).abs()) >= 0.75)
+        // A brush stroke records the pointer each frame it moved (`prepare` keeps only what is
+        // on the plot, in data space).
+        if let (Some(st), Some(at)) = (&mut self.stroke, p)
+            && !st.done
         {
-            raw.push(at);
+            st.sample(at);
         }
     }
 
@@ -693,9 +690,9 @@ impl ChartDrawings {
             match (tool.anchors(), self.pending) {
                 // The brush draws while the button is held (`set_pointer`); the release ends it.
                 _ if tool == Tool::Brush => {
-                    let mut raw = Vec::with_capacity(STROKE_RAW);
-                    raw.push((x, y));
-                    self.stroke = Some((raw, false));
+                    let mut st = Stroke::new();
+                    st.sample((x, y));
+                    self.stroke = Some(st);
                 }
                 (1, _) if tool == Tool::Note => {
                     self.note = Some((at, String::new()));
@@ -749,11 +746,12 @@ impl ChartDrawings {
 
     /// The press ended at plot-local (`x`, `y`). Returns whether it was the drawings'.
     pub fn on_up(&mut self, x: f32, y: f32, anchor: Option<Anchor>) -> bool {
-        if let Some((raw, done)) = &mut self.stroke {
-            if raw.len() < raw.capacity() && raw.last() != Some(&(x, y)) {
-                raw.push((x, y));
+        if let Some(st) = &mut self.stroke {
+            // Where it was released, if on the plot (`prepare` drops points off it).
+            if anchor.is_some() {
+                st.sample((x, y));
             }
-            *done = true; // kept in data space next frame (`prepare`)
+            st.done = true; // kept next frame (`prepare`)
             return true;
         }
         if self.quick {
@@ -1024,29 +1022,38 @@ impl ChartDrawings {
         if self.hidden {
             return;
         }
-        // A brush stroke released: smoothed and simplified as drawn, kept as times and prices
-        // (each point's exact time on this chart's axis, its price on the tick grid).
-        if let Some((raw, true)) = &self.stroke {
-            let kept = simplify_stroke(raw, STROKE_EPS, MAX_STROKE);
-            let mut points: Vec<Anchor> = Vec::with_capacity(kept.len());
-            for (x, y) in kept {
-                let Some(time) = axis.time_at(vp.x_to_index(f64::from(x))) else {
-                    continue;
-                };
-                let at = Anchor {
-                    time,
-                    price: grid_price(vp.y_to_price(f64::from(y)), tick),
-                };
-                if points.last() != Some(&at) {
-                    points.push(at);
+        // A brush stroke: each new sample to data space on the frame it arrived (a view that
+        // moves mid-stroke, a live bar or a fit, never shifts what was drawn); once released,
+        // smoothed and simplified on screen and kept as times and prices.
+        let mut kept: Option<Drawing> = None;
+        if let Some(st) = &mut self.stroke {
+            st.follow_view(axis, vp);
+            if st.done {
+                let simple = simplify_stroke(&st.screen, STROKE_EPS, MAX_STROKE);
+                let mut points: Vec<Anchor> = Vec::with_capacity(simple.len());
+                for (x, y) in simple {
+                    let Some(time) = axis.time_at(vp.x_to_index(f64::from(x))) else {
+                        continue;
+                    };
+                    let at = Anchor {
+                        time,
+                        price: grid_price(vp.y_to_price(f64::from(y)), tick),
+                    };
+                    if points.last() != Some(&at) {
+                        points.push(at);
+                    }
                 }
+                kept = Drawing::stroke(points, self.default_style(Tool::Brush));
+                // A click draws nothing and leaves the brush chosen (as Esc, and the other
+                // tools' first click); a stroke ends drawing mode.
+                if kept.is_some() {
+                    self.tool = None;
+                }
+                self.stroke = None;
             }
-            self.stroke = None;
-            self.tool = None;
-            // A click (or a stroke inside one tick and one moment) draws nothing.
-            if let Some(d) = Drawing::stroke(points, self.default_style(Tool::Brush)) {
-                self.add(d);
-            }
+        }
+        if let Some(d) = kept {
+            self.add(d);
         }
         let pointer = self
             .pointer
@@ -1166,19 +1173,13 @@ impl ChartDrawings {
         for d in self.drawn.iter().chain(self.preview.as_ref()) {
             paint_shape(d, &self.pts, None, t, origin, hair, window);
         }
-        // A brush stroke being drawn: its raw points, in the brush's style.
-        if let Some((raw, _)) = &self.stroke {
+        // A brush stroke being drawn, in the brush's style (not for the eyedropper).
+        if let Some(st) = &self.stroke {
             let s = self.default_style(Tool::Brush);
             let color = t.style_color(s.line.color, &t.drawing, s.line.opacity);
             let width = f32::from(s.line.width).max(hair);
-            paint_polyline(
-                raw,
-                width,
-                &drawing_dash(s.line.line, width),
-                color,
-                origin,
-                window,
-            );
+            let dash = drawing_dash(s.line.line, width);
+            paint_polyline(&st.screen, width, &dash, color, origin, false, window);
         }
         if let Some((m, stats)) = self.measure_drawn {
             let color = if stats.units >= 0 { t.up } else { t.down };
@@ -1523,6 +1524,64 @@ fn dragged(drag: &Drag, at: Anchor, axis: &TimeAxis<'_>, tick: i64) -> Drawing {
     }
 }
 
+/// A brush stroke being drawn: the pointer's samples (plot px, one per frame it moved), the
+/// same in data space (time, raw price; converted on the frame each arrived, only those on
+/// the plot), and that again on this frame's screen (the preview, and what is simplified on
+/// release). Buffers reserved at the press, never grown.
+struct Stroke {
+    raw: Vec<(f32, f32)>,
+    /// Samples converted so far.
+    conv: usize,
+    data: Vec<(UtcMillis, f64)>,
+    screen: Vec<(f32, f32)>,
+    /// The button was released (or the release was lost): kept next frame.
+    done: bool,
+}
+
+impl Stroke {
+    fn new() -> Stroke {
+        Stroke {
+            raw: Vec::with_capacity(STROKE_RAW),
+            conv: 0,
+            data: Vec::with_capacity(STROKE_RAW),
+            screen: Vec::with_capacity(STROKE_RAW),
+            done: false,
+        }
+    }
+
+    /// The pointer at `at`, if it moved (and the buffer has room).
+    fn sample(&mut self, at: (f32, f32)) {
+        let moved = self
+            .raw
+            .last()
+            .is_none_or(|l| (l.0 - at.0).abs().max((l.1 - at.1).abs()) >= 0.75);
+        if moved && self.raw.len() < self.raw.capacity() {
+            self.raw.push(at);
+        }
+    }
+
+    /// New samples to data space on this frame's view (those off the plot, over a lower pane
+    /// or an axis, dropped), then everything back to this frame's screen.
+    fn follow_view(&mut self, axis: &TimeAxis<'_>, vp: &Viewport) {
+        let (w, h) = (vp.width as f32, vp.height as f32);
+        for &(x, y) in &self.raw[self.conv..] {
+            if !(0.0..=w).contains(&x) || !(0.0..=h).contains(&y) {
+                continue;
+            }
+            if let Some(t) = axis.time_at(vp.x_to_index(f64::from(x))) {
+                self.data.push((t, vp.y_to_price(f64::from(y))));
+            }
+        }
+        self.conv = self.raw.len();
+        self.screen.clear();
+        for &(t, p) in &self.data {
+            if let Some(x) = axis.x_of(vp, t) {
+                self.screen.push((x, vp.price_to_y(p) as f32));
+            }
+        }
+    }
+}
+
 fn rect(origin: (f32, f32), x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
     Bounds::new(
         point(px(origin.0 + x), px(origin.1 + y)),
@@ -1616,6 +1675,7 @@ fn paint_polyline(
     dash: &DashPattern,
     color: Hsla,
     origin: (f32, f32),
+    record: bool,
     window: &mut Window,
 ) {
     if pts.len() < 2 {
@@ -1629,13 +1689,15 @@ fn paint_polyline(
     let at = |p: (f32, f32)| point(px(origin.0 + p.0), px(origin.1 + p.1));
     path.move_to(at(pts[0]));
     for w in pts.windows(2) {
-        crate::eyedropper::segment(
-            (origin.0 + w[0].0, origin.1 + w[0].1),
-            (origin.0 + w[1].0, origin.1 + w[1].1),
-            width,
-            color,
-            "Drawing",
-        );
+        if record {
+            crate::eyedropper::segment(
+                (origin.0 + w[0].0, origin.1 + w[0].1),
+                (origin.0 + w[1].0, origin.1 + w[1].1),
+                width,
+                color,
+                "Drawing",
+            );
+        }
         path.line_to(at(w[1]));
     }
     if let Ok(p) = path.build() {
@@ -1689,16 +1751,21 @@ fn paint_head(
     }
 }
 
-/// The last segment of a stroke long enough to aim its arrowhead (a few px back from the end).
-fn aim(pts: &[(f32, f32)], width: f32) -> Option<((f32, f32), (f32, f32))> {
+/// Where a stroke's arrowhead is aimed from: the index of the last point at least a head's
+/// length back from the end (else the first). The body is drawn to it, then a straight line
+/// short of the head, so no point inside the head pokes past its sides.
+fn aim(pts: &[(f32, f32)], width: f32) -> Option<usize> {
     let tip = *pts.last()?;
+    if pts.len() < 2 {
+        return None;
+    }
     let want = head_size(width).0;
-    let from = pts[..pts.len() - 1]
-        .iter()
-        .rev()
-        .find(|p| ((p.0 - tip.0).powi(2) + (p.1 - tip.1).powi(2)).sqrt() >= want)
-        .or_else(|| pts.first())?;
-    Some((*from, tip))
+    Some(
+        pts[..pts.len() - 1]
+            .iter()
+            .rposition(|p| ((p.0 - tip.0).powi(2) + (p.1 - tip.1).powi(2)).sqrt() >= want)
+            .unwrap_or(0),
+    )
 }
 
 /// One drawing in its style (`color`: a fixed line color instead: the temporary measure's
@@ -1739,17 +1806,16 @@ fn paint_shape(
                 .get(d.pts.0 as usize..d.pts.1 as usize)
                 .unwrap_or_default();
             match aim(s, width).filter(|_| head) {
-                Some((from, tip)) => {
-                    // The stroke up to its last point, that point pulled short of the head.
-                    let (body, _) = s.split_at(s.len() - 1);
-                    paint_polyline(body, width, &dash, line, origin, window);
+                Some(k) => {
+                    // The body to the point the head is aimed from, then straight on to just
+                    // short of the head.
+                    let (from, tip) = (s[k], s[s.len() - 1]);
+                    paint_polyline(&s[..=k], width, &dash, line, origin, true, window);
                     let end = short_of_head(from, tip, width);
-                    if let Some(&last) = body.last() {
-                        paint_polyline(&[last, end], width, &dash, line, origin, window);
-                    }
+                    paint_polyline(&[from, end], width, &dash, line, origin, true, window);
                     paint_head(from, tip, width, line, origin, window);
                 }
-                None => paint_polyline(s, width, &dash, line, origin, window),
+                None => paint_polyline(s, width, &dash, line, origin, true, window),
             }
         }
         Tool::Rect | Tool::Measure => {

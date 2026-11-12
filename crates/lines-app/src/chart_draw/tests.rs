@@ -1121,13 +1121,14 @@ fn the_brush_draws_a_stroke_in_data_space() {
     // One undo step.
     assert!(r.d.undo());
     assert!(r.items().is_empty());
-    // A click draws nothing; Esc mid-stroke drops the stroke, the brush stays chosen.
+    // A click draws nothing and leaves the brush chosen; Esc mid-stroke drops the stroke, the
+    // brush stays chosen too.
     r.d.set_tool(Tool::Brush);
     r.down(300.0, 200.0);
     r.up(300.0, 200.0);
     r.frame(300.0, 200.0);
     assert!(r.items().is_empty());
-    r.d.set_tool(Tool::Brush);
+    assert_eq!(r.d.tool(), Some(Tool::Brush));
     r.down(300.0, 200.0);
     r.frame(340.0, 230.0);
     assert!(r.d.cancel());
@@ -1180,4 +1181,59 @@ fn a_stroke_moves_whole_and_the_arrow_has_its_head() {
         .find(|d| d.tool == Tool::Arrow)
         .unwrap();
     assert!(arrow.style.arrow_end);
+}
+
+/// A stroke is kept where it was drawn even when the view moves mid-stroke (a live bar, a
+/// fit): each sample goes to data space on the frame it arrived. Samples off the plot (a lower
+/// pane, the axes) and an off-plot release add nothing; a release the chart never saw keeps
+/// the stroke as drawn.
+#[test]
+fn a_stroke_stays_where_it_was_drawn() {
+    let mut r = Rig::new();
+    r.d.set_tool(Tool::Brush);
+    r.down(100.0, 100.0);
+    for k in 1..=40 {
+        r.frame(100.0 + k as f32 * 2.0, 100.0 + k as f32);
+    }
+    // Where the first half was drawn, in data space.
+    let axis = TimeAxis::new(BarsView::fixed(&r.bars, M));
+    let t40 = axis.time_at(r.vp.x_to_index(180.0)).unwrap();
+    // The view scrolls two bars and the price range shifts mid-stroke.
+    r.vp.right_index -= 2.0;
+    r.vp.price_lo += 100.0;
+    r.vp.price_hi += 100.0;
+    for k in 41..=80 {
+        r.frame(100.0 + k as f32 * 2.0, 100.0 + k as f32);
+    }
+    // A move below the plot (a lower pane): no point there; the release there neither.
+    r.frame(260.0, 900.0);
+    let below = r.d.on_up(260.0, 900.0, None);
+    assert!(below);
+    r.frame(260.0, 900.0);
+    let d = r.items().pop().unwrap();
+    let axis = TimeAxis::new(BarsView::fixed(&r.bars, M));
+    // The first half kept its times (the point near x=180 then is still at t40's minute).
+    assert!(
+        d.points.iter().any(|p| (p.time.0 - t40.0).abs() < 2 * M),
+        "the early part stayed on its bars"
+    );
+    // Nothing below the plot: every price inside the visible range then.
+    assert!(
+        d.points
+            .iter()
+            .all(|p| p.price.0 >= 599_000 && p.price.0 <= 601_100)
+    );
+    assert!(d.points.iter().all(|p| axis.x_of(&r.vp, p.time).is_some()));
+    // A lost release keeps the stroke as drawn.
+    r.d.set_tool(Tool::Brush);
+    r.down(300.0, 150.0);
+    for k in 1..=20 {
+        r.frame(300.0 + k as f32 * 3.0, 150.0 + k as f32 * 2.0);
+    }
+    assert!(r.d.release_lost());
+    r.frame(360.0, 190.0);
+    assert_eq!(
+        r.items().iter().filter(|d| d.tool == Tool::Brush).count(),
+        2
+    );
 }

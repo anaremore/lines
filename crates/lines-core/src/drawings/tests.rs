@@ -669,3 +669,40 @@ fn hit_testing_a_thin_stroke() {
     );
     assert!(!Tool::Ray.has_arrowhead());
 }
+
+/// `time_at` inverts `index_of` on a view whose buckets aren't all one period: the newest
+/// bucket cut short (a session's close) and a gap between buckets.
+#[test]
+fn time_at_inverts_a_cut_short_last_bucket() {
+    let h = 3_600_000i64;
+    let base = t("2026-11-05T14:00:00Z").0;
+    let bar = |k: i64| Bar {
+        time: UtcMillis(base + k * 4 * h),
+        open: Price(600_000),
+        high: Price(600_100),
+        low: Price(599_900),
+        close: Price(600_000),
+        volume: Qty(1),
+    };
+    let bars = [bar(0), bar(1), bar(2)];
+    // 4h buckets; the last cut to one hour.
+    let ends = [
+        UtcMillis(base + 4 * h),
+        UtcMillis(base + 8 * h),
+        UtcMillis(base + 9 * h),
+    ];
+    let view = BarsView {
+        bars: &bars,
+        ends: Some(&ends),
+        period_ms: 4 * h,
+        trades: None,
+    };
+    let axis = TimeAxis::new(view);
+    for i in [0.25, 1.5, 2.2, 2.9, 3.5, -0.5] {
+        let t = axis.time_at(i).unwrap();
+        let back = axis.index_of(t).unwrap();
+        assert!((back - i).abs() < 1e-6, "{i} -> {t:?} -> {back}");
+    }
+    // Inside the cut-short bucket: by its own length (0.2 of an hour = 12 minutes).
+    assert_eq!(axis.time_at(2.2).unwrap().0, base + 8 * h + 12 * 60_000);
+}
