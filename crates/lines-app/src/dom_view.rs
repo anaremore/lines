@@ -405,6 +405,14 @@ impl DomView {
         }
     }
 
+    /// A new DOM (not restored): hide the columns Settings › DOM › Columns hides.
+    pub fn hide_new_columns(&mut self, hidden: &[DomCol]) {
+        let specs = self.cols.specs();
+        for c in hidden.iter().filter(|c| specs[c.index()].hideable) {
+            let _ = self.cols.set.set_shown(specs, c.index(), false);
+        }
+    }
+
     /// Restore saved view state (price grouping, columns).
     pub fn restore(&mut self, state: &DomState) {
         self.set_grouping(state.grouping.clamp(1, 10_000));

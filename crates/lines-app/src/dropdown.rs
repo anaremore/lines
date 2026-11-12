@@ -83,16 +83,48 @@ pub fn dropdown(trigger: impl IntoElement, popup: Option<AnyElement>) -> Dropdow
     Dropdown {
         trigger: trigger.into_any_element(),
         popup,
+        list: None,
         dismiss: None,
         priority: PRIORITY,
+        lint_trigger: None,
+    }
+}
+
+/// An open list for [`dropdown_list`]: the list (its rows its own children), its scroll, its
+/// cap (logical px, already zoomed; `crate::drop_list::MAX_H`) and its background (the fade
+/// that says more is below).
+pub type OpenList = (
+    gpui::Stateful<gpui::Div>,
+    gpui::ScrollHandle,
+    f32,
+    gpui::Hsla,
+);
+
+/// `trigger`, with `list` (when open) placed by [`fit`] as [`dropdown`] places a popup, but
+/// scrolling itself: at most its cap and the room tall, so its `scroll` keeps a row in view
+/// (`ScrollHandle::scroll_to_item` with `crate::drop_list::DropList::child_index`); while more
+/// is below, its bottom fades into its background (the Settings page's overflow cue).
+pub fn dropdown_list(trigger: impl IntoElement, list: Option<OpenList>) -> Dropdown {
+    Dropdown {
+        trigger: trigger.into_any_element(),
+        popup: None,
+        list,
+        dismiss: None,
+        priority: PRIORITY,
+        lint_trigger: None,
     }
 }
 
 pub struct Dropdown {
     trigger: AnyElement,
     popup: Option<AnyElement>,
+    /// A list scrolling itself ([`dropdown_list`]).
+    list: Option<OpenList>,
     dismiss: Option<OnDismiss>,
     priority: usize,
+    /// Screenshots: the open list is recorded for the layout lint as a popup of the control
+    /// labelled so (`crate::layout_rec`).
+    lint_trigger: Option<String>,
 }
 
 impl Dropdown {
@@ -100,6 +132,15 @@ impl Dropdown {
     /// (`popover::defer_backdrop`, the popover rule).
     pub fn on_dismiss(mut self, dismiss: OnDismiss) -> Self {
         self.dismiss = Some(dismiss);
+        self
+    }
+
+    /// Record the open list for the layout lint as a popup of the control labelled `trigger`
+    /// (only while recording: nothing is kept otherwise).
+    pub fn lint_trigger(mut self, trigger: &str) -> Self {
+        if crate::layout_rec::on() {
+            self.lint_trigger = Some(trigger.to_owned());
+        }
         self
     }
 }
@@ -145,9 +186,9 @@ impl Element for Dropdown {
         cx: &mut App,
     ) {
         self.trigger.prepaint(window, cx);
-        let Some(popup) = self.popup.take() else {
+        if self.popup.is_none() && self.list.is_none() {
             return;
-        };
+        }
         // The part of the chip that shows: a header clips its content before the hover
         // controls' gutter. A chip clipped away entirely opens nothing.
         let bounds = bounds.intersect(&window.content_mask().bounds);
@@ -166,7 +207,49 @@ impl Element for Dropdown {
             f32::from(bounds.size.height),
         );
         let (below, above) = room(trigger, win);
-        let mut popup = {
+        let mut popup = if let Some((list, scroll, cap, bg)) = self.list.take() {
+            use gpui::StatefulInteractiveElement as _;
+            use gpui::prelude::FluentBuilder as _;
+            use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+            // More below what shows (as of the last frame; the offset runs from 0 down to
+            // -max_offset).
+            let more = scroll.max_offset().y > px(0.0)
+                && -scroll.offset().y < scroll.max_offset().y - px(1.0);
+            let list = list
+                .occlude()
+                .min_w(bounds.size.width)
+                .max_w(px((win.0 - 2.0 * MARGIN).max(0.0)))
+                .max_h(px(below.max(above).min(cap)))
+                .overflow_y_scroll()
+                .track_scroll(&scroll);
+            gpui::div()
+                .relative()
+                .flex()
+                .flex_col()
+                .child(list)
+                .when(more, |d| {
+                    d.child(
+                        gpui::div()
+                            .absolute()
+                            .left(px(1.0))
+                            .right(px(1.0))
+                            .bottom(px(1.0))
+                            .h(crate::zoom::ui(16.0))
+                            .rounded_b_md()
+                            // The list's background, fully transparent: a scroll cue, not a
+                            // UI state (no state token).
+                            .bg(gpui::linear_gradient(
+                                180.0,
+                                gpui::linear_color_stop(gpui::Hsla { a: 0.0, ..bg }, 0.0),
+                                gpui::linear_color_stop(bg, 1.0),
+                            )),
+                    )
+                })
+                .into_any_element()
+        } else {
+            let Some(popup) = self.popup.take() else {
+                return;
+            };
             use gpui::StatefulInteractiveElement as _;
             use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
             // Its own id (from where its trigger is): two lists never share a scroll offset. It
@@ -192,6 +275,17 @@ impl Element for Dropdown {
         );
         let at = fit(trigger, (f32::from(s.width), f32::from(s.height)), win);
         let (x, y) = (at.x.round(), at.y.round());
+        if let Some(trigger) = self.lint_trigger.take() {
+            crate::layout_rec::record_xywh(
+                window,
+                (x, y, at.w, at.h),
+                crate::layout_rec::Spec::new(
+                    lines_core::layout_lint::Kind::Popup { trigger },
+                    "dropdown list",
+                )
+                .layer(crate::layout_rec::POPUP),
+            );
+        }
         // Under the list, over everything else: a press outside closes it and does only that.
         if let Some(dismiss) = self.dismiss.take() {
             let list = Rect::new(x, y, at.w, at.h);

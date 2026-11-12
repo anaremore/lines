@@ -689,11 +689,13 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
             if !opts.trail_from_cli {
                 opts.trail |= np.dom_trail;
             }
+            let hidden = np.dom_hidden.clone();
             let frozen = env.frozen;
             PaneHandle::Dom(cx.new(|cx| {
                 let mut v = DomView::new(feed, theme, frozen, opts, cx);
-                if let Some(s) = &doc.dom {
-                    v.restore(s);
+                match &doc.dom {
+                    Some(s) => v.restore(s),
+                    None => v.hide_new_columns(&hidden),
                 }
                 v.restore_trade(doc.trade.as_ref(), cx);
                 v

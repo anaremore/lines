@@ -26,6 +26,8 @@ use gpui::{
 
 use crate::brackets::{self, EditorKey};
 use crate::display_zone;
+use crate::drop_list::{DropList, Entry, Outcome};
+use crate::drop_view;
 use crate::fonts;
 use crate::picker_view::{settings, update_settings};
 use crate::search_list;
@@ -200,6 +202,20 @@ struct Pending {
     tomorrow: bool,
 }
 
+/// A setting's open dropdown: its rows and its scroll (the lit row kept in view).
+struct OpenDrop {
+    /// The setting.
+    i: usize,
+    list: DropList,
+    /// A multi-select's row keys (a product's symbol, an option's name), fixed when it opens:
+    /// a toggle and its ✓ go by key, never by a row index into a list that may have changed.
+    keys: Vec<String>,
+    scroll: gpui::ScrollHandle,
+    /// Frames waited for its first layout before the lit row is scrolled to (GPUI scrolls
+    /// against the list's last bounds, none on its first frame); `None` once done.
+    reveal_wait: Option<u8>,
+}
+
 pub struct SettingsWindow {
     focus: FocusHandle,
     theme: Theme,
@@ -226,8 +242,8 @@ pub struct SettingsWindow {
     data_holds: Option<String>,
     /// Screenshots: a trade refusal shown as if a position and orders were open.
     data_forced: Option<String>,
-    /// Depth recorded for: the product chip the keys move between.
-    chip: usize,
+    /// A setting's dropdown, while open (one at a time; `crate::drop_list`).
+    drop: Option<OpenDrop>,
     /// The data folder's revision last shown (a copy's progress repaints the window).
     seen_data: u64,
     /// The settings list's scroll (keeps the selected row in view).
@@ -273,6 +289,9 @@ const RESET_W: f32 = 24.0;
 const MARKS_W: f32 = 8.0 + DOT_W + 8.0 + RESET_W + 8.0;
 /// A number field's narrowest.
 const NUMBER_W: f32 = 72.0;
+/// A number field's narrowest between its − and + (the three as wide as the field was alone,
+/// near enough: a row keeps its line).
+const NUMBER_STEP_W: f32 = 40.0;
 /// The tighter/looser rule, said once under the account picker.
 const RULE_NOTE: &str = "Tighter applies at once; looser waits for the next session.";
 
@@ -296,14 +315,16 @@ fn parse_set(s: &str) -> Result<(usize, Value, bool), String> {
     let value = match (schema::all()[i].kind, v) {
         (Kind::Toggle, "on") => Value::Bool(true),
         (Kind::Toggle, "off") => Value::Bool(false),
-        (Kind::Choice(_), n) => Value::Choice(
-            n.parse()
-                .map_err(|_| format!("{s:?}: a choice's position"))?,
-        ),
+        (Kind::Choice(_), n) => match n.parse() {
+            Ok(k) => Value::Choice(k),
+            // A typed Bar period or grouping ("charts.timeframe=750t").
+            Err(_) if schema::takes_custom(k) => Value::Text(n.to_owned()),
+            Err(_) => return Err(format!("{s:?}: a choice's position")),
+        },
         (Kind::Number { .. }, n) => {
             Value::Number(schema::parse_number(n).map_err(|e| format!("{s:?}: {e}"))?)
         }
-        (Kind::Products, n) => Value::List(
+        (Kind::Products | Kind::Picks(_), n) => Value::List(
             n.split(',')
                 .map(str::trim)
                 .filter(|x| !x.is_empty())
@@ -327,8 +348,25 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
     // `account=NAME` picks the window's account (by name or id), `appearance.time_zone=list:Q`
     // (or `appearance.ui_font=list:Q`) opens that setting's list with Q typed; the rest are
     // settings.
+    for s in set {
+        if let Some((i, _)) = drop_open(s) {
+            let st = &schema::all()[i];
+            let drops = match st.kind {
+                Kind::Choice(c) => schema::drops_down(c),
+                Kind::Products | Kind::Picks(_) => true,
+                Kind::Editor => List::of(st.key).is_some(),
+                _ => false,
+            };
+            if !drops {
+                anyhow::bail!("--settings-set {s:?}: {} has no dropdown", st.key);
+            }
+        }
+    }
     for s in set.iter().filter(|s| {
-        !s.starts_with("account=") && List::typed(s).is_none() && !s.starts_with(DATA_PICK)
+        !s.starts_with("account=")
+            && List::typed(s).is_none()
+            && !s.starts_with(DATA_PICK)
+            && drop_open(s).is_none()
     }) {
         parse_set(s).map_err(anyhow::Error::msg)?;
     }
@@ -339,6 +377,18 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
 /// list, open, with the rest typed in it.
 #[cfg(feature = "screenshot")]
 const LIST_OPEN: &str = "=list:";
+
+/// `--settings-set KEY=open`: setting KEY's dropdown (or list) open; `KEY=custom:TEXT`: its
+/// "Custom…" field open with TEXT typed. The setting and the text.
+#[cfg(feature = "screenshot")]
+fn drop_open(s: &str) -> Option<(usize, Option<&str>)> {
+    if let Some(key) = s.strip_suffix("=open") {
+        return Some((schema::index_of(key)?, None));
+    }
+    let (key, text) = s.split_once("=custom:")?;
+    schema::takes_custom(key).then_some(())?;
+    Some((schema::index_of(key)?, Some(text)))
+}
 
 /// `--settings-set` prefix: the data folder picked (`data.folder=pick:PATH`, the Move existing
 /// data / Start empty question), picked and refused for an open trade
@@ -373,6 +423,18 @@ pub fn open_for_screenshot(
                 {
                     v.target.account = Some(a.id.clone());
                     v.target.account_name = Some(a.name.clone());
+                }
+                continue;
+            }
+            if let Some((i, typed)) = drop_open(s) {
+                v.select(i);
+                match List::of(schema::all()[i].key) {
+                    Some(list) => v.open_list(list, cx),
+                    None => v.open_drop(i, cx),
+                }
+                if let (Some(text), Some(d)) = (typed, v.drop.as_mut()) {
+                    d.list.lit = d.list.entries.len();
+                    d.list.typing = Some(text.to_owned());
                 }
                 continue;
             }
@@ -816,7 +878,7 @@ impl SettingsWindow {
             data_choice: None,
             data_holds: None,
             data_forced: None,
-            chip: 0,
+            drop: None,
             seen_data: 0,
             scroll: gpui::ScrollHandle::new(),
             win_w: 0.0,
@@ -927,6 +989,7 @@ impl SettingsWindow {
         self.editor = None;
         self.editor_msg = None;
         self.list_pick = None;
+        self.drop = None;
         self.data_choice = None;
         self.data_holds = None;
     }
@@ -1272,6 +1335,168 @@ impl SettingsWindow {
         }
     }
 
+    /// Setting `i`'s dropdown rows for its value `cur`, lit at the value in force (a choice of
+    /// five or more or with long names, a timeframe or grouping with "Custom…", products,
+    /// columns); `None`: the setting has buttons or a field instead.
+    fn drop_rows(i: usize, cur: &Value, prefs: &Prefs) -> Option<DropList> {
+        let st = &schema::all()[i];
+        let a = &prefs.app.appearance;
+        Some(match (st.kind, cur) {
+            (Kind::Choice(c), cur) if schema::drops_down(c) => {
+                let rows = c
+                    .iter()
+                    .enumerate()
+                    .map(|(j, n)| {
+                        let label = schema::choice_label(st.key, j, n, a).into_owned();
+                        match schema::choice_group(st.key, n) {
+                            Some(g) => Entry::grouped(label, g),
+                            None => Entry::new(label),
+                        }
+                    })
+                    .collect();
+                let custom = schema::takes_custom(st.key);
+                let at = match cur {
+                    Value::Choice(k) => Some(*k),
+                    // A typed value: "Custom…" is lit.
+                    _ if custom => Some(c.len()),
+                    _ => None,
+                };
+                DropList::new(rows, false, custom, at)
+            }
+            (Kind::Products, Value::List(l)) => DropList::new(
+                schema::depth_choices(l)
+                    .into_iter()
+                    .map(|(sym, known)| {
+                        Entry::new(if known {
+                            sym
+                        } else {
+                            format!("{sym} (unavailable)")
+                        })
+                    })
+                    .collect(),
+                true,
+                false,
+                None,
+            ),
+            (Kind::Picks(names), _) => DropList::new(
+                names.iter().map(|n| Entry::new(*n)).collect(),
+                true,
+                false,
+                None,
+            ),
+            _ => return None,
+        })
+    }
+
+    /// A multi-select's row keys for its value `cur` (each product's symbol, each option's
+    /// name), row for row with [`Self::drop_rows`]; empty for a one-pick list.
+    fn drop_keys(i: usize, cur: &Value) -> Vec<String> {
+        match (schema::all()[i].kind, cur) {
+            (Kind::Products, Value::List(l)) => schema::depth_choices(l)
+                .into_iter()
+                .map(|(s, _)| s)
+                .collect(),
+            (Kind::Picks(names), _) => names.iter().map(|n| (*n).to_owned()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether row `k` of a dropdown is the value in force (one pick, `cur` a choice) or on
+    /// (several: its key, from `keys`, is in `cur`).
+    fn drop_checked(cur: &Value, keys: &[String], k: usize) -> bool {
+        match cur {
+            Value::Choice(j) => *j == k,
+            Value::List(l) => keys
+                .get(k)
+                .is_some_and(|key| l.iter().any(|x| x.eq_ignore_ascii_case(key))),
+            _ => false,
+        }
+    }
+
+    /// Open setting `i`'s dropdown (closing any other list).
+    fn open_drop(&mut self, i: usize, cx: &App) {
+        let prefs = current_prefs(cx);
+        let cur = (schema::all()[i].get)(&prefs, &self.target, &self.facts);
+        if let Some(list) = Self::drop_rows(i, &cur, &prefs) {
+            // One thing at a time: a question waiting (a loosening's Y, the data folder's Move
+            // or Start empty) is left, as a click elsewhere leaves it.
+            self.list_pick = None;
+            self.edit = None;
+            self.cancel_pending();
+            self.data_choice = None;
+            self.data_holds = None;
+            self.drop = Some(OpenDrop {
+                i,
+                list,
+                keys: Self::drop_keys(i, &cur),
+                scroll: gpui::ScrollHandle::new(),
+                reveal_wait: Some(0),
+            });
+        }
+    }
+
+    /// What a key or a click in the open dropdown did.
+    fn drop_outcome(&mut self, o: Outcome, cx: &mut Context<Self>) {
+        let Some(d) = self.drop.as_mut() else {
+            return;
+        };
+        let i = d.i;
+        let st = &schema::all()[i];
+        match o {
+            Outcome::None => drop_view::reveal(&d.scroll, &d.list, false),
+            Outcome::Close => self.drop = None,
+            Outcome::Pick(k) => {
+                self.drop = None;
+                self.set(i, Value::Choice(k), false, cx);
+            }
+            // Refused (not a timeframe, out of range): the field stays, with what was typed,
+            // and the row says why.
+            Outcome::Submit(text) => {
+                let mut p = current_prefs(cx);
+                match st.apply(&mut p, &self.target, Value::Text(text.clone())) {
+                    Ok(()) => {
+                        self.drop = None;
+                        self.set(i, Value::Text(text), false, cx);
+                    }
+                    Err(e) => self.note = Some((i, e.to_owned(), Tone::Problem)),
+                }
+            }
+            Outcome::Toggle(k) => {
+                d.list.lit = k;
+                let key = d.keys.get(k).cloned();
+                let cur = (st.get)(&current_prefs(cx), &self.target, &self.facts);
+                let next = match (st.kind, cur, key) {
+                    (Kind::Products, Value::List(l), Some(sym)) => Some(schema::toggled(&l, &sym)),
+                    // In the options' order; `key` flips, the rest stay.
+                    (Kind::Picks(names), Value::List(l), Some(key)) => Some(
+                        names
+                            .iter()
+                            .filter(|m| (**m == key) != l.iter().any(|x| x == *m))
+                            .map(|m| (*m).to_owned())
+                            .collect(),
+                    ),
+                    _ => None,
+                };
+                if let Some(next) = next {
+                    self.set(i, Value::List(next), false, cx);
+                }
+            }
+        }
+    }
+
+    /// A key while a dropdown is open: it moves, jumps, picks, toggles or closes.
+    fn drop_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) {
+        let k = &ev.keystroke;
+        let Some(d) = self.drop.as_mut() else {
+            return;
+        };
+        let o = d
+            .list
+            .key(k.key.as_str(), k.key_char.as_deref(), Instant::now());
+        self.drop_outcome(o, cx);
+        cx.notify();
+    }
+
     /// The editor a setting of kind `Editor` opens.
     fn open_editor_for(&mut self, i: usize, cx: &App) {
         if let Some(list) = List::of(schema::all()[i].key) {
@@ -1364,6 +1589,10 @@ impl SettingsWindow {
                 self.conn_action(a, cx);
             }
             cx.notify();
+            return;
+        }
+        if self.drop.is_some() {
+            self.drop_key(ev, cx);
             return;
         }
         if self.list_pick.is_some() {
@@ -1497,14 +1726,6 @@ impl SettingsWindow {
                         (Kind::Toggle, _) if !st.read_only() => {
                             self.set(i, Value::Bool(key == "right"), false, cx)
                         }
-                        (Kind::Products, Value::List(l)) => {
-                            let n = schema::depth_choices(&l).len();
-                            self.chip = if key == "left" {
-                                self.chip.saturating_sub(1)
-                            } else {
-                                (self.chip + 1).min(n.saturating_sub(1))
-                            };
-                        }
                         // A line of two numbers: the other one.
                         (Kind::Number { .. }, _) => {
                             self.step_field(i, key == "right");
@@ -1550,6 +1771,8 @@ impl SettingsWindow {
         let cur = (st.get)(&current_prefs(cx), &self.target, &self.facts);
         match (kind, cur) {
             (Kind::Toggle, Value::Bool(b)) => self.set(i, Value::Bool(!b), false, cx),
+            (Kind::Choice(c), _) if schema::drops_down(c) => self.open_drop(i, cx),
+            (Kind::Products | Kind::Picks(_), _) => self.open_drop(i, cx),
             (Kind::Choice(c), Value::Choice(k)) => {
                 self.set(i, Value::Choice((k + 1) % c.len()), false, cx)
             }
@@ -1569,11 +1792,6 @@ impl SettingsWindow {
                 }
             }
             (Kind::Editor, _) => self.open_editor_for(i, cx),
-            (Kind::Products, Value::List(l)) => {
-                if let Some((sym, _)) = schema::depth_choices(&l).get(self.chip) {
-                    self.set(i, Value::List(schema::toggled(&l, sym)), false, cx);
-                }
-            }
             _ => {}
         }
     }
@@ -1910,81 +2128,6 @@ impl SettingsWindow {
         )
     }
 
-    /// Depth recorded for: one chip per catalog product (a check and the fill when chosen),
-    /// then saved symbols this build doesn't know: dashed and muted, unavailable. `locked`: a
-    /// flag rules the row this run (dimmed, nothing reacts).
-    fn product_chips(
-        &self,
-        i: usize,
-        list: &[String],
-        locked: bool,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let t = self.theme;
-        let selected = self.selected() == Some(i);
-        let mut chips = div()
-            .flex()
-            .flex_row()
-            .flex_wrap()
-            .gap_1()
-            .min_w_0()
-            .max_w_full();
-        for (k, (sym, known)) in schema::depth_choices(list).into_iter().enumerate() {
-            let on = list.iter().any(|s| s.eq_ignore_ascii_case(&sym));
-            let focused = selected && k == self.chip && !locked;
-            // The check has its own fixed slot in every chip: checking one moves nothing.
-            let name = if known {
-                sym.clone()
-            } else {
-                format!("{sym} (unavailable)")
-            };
-            let fill = if locked { t.element_selected } else { t.accent };
-            let text = if on && known && !locked {
-                t.bg
-            } else if known || on {
-                t.text_main
-            } else {
-                t.text_dim
-            };
-            let mut chip = div()
-                .id(("depth", i * 256 + k))
-                .flex()
-                .flex_row()
-                .flex_none()
-                .whitespace_nowrap()
-                .pr_1()
-                .rounded_sm()
-                .border_1()
-                // The keys' chip: a main-text border, seen on a chosen (filled) chip too; the
-                // rest a 3:1 control edge (dashed while a flag rules the row, or unknown).
-                .border_color(if focused { t.text_main } else { t.control_edge })
-                .when(locked || !known, |d| d.border_dashed())
-                .when(on && known, |d| d.bg(fill))
-                .text_color(text)
-                .child(
-                    div()
-                        .w(crate::zoom::ui(14.0))
-                        .flex()
-                        .justify_center()
-                        .child(if on { "✓" } else { "" }),
-                )
-                .child(name);
-            if !locked {
-                chip = chip.cursor_pointer().on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |v, _, _, cx| {
-                        v.select(i);
-                        v.chip = k;
-                        v.activate(i, Kind::Products, cx);
-                        cx.notify();
-                    }),
-                );
-            }
-            chips = chips.child(chip);
-        }
-        chips.into_any_element()
-    }
-
     // ---- rendering ----------------------------------------------------------------------
 
     /// The sidebar: the sections under their groups' headers (App, Panes, Trading, Data, then
@@ -2109,6 +2252,28 @@ impl SettingsWindow {
         // A flag rules the row this run: its value in force, dimmed; nothing reacts (`set`).
         let locked = schema::flag_value(st, &self.facts).is_some();
         match (st.kind, value) {
+            (Kind::Choice(c), Value::Choice(_) | Value::Text(_)) if schema::drops_down(c) => {
+                let text = match value {
+                    Value::Choice(k) => c
+                        .get(*k)
+                        .map(|n| {
+                            schema::choice_label(st.key, *k, n, &prefs.app.appearance).into_owned()
+                        })
+                        .unwrap_or_default(),
+                    Value::Text(s) => s.clone(),
+                    _ => String::new(),
+                };
+                self.drop_control(i, text, value, focused, locked, cx)
+            }
+            (Kind::Products, Value::List(l)) => {
+                self.drop_control(i, products_summary(l), value, focused, locked, cx)
+            }
+            (Kind::Picks(names), Value::List(l)) => {
+                self.drop_control(i, picks_summary(l, names.len()), value, focused, locked, cx)
+            }
+            (Kind::Editor, Value::Text(s)) if List::of(st.key).is_some() => {
+                self.list_control(i, s.clone(), focused, cx)
+            }
             (Kind::Choice(c), Value::Choice(k)) => {
                 // Wraps onto more lines when the row is narrower than its chips.
                 let mut seg = div()
@@ -2226,14 +2391,20 @@ impl SettingsWindow {
                 let text = schema::flag_text(st, &self.facts)
                     .filter(|_| locked)
                     .unwrap_or(text);
-                div()
+                let steps = !(locked || muted || editing || st.read_only())
+                    && steps_fit(i, self.win_w, crate::zoom::get());
+                let field = div()
                     .id(("number", i))
                     .flex_none()
                     .font_features(gpui::FontFeatures(std::sync::Arc::new(vec![(
                         "tnum".into(),
                         1,
                     )])))
-                    .min_w(crate::zoom::ui(NUMBER_W))
+                    .min_w(crate::zoom::ui(if steps {
+                        NUMBER_STEP_W
+                    } else {
+                        NUMBER_W
+                    }))
                     .px_2()
                     .rounded_sm()
                     .border_1()
@@ -2258,12 +2429,11 @@ impl SettingsWindow {
                             v.activate(i, schema::all()[i].kind, cx);
                             cx.notify();
                         }),
-                    )
-                    .into_any_element()
+                    );
+                self.stepper(i, *n, field, !steps, cx)
             }
             (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_buttons(i, cx),
             (Kind::Editor, _) if st.key == schema::DATA_FOLDER_KEY => self.data_buttons(i, cx),
-            (Kind::Products, Value::List(l)) => self.product_chips(i, l, locked, cx),
             (Kind::Editor, _) if st.key == schema::ROLLBACK_KEY => {
                 match self.facts.rollback.clone() {
                     None => div().into_any_element(),
@@ -2280,9 +2450,7 @@ impl SettingsWindow {
                 }
             }
             (Kind::Editor, _) => {
-                let label = if List::of(st.key).is_some() {
-                    "Change…"
-                } else if st.key == schema::PROP_OVERRIDES_KEY {
+                let label = if st.key == schema::PROP_OVERRIDES_KEY {
                     if self.overrides_open {
                         "Hide overrides"
                     } else {
@@ -2304,6 +2472,158 @@ impl SettingsWindow {
             }
             _ => div().into_any_element(),
         }
+    }
+
+    /// A dropdown: `text` (the value in force, or a summary) and ▾; open, its list floats under
+    /// it (above when there's more room there), capped and scrolling.
+    fn drop_control(
+        &self,
+        i: usize,
+        text: String,
+        value: &Value,
+        focused: bool,
+        locked: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.theme;
+        let open = self.drop.as_ref().filter(|d| d.i == i);
+        let label = text.clone();
+        let trigger = drop_view::trigger(("drop", i), text, focused, open.is_some(), locked, &t)
+            .when(!locked, |d| {
+                d.on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        v.select(i);
+                        v.activate(i, schema::all()[i].kind, cx);
+                        cx.notify();
+                    }),
+                )
+            });
+        let list = open.map(|d| {
+            let checked = |k: usize| Self::drop_checked(value, &d.keys, k);
+            let el = drop_view::list(
+                "drop-list",
+                &d.list,
+                &checked,
+                &t,
+                cx,
+                |v: &mut Self, k, _, cx| {
+                    if let Some(d) = v.drop.as_mut() {
+                        let o = d.list.choose(k);
+                        v.drop_outcome(o, cx);
+                    }
+                },
+            );
+            (el, d.scroll.clone(), drop_view::cap(), t.panel)
+        });
+        crate::dropdown::dropdown_list(trigger, list)
+            .lint_trigger(&label)
+            .on_dismiss(Box::new(cx.listener(
+                |v, _: &gpui::MouseDownEvent, _, cx| {
+                    v.drop = None;
+                    cx.notify();
+                },
+            )))
+            .into_any_element()
+    }
+
+    /// Time zone, UI font: the value in force and ▾; open, its searchable list floats under it.
+    fn list_control(
+        &self,
+        i: usize,
+        text: String,
+        focused: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let t = self.theme;
+        let Some(list) = List::of(schema::all()[i].key) else {
+            return div().into_any_element();
+        };
+        let open = self.list_pick.as_ref().is_some_and(|(l, _)| *l == list);
+        let label = text.clone();
+        let trigger = drop_view::trigger(("list", i), text, focused, open, false, &t)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _, _, cx| {
+                    v.select(i);
+                    if open {
+                        v.list_pick = None;
+                    } else {
+                        v.drop = None;
+                        v.open_list(list, cx);
+                    }
+                    cx.notify();
+                }),
+            );
+        crate::dropdown::dropdown(trigger, self.list_view(list.key(), cx))
+            .lint_trigger(&label)
+            .on_dismiss(Box::new(cx.listener(
+                |v, _: &gpui::MouseDownEvent, _, cx| {
+                    v.list_pick = None;
+                    cx.notify();
+                },
+            )))
+            .into_any_element()
+    }
+
+    /// A number field between − and +, each a step (`schema::stepped`: $100, 5 minutes, else
+    /// 1); none while a flag rules it, it rests, or it is being typed.
+    fn stepper(
+        &self,
+        i: usize,
+        n: Option<i64>,
+        field: impl IntoElement,
+        quiet: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let st = &schema::all()[i];
+        if quiet || st.read_only() {
+            return field.into_any_element();
+        }
+        let t = self.theme;
+        let kind = st.kind;
+        // A prop override's empty is "the preset's" (not Off): − stops at the least.
+        let to_empty = !schema::PROP_OVERRIDES.contains(&st.key);
+        let next =
+            move |up: bool| schema::stepped(kind, n, up).filter(|next| next.is_some() || to_empty);
+        let step = |up: bool| {
+            let can = next(up).is_some();
+            let hover = t.ghost_selected;
+            div()
+                .id(("step", i * 2 + usize::from(up)))
+                .flex_none()
+                .w(crate::zoom::ui(20.0))
+                .flex()
+                .justify_center()
+                .rounded_sm()
+                .border_1()
+                // At its end (Off, the least, the most): quieter, and nothing happens.
+                .border_color(if can { t.control_edge } else { t.axis_line })
+                .text_color(if can { t.text_main } else { t.text_dim })
+                .when(can, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
+                .child(if up { "+" } else { "−" })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v, _, _, cx| {
+                        v.select(i);
+                        if let Some(next) = next(up) {
+                            v.set(i, Value::Number(next), false, cx);
+                        }
+                        cx.notify();
+                    }),
+                )
+        };
+        let (minus, plus) = (step(false), step(true));
+        div()
+            .flex()
+            .flex_row()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .child(minus)
+            .child(field)
+            .child(plus)
+            .into_any_element()
     }
 
     /// A quiet outlined button (Edit…, Change…, Override…).
@@ -2588,7 +2908,7 @@ impl SettingsWindow {
         // In the column the line's parts stack: every long choice today is alone on its line.
         let own_line = idx
             .iter()
-            .any(|&k| matches!(schema::all()[k].kind, Kind::Choice(c) if long_choice(c, line_w)));
+            .any(|&k| matches!(schema::all()[k].kind, Kind::Choice(c) if !schema::drops_down(c) && long_choice(c, line_w)));
         let mut right = if own_line {
             div().flex().flex_col().items_end().w_full().min_w_0()
         } else {
@@ -2693,7 +3013,9 @@ impl SettingsWindow {
                 t.text_main
             };
             let summary = match (st.kind, value_of(i)) {
-                (Kind::Editor, Value::Text(s)) if !summary_beside(st.key) => {
+                (Kind::Editor, Value::Text(s))
+                    if !summary_beside(st.key) && List::of(st.key).is_none() =>
+                {
                     Some(small(s, summary_color))
                 }
                 _ => None,
@@ -3197,13 +3519,13 @@ impl SettingsWindow {
         let mut v = div()
             .flex()
             .flex_col()
-            .gap_1()
-            .mx_2()
-            .my_1()
-            .p_2()
-            .rounded_sm()
+            .p_1()
+            .min_w(crate::zoom::ui(320.0))
+            .block_mouse_except_scroll()
+            .bg(t.panel)
+            .rounded_md()
             .border_1()
-            .border_color(t.accent)
+            .border_color(t.axis_line)
             .child(
                 div()
                     .px_1()
@@ -3479,7 +3801,6 @@ impl Render for SettingsWindow {
             for &i in keys {
                 match schema::all()[i].key {
                     "trading.brackets" => out.extend(v.editor_view()),
-                    k if List::of(k).is_some() => out.extend(v.list_view(k, cx)),
                     "keys.list" => out.push(v.keys_list()),
                     // Settings › Connections: a card per source (decision 0030).
                     k if k == schema::CONNECTIONS_LIST => {
@@ -3580,6 +3901,18 @@ impl Render for SettingsWindow {
             };
             if tries < 4 {
                 self.scroll_wait = Some((at, tries + 1));
+                cx.notify();
+            }
+        }
+        // An open dropdown, laid out once: its lit row near the middle.
+        if let Some(d) = self.drop.as_mut()
+            && let Some(n) = d.reveal_wait
+        {
+            if d.scroll.bounds().size.height > px(0.0) {
+                drop_view::reveal(&d.scroll, &d.list, true);
+                d.reveal_wait = None;
+            } else if n < 4 {
+                d.reveal_wait = Some(n + 1);
                 cx.notify();
             }
         }
@@ -3699,6 +4032,34 @@ fn content_line_w(win_w: f32, z: f32) -> f32 {
     w / z.max(0.1) - LINE_CHROME_W
 }
 
+/// The − / + pair and the field between them at its narrowest (100 % px: two 20 px buttons,
+/// the gaps, the field).
+const STEPPER_W: f32 = 2.0 * 20.0 + 2.0 * 4.0 + NUMBER_STEP_W;
+
+/// Whether number setting `i` gets − / + in a window `win_w` wide at zoom `z`: it is its line's
+/// only field (a line of two numbers and words is typed), and the pair fits beside the label's
+/// narrowest column, so the row keeps its one line (at 150 % in the default window it doesn't:
+/// the field alone, typed, as before).
+fn steps_fit(i: usize, win_w: f32, z: f32) -> bool {
+    let st = &schema::all()[i];
+    let fields = |l: &schema::Line| {
+        l.parts
+            .iter()
+            .filter(|p| matches!(p, schema::Part::Field(..)))
+            .count()
+    };
+    let alone = schema::page(st.section)
+        .iter()
+        .flat_map(|g| g.lines.iter())
+        .find(|l| {
+            l.parts
+                .iter()
+                .any(|p| matches!(p, schema::Part::Field(k, _) if *k == st.key))
+        })
+        .is_none_or(|l| fields(l) == 1);
+    alone && content_line_w(win_w, z) - LABEL_MIN_W - 8.0 >= STEPPER_W
+}
+
 /// A chip group's width estimated from its labels (100 % px): 9 px a character (the 13 px
 /// UI text measures about 8 px a character in IBM Plex Sans, a bold chip and digits a little
 /// more), each chip's padding (px_2) with 2 px to spare, and the group's border. Wide on
@@ -3730,10 +4091,30 @@ fn long_choice(chips: &[&str], line_w: f32) -> bool {
     choice_w(&shown) > line_w
 }
 
+/// A product multi-select's trigger: "None", "ES, NQ", "ES, NQ, +3".
+fn products_summary(l: &[String]) -> String {
+    match l {
+        [] => "None".to_owned(),
+        [a] => a.clone(),
+        [a, b] => format!("{a}, {b}"),
+        [a, b, rest @ ..] => format!("{a}, {b}, +{}", rest.len()),
+    }
+}
+
+/// A multi-select of a few named options: "All", "Orders, Bid", "3 of 4", "None".
+fn picks_summary(l: &[String], of: usize) -> String {
+    match l.len() {
+        0 => "None".to_owned(),
+        n if n == of => "All".to_owned(),
+        1 | 2 => l.join(", "),
+        n => format!("{n} of {of}"),
+    }
+}
+
 /// Editors whose summary sits beside their button ("8/16, 12/24 ticks  Edit…"); the rest
 /// (the data folder's path, the reset's account, the rollback) go under the label.
 fn summary_beside(key: &str) -> bool {
-    key == display_zone::KEY || key == "trading.brackets" || key == schema::PROP_OVERRIDES_KEY
+    key == "trading.brackets" || key == schema::PROP_OVERRIDES_KEY
 }
 
 #[cfg(test)]
@@ -3753,33 +4134,38 @@ mod tests {
 
     use super::*;
 
-    /// Which rows' chips take their own line: every choice with more chips than fit beside a
-    /// label at the narrowest window. Named here, so a new long choice is a decision.
+    /// Which rows' chips take their own line: every choice of buttons with more chips than fit
+    /// beside a label at the narrowest window (a dropdown is one field, never long). Named
+    /// here, so a new long choice is a decision.
     #[test]
     fn long_choices_take_their_own_line() {
         let long = |win: f32, z: f32| -> Vec<&str> {
             let line = content_line_w(win, z);
             schema::all()
                 .iter()
-                .filter(|s| matches!(s.kind, Kind::Choice(c) if long_choice(c, line)))
+                .filter(|s| {
+                    matches!(s.kind, Kind::Choice(c) if !schema::drops_down(c) && long_choice(c, line))
+                })
                 .map(|s| s.key)
                 .collect()
         };
-        // At the default size and zoom, only Bar period's chips would wrap.
-        assert_eq!(long(SIZE.0, 1.0), ["charts.timeframe"]);
-        // The narrowest window at 150 %: every group wider than its line.
+        // At the default size and zoom, no buttons wrap (Bar period's 23 are a dropdown).
+        assert!(long(SIZE.0, 1.0).is_empty(), "{:?}", long(SIZE.0, 1.0));
+        // The narrowest window at 150 %: the button groups wider than their line.
         let line = content_line_w(MIN_SIZE.0, 1.5);
         assert!((150.0..200.0).contains(&line), "{line}");
+        let narrow = long(MIN_SIZE.0, 1.5);
+        for k in ["trading.pnl", "guard.news"] {
+            assert!(narrow.contains(&k), "{k}");
+        }
         for k in [
             "general.updates",
             "appearance.light_palette",
             "appearance.ui_zoom",
             "charts.timeframe",
-            "trading.pnl",
-            "guard.news",
             "prop.preset",
         ] {
-            assert!(long(MIN_SIZE.0, 1.5).contains(&k), "{k}");
+            assert!(!narrow.contains(&k), "{k} is a dropdown");
         }
         // At the default size a short group keeps its place beside the label.
         assert!(!long_choice(
@@ -3788,6 +4174,97 @@ mod tests {
         ));
         // UI zoom's six chips (about 280 px drawn) are counted at least that wide.
         assert!(choice_w(&crate::zoom::LABELS) >= 280.0);
+    }
+
+    /// The audited rows open dropdowns, lit at the value in force: Bar period grouped with
+    /// "Custom…" last; the depth products and the DOM's columns several at once.
+    #[test]
+    fn dropdowns_list_their_rows() {
+        let prefs = Prefs::default();
+        let at = |key: &str| schema::index_of(key).unwrap();
+        let rows = |key: &str, v: Value| SettingsWindow::drop_rows(at(key), &v, &prefs).unwrap();
+        let tf = rows("charts.timeframe", Value::Choice(3));
+        assert_eq!(tf.lit, 3);
+        assert!(tf.custom && !tf.multi);
+        let groups: Vec<_> = tf.entries.iter().map(|e| e.group.unwrap()).collect();
+        let mut seen = groups.clone();
+        seen.dedup();
+        assert_eq!(
+            seen,
+            [
+                "Minutes", "Hours", "Days", "Ticks", "Seconds", "Volume", "Range"
+            ],
+            "each group once, in order"
+        );
+        // A typed timeframe lights "Custom…".
+        assert_eq!(rows("charts.timeframe", Value::Text("750t".into())).lit, 23);
+        assert!(rows("dom.grouping", Value::Choice(0)).custom);
+        assert!(!rows("appearance.ui_zoom", Value::Choice(2)).custom);
+        let cols = rows("dom.columns", Value::List(vec!["Bid".into(), "Ask".into()]));
+        assert!(cols.multi);
+        let on = Value::List(vec!["Bid".into(), "Ask".into()]);
+        let keys = SettingsWindow::drop_keys(at("dom.columns"), &on);
+        let checked: Vec<bool> = (0..4)
+            .map(|k| SettingsWindow::drop_checked(&on, &keys, k))
+            .collect();
+        assert_eq!(checked, [false, true, true, false]);
+        assert!(rows("data.depth", Value::List(vec!["ES".into()])).multi);
+        // Rows keep their product when the saved set shrinks under the open list: unknown
+        // symbols sit last, so removing one would move the rows after it.
+        let saved = Value::List(vec!["ES".into(), "ZZ1".into(), "ZZ2".into()]);
+        let keys = SettingsWindow::drop_keys(at("data.depth"), &saved);
+        let (zz1, zz2) = (keys.len() - 2, keys.len() - 1);
+        assert_eq!((&*keys[zz1], &*keys[zz2]), ("ZZ1", "ZZ2"));
+        let after = Value::List(vec!["ES".into(), "ZZ2".into()]);
+        assert!(!SettingsWindow::drop_checked(&after, &keys, zz1));
+        assert!(SettingsWindow::drop_checked(&after, &keys, zz2));
+        // Buttons stay buttons.
+        for key in [
+            "appearance.theme",
+            "appearance.palette",
+            "trading.pnl",
+            "guard.news",
+        ] {
+            let v = (schema::all()[at(key)].get)(&prefs, &Target::default(), &Facts::default());
+            assert!(
+                SettingsWindow::drop_rows(at(key), &v, &prefs).is_none(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn summaries_name_a_few_and_count_the_rest() {
+        let l = |v: &[&str]| v.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        assert_eq!(products_summary(&[]), "None");
+        assert_eq!(products_summary(&l(&["ES", "NQ"])), "ES, NQ");
+        assert_eq!(
+            products_summary(&l(&["ES", "NQ", "CL", "GC", "MES"])),
+            "ES, NQ, +3"
+        );
+        assert_eq!(
+            picks_summary(&l(&["Orders", "Bid", "Ask", "Volume"]), 4),
+            "All"
+        );
+        assert_eq!(picks_summary(&l(&["Bid", "Ask", "Volume"]), 4), "3 of 4");
+        assert_eq!(picks_summary(&l(&["Bid", "Ask"]), 4), "Bid, Ask");
+        assert_eq!(picks_summary(&[], 4), "None");
+    }
+
+    /// − / + go beside a lone number when they fit by the label's narrowest column: at 100 %
+    /// in every window size, never at 150 % in the default one (the field alone keeps the row
+    /// on one line); never on a line of two numbers.
+    #[test]
+    fn steppers_only_where_they_fit() {
+        let at = |key: &str| schema::index_of(key).unwrap();
+        let daily = at("guard.max_daily_loss");
+        assert!(steps_fit(daily, SIZE.0, 1.0));
+        assert!(steps_fit(daily, MIN_SIZE.0, 1.0));
+        assert!(!steps_fit(daily, SIZE.0, 1.5));
+        assert!(
+            !steps_fit(at("guard.news_before"), SIZE.0, 1.0),
+            "two numbers"
+        );
     }
 
     /// At its smallest the window leaves a row's label column its full width, and the widest

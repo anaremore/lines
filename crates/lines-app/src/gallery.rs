@@ -286,10 +286,9 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             )),
         ));
     }
-    // Settings › Charts at the narrowest window: Bar period's 23 chips wrap on their own line
-    // under the label, and the row grows to hold them (never over its description or the next
-    // row). Dark at 100 %, light at 150 % (tall enough that the page needs no scrolling, so
-    // nothing is cut at its edge).
+    // Settings › Charts at the narrowest window: Bar period is a dropdown (one field), Hollow
+    // candles' chips keep to their line. Dark at 100 %, light at 150 % (tall enough that the page
+    // needs no scrolling, so nothing is cut at its edge).
     let mut set = s(
         "settings-charts-narrow",
         false,
@@ -310,9 +309,9 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     );
     set.windows = 2;
     v.push(set);
-    // Every other page with a chip group that wraps at the narrowest window and 150 %: General
-    // (updates), Appearance (Light palette's long names, UI zoom), Order entry (P&L display)
-    // and Accounts (the news blackout, the prop preset).
+    // The pages at the narrowest window and 150 %: General (the Updates dropdown), Appearance
+    // (the Light palette and UI zoom dropdowns), Order entry (P&L display's chips, the − / +
+    // number fields) and Accounts (the news blackout's chips, the prop preset's dropdown).
     for (page, name, h) in [
         ("general", "settings-general-narrow-light-150", 700),
         ("appearance", "settings-appearance-narrow-light-150", 900),
@@ -342,6 +341,48 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     );
     set.windows = 2;
     v.push(set);
+    // Settings' dropdowns open (owner-approved, 2026-11-11): floating over the rows under them,
+    // never moving them. Bar period's grouped list in the smallest window (capped, scrolling,
+    // the value in force in view); the depth products' multi-select; the prop preset opening
+    // upward near the window's bottom; the time zone's searchable list at 150 %.
+    for (name, page, rest) in [
+        (
+            "settings-drop-timeframe",
+            "charts",
+            "--theme dark --settings-size 640x420 --settings-set charts.timeframe=open",
+        ),
+        (
+            "settings-drop-custom-light-150",
+            "charts",
+            "--theme light --ui-zoom 150 --settings-size 640x900 --settings-set charts.timeframe=custom:750t",
+        ),
+        (
+            "settings-drop-depth",
+            "data-folder",
+            "--theme dark --settings-size 640x420 --settings-set data.depth=open",
+        ),
+        (
+            "settings-drop-preset-light",
+            "accounts",
+            "--theme light --settings-size 860x700 --settings-set prop.preset=open",
+        ),
+        (
+            "settings-drop-zone-150",
+            "general",
+            "--theme dark --ui-zoom 150 --settings-size 860x620 --settings-set appearance.time_zone=open",
+        ),
+    ] {
+        let mut set = s(
+            name,
+            false,
+            end,
+            args(&format!(
+                "--layout chart --size 1000x700 --settings {page} {rest}"
+            )),
+        );
+        set.windows = 2;
+        v.push(set);
+    }
     // The trading panel's Qty and Bracket lists: anchored under their field, as wide as their
     // content (never the window's width).
     v.push(s(
