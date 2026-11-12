@@ -95,11 +95,11 @@ fn matches(m: &Keymap, c: Command, filter: &str) -> bool {
     if f.is_empty() {
         return true;
     }
+    // A key (pressed, or typed with Ctrl or Alt, or an F-key): that exact key only.
     if let Some(k) = Combo::parse(f)
-        && (k.ctrl || k.alt || k.key.starts_with('f') && k.key.len() > 1)
-        && m.keys(c).any(|x| *x == k)
+        && (k.ctrl || k.alt || k.key.starts_with('f') && k.key[1..].parse::<u8>().is_ok())
     {
-        return true;
+        return m.keys(c).any(|x| *x == k);
     }
     let label = commands::label(c).to_lowercase();
     let mac = cfg!(target_os = "macos");
@@ -958,6 +958,16 @@ mod tests {
         // By a key: the command on it.
         let f = rows(&m, Chip::All, "ctrl+shift+f");
         assert_eq!(f, vec![Command::Trade(TradeCmd::Flatten)]);
+        // Exactly that key: not one that starts with it (Ctrl+Shift+F9).
+        m.set(
+            Command::NewTab,
+            None,
+            Combo::parse("ctrl+shift+f9").unwrap(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(rows(&m, Chip::All, "Ctrl+Shift+F"), f);
+        m.reset(Command::NewTab);
         // By words.
         assert!(rows(&m, Chip::All, "flatten").contains(&Command::Trade(TradeCmd::Flatten)));
         // A group.

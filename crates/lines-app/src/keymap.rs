@@ -449,7 +449,7 @@ impl Keymap {
                 }
             }
             said.push(
-                "Key bindings: Flatten, Cancel all and Stop all strategies are back to their                  default keys"
+                "Key bindings: Flatten, Cancel all and Stop all strategies are back to their default keys"
                     .to_owned(),
             );
         }
@@ -551,6 +551,8 @@ impl Keymap {
             Some(i) => self.binds[i].1 = k,
             None => self.binds.push((c, k)),
         }
+        // The order a restart loads (defaults first): the hint never changes on a restart.
+        self.in_default_order();
         Ok(())
     }
 
