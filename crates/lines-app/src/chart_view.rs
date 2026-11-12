@@ -8678,7 +8678,9 @@ impl ChartView {
         let text = if d.confirm_clear {
             clear_drawings_question(d.count(), self.instrument.symbol)
         } else if let Some(tool) = d.tool() {
-            let how = if tool.anchors() == 2 {
+            let how = if tool == Tool::Brush {
+                "press and drag to draw"
+            } else if tool.anchors() == 2 {
                 "click two points (or drag)"
             } else {
                 "click to place"
