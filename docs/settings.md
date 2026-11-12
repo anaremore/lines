@@ -43,6 +43,7 @@ Every Settings row shows a brief description, always (at most 60 characters; own
 - **Order tags on the chart**: Where working orders' tags sit: beside the price axis, or at the plot's left edge with the position's.
 - **Bracket presets**: Stop and target pairs per account and product. The DOM panel's Edit… edits the same list in place.
 - **Bracket units**: Show bracket distances in ticks or points (stored in ticks, exact).
+- **Move stop and target with the entry**: Dragging an unfilled entry moves its stop and target too.
 - **Disable trading when a DOM loses focus**: Off by default (↺ shows the default): the trading switch stays as you set it.
 - **Disable trading on an account change**: Off by default.
 - **Disable trading on a contract change**: Off by default (a roll, a picker switch, a linked pane).

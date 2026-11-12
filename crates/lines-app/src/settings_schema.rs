@@ -5086,6 +5086,15 @@ mod tests {
                 st.key
             );
         }
+        // The full texts: one entry per setting in docs/settings.md.
+        let doc = include_str!("../../../docs/settings.md");
+        for st in all() {
+            assert!(
+                doc.contains(&format!("- **{}**:", st.name)),
+                "{}: no entry in docs/settings.md",
+                st.key
+            );
+        }
         let names = |q: &str| -> Vec<&str> { search(q).iter().map(|&i| all()[i].key).collect() };
         assert!(names("mid-trade").contains(&"general.updates"));
         assert!(names("exits not blocked").contains(&"guard.news"));

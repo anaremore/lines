@@ -316,7 +316,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         ("general", "settings-general-narrow-light-150", 700),
         ("appearance", "settings-appearance-narrow-light-150", 900),
         ("order-entry", "settings-order-entry-narrow-light-150", 1100),
-        ("accounts", "settings-accounts-narrow-light-150", 2000),
+        ("accounts", "settings-accounts-narrow-light-150", 1400),
     ] {
         let mut set = s(
             name,
