@@ -2086,9 +2086,6 @@ impl SettingsWindow {
         )
     }
 
-    /// Depth recorded for: one chip per catalog product (a check and the fill when chosen),
-    /// then saved symbols this build doesn't know: dashed and muted, unavailable. `locked`: a
-    /// flag rules the row this run (dimmed, nothing reacts).
     // ---- rendering ----------------------------------------------------------------------
 
     /// The sidebar: the sections under their groups' headers (App, Panes, Trading, Data, then
