@@ -143,6 +143,12 @@ impl KeysPage {
         keymap::set_capturing(false);
     }
 
+    /// The focused row inside the rows shown (a change can drop rows: Changed).
+    fn clamp(&mut self) {
+        let n = rows(&keymap::snapshot(), self.chip, &self.filter).len();
+        self.focus = self.focus.min(n.saturating_sub(1));
+    }
+
     /// Whether a key is being captured (every key goes to the page).
     pub(crate) fn capturing(&self) -> bool {
         self.capture.is_some() || self.conflict.is_some()
@@ -157,6 +163,7 @@ impl KeysPage {
 
     pub(crate) fn press(&mut self, a: Action, cx: &mut App) {
         self.press_inner(a, cx);
+        self.clamp();
         keymap::set_capturing(self.capturing());
     }
 
@@ -176,10 +183,12 @@ impl KeysPage {
                 let mut m = keymap::snapshot();
                 m.reset(cmd);
                 Self::commit(m, cx);
+                self.reveal = false;
             }
             Action::ResetAll => {
                 self.leave();
                 Self::commit(Keymap::defaults(), cx);
+                self.reveal = false;
             }
             Action::Chip(c) => {
                 self.leave();
@@ -214,11 +223,20 @@ impl KeysPage {
     /// A key on the page. `true`: handled (never passed on: while capturing, every key).
     pub(crate) fn key(&mut self, ev: &KeyDownEvent, cx: &mut App) -> bool {
         let handled = self.key_inner(ev, cx);
+        self.clamp();
         keymap::set_capturing(self.capturing());
         handled
     }
 
     fn key_inner(&mut self, ev: &KeyDownEvent, cx: &mut App) -> bool {
+        // A held key's repeats: only ↑ ↓ and ⌫ repeat (moving, erasing); a key held through
+        // a capture never lands as a key or in the search.
+        if ev.is_held
+            && (self.capturing()
+                || !matches!(ev.keystroke.key.as_str(), "up" | "down" | "backspace"))
+        {
+            return true;
+        }
         let k = &ev.keystroke;
         let m = k.modifiers;
         let key = k.key.as_str();
@@ -339,6 +357,13 @@ impl KeysPage {
                 // A key with Ctrl or Alt (or an F-key): find the command it is on.
                 let fkey = key.len() > 1 && key.starts_with('f') && key[1..].parse::<u8>().is_ok();
                 if m.control || m.alt || m.platform || fkey {
+                    // The window's zoom keys stay the window's.
+                    if matches!(
+                        commands::command_for(k),
+                        Some(Command::ZoomIn | Command::ZoomOut | Command::ZoomReset)
+                    ) {
+                        return false;
+                    }
                     if let Ok(c) = captured(k) {
                         self.filter = c.text(cfg!(target_os = "macos"));
                         self.focus = 0;

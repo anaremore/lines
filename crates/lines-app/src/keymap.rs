@@ -236,6 +236,15 @@ pub fn keeps_a_key(c: Command) -> bool {
     )
 }
 
+/// A command's default keys (`BINDINGS`).
+fn default_keys(c: Command) -> Vec<Combo> {
+    BINDINGS
+        .iter()
+        .filter(|b| b.cmd == c)
+        .map(|b| Combo::new(b.ctrl, b.shift, b.alt, b.key))
+        .collect()
+}
+
 /// The short name of a command that always keeps a key (for a row's refusal).
 fn emergency_name(c: Command) -> String {
     match c {
@@ -370,6 +379,10 @@ impl Keymap {
                     ));
                     continue;
                 };
+                // A fixed key is saved with its command's list and never left it.
+                if fixed(c, &k) {
+                    continue;
+                }
                 match m.check(c, &k) {
                     Check::Free => m.binds.push((c, k)),
                     Check::Same => {}
@@ -388,21 +401,60 @@ impl Keymap {
             }
         }
         // A command that must keep a key and lost every one: its defaults back (reported).
-        for c in bindable().into_iter().filter(|c| keeps_a_key(*c)) {
-            if m.keys(c).next().is_none() {
-                for b in BINDINGS.iter().filter(|b| b.cmd == c) {
-                    let k = Combo::new(b.ctrl, b.shift, b.alt, b.key);
-                    if m.lookup(k.ctrl, k.shift, k.alt, &k.key).is_none() {
-                        m.binds.push((c, k));
+        skipped.extend(m.keep_emergency_keys());
+        (m, skipped)
+    }
+
+    /// Flatten, Cancel all and Stop all strategies each with a key: one left without any
+    /// takes its defaults back from whoever has them; if another of the three holds one as
+    /// its only key, all three go back to their defaults. What was done, as sentences.
+    fn keep_emergency_keys(&mut self) -> Vec<String> {
+        let mut said = Vec::new();
+        let emergency: Vec<Command> = bindable().into_iter().filter(|c| keeps_a_key(*c)).collect();
+        for &c in &emergency {
+            if self.keys(c).next().is_some() {
+                continue;
+            }
+            for k in default_keys(c) {
+                match self.lookup(k.ctrl, k.shift, k.alt, &k.key) {
+                    None => self.binds.push((c, k)),
+                    Some(o) if keeps_a_key(o) && self.keys(o).count() == 1 => {}
+                    Some(o) => {
+                        said.push(format!(
+                            "Key bindings: {} moved back from {} to {}",
+                            k.text(MAC),
+                            crate::commands::label(o),
+                            emergency_name(c)
+                        ));
+                        self.binds.retain(|(_, x)| *x != k);
+                        self.binds.push((c, k));
                     }
                 }
-                skipped.push(format!(
+            }
+            if self.keys(c).next().is_some() {
+                said.push(format!(
                     "Key bindings: {} always keeps a key: its default is back",
-                    crate::commands::label(c)
+                    emergency_name(c)
                 ));
             }
         }
-        (m, skipped)
+        if emergency.iter().any(|c| self.keys(*c).next().is_none()) {
+            for &c in &emergency {
+                self.binds.retain(|(b, _)| *b != c);
+            }
+            for &c in &emergency {
+                for k in default_keys(c) {
+                    self.binds.retain(|(_, x)| *x != k);
+                    self.binds.push((c, k));
+                }
+            }
+            said.push(
+                "Key bindings: Flatten, Cancel all and Stop all strategies are back to their                  default keys"
+                    .to_owned(),
+            );
+        }
+        self.in_default_order();
+        said
     }
 
     /// The command a key runs. Allocates nothing (the key path).
@@ -520,12 +572,10 @@ impl Keymap {
 
     /// `c`'s keys back to its defaults (↺); a default another command took since comes back
     /// from it (unless that would leave a command that keeps a key without one).
+    /// A command that keeps a key and would be left with none keeps the keys it had.
     pub fn reset(&mut self, c: Command) {
-        let defaults: Vec<Combo> = BINDINGS
-            .iter()
-            .filter(|b| b.cmd == c)
-            .map(|b| Combo::new(b.ctrl, b.shift, b.alt, b.key))
-            .collect();
+        let before = self.binds.clone();
+        let defaults = default_keys(c);
         self.binds.retain(|(b, _)| *b != c);
         for k in defaults {
             if let Some(o) = self.lookup(k.ctrl, k.shift, k.alt, &k.key) {
@@ -535,6 +585,10 @@ impl Keymap {
                 self.binds.retain(|(_, x)| *x != k);
             }
             self.binds.push((c, k));
+        }
+        if keeps_a_key(c) && self.keys(c).next().is_none() {
+            self.binds = before;
+            return;
         }
         self.in_default_order();
     }
@@ -740,6 +794,125 @@ mod tests {
         assert_eq!(skipped.len(), 1, "{skipped:?}");
     }
 
+    /// ↺ never leaves Flatten without a key (its default held by Cancel all as its only one):
+    /// it keeps the keys it had.
+    #[test]
+    fn reset_never_leaves_an_emergency_command_keyless() {
+        let mut m = Keymap::defaults();
+        let flat = Command::Trade(TradeCmd::Flatten);
+        let cancel = Command::Trade(TradeCmd::CancelAll);
+        let f = m.keys(flat).next().unwrap().clone();
+        let a = m.keys(cancel).next().unwrap().clone();
+        m.set(flat, None, k("ctrl+shift+f12"), false).unwrap();
+        m.set(cancel, None, f.clone(), true).unwrap();
+        m.remove(cancel, &a).unwrap();
+        m.reset(flat);
+        assert_eq!(m.keys(flat).count(), 1, "kept its key");
+        assert_eq!(m.keys(cancel).cloned().collect::<Vec<_>>(), vec![f]);
+        // Such a file loads with every one of the three keyed.
+        let mut s = m.saved();
+        s.insert(id(flat), Vec::new());
+        let (back, skipped) = Keymap::with(&s);
+        for c in [flat, cancel, Command::Strategy(StrategyCmd::StopAll)] {
+            assert!(back.keys(c).next().is_some(), "{c:?} {skipped:?}");
+        }
+        assert!(!skipped.is_empty());
+    }
+
+    /// Loading: an emergency command's default taken by another command comes back from it,
+    /// and the report says so.
+    #[test]
+    fn loading_gives_an_emergency_command_its_key_back() {
+        let flat = Command::Trade(TradeCmd::Flatten);
+        let mut s = Saved::new();
+        s.insert(id(flat), Vec::new());
+        s.insert(id(Command::ToggleMagnet), vec!["ctrl+shift+f".into()]);
+        let (m, skipped) = Keymap::with(&s);
+        assert_eq!(m.lookup(true, true, false, "f"), Some(flat), "{skipped:?}");
+        assert!(
+            skipped.iter().any(|x| x.contains("moved back")),
+            "{skipped:?}"
+        );
+    }
+
+    /// Many random edits: no order key without Ctrl+Shift or Ctrl+Alt, every emergency
+    /// command keyed, no key on two commands, and the saved form loads back the same.
+    #[test]
+    fn random_edits_keep_the_rules() {
+        let cmds = bindable();
+        let keys: Vec<Combo> = [
+            "ctrl+shift+f",
+            "ctrl+shift+a",
+            "ctrl+shift+f12",
+            "ctrl+alt+f11",
+            "ctrl+f9",
+            "f2",
+            "ctrl+shift+d",
+            "ctrl+alt+s",
+            "alt+f",
+            "space",
+            "ctrl+shift+space",
+            "ctrl+j",
+        ]
+        .iter()
+        .map(|x| k(x))
+        .collect();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let mut m = Keymap::defaults();
+        for _ in 0..20_000 {
+            let c = cmds[next(cmds.len())];
+            let key = keys[next(keys.len())].clone();
+            let old = m.keys(c).nth(next(3)).cloned();
+            match next(4) {
+                0 => {
+                    let _ = m.set(c, old.as_ref(), key, next(2) == 0);
+                }
+                1 => {
+                    if let Some(o) = old {
+                        let _ = m.remove(c, &o);
+                    }
+                }
+                2 => m.reset(c),
+                _ => {
+                    let _ = m.set(c, None, key, true);
+                }
+            }
+            for (b, x) in &m.binds {
+                assert!(!trades(*b) || x.ctrl && (x.shift || x.alt), "{b:?} {x:?}");
+                assert_eq!(
+                    m.lookup(x.ctrl, x.shift, x.alt, &x.key),
+                    Some(*b),
+                    "{x:?} twice"
+                );
+            }
+            for e in cmds.iter().filter(|c| keeps_a_key(**c)) {
+                assert!(m.keys(*e).next().is_some(), "{e:?} keyless");
+            }
+            assert_eq!(
+                m.binds
+                    .iter()
+                    .filter(|(_, x)| m.binds.iter().filter(|(_, y)| y == x).count() > 1)
+                    .count(),
+                0
+            );
+        }
+        let (back, skipped) = Keymap::with(&m.saved());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        for c in &cmds {
+            let mut a: Vec<_> = m.keys(*c).collect();
+            let mut b: Vec<_> = back.keys(*c).collect();
+            a.sort();
+            b.sort();
+            assert_eq!(a, b, "{c:?}");
+        }
+    }
+
     /// The replay's plain keys stay: never replaced, removed or taken.
     #[test]
     fn the_replays_plain_keys_are_fixed() {
@@ -752,6 +925,10 @@ mod tests {
         // Another key besides it is fine.
         m.set(play, None, k("ctrl+alt+f11"), false).unwrap();
         assert_eq!(m.keys(play).count(), 2);
+        // Saved with its fixed key, it loads back without a report.
+        let (back, skipped) = Keymap::with(&m.saved());
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(back, m);
     }
 
     /// A file from an older or newer version: unknown commands and unreadable, refused or
