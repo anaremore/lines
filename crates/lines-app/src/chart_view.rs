@@ -1852,6 +1852,10 @@ impl ChartView {
                 }
             }
             PluginCmd::Discard { source, key } => crate::plugin_settings::discard(&source, key),
+            // Asked and answered: on, as is.
+            PluginCmd::Confirmed { source, key } => {
+                let _ = crate::plugin_settings::set(cx, &source, key, "true");
+            }
             // The menu's own (`StudyMenu::local`).
             PluginCmd::Edit { .. } | PluginCmd::Answer(_) => {}
         }

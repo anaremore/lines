@@ -299,7 +299,21 @@ const RULE_NOTE: &str = "Tighter applies at once; looser waits for the next sess
 
 #[cfg(feature = "screenshot")]
 fn section_named(name: &str) -> Option<Section> {
-    Section::parse(name)
+    Section::parse(name).filter(|s| *s != Section::Plugins || has_plugins())
+}
+
+/// Whether a plugin is installed: Plugins is a section (in the sidebar, Tab, search) only then.
+fn has_plugins() -> bool {
+    !crate::plugin_settings::plugins().is_empty()
+}
+
+/// A search's rows: Plugins' only while a plugin is installed.
+fn search_hits(query: &str) -> Vec<usize> {
+    let mut hits = schema::search(query);
+    if !has_plugins() {
+        hits.retain(|&i| schema::all()[i].key != schema::PLUGINS_LIST);
+    }
+    hits
 }
 
 /// `KEY=VALUE` for `--settings-set`: the setting and its value.
@@ -1033,7 +1047,7 @@ impl SettingsWindow {
                 .filter(|&i| self.on_page(i))
                 .collect()
         } else {
-            schema::search(&self.query)
+            search_hits(&self.query)
         }
     }
 
@@ -1569,9 +1583,11 @@ impl SettingsWindow {
             self.editor_key(ev, cx);
             return;
         }
-        // Settings › Plugins: its fields, lists, questions and controls take the keys.
-        if self.section == Section::Plugins
-            && self.query.trim().is_empty()
+        // Settings › Plugins: its fields, lists, questions and controls take the keys (a
+        // value being typed or a list open takes them on a search's results too).
+        if ((self.section == Section::Plugins && self.query.trim().is_empty())
+            || self.plugins.edit.is_some()
+            || self.plugins.open.is_some())
             && self.plugins.key(ev, cx)
         {
             cx.notify();
@@ -2153,7 +2169,7 @@ impl SettingsWindow {
         let t = self.theme;
         let searching = !self.query.trim().is_empty();
         let hits = if searching {
-            schema::search(&self.query)
+            search_hits(&self.query)
         } else {
             Vec::new()
         };
@@ -2170,7 +2186,7 @@ impl SettingsWindow {
             .border_r_1()
             .border_color(t.axis_line);
         let mut group = None;
-        let has_plugins = !crate::plugin_settings::plugins().is_empty();
+        let has_plugins = has_plugins();
         for (k, s) in Section::ALL.into_iter().enumerate() {
             // Plugins only while one is installed.
             if s == Section::Plugins && !has_plugins {

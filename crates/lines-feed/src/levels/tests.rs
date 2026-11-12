@@ -682,9 +682,12 @@ fn a_dropped_legend_warns_once_per_change() {
     assert!(!legend_newly_dropped(None, &good));
 }
 
-/// A live source whose map is one line at its `n` setting (ticks) and whose `url` setting is
-/// part of its connection: it counts its connections.
-struct SettingsProbe(Arc<std::sync::atomic::AtomicUsize>);
+/// A live one-shot source whose map is one line at its `n` setting (ticks) and whose `url`
+/// setting is part of its connection: it counts its connections and its fetches.
+struct SettingsProbe(
+    Arc<std::sync::atomic::AtomicUsize>,
+    Arc<std::sync::atomic::AtomicUsize>,
+);
 
 static PROBE_SETTINGS: [SettingSpec; 2] = [
     SettingSpec::new(
@@ -704,10 +707,11 @@ static PROBE_SETTINGS: [SettingSpec; 2] = [
     SettingSpec::new("url", "URL", SettingKind::Url, "http://127.0.0.1:1", "").connection(),
 ];
 
-struct ProbeTransport;
+struct ProbeTransport(Arc<std::sync::atomic::AtomicUsize>);
 
 impl LevelTransport for ProbeTransport {
     fn fetch(&mut self) -> BoxFuture<'_, Result<Vec<LevelFrame>>> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Box::pin(async { Ok(vec![LevelFrame::new("probe", "{}")]) })
     }
 }
@@ -723,7 +727,7 @@ impl LevelSource for SettingsProbe {
         true
     }
     fn refresh(&self) -> RefreshMode {
-        RefreshMode::Poll(std::time::Duration::from_millis(20))
+        RefreshMode::OneShot
     }
     /// Runs live whatever another test set the process's mode to.
     fn synthetic(&self) -> bool {
@@ -737,7 +741,8 @@ impl LevelSource for SettingsProbe {
     }
     fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
         self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Box::pin(async { Ok(Box::new(ProbeTransport) as Box<dyn LevelTransport>) })
+        let fetches = self.1.clone();
+        Box::pin(async { Ok(Box::new(ProbeTransport(fetches)) as Box<dyn LevelTransport>) })
     }
     fn decode(
         &self,
@@ -766,12 +771,13 @@ impl LevelSource for SettingsProbe {
 }
 
 /// Settings apply live: a change that isn't part of the connection decodes the newest batch
-/// again (no new connection); a connection setting connects again; the same values again do
-/// nothing (the generation moves only on a change).
+/// again (no fetch, no new connection; the map's freshness as it was); a connection setting
+/// connects again; the same values again do nothing (the generation moves only on a change).
 #[test]
 fn settings_apply_live() {
     let connects = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let src = Arc::new(SettingsProbe(connects.clone()));
+    let fetches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let src = Arc::new(SettingsProbe(connects.clone(), fetches.clone()));
     let prices: Arc<dyn ChartPrices> = Arc::new(Fixed {
         bars: Vec::new(),
         now: None,
@@ -796,6 +802,8 @@ fn settings_apply_live() {
     };
     wait("first map", &|| line(&h) == Some(4 * 25));
     let c0 = connects.load(std::sync::atomic::Ordering::SeqCst);
+    let f0 = fetches.load(std::sync::atomic::Ordering::SeqCst);
+    let received = h.cell().read().received;
     let g0 = runtime::settings_generation("settings-probe");
     let mut v = SettingValues::new();
     v.insert("n".into(), "8".into());
@@ -812,6 +820,16 @@ fn settings_apply_live() {
         connects.load(std::sync::atomic::Ordering::SeqCst),
         c0,
         "no new connection for a display setting"
+    );
+    assert_eq!(
+        fetches.load(std::sync::atomic::Ordering::SeqCst),
+        f0,
+        "no fetch: the newest batch decoded again"
+    );
+    assert_eq!(
+        h.cell().read().received,
+        received,
+        "its freshness as it was"
     );
     v.insert("url".into(), "http://127.0.0.1:2".into());
     runtime::set_settings("settings-probe", v);

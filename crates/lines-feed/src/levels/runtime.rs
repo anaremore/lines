@@ -611,6 +611,25 @@ fn apply(
     series_only
 }
 
+/// Decode the newest batch again for new settings: only the map changes. Its freshness and any
+/// error stay as they were (a source whose fetches fail stays stale, with its reason), and a
+/// batch the new settings refuse leaves the map as it was.
+fn redecode(
+    source: &dyn LevelSource,
+    ctx: &LevelContext,
+    prices: &dyn ChartPrices,
+    cell: &LevelCell,
+    frames: &[LevelFrame],
+) {
+    let prev = cell.read().map.clone();
+    if let Ok(Some(m)) = source.decode(ctx, prices, prev.as_deref(), frames)
+        && m.product == ctx.product.id
+        && m.source == source.id()
+    {
+        cell.update(|s| s.map = Some(Arc::new(m)));
+    }
+}
+
 /// Whether `map`'s legend was dropped (`LevelMap::legend_dropped`) where the map before it
 /// (`prev`) kept its legend: the warning is logged once per change, not every refresh.
 pub(crate) fn legend_newly_dropped(prev: Option<&LevelMap>, map: &LevelMap) -> bool {
@@ -700,7 +719,9 @@ pub(crate) async fn live(
     // (connect again), `Some(false)` when another did (the newest batch is decoded again here,
     // with no fetch, and not recorded again: a replay decodes the recorded batch as it was).
     let id = source.id().to_owned();
-    let mut seen = settings_generation(&id);
+    // Never matches: the first look compares the values this task started with (read when the
+    // chart attached) with those in force now, so a change in between is never missed.
+    let mut seen = u64::MAX;
     let mut take_settings = |ctx: &mut LevelContext| -> Option<bool> {
         let g = settings_generation(&id);
         if g == seen {
@@ -708,10 +729,13 @@ pub(crate) async fn live(
         }
         seen = g;
         let new = settings_for(&id);
+        if new == ctx.settings {
+            return None;
+        }
         let reconnect = reconnects(source.settings(), &ctx.settings, &new);
         ctx.settings = new;
         if !reconnect && let Some((_, frames)) = last.lock().clone() {
-            apply(&*source, ctx, &*prices, &cell, &frames, crate::now_utc());
+            redecode(&*source, ctx, &*prices, &cell, &frames);
         }
         Some(reconnect)
     };

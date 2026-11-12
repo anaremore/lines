@@ -1184,16 +1184,39 @@ fn a_sources_own_settings() {
     assert_eq!(l[at + 2], "+ Turn on allow remote");
     assert_eq!(l[at + 3], "+ Cancel");
     let yes = m.activate(&items, at + 2).unwrap();
+    // Answered: turned on as asked (never asked again: the chart applies it as is).
     assert_eq!(
         m.local(yes),
-        Some(MenuCmd::Plugin(PluginCmd::Set {
+        Some(MenuCmd::Plugin(PluginCmd::Confirmed {
             source: "demo".into(),
             key: key::ALLOW_REMOTE,
-            value: "true".into()
         }))
     );
     assert_eq!(m.asking, None);
     m.asking = Some(("demo".into(), key::ALLOW_REMOTE));
     assert_eq!(m.local(MenuCmd::Plugin(PluginCmd::Answer(false))), None);
     assert_eq!(m.asking, None);
+    // Typing ends with its editor (another study's, or none): no key lands in a field no
+    // longer shown, and a press elsewhere ends it too.
+    m.local(MenuCmd::Plugin(PluginCmd::Edit {
+        source: "demo".into(),
+        key: key::FEED_URL,
+        text: "x".into(),
+    }));
+    m.asking = Some(("demo".into(), key::ALLOW_REMOTE));
+    m.local(MenuCmd::Edit(StudyRef::Vwap(0)));
+    assert_eq!((m.typing.clone(), m.asking.clone()), (None, None));
+    m.editing = Some(StudyRef::Levels("demo".into()));
+    m.local(MenuCmd::Plugin(PluginCmd::Edit {
+        source: "demo".into(),
+        key: key::FEED_URL,
+        text: "x".into(),
+    }));
+    let items = m.items(&input(&set, &src, &[]));
+    let sym = labels(&items)
+        .iter()
+        .position(|s| s.starts_with("  Symbol"))
+        .unwrap();
+    m.activate(&items, sym);
+    assert_eq!(m.typing, None);
 }

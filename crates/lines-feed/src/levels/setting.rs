@@ -128,16 +128,16 @@ pub fn parse(spec: &SettingSpec, text: &str, choices: Option<&[String]>) -> Resu
             }
             Ok(t.to_owned())
         }
+        // The option as listed (whatever case was typed).
         SettingKind::Choice(own) => {
-            let ok = match choices {
-                Some(c) => c.iter().any(|c| c.eq_ignore_ascii_case(t)),
-                None => own.iter().any(|c| c.eq_ignore_ascii_case(t)),
+            let found = match choices {
+                Some(c) => c.iter().find(|c| c.eq_ignore_ascii_case(t)).cloned(),
+                None => own
+                    .iter()
+                    .find(|c| c.eq_ignore_ascii_case(t))
+                    .map(|c| (*c).to_owned()),
             };
-            if ok {
-                Ok(t.to_owned())
-            } else {
-                Err(format!("Not one of the choices: {t}"))
-            }
+            found.ok_or_else(|| format!("Not one of the choices: {t}"))
         }
         SettingKind::Text => Ok(t.to_owned()),
         SettingKind::Secret => Err("Secrets are never set here".into()),
@@ -207,32 +207,61 @@ pub fn step(spec: &SettingSpec, value: &str, up: bool) -> Option<String> {
     }
 }
 
-/// Whole seconds as they read best: "45 s", "5 min", "1 h 30 min", "23 h", "2 d".
+/// Whole seconds as they read best, exactly: "45 s", "5 min", "1 h 30 min", "23 h", "2 d",
+/// "1 h 1 min 1 s" (every part that isn't zero; whole days alone as days). [`parse`] reads
+/// any of these back.
 pub fn seconds_text(s: u32) -> String {
-    match s {
-        s if s < 60 => format!("{s} s"),
-        s if s < 3600 && s % 60 == 0 => format!("{} min", s / 60),
-        s if s < 3600 => format!("{} min {} s", s / 60, s % 60),
-        s if s % 86_400 == 0 => format!("{} d", s / 86_400),
-        s if s % 3600 == 0 => format!("{} h", s / 3600),
-        s => format!("{} h {} min", s / 3600, (s % 3600) / 60),
+    if s == 0 {
+        return "0 s".into();
     }
+    if s.is_multiple_of(86_400) {
+        return format!("{} d", s / 86_400);
+    }
+    let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
+    let mut out: Vec<String> = Vec::new();
+    if h > 0 {
+        out.push(format!("{h} h"));
+    }
+    if m > 0 {
+        out.push(format!("{m} min"));
+    }
+    if sec > 0 {
+        out.push(format!("{sec} s"));
+    }
+    out.join(" ")
 }
 
-/// Typed seconds: a whole number with an optional unit (s, min, m, h, d).
+/// Typed seconds: one or more whole numbers, each with an optional unit (s, min, m, h, d):
+/// "90", "5 min", "1 h 30 min", "1h30m".
 fn parse_seconds(t: &str) -> Option<u32> {
     let t = t.trim().to_ascii_lowercase();
-    let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
-    let (n, unit) = t.split_at(split);
-    let n: u64 = n.parse().ok()?;
-    let mult: u64 = match unit.trim() {
-        "" | "s" | "sec" | "secs" | "second" | "seconds" => 1,
-        "m" | "min" | "mins" | "minute" | "minutes" => 60,
-        "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
-        "d" | "day" | "days" => 86_400,
-        _ => return None,
-    };
-    u32::try_from(n.checked_mul(mult)?).ok()
+    if t.is_empty() {
+        return None;
+    }
+    let mut total: u64 = 0;
+    let mut rest = t.as_str();
+    while !rest.trim_start().is_empty() {
+        let r = rest.trim_start();
+        let digits = r.find(|c: char| !c.is_ascii_digit()).unwrap_or(r.len());
+        if digits == 0 {
+            return None;
+        }
+        let n: u64 = r[..digits].parse().ok()?;
+        let after = r[digits..].trim_start();
+        let unit_len = after
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(after.len());
+        let mult: u64 = match &after[..unit_len] {
+            "" | "s" | "sec" | "secs" | "second" | "seconds" => 1,
+            "m" | "min" | "mins" | "minute" | "minutes" => 60,
+            "h" | "hr" | "hrs" | "hour" | "hours" => 3600,
+            "d" | "day" | "days" => 86_400,
+            _ => return None,
+        };
+        total = total.checked_add(n.checked_mul(mult)?)?;
+        rest = &after[unit_len..];
+    }
+    u32::try_from(total).ok()
 }
 
 /// A decimal in units of `10^-decimals`: `None` when empty, `Some(Err)` when not a number or
@@ -262,7 +291,9 @@ fn parse_decimal(t: &str, decimals: u8) -> Option<Result<i64, String>> {
             d => format!("{d} decimal places at most"),
         }));
     }
-    let scale = 10i64.checked_pow(u32::from(decimals))?;
+    let Some(scale) = 10i64.checked_pow(u32::from(decimals)) else {
+        return Some(Err("Too many decimal places for a number".to_owned()));
+    };
     let w: i64 = if whole.is_empty() {
         0
     } else {
@@ -407,6 +438,13 @@ mod tests {
         assert_eq!(display(&s, "1"), "1 s");
         assert_eq!(display(&s, "300"), "5 min");
         assert_eq!(display(&s, "5400"), "1 h 30 min");
+        assert_eq!(display(&s, "3661"), "1 h 1 min 1 s", "exact");
+        // What is shown types back as itself.
+        for v in [1u32, 59, 61, 300, 3600, 3661, 5400, 82_800, 604_800] {
+            let shown = display(&s, &v.to_string());
+            assert_eq!(parse(&s, &shown, None), Ok(v.to_string()), "{shown}");
+        }
+        assert_eq!(parse(&s, "1h30m", None), Ok("5400".into()));
         assert_eq!(display(&s, "604800"), "7 d");
         assert_eq!(step(&s, "59", true), Some("60".into()));
         assert_eq!(step(&s, "60", true), Some("120".into()));
@@ -437,6 +475,7 @@ mod tests {
         assert_eq!(display(&b, "false"), "Off");
         let c = spec(SettingKind::Choice(&["auto"]));
         assert_eq!(parse(&c, "auto", None), Ok("auto".into()));
+        assert_eq!(parse(&c, "AUTO", None), Ok("auto".into()), "as listed");
         assert!(parse(&c, "ES", None).is_err());
         let listed = vec!["auto".to_owned(), "ES".to_owned()];
         assert_eq!(parse(&c, "ES", Some(&listed)), Ok("ES".into()));

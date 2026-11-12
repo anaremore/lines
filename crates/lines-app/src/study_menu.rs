@@ -661,6 +661,8 @@ pub enum PluginCmd {
     },
     /// The question answered: turn the switch on (`true`), or leave it.
     Answer(bool),
+    /// Turn the switch on, asked and answered (never asks again).
+    Confirmed { source: String, key: &'static str },
     /// Esc on a field: drop its refused value (the value in force shows again).
     Discard { source: String, key: &'static str },
 }
@@ -2052,6 +2054,8 @@ impl StudyMenu {
     /// The primary command of item `i` (a click on it, or Enter).
     pub fn activate(&mut self, items: &[Item], i: usize) -> Option<MenuCmd> {
         self.cursor = i;
+        // A press elsewhere ends typing (a press on the field itself types it again).
+        self.typing = None;
         match items.get(i)? {
             Item::Study { r, .. } => Some(MenuCmd::Edit(r.clone())),
             Item::Drop { .. } => {
@@ -2216,6 +2220,10 @@ impl StudyMenu {
     pub fn local(&mut self, cmd: MenuCmd) -> Option<MenuCmd> {
         match cmd {
             MenuCmd::Edit(r) => {
+                // Another editor (or none): a value being typed or a question goes with the
+                // old one, so no key lands in a field no longer shown.
+                self.typing = None;
+                self.asking = None;
                 self.editing = if self.editing.as_ref() == Some(&r) {
                     None
                 } else {
@@ -2238,16 +2246,12 @@ impl StudyMenu {
             }
             MenuCmd::Plugin(PluginCmd::Answer(yes)) => {
                 let (source, key) = self.asking.take()?;
-                yes.then(|| {
-                    MenuCmd::Plugin(PluginCmd::Set {
-                        source,
-                        key,
-                        value: "true".into(),
-                    })
-                })
+                yes.then_some(MenuCmd::Plugin(PluginCmd::Confirmed { source, key }))
             }
             MenuCmd::Set(StudyAction::Remove(ref r)) if self.editing.as_ref() == Some(r) => {
                 self.editing = None;
+                self.typing = None;
+                self.asking = None;
                 Some(cmd)
             }
             other => Some(other),

@@ -166,7 +166,10 @@ pub fn rows(source: &dyn LevelSource, saved: Option<&SettingValues>) -> Vec<Row>
 /// Keep `value` for `spec` in `map` only where it isn't simply the default (a value equal to
 /// the default is kept while an outside default would otherwise win).
 fn store(map: &mut SettingValues, spec: &SettingSpec, value: String, outside: bool) {
-    if value == spec.default && !outside {
+    // The default in the same form as the value (a number's "1" is "1.00").
+    let default =
+        setting::parse(spec, spec.default, None).unwrap_or_else(|_| spec.default.to_owned());
+    if value == default && !outside {
         map.remove(spec.key);
     } else {
         map.insert(spec.key.to_owned(), value);
@@ -212,11 +215,15 @@ pub fn change(
         value,
         source.outside_default(key).is_some(),
     );
+    // The source's reasons for these values: this key's, and any new one this change causes (a
+    // problem that was already there, e.g. an address from the environment, never blocks an
+    // unrelated change).
+    let before = source.check(&in_force(source, saved));
     let reasons = source.check(&in_force(source, &next));
     if let Some((k, why)) = reasons
         .iter()
         .find(|(k, _)| *k == key)
-        .or_else(|| reasons.first())
+        .or_else(|| reasons.iter().find(|r| !before.contains(r)))
     {
         // Another setting's reason, named: this change would leave it refused.
         let why = if *k == key {
@@ -428,6 +435,18 @@ mod tests {
         // Turning it off again would leave the address refused: refused itself, named.
         let e = change(&d, &s, key::ALLOW_REMOTE, "off").unwrap_err();
         assert!(e.starts_with("Feed URL: Not this machine"), "{e}");
+        discard("demo", key::ALLOW_REMOTE);
+        // A problem already there (a remote address saved by hand) doesn't block another change.
+        let bad = saved(&[(key::FEED_URL, "http://100.71.4.20:7878")]);
+        assert!(change(&d, &bad, key::BANDS, "off").is_ok());
+        clean();
+    }
+
+    #[test]
+    fn a_default_typed_in_another_form_isnt_saved() {
+        let d = DemoLevels;
+        let s = change(&d, &SettingValues::new(), key::BAND_WIDTH, "1").unwrap();
+        assert!(s.is_empty(), "1 is the default 1.00");
         clean();
     }
 
