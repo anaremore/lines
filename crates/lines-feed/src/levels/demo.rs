@@ -568,3 +568,124 @@ impl LevelSource for DemoLevels {
             .map_err(|e| e.to_string())
     }
 }
+
+// ---- a second source that crowds the demo's labels -------------------------------------
+
+/// The crowding source's id.
+pub const CROWD_ID: &str = "demo-crowd";
+
+/// A second synthetic source for the same ES/MES charts (`--demo-crowd`): its labels sit at and
+/// beside the demo's (one layout for every source on a chart: none may draw over another's),
+/// half of them a low-priority type that gives way first.
+pub const CROWD_BODY: &str = r#"{
+  "as_of": "2026-11-05T13:00:00",
+  "levels": [
+    {"kind": "dyn",  "line": 601000, "label": "Dyn HP 6010",   "color": "5b8def"},
+    {"kind": "det",  "line": 601025, "label": "Det IRL 6010.25", "color": "9a7fd1"},
+    {"kind": "dyn",  "line": 602475, "label": "Dyn MHP 6024.75", "color": "5b8def"},
+    {"kind": "det",  "line": 602500, "label": "Det YL 6025", "color": "9a7fd1"},
+    {"kind": "det",  "line": 599775, "label": "Det RL 5997.75", "color": "9a7fd1"},
+    {"kind": "dyn",  "line": 599500, "label": "Dyn VAL 5995", "color": "5b8def"}
+  ]
+}"#;
+
+/// The crowding source's types: `dyn` at Normal priority, `det` (a detector's guesses) Low.
+pub static CROWD_TYPES: [LevelType; 2] = [
+    LevelType::line(
+        "dyn",
+        "Dynamic",
+        "Lines",
+        themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1),
+    ),
+    LevelType::line(
+        "det",
+        "Detector",
+        "Lines",
+        themed(OLIVE.0, Some(OLIVE.1), LineType::Dashed, 1),
+    )
+    .label_priority(lines_core::levels::LabelPriority::Low),
+];
+
+pub struct DemoCrowd;
+
+struct CrowdTransport;
+
+impl LevelTransport for CrowdTransport {
+    fn fetch(&mut self) -> BoxFuture<'_, Result<Vec<LevelFrame>>> {
+        Box::pin(async { Ok(vec![LevelFrame::new("demo-crowd/levels", CROWD_BODY)]) })
+    }
+}
+
+#[derive(Deserialize)]
+struct CrowdDoc {
+    as_of: String,
+    levels: Vec<CrowdRow>,
+}
+
+#[derive(Deserialize)]
+struct CrowdRow {
+    kind: String,
+    line: i64,
+    label: String,
+    color: String,
+}
+
+impl LevelSource for DemoCrowd {
+    fn id(&self) -> &'static str {
+        CROWD_ID
+    }
+    fn label(&self) -> &'static str {
+        "Crowd levels"
+    }
+    fn serves(&self, product: &Product) -> bool {
+        matches!(product.symbol, "ES" | "MES")
+    }
+    fn refresh(&self) -> RefreshMode {
+        RefreshMode::OneShot
+    }
+    fn synthetic(&self) -> bool {
+        true
+    }
+    fn stale_after(&self) -> Duration {
+        Duration::from_secs(24 * 3600)
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &CROWD_TYPES
+    }
+    fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
+        Box::pin(async { Ok(Box::new(CrowdTransport) as Box<dyn LevelTransport>) })
+    }
+    fn decode(
+        &self,
+        ctx: &LevelContext,
+        _prices: &dyn ChartPrices,
+        _prev: Option<&LevelMap>,
+        frames: &[LevelFrame],
+    ) -> Result<Option<LevelMap>, String> {
+        let Some(f) = frames.iter().find(|f| f.topic == "demo-crowd/levels") else {
+            return Ok(None);
+        };
+        let doc: CrowdDoc = serde_json::from_slice(&f.body).map_err(|e| e.to_string())?;
+        let at = UtcMillis::parse_iso(&doc.as_of).ok_or("bad time")?;
+        let mut b = LevelMap::builder(CROWD_ID, ctx.product.id, at);
+        if let Some(c) = ctx.contract {
+            b = b.contract(c);
+        }
+        for r in &doc.levels {
+            let style = LevelStyle {
+                rgba: rgba(&format!("{}ff", r.color))?,
+                weight: 1,
+                dashed: r.kind == "det",
+            };
+            b = b.line(
+                &r.kind,
+                LevelValue::Tick(Price(r.line)),
+                Some(&r.label),
+                style,
+            );
+        }
+        b.build(ctx.product.price.tick)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+}

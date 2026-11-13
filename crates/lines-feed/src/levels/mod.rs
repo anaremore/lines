@@ -37,8 +37,8 @@ use lines_core::{ContractKey, Price, Product, UtcMillis};
 use parking_lot::RwLock;
 
 pub use lines_core::levels::{
-    LabelMode, LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape, LevelStyle, LevelType,
-    LevelValue, NamedValue, Series, TypeStyle,
+    LabelMode, LabelPriority, LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape,
+    LevelStyle, LevelType, LevelValue, NamedValue, Series, TypeStyle,
 };
 
 /// How a source refreshes.

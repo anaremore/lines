@@ -818,6 +818,32 @@ pub struct LevelType {
     /// with no entry for this kind takes the first of these that has one, so merging kinds
     /// keeps what a trader styled. The style editor moves it to this kind on its first edit.
     pub replaces: &'static [&'static str],
+    /// Whose label keeps its row when labels crowd (every level source's on a chart share one
+    /// layout): higher first. [`LabelPriority::Normal`] unless the source says otherwise
+    /// ([`LevelType::label_priority`]), so a source that doesn't know of it is Normal.
+    pub label_priority: LabelPriority,
+}
+
+/// A level type's label priority: when labels from every source on a chart crowd, a higher
+/// one keeps its row and a lower one gives way first (stacked a row away, else hidden: its
+/// line stays, and pointing at it shows its label). The last price outranks them all.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum LabelPriority {
+    High,
+    #[default]
+    Normal,
+    Low,
+}
+
+impl LabelPriority {
+    /// Placement order: 0 first.
+    pub const fn rank(self) -> u8 {
+        match self {
+            LabelPriority::High => 0,
+            LabelPriority::Normal => 1,
+            LabelPriority::Low => 2,
+        }
+    }
 }
 
 impl LevelType {
@@ -835,6 +861,7 @@ impl LevelType {
             style,
             parent: None,
             replaces: &[],
+            label_priority: LabelPriority::Normal,
         }
     }
 
@@ -852,6 +879,7 @@ impl LevelType {
             style,
             parent: None,
             replaces: &[],
+            label_priority: LabelPriority::Normal,
         }
     }
 
@@ -867,6 +895,14 @@ impl LevelType {
     pub const fn replacing(self, ids: &'static [&'static str]) -> LevelType {
         LevelType {
             replaces: ids,
+            ..self
+        }
+    }
+
+    /// This type, its labels at priority `p` (see [`LevelType::label_priority`]).
+    pub const fn label_priority(self, p: LabelPriority) -> LevelType {
+        LevelType {
+            label_priority: p,
             ..self
         }
     }
@@ -942,6 +978,9 @@ pub struct Placed {
     /// axis marks the price itself): a low-edge label on the low edge, a high-edge one on the
     /// high edge. Off from [`place`]; the layer sets it.
     pub on_edge: bool,
+    /// Its label's placement order ([`LabelPriority::rank`]: 0 first): Normal's from
+    /// [`place`]; the layer sets its type's.
+    pub rank: u8,
 }
 
 impl Placed {
@@ -990,6 +1029,7 @@ pub fn place(
             vwap_relative: l.is_vwap_relative(),
             anchor: LabelAt::Own,
             on_edge: false,
+            rank: LabelPriority::Normal.rank(),
         });
     }
 }
@@ -1018,9 +1058,12 @@ pub enum LabelSeen {
 /// label overlapping one already placed stacks to the nearest free row at most one label's
 /// height from its anchor ([`stack_row`]: a line's either way, a low-edge label only further
 /// down, a high-edge label only further up, so it never reaches its zone's other edge), and
-/// is dropped only when no such row is free (the level is still drawn). Levels at fixed
-/// prices are placed first, in map order, then those moving with the VWAP, so a moving band
-/// never reshuffles the others. The layout depends only on the levels and the viewport, never
+/// is dropped only when no such row is free (the level is still drawn). Labels are placed by
+/// priority ([`Placed::rank`]: a higher one claims its row first, so a short plot drops the
+/// lowest first), and within one priority those at fixed prices first, in order, then those
+/// moving with the VWAP, so a moving band never reshuffles the others. Every level source on a
+/// chart is placed in one call (the layer joins their levels), so no two sources' labels
+/// overlap. The layout depends only on the levels and the viewport, never
 /// the price, and keeps last frame's decision near the threshold: `seen` (by level index,
 /// updated in place) says what each label did last frame; one moved or dropped then comes back
 /// to its anchor only once that is clear of every placed label by [`LABEL_HYSTERESIS`] more (a
@@ -1045,10 +1088,11 @@ pub fn place_labels(
         return;
     }
     // Last frame's state per placed label is read before any is updated.
-    for moving in [false, true] {
+    let ranks = placed.iter().map(|p| p.rank).max().unwrap_or(0);
+    for (rank, moving) in (0..=ranks).flat_map(|r| [(r, false), (r, true)]) {
         for i in 0..placed.len() {
             let p = placed[i];
-            if p.vwap_relative != moving || !has_label(p.index) {
+            if p.rank != rank || p.vwap_relative != moving || !has_label(p.index) {
                 continue;
             }
             let was = seen.get(p.index as usize).copied().unwrap_or_default();
