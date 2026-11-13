@@ -904,6 +904,9 @@ pub struct LevelsLayer {
     joint: Vec<Placed>,
     /// Every source's label states, joined as `joint` is (each source's `seen` in turn).
     seen_all: Vec<LabelSeen>,
+    /// Whether each joined level is drawn this frame (by `seen_all` index): one that isn't
+    /// (not begun, or over before the plot) claims no label row.
+    drawn_all: Vec<bool>,
     /// Each joined source: (its slot, its first index in `seen_all`).
     joint_slots: Vec<(usize, u32)>,
     /// The pointer over the plot (plot px), for an event's highlight ([`Self::set_pointer`]).
@@ -969,6 +972,7 @@ impl LevelsLayer {
             chips: Vec::new(),
             joint: Vec::new(),
             seen_all: Vec::new(),
+            drawn_all: Vec::new(),
             joint_slots: Vec::new(),
             pointer: None,
             hot: None,
@@ -1221,6 +1225,8 @@ impl LevelsLayer {
         let placed: usize = self.slots.iter().map(|s| s.placed.capacity()).sum();
         self.seen_all
             .reserve(levels.saturating_sub(self.seen_all.len()));
+        self.drawn_all
+            .reserve(levels.saturating_sub(self.drawn_all.len()));
         self.joint.reserve(placed.saturating_sub(self.joint.len()));
         self.joint_slots
             .reserve(self.slots.len().saturating_sub(self.joint_slots.len()));
@@ -1443,6 +1449,7 @@ impl LevelsLayer {
     fn place_all_labels(&mut self, plot_w: f32, plot_h: f32) {
         self.joint.clear();
         self.seen_all.clear();
+        self.drawn_all.clear();
         self.joint_slots.clear();
         let on_edge = self.config.label_place == LabelPlace::Axis;
         for (si, s) in self.slots.iter().enumerate() {
@@ -1459,6 +1466,12 @@ impl LevelsLayer {
             let base = self.seen_all.len() as u32;
             self.joint_slots.push((si, base));
             self.seen_all.extend_from_slice(&s.seen);
+            self.drawn_all.resize(self.seen_all.len(), true);
+            for p in &s.placed {
+                if p.x0 > p.x1 {
+                    self.drawn_all[(base + p.index) as usize] = false;
+                }
+            }
             self.joint.extend(s.placed.iter().map(|p| Placed {
                 index: p.index + base,
                 ..*p
@@ -1468,7 +1481,7 @@ impl LevelsLayer {
         // this room: an empty cut means none fits) claims no room; nor does one whose source's
         // labels are off. No room at all (labels can't show): none placed.
         let room = self.room.at(plot_w);
-        let (slots, joint_slots) = (&self.slots, &self.joint_slots);
+        let (slots, joint_slots, drawn) = (&self.slots, &self.joint_slots, &self.drawn_all);
         let (texts_of, widths, cuts, config) = (
             |si: usize| &slots[si].texts,
             &self.widths,
@@ -1491,11 +1504,7 @@ impl LevelsLayer {
                     return false;
                 }
                 // Not drawn (not begun, or over before the plot): no label, no row.
-                let i_local = (g - base) as usize;
-                if s.placed
-                    .iter()
-                    .any(|p| p.index as usize == i_local && p.x0 > p.x1)
-                {
+                if !drawn.get(g as usize).copied().unwrap_or(true) {
                     return false;
                 }
                 let Some(map) = s.map.as_ref() else {
