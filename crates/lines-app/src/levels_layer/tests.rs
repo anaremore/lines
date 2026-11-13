@@ -2165,7 +2165,7 @@ fn pointing_at_a_member_finds_its_event() {
     assert_eq!(group_dim(None, ev, None), 1.0);
 }
 
-/// The markers' ink is the accent (the approved violet) and their labels are AA on the chart
+/// The markers' ink is the accent (the approved violet) and their labels are AA on their plates
 /// in every theme: the accent where it is, else the theme's text. Dots keep 3:1.
 #[test]
 fn marker_colors_read_in_every_theme() {

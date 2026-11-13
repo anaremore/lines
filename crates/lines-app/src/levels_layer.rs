@@ -1661,6 +1661,8 @@ impl LevelsLayer {
                 let t = text.opacity(text.a * a);
                 let line = shaped_in(&mut self.shaped, label, t, window);
                 // On a plate (the legend box: opaque), so no candle or line runs through it.
+                // Dimmed with its label (outside the highlighted event, or stale): a dimmed
+                // label is set back, not meant to be read over the bars.
                 let pad = crate::zoom::f(2.0);
                 let (lx, ly) = (ox + x + r + pad * 2.0, oy + y + r - label_px() * 0.2);
                 let lh = label_px() * 1.3;
@@ -1671,10 +1673,9 @@ impl LevelsLayer {
                     ),
                     plate.opacity(plate.a * a),
                 ));
-                let line = shaped_in(&mut self.shaped, label, t, window);
                 let _ = line.paint(
                     point(px(lx), px(ly)),
-                    px(label_px() * 1.3),
+                    px(lh),
                     TextAlign::Left,
                     None,
                     window,
