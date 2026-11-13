@@ -278,6 +278,8 @@ pub struct SettingsWindow {
     /// Whether the last frame's pinned head repeated that target (a change draws again, so
     /// the head follows the layout it was decided from).
     target_shown: bool,
+    /// The page (section and search) that decision was made on.
+    target_page: Option<(Section, String)>,
 }
 
 /// The window's size (logical px).
@@ -985,6 +987,7 @@ impl SettingsWindow {
             scroll_wait: None,
             target_wait: 0,
             target_shown: false,
+            target_page: None,
         }
     }
 
@@ -4023,9 +4026,21 @@ impl Render for SettingsWindow {
         // A group headed by its account and product (Order entry › Brackets): while its
         // header is scrolled above the page and the group is still in view, the pinned head
         // repeats which account and product its rows are for (as of the last layout).
-        if let Some((first, last)) = target_group
-            && !searching
-        {
+        // A new page or search: the last layout was another page's, so nothing is decided from
+        // it (a next frame decides).
+        let page_key = (self.section, self.query.clone());
+        let fresh_page = self.target_page.as_ref() != Some(&page_key);
+        if fresh_page {
+            self.target_page = Some(page_key);
+            self.target_shown = false;
+            self.target_wait = 0;
+        }
+        if target_group.is_none() || searching {
+            self.target_shown = false;
+            self.target_wait = 0;
+        } else if fresh_page {
+            cx.notify();
+        } else if let Some((first, last)) = target_group {
             match (
                 self.scroll.bounds_for_item(first),
                 self.scroll.bounds_for_item(last),
@@ -4069,6 +4084,9 @@ impl Render for SettingsWindow {
             .border_b_1()
             .border_color(t.axis_line)
             .child(head);
+        // Whether this frame scrolls the page itself (the pinned head's target repeat then
+        // decides again on the next frame, from where the rows ended up).
+        let mut moved = false;
         // Settings › Keys: the focused (or capturing) row in view once it moved.
         if self.keys.reveal
             && let (Some(first), Some(i)) = (keys_first, self.keys.at.get())
@@ -4076,6 +4094,7 @@ impl Render for SettingsWindow {
         {
             self.scroll.scroll_to_item(first + i);
             self.keys.reveal = false;
+            moved = true;
             self.scrolled = Some((self.section, self.row, self.query.clone()));
         } else if self.keys.reveal && keys_first.is_some() && self.keys.at.get().is_some() {
             // Not laid out yet: the next frame.
@@ -4088,12 +4107,13 @@ impl Render for SettingsWindow {
             && self.scrolled.as_ref() != Some(&at)
             && self.scroll.bounds().size.height > px(0.0)
         {
-            // The first row: the top (its page's title and account line too).
+            // The first row: the top (the page's first rows; the head is pinned above them).
             if self.row == 0 {
                 self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
             } else {
                 self.scroll.scroll_to_item(c);
             }
+            moved = true;
             self.scrolled = Some(at);
             self.scroll_wait = None;
         } else if selected_child.is_some() && self.scrolled.as_ref() != Some(&at) {
@@ -4107,6 +4127,9 @@ impl Render for SettingsWindow {
                 self.scroll_wait = Some((at, tries + 1));
                 cx.notify();
             }
+        }
+        if moved && target_group.is_some() && !searching {
+            cx.notify();
         }
         // An open dropdown, laid out once: its lit row near the middle.
         if let Some(d) = self.drop.as_mut()
