@@ -2177,8 +2177,8 @@ fn marker_colors_read_in_every_theme() {
             t.is_dark()
         );
         assert!(
-            contrast(marker_text(&t), t.bg) >= 4.5,
-            "label AA ({})",
+            contrast(marker_text(&t), t.legend_box()) >= 4.5,
+            "label AA on its plate ({})",
             t.is_dark()
         );
     }

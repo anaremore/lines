@@ -17,8 +17,8 @@
 const ALLOWED: &[(&str, &str, usize)] = &[
     (
         "levels_layer.rs",
-        "a level label on the chart under the pointer, faded (box and text) so the bars under it show; an event's markers (path, dot, label) outside the highlighted event or from a stale map, dimmed as their levels are",
-        5,
+        "a level label on the chart under the pointer, faded (box and text) so the bars under it show; an event's markers (path, dot, label and its plate) outside the highlighted event or from a stale map, dimmed as their levels are",
+        6,
     ),
     (
         "pane.rs",

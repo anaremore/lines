@@ -279,9 +279,10 @@ pub(crate) fn marker_ink(theme: &Theme) -> MarkerInk {
     theme.accent
 }
 
-/// A marker's label: the accent where it is AA on the chart, else the theme's text.
+/// A marker's label: the accent where it is AA on its plate (the legend box, opaque), else the
+/// theme's text.
 pub(crate) fn marker_text(theme: &Theme) -> MarkerInk {
-    if crate::theme::contrast(theme.accent, theme.bg) >= 4.5 {
+    if crate::theme::contrast(theme.accent, theme.legend_box()) >= 4.5 {
         theme.accent
     } else {
         theme.text_main
@@ -1581,6 +1582,7 @@ impl LevelsLayer {
         let r = crate::zoom::f(MARKER_R);
         let ink = marker_ink(theme);
         let text = marker_text(theme);
+        let plate = theme.legend_box();
         for si in 0..self.slots.len() {
             let Some(map) = self.slots[si].map.clone() else {
                 continue;
@@ -1658,11 +1660,20 @@ impl LevelsLayer {
                 };
                 let t = text.opacity(text.a * a);
                 let line = shaped_in(&mut self.shaped, label, t, window);
-                let _ = line.paint(
-                    point(
-                        px(ox + x + r + crate::zoom::f(2.0)),
-                        px(oy + y + r - label_px() * 0.2),
+                // On a plate (the legend box: opaque), so no candle or line runs through it.
+                let pad = crate::zoom::f(2.0);
+                let (lx, ly) = (ox + x + r + pad * 2.0, oy + y + r - label_px() * 0.2);
+                let lh = label_px() * 1.3;
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(px(lx - pad), px(ly)),
+                        size(px(f32::from(line.width) + pad * 2.0), px(lh)),
                     ),
+                    plate.opacity(plate.a * a),
+                ));
+                let line = shaped_in(&mut self.shaped, label, t, window);
+                let _ = line.paint(
+                    point(px(lx), px(ly)),
                     px(label_px() * 1.3),
                     TextAlign::Left,
                     None,
