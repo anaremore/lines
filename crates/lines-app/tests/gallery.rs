@@ -19,9 +19,11 @@ fn run(full: bool) {
     }
     let out = cmd.output().unwrap();
     let summary = std::fs::read_to_string(dir.join("gallery.txt")).unwrap_or_default();
+    // A failure keeps the scenes' PNGs and lint reports to look at.
+    let kept = (!out.status.success()).then(|| dir.keep());
     assert!(
         out.status.success(),
-        "gallery failed ({}):\n{summary}\nstdout:\n{}\nstderr:\n{}",
+        "gallery failed ({}), its files kept in {kept:?}:\n{summary}\nstdout:\n{}\nstderr:\n{}",
         out.status,
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)

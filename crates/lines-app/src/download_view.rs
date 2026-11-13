@@ -988,6 +988,8 @@ pub mod shot {
             },
             days: Arc::new(src.clone()),
         }];
+        // Gone once this returns: fine for a screenshot (the window is never pressed); a
+        // fixture driven by hand would recreate it under the temp folder.
         cx.set_global(DownloadEnv {
             root: Ok(root.clone()),
             // Small, so the estimate shows the budget note.

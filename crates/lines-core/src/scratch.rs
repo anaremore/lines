@@ -22,6 +22,10 @@ impl Scratch {
     /// A new, empty folder `lines-<name>-<pid>-<n>` under the system temp folder (unique in
     /// this process, so tests running in parallel never share one).
     pub fn new(name: &str) -> Scratch {
+        debug_assert!(
+            !name.contains(['/', '\\']) && !name.contains(".."),
+            "a scratch name is one folder name: {name:?}"
+        );
         static N: AtomicU64 = AtomicU64::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!("{PREFIX}{name}-{}-{n}", std::process::id()));
@@ -50,6 +54,14 @@ impl Scratch {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// Keep the folder (a failed run's evidence): it is no longer removed, and its path is
+    /// returned to report.
+    pub fn keep(mut self) -> PathBuf {
+        let root = std::mem::take(&mut self.root);
+        std::mem::forget(self);
+        root
+    }
 }
 
 impl Deref for Scratch {
@@ -68,11 +80,16 @@ impl AsRef<Path> for Scratch {
 impl Drop for Scratch {
     fn drop(&mut self) {
         // Windows can hold a just-closed file for a moment (an indexer, a virus scanner): a
-        // few tries, then leave it rather than panic in a drop.
-        for _ in 0..5 {
+        // few tries, then leave it, said on stderr (a failing test's output shows it), rather
+        // than panic in a drop.
+        for k in 0..5 {
             match std::fs::remove_dir_all(&self.root) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    if k == 4 {
+                        eprintln!("scratch folder {} left: {e}", self.root.display());
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                    }
                 }
                 _ => return,
             }
@@ -110,6 +127,11 @@ mod tests {
         });
         assert!(r.is_err());
         assert!(!root.exists(), "removed while unwinding");
+
+        // Kept: left in place, its path returned.
+        let k = Scratch::new("scratch-keep").keep();
+        assert!(k.is_dir());
+        std::fs::remove_dir_all(&k).unwrap();
 
         // Two at once, same name: never the same folder.
         let (a, b) = (Scratch::new("scratch-two"), Scratch::new("scratch-two"));
