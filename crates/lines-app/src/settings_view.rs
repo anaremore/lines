@@ -272,6 +272,12 @@ pub struct SettingsWindow {
     /// A selection waiting for the list's first layout to scroll into view, and how many
     /// frames it has waited (a few at most).
     scroll_wait: Option<((Section, usize, String), u8)>,
+    /// Frames waited for a group headed by account and product to be laid out (its header's
+    /// place decides whether the pinned head repeats the target).
+    target_wait: u8,
+    /// Whether the last frame's pinned head repeated that target (a change draws again, so
+    /// the head follows the layout it was decided from).
+    target_shown: bool,
 }
 
 /// The window's size (logical px).
@@ -314,6 +320,17 @@ fn search_hits(query: &str) -> Vec<usize> {
         hits.retain(|&i| schema::all()[i].key != schema::PLUGINS_LIST);
     }
     hits
+}
+
+/// Whether a group's header (its bottom at `title_bottom`) has scrolled above the page's top
+/// while the group (its last row ending at `end_bottom`) is still in view: the pinned head then
+/// repeats the account and product the group's rows are for.
+fn target_out_of_view(
+    title_bottom: gpui::Pixels,
+    end_bottom: gpui::Pixels,
+    top: gpui::Pixels,
+) -> bool {
+    title_bottom <= top && end_bottom > top
 }
 
 /// `KEY=VALUE` for `--settings-set`: the setting and its value.
@@ -393,6 +410,7 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
     }
     for s in set.iter().filter(|s| {
         !s.starts_with("account=")
+            && *s != "trading.brackets=edit"
             && !s.starts_with("keys:")
             && !s.starts_with(SELECT)
             && List::typed(s).is_none()
@@ -470,6 +488,14 @@ pub fn open_for_screenshot(
                 if let Some(i) = schema::index_of(key) {
                     v.select(i);
                 }
+                continue;
+            }
+            // `trading.brackets=edit`: the preset editor open.
+            if s == "trading.brackets=edit"
+                && let Some(i) = schema::index_of("trading.brackets")
+            {
+                v.select(i);
+                v.open_editor_for(i, cx);
                 continue;
             }
             if let Some(name) = s.strip_prefix("account=") {
@@ -957,6 +983,8 @@ impl SettingsWindow {
             overrides_open: false,
             dormant: Vec::new(),
             scroll_wait: None,
+            target_wait: 0,
+            target_shown: false,
         }
     }
 
@@ -3829,7 +3857,6 @@ impl Render for SettingsWindow {
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .px_3()
-            .pt_2()
             // Room under the last row: its controls never sit on the footer's rule.
             .pb_4();
         // The page's title; on Accounts, the one account picker beside it, what the account
@@ -3877,9 +3904,10 @@ impl Render for SettingsWindow {
                 );
             }
         }
-        main = main.child(head);
         // Children before the rows: the selected line's index, for scrolling it into view.
-        let mut child = 1;
+        // The head is pinned above the scrolling rows (never a child of them): the account
+        // being edited stays in view however far down the page the selected row is.
+        let mut child = 0;
         if accounts_page {
             main = main.child(
                 div()
@@ -3892,6 +3920,8 @@ impl Render for SettingsWindow {
         }
         let mut selected_child = None;
         let mut keys_first = None;
+        // A group headed by account and product: its header's and last row's children.
+        let mut target_group: Option<(usize, usize)> = None;
         // Blocks shown after a line: the preset editor, the time zone's and the UI font's
         // lists, the keys.
         let extras = |v: &Self, keys: &[usize], cx: &mut Context<Self>| -> Vec<AnyElement> {
@@ -3954,6 +3984,9 @@ impl Render for SettingsWindow {
         } else {
             for g in schema::page(self.section) {
                 if !g.title.is_empty() {
+                    if g.product {
+                        target_group = Some((child, child));
+                    }
                     main = main.child(self.group_title(g.title, g.product, cx));
                     child += 1;
                 }
@@ -3979,9 +4012,63 @@ impl Render for SettingsWindow {
                         main = main.child(e);
                         child += 1;
                     }
+                    if g.product
+                        && let Some((_, last)) = target_group.as_mut()
+                    {
+                        *last = child - 1;
+                    }
                 }
             }
         }
+        // A group headed by its account and product (Order entry › Brackets): while its
+        // header is scrolled above the page and the group is still in view, the pinned head
+        // repeats which account and product its rows are for (as of the last layout).
+        if let Some((first, last)) = target_group
+            && !searching
+        {
+            match (
+                self.scroll.bounds_for_item(first),
+                self.scroll.bounds_for_item(last),
+            ) {
+                (Some(title), Some(end)) => {
+                    self.target_wait = 0;
+                    // Item bounds are where the rows lie unscrolled: the offset moves them.
+                    let dy = self.scroll.offset().y;
+                    let out = target_out_of_view(
+                        title.bottom() + dy,
+                        end.bottom() + dy,
+                        self.scroll.bounds().top(),
+                    );
+                    if out != self.target_shown {
+                        self.target_shown = out;
+                        cx.notify();
+                    }
+                    if out {
+                        head = head
+                            .child(self.account_field(cx))
+                            .child(self.product_field(cx))
+                            .children(
+                                self.account_kind()
+                                    .map(|k| crate::trade_bar::account_badge(k, &t)),
+                            );
+                    }
+                }
+                // Not laid out yet: a next frame, a few at most.
+                _ if self.target_wait < 4 => {
+                    self.target_wait += 1;
+                    cx.notify();
+                }
+                _ => {}
+            }
+        }
+        // A rule under it: rows scrolled up are cut at the rule, never run into the head.
+        let pinned = div()
+            .flex_none()
+            .mx_3()
+            .pt_2()
+            .border_b_1()
+            .border_color(t.axis_line)
+            .child(head);
         // Settings › Keys: the focused (or capturing) row in view once it moved.
         if self.keys.reveal
             && let (Some(first), Some(i)) = (keys_first, self.keys.at.get())
@@ -4081,32 +4168,48 @@ impl Render for SettingsWindow {
                     .child(
                         // A page longer than the window fades into the bottom bar, so a row
                         // cut there reads as more below, not as a broken control.
-                        div().relative().flex().flex_1().min_w_0().child(main).when(
-                            // More below the visible part (the offset is negative, down to
-                            // -max_offset), not merely a page longer than the window.
-                            self.scroll.max_offset().y > px(0.0)
-                                && -self.scroll.offset().y < self.scroll.max_offset().y - px(1.0),
-                            |d| {
-                                d.child(
-                                    div()
-                                        .absolute()
-                                        .left_0()
-                                        .right_0()
-                                        .bottom_0()
-                                        .h(crate::zoom::ui(FADE_H))
-                                        .bg(gpui::linear_gradient(
-                                            180.0,
-                                            // The background, fully transparent: a
-                                            // scroll cue, not a UI state (no state token).
-                                            gpui::linear_color_stop(
-                                                gpui::Hsla { a: 0.0, ..t.bg },
-                                                0.0,
-                                            ),
-                                            gpui::linear_color_stop(t.bg, 1.0),
-                                        )),
-                                )
-                            },
-                        ),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(pinned)
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex()
+                                    .flex_1()
+                                    .min_h_0()
+                                    .min_w_0()
+                                    .child(main)
+                                    .when(
+                                        // More below the visible part (the offset is negative, down to
+                                        // -max_offset), not merely a page longer than the window.
+                                        self.scroll.max_offset().y > px(0.0)
+                                            && -self.scroll.offset().y
+                                                < self.scroll.max_offset().y - px(1.0),
+                                        |d| {
+                                            d.child(
+                                                div()
+                                                    .absolute()
+                                                    .left_0()
+                                                    .right_0()
+                                                    .bottom_0()
+                                                    .h(crate::zoom::ui(FADE_H))
+                                                    .bg(gpui::linear_gradient(
+                                                        180.0,
+                                                        // The background, fully transparent: a
+                                                        // scroll cue, not a UI state (no state token).
+                                                        gpui::linear_color_stop(
+                                                            gpui::Hsla { a: 0.0, ..t.bg },
+                                                            0.0,
+                                                        ),
+                                                        gpui::linear_color_stop(t.bg, 1.0),
+                                                    )),
+                                            )
+                                        },
+                                    ),
+                            ),
                     ),
             )
             .child(
@@ -4250,6 +4353,29 @@ mod tests {
     }
 
     use super::*;
+
+    /// The pinned head repeats a group's account and product only while the group's header
+    /// is above the page's top and the group is still in view.
+    #[test]
+    fn a_target_header_out_of_view() {
+        let top = px(100.0);
+        assert!(
+            !target_out_of_view(px(130.0), px(400.0), top),
+            "header in view"
+        );
+        assert!(
+            target_out_of_view(px(100.0), px(400.0), top),
+            "header just above"
+        );
+        assert!(
+            target_out_of_view(px(20.0), px(101.0), top),
+            "last row still in view"
+        );
+        assert!(
+            !target_out_of_view(px(20.0), px(100.0), top),
+            "whole group above"
+        );
+    }
 
     /// Which rows' chips take their own line: every choice of buttons with more chips than fit
     /// beside a label at the narrowest window (a dropdown is one field, never long). Named
