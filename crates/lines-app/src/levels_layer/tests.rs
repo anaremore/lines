@@ -2081,7 +2081,7 @@ fn event_lines_start_at_their_bars() {
     let ev = source_at(&layer, "demo-event");
     let a = placed_named(&layer, ev, "A 6005");
     assert_eq!((a.x0, a.x1), (x(8.0), 800.0));
-    assert_eq!(placed_named(&layer, ev, "IRL 6013.50").x0, x(8.0));
+    assert_eq!(placed_named(&layer, ev, "Impact 6013.50").x0, x(8.0));
     assert_eq!(placed_named(&layer, ev, "E1 6022").x0, x(16.0));
     let prior = layer.map(ev).unwrap();
     let boxed = layer
@@ -2090,7 +2090,8 @@ fn event_lines_start_at_their_bars() {
         .find(|p| prior.levels[p.index as usize].to.is_some())
         .copied()
         .expect("the box");
-    assert_eq!((boxed.x0, boxed.x1), (x(8.0), x(9.0)));
+    // Its bars' whole slots: half a bar either side of their centres.
+    assert_eq!((boxed.x0, boxed.x1), (x(8.0) - 5.0, x(9.0) + 5.0));
     // An old source's levels: across the whole plot, as before.
     let demo = source_at(&layer, "demo");
     assert!(
@@ -2113,6 +2114,19 @@ fn an_event_not_begun_draws_nothing() {
     let a = placed_named(&layer, ev, "A 6005");
     assert!(a.x0 > a.x1, "not drawn");
     assert_eq!(a.label_y, None, "no label");
+    // It claims no label row (laid out once the times are known), and pointing at its row
+    // reveals nothing of it.
+    let half = LevelsLayer::label_h() * 0.5;
+    let row = a.label_anchor(half);
+    let mut rows = Vec::new();
+    layer.tag_rows(|y| rows.push(y));
+    assert!(rows.iter().all(|y| (y - row).abs() > 1e-3), "{rows:?}");
+    assert!(
+        layer
+            .revealed_label(row, 400.0, 800.0)
+            .is_none_or(|(si, p, _)| !(si == ev && p.index == a.index)),
+        "an undrawn level isn't revealed"
+    );
 }
 
 /// Pointing at any member (a marker, a level's line where it is drawn) finds its event; left

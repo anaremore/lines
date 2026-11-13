@@ -6431,7 +6431,7 @@ impl ChartView {
                 );
                 self.levels.paint_front(plot, &t, &self.footprint, window);
                 // Event markers and their paths, over the level lines.
-                self.levels.paint_markers(plot, &t, window, cx);
+                self.levels.paint_markers(plot, labels, &t, window, cx);
                 self.footprint.paint_numbers(plot, &self.vp, &t, window, cx);
                 // On the chart: under the drawings and the strategy markers, as study labels
                 // always were (in the axis or the column: after the plot, outside it).

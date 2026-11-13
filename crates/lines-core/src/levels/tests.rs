@@ -1163,3 +1163,36 @@ fn event_fields_build_and_validate() {
         LevelError::TooLong("marker label")
     );
 }
+
+/// A path between markers is drawn only where it crosses the plot: clipped to it, `None` when
+/// it misses it, whatever its length (a price far off the plot never makes a long loop).
+#[test]
+fn marker_paths_clip_to_the_plot() {
+    // Inside: unchanged.
+    assert_eq!(
+        clip_segment((10.0, 10.0), (50.0, 40.0), 100.0, 100.0),
+        Some(((10.0, 10.0), (50.0, 40.0)))
+    );
+    // From inside to far below: cut at the bottom edge.
+    let (a, b) = clip_segment((50.0, 50.0), (50.0, 1.0e9), 100.0, 100.0).unwrap();
+    assert_eq!(a, (50.0, 50.0));
+    assert!((b.1 - 100.0).abs() < 1e-3, "{b:?}");
+    // Entirely left of the plot: nothing.
+    assert_eq!(
+        clip_segment((-50.0, 10.0), (-10.0, 90.0), 100.0, 100.0),
+        None
+    );
+}
+
+/// A level moving with the VWAP is drawn bar by bar along it: a start or end time on it is
+/// refused, never drawn from the plot's left edge.
+#[test]
+fn a_vwap_level_takes_no_time() {
+    let at = t("2026-11-05T14:02:00");
+    let e = LevelMap::builder("src", ES, at)
+        .line("a", LevelValue::VwapOffset(100.0), None, style())
+        .from(at)
+        .build(TICK)
+        .unwrap_err();
+    assert_eq!(e, LevelError::BadTime);
+}

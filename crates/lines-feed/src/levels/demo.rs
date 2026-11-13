@@ -699,9 +699,9 @@ pub const EVENT_GROUP: &str = "demo/event-1";
 
 /// A synthetic event on the synthetic ES session (`--demo-event`): an anchor (A) at 15:58 ET
 /// (20:58 UTC), a first-wave extreme (E1) at 16:06 and a V low (hollow: unconfirmed) at 16:12, joined by a
-/// dashed path; the event's lines begin at their own bars (A's, the IRL and the YL at the
-/// anchor's, E1's at its own), never earlier; a box from the anchor to the YL over the anchor's
-/// bar. All one group: pointing at any of them highlights the event. A second, ungrouped line
+/// dashed path; the event's lines begin at their own bars (A's, the impact and the target lines
+/// at the anchor's, E1's at its own), never earlier; a box from the anchor to the target over
+/// the anchor's bar. All one group: pointing at any of them highlights the event. A second, ungrouped line
 /// across the whole plot stays as lines always were.
 pub static EVENT_TYPES: [LevelType; 5] = [
     LevelType::line(
@@ -717,20 +717,20 @@ pub static EVENT_TYPES: [LevelType; 5] = [
         themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1),
     ),
     LevelType::line(
-        "ev-irl",
-        "Impact red line",
+        "ev-impact",
+        "Impact line",
         "Event",
         themed(OLIVE.0, Some(OLIVE.1), LineType::Dashed, 1),
     ),
     LevelType::line(
-        "ev-yl",
-        "Yellow line",
+        "ev-target",
+        "Target line",
         "Event",
         themed(OLIVE.0, Some(OLIVE.1), LineType::Solid, 1),
     ),
     LevelType::zone(
         "ev-box",
-        "Anchor to YL",
+        "Anchor to target",
         "Event",
         themed(EDGE.0, Some(EDGE.1), LineType::Solid, 1),
     ),
@@ -815,17 +815,17 @@ impl LevelSource for DemoEvent {
             .from(e1_at)
             .group(EVENT_GROUP)
             .line(
-                "ev-irl",
+                "ev-impact",
                 tick(601_350),
-                Some("IRL 6013.50"),
+                Some("Impact 6013.50"),
                 style(0xa87719ff, true),
             )
             .from(a_at)
             .group(EVENT_GROUP)
             .line(
-                "ev-yl",
+                "ev-target",
                 tick(602_600),
-                Some("YL 6026"),
+                Some("Target 6026"),
                 style(0xa87719ff, false),
             )
             .from(a_at)

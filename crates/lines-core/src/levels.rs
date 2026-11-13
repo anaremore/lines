@@ -429,7 +429,8 @@ pub enum LevelError {
     /// An event modifier (`from`, `to`, `group`, `hollow`, `joined`) with nothing it applies
     /// to (no level or marker before it, or the wrong one).
     Misplaced(&'static str),
-    /// A level that ends before it begins, or a marker whose price moves with the VWAP.
+    /// A level that ends before it begins, a level moving with the VWAP given a time, or a
+    /// marker whose price moves with the VWAP.
     BadTime,
 }
 
@@ -447,7 +448,7 @@ impl fmt::Display for LevelError {
             LevelError::BadTime => {
                 write!(
                     f,
-                    "a level ends before it begins, or a marker moves with the VWAP"
+                    "a level ends before it begins, or a time on something moving with the VWAP"
                 )
             }
             LevelError::NotFinite => write!(f, "a level value is not a finite number"),
@@ -668,6 +669,7 @@ impl LevelMapBuilder {
 
     /// Add a named value (not a price): see [`NamedValue`].
     pub fn value(mut self, name: &str, value: f64, as_of: Option<UtcMillis>) -> Self {
+        self.last = Last::None;
         self.map.values.push(NamedValue {
             name: name.to_owned(),
             value,
@@ -678,6 +680,7 @@ impl LevelMapBuilder {
 
     /// Add a line series for lower panes: see [`Series`].
     pub fn series(mut self, s: std::sync::Arc<Series>) -> Self {
+        self.last = Last::None;
         self.map.series.push(s);
         self
     }
@@ -690,6 +693,7 @@ impl LevelMapBuilder {
 
     /// The source's legend content: see [`LevelLegend`].
     pub fn legend(mut self, legend: LevelLegend) -> Self {
+        self.last = Last::None;
         self.map.legend = Some(legend);
         self
     }
@@ -795,6 +799,10 @@ impl LevelMapBuilder {
                 if let (Some(a), Some(b)) = (l.from, l.to)
                     && b < a
                 {
+                    return Err(LevelError::BadTime);
+                }
+                // A level moving with the VWAP is drawn bar by bar along it: it takes no times.
+                if l.is_vwap_relative() && (l.from.is_some() || l.to.is_some()) {
                     return Err(LevelError::BadTime);
                 }
                 match l.shape {
@@ -1254,6 +1262,49 @@ pub fn end_x(bars: &crate::timeframe::BarsView<'_>, vp: &Viewport, to: UtcMillis
         return None;
     }
     Some(x.min(vp.width as f32))
+}
+
+/// The part of segment `a`–`b` inside the rectangle `0..=w` × `0..=h` (Liang–Barsky), or
+/// `None` when none of it is. For drawing a path between markers only where it shows: never a
+/// loop over points far off the plot. No allocation.
+pub fn clip_segment(
+    a: (f32, f32),
+    b: (f32, f32),
+    w: f32,
+    h: f32,
+) -> Option<((f32, f32), (f32, f32))> {
+    let (x0, y0, x1, y1) = (
+        f64::from(a.0),
+        f64::from(a.1),
+        f64::from(b.0),
+        f64::from(b.1),
+    );
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [
+        (-dx, x0),
+        (dx, f64::from(w) - x0),
+        (-dy, y0),
+        (dy, f64::from(h) - y0),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 || !q.is_finite() {
+                return None;
+            }
+            continue;
+        }
+        let r = q / p;
+        if p < 0.0 {
+            t0 = t0.max(r);
+        } else {
+            t1 = t1.min(r);
+        }
+        if t0 > t1 {
+            return None;
+        }
+    }
+    let at = |t: f64| ((x0 + t * dx) as f32, (y0 + t * dy) as f32);
+    Some((at(t0), at(t1)))
 }
 
 /// A marker's place on the plot (px from its top-left), unclamped: its bar's centre (`None`
