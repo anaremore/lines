@@ -280,6 +280,9 @@ pub struct SettingsWindow {
     target_shown: bool,
     /// The page (section and search) that decision was made on.
     target_page: Option<(Section, String)>,
+    /// That group's shape at the last decision (children, editor rows, viewport size).
+    #[allow(clippy::type_complexity)]
+    target_shape: Option<(usize, usize, Option<usize>, (gpui::Pixels, gpui::Pixels))>,
 }
 
 /// The window's size (logical px).
@@ -988,6 +991,7 @@ impl SettingsWindow {
             target_wait: 0,
             target_shown: false,
             target_page: None,
+            target_shape: None,
         }
     }
 
@@ -4041,6 +4045,20 @@ impl Render for SettingsWindow {
         } else if fresh_page {
             cx.notify();
         } else if let Some((first, last)) = target_group {
+            // The group's shape (its children, the preset editor's rows) or the window's size
+            // changed since the last layout: that layout is stale, so decide again on a next
+            // frame (once: that frame sees the same shape).
+            let size = self.scroll.bounds().size;
+            let shape = (
+                first,
+                last,
+                self.editor.as_ref().map(|e| e.rows.len()),
+                (size.width, size.height),
+            );
+            if self.target_shape != Some(shape) {
+                self.target_shape = Some(shape);
+                cx.notify();
+            }
             match (
                 self.scroll.bounds_for_item(first),
                 self.scroll.bounds_for_item(last),
