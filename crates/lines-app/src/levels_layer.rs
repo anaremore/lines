@@ -271,13 +271,16 @@ fn group_dim(hot: Option<(usize, u16)>, si: usize, g: Option<u16>) -> f32 {
     }
 }
 
+/// A marker's color (a theme token, chosen by the helpers below).
+pub(crate) type MarkerInk = Hsla;
+
 /// A marker's dot and path: the theme's accent (the owner-approved mock's violet).
-pub(crate) fn marker_ink(theme: &Theme) -> Hsla {
+pub(crate) fn marker_ink(theme: &Theme) -> MarkerInk {
     theme.accent
 }
 
 /// A marker's label: the accent where it is AA on the chart, else the theme's text.
-pub(crate) fn marker_text(theme: &Theme) -> Hsla {
+pub(crate) fn marker_text(theme: &Theme) -> MarkerInk {
     if crate::theme::contrast(theme.accent, theme.bg) >= 4.5 {
         theme.accent
     } else {

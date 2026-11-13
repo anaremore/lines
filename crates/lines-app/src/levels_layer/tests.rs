@@ -2158,9 +2158,10 @@ fn pointing_at_a_member_finds_its_event() {
     assert_eq!(layer.group_at(100.0, 395.0), None);
     // The highlight: members whole, the rest dimmed.
     let hot = want;
-    assert_eq!(group_dim(hot, ev, Some(want.unwrap().1)), 1.0);
+    let g = want.map(|(_, g)| g);
+    assert_eq!(group_dim(hot, ev, g), 1.0);
     assert_eq!(group_dim(hot, ev, None), GROUP_DIM);
-    assert_eq!(group_dim(hot, ev + 1, Some(want.unwrap().1)), GROUP_DIM);
+    assert_eq!(group_dim(hot, ev + 1, g), GROUP_DIM);
     assert_eq!(group_dim(None, ev, None), 1.0);
 }
 
