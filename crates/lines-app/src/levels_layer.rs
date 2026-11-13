@@ -246,6 +246,9 @@ pub struct LabelStrip {
     pub newest_right: Option<f32>,
     /// The pointer, for the fade of a label on the chart under it.
     pub hover: Option<(f32, f32)>,
+    /// The crosshair's price tag in the axis (centre y and height), while it shows: a level
+    /// tag it would cover isn't drawn (never a tag cut to a sliver under it).
+    pub cross_tag: Option<(f32, f32)>,
 }
 /// Most labels shaped and kept, by (text, color) (cleared when exceeded).
 const MAX_SHAPED: usize = 512;
@@ -1708,7 +1711,13 @@ impl LevelsLayer {
             self.slots[si].label_colors(&map, theme, hair, self.px_per_unit);
             for pi in 0..self.slots[si].placed.len() {
                 let p = self.slots[si].placed[pi];
-                if let Some(y) = p.label_y {
+                let Some(y) = p.label_y else { continue };
+                // A tag the crosshair's price tag covers: none, while the pointer is there.
+                let under_cross = self.config.label_place == LabelPlace::Axis
+                    && strip
+                        .cross_tag
+                        .is_some_and(|(cy, ch)| (cy - y).abs() < (ch + box_h) * 0.5);
+                if !under_cross {
                     self.paint_label(si, &map, p, y, false, &at, theme, window, cx);
                 }
             }
