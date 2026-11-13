@@ -1576,15 +1576,11 @@ fn a_stale_feed_never_fires() {
 
 fn restart(r: &Rig, paper: &PaperConfig) -> Rig {
     let file = lines_trading::service::trading_file(&r.core, paper).expect("paper");
-    let dir = std::env::temp_dir().join(format!(
-        "lines-triggers-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
+    let dir = lines_core::scratch::Scratch::new("triggers");
     let path = dir.join("paper.json");
     persist::save(&path, &file).unwrap();
     let f: TradingFile = persist::load(&path).unwrap().expect("saved");
-    let _ = std::fs::remove_dir_all(&dir);
+    drop(dir);
     assert_eq!(f.version, persist::VERSION);
     let mut core = TradingCore::new(Box::new(PaperBroker::from_state(paper.clone(), f.broker)));
     for a in f.accounts {

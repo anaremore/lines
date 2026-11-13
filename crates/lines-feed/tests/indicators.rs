@@ -19,10 +19,9 @@ fn at(iso: &str) -> UtcMillis {
 
 /// NQ trades from Tuesday 13:00 to Wednesday 01:00 UTC: across Tuesday's 16:00 CT close and
 /// Wednesday's 17:00 CT open.
-fn recording() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lines-ind-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("nq.lfr");
+/// The recording is in a scratch folder, removed when the returned guard drops.
+fn recording() -> lines_core::scratch::Scratch {
+    let path = lines_core::scratch::Scratch::file("ind", "nq.lfr");
     let nq = catalog::get(catalog::NQ).unwrap();
     let start = at("2026-11-10T13:00:00Z");
     let header = Header {
@@ -120,8 +119,8 @@ async fn run_once(path: std::path::PathBuf) -> (Vec<Point>, Vec<Point>, Vec<Poin
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_drives_shared_deterministic_vwaps() {
     let path = recording();
-    let (eth1, _, rth1) = run_once(path.clone()).await;
-    let (eth2, _, rth2) = run_once(path).await;
+    let (eth1, _, rth1) = run_once(path.to_path_buf()).await;
+    let (eth2, _, rth2) = run_once(path.to_path_buf()).await;
     assert!(
         eth1.len() > 500 && rth1.len() > 100,
         "{} {}",
@@ -156,8 +155,7 @@ async fn replay_drives_shared_deterministic_vwaps() {
 /// approximate).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replay_from_the_session_open_is_exact() {
-    let dir = std::env::temp_dir().join(format!("lines-ind-open-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("ind-open");
     let path = dir.join("es-open.lfr");
     let es = catalog::get(catalog::ES).unwrap();
     // Trade date 2026-11-05 (Thursday, CST): ETH opens 17:00 CT = 23:00 UTC the day before.

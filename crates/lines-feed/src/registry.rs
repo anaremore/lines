@@ -274,15 +274,14 @@ mod tests {
     #[test]
     fn a_running_feed_starts_and_stops_recording() {
         use crate::live_record::RecState;
-        let dir = std::env::temp_dir().join(format!("lines-live-rec-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = lines_core::scratch::Scratch::new("live-rec");
         let reg = FeedRegistry::new();
         let a = reg.subscribe(mock(None)).unwrap();
         let store = a.store().clone();
         wait_until(|| store.read().stats.trades_in > 0);
         assert!(store.recording.recordable());
-        assert!(store.recording.start(dir.clone()));
-        assert!(!store.recording.start(dir.clone()), "once");
+        assert!(store.recording.start(dir.to_path_buf()));
+        assert!(!store.recording.start(dir.to_path_buf()), "once");
         wait_until(|| matches!(store.recording.state(), RecState::On { .. }));
         let RecState::On { path, .. } = store.recording.state() else {
             unreachable!()
@@ -329,11 +328,10 @@ mod tests {
         );
         assert!(!rs.recording.recordable());
         assert!(
-            !rs.recording.start(dir.clone()),
+            !rs.recording.start(dir.to_path_buf()),
             "a replay is never recorded again"
         );
         drop((a, replay));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

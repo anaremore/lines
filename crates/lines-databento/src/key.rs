@@ -299,9 +299,7 @@ mod tests {
         assert_eq!(k.secret(), ENV_KEY, "the environment overrides");
         let k = ApiKey::load_from(Some("  ".into()), chain, None).unwrap();
         assert_eq!(k.secret(), CHAIN_KEY, "an empty variable is no key");
-        let dir =
-            std::env::temp_dir().join(format!("lines-databento-order-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("databento-order");
         let p = dir.join("key.txt");
         std::fs::write(&p, "db-FILEKEYFILEKEYFILEKEYFILEKEYF").unwrap();
         let file = Some(p.display().to_string());
@@ -315,13 +313,11 @@ mod tests {
         );
         let e = ApiKey::load_from(None, || Ok(None), None).unwrap_err();
         assert!(format!("{e:#}").starts_with("not set up"), "{e:#}");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn a_key_file_is_read_trimmed_and_errors_never_show_it() {
-        let dir = std::env::temp_dir().join(format!("lines-databento-key-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("databento-key");
         let p = dir.join("key.txt");
         std::fs::write(&p, "  db-FILEKEYFILEKEYFILEKEYFILEKEYF\r\n").unwrap();
         let k = ApiKey::from_file(&p).unwrap();
@@ -330,6 +326,5 @@ mod tests {
         assert!(format!("{missing:#}").contains("none.txt"));
         std::fs::write(&p, "\n").unwrap();
         assert!(ApiKey::from_file(&p).is_err(), "an empty file is no key");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

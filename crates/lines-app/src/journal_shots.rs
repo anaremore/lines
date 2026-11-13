@@ -1016,7 +1016,7 @@ mod tests {
             None,
         )];
         assert_eq!(kind_word(&kinds, &AccountId::new("elsewhere")), "UNLISTED");
-        let tx = spawn(stores, kinds, dir.clone()).unwrap();
+        let tx = spawn(stores, kinds, dir.to_path_buf()).unwrap();
         let file = r.file.clone();
         tx.send(ShotMsg::Take(Box::new(r))).unwrap();
         let (done, wait) = mpsc::channel();
@@ -1038,7 +1038,6 @@ mod tests {
             !svg.contains("DISTINCTIVE") && !svg.contains("Name"),
             "{svg}"
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Writes evidence files to `LINES_EVIDENCE_DIR`: a scale-out with bars through the trade,
@@ -1202,10 +1201,9 @@ mod tests {
         assert_eq!(grid_step(30, 25, 6), 25);
     }
 
-    fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("lines-shots-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    /// A fresh scratch folder, standing for `shots` inside it (not yet made).
+    fn temp(name: &str) -> lines_core::scratch::Scratch {
+        lines_core::scratch::Scratch::file(&format!("shots-{name}"), "shots")
     }
 
     /// The thread writes the named file whole, with no data open it says so, and a flush
@@ -1213,7 +1211,7 @@ mod tests {
     #[test]
     fn the_thread_writes_the_named_file_and_a_flush_waits_for_it() {
         let dir = temp("thread");
-        let tx = spawn(Stores::default(), Kinds::default(), dir.clone()).unwrap();
+        let tx = spawn(Stores::default(), Kinds::default(), dir.to_path_buf()).unwrap();
         let r = request();
         let file = r.file.clone();
         tx.send(ShotMsg::Take(Box::new(r))).unwrap();
@@ -1225,7 +1223,6 @@ mod tests {
         assert!(svg.contains("No chart data for ESZ26"));
         assert!(!svg.contains("DISTINCTIVE"));
         assert!(!dir.join(&file).with_extension("svg.tmp").exists());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// A shot whose folder can't be written is logged and leaves the name: the thread goes on.
@@ -1234,13 +1231,12 @@ mod tests {
         let dir = temp("blocked");
         std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
         std::fs::write(&dir, "a file where the folder should be").unwrap();
-        let tx = spawn(Stores::default(), Kinds::default(), dir.clone()).unwrap();
+        let tx = spawn(Stores::default(), Kinds::default(), dir.to_path_buf()).unwrap();
         tx.send(ShotMsg::Take(Box::new(request()))).unwrap();
         let (done, wait) = mpsc::channel();
         tx.send(ShotMsg::Flush(done)).unwrap();
         wait.recv_timeout(std::time::Duration::from_secs(30))
             .unwrap();
-        let _ = std::fs::remove_file(dir);
     }
 
     #[test]
@@ -1260,7 +1256,6 @@ mod tests {
         assert!(locate(Some(&inner), Some("..\\outside.svg")).is_err());
         std::fs::write(dir.join(name), "<svg/>").unwrap();
         assert_eq!(locate(Some(&dir), Some(name)), Ok(dir.join(name)));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

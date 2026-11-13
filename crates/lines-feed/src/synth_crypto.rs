@@ -109,13 +109,11 @@ mod tests {
 
     #[test]
     fn the_btc_session_is_deterministic() {
-        let dir = std::env::temp_dir().join(format!("lines-synth-btc-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("synth-btc");
         let (a, b) = (dir.join("a.lfr"), dir.join("b.lfr"));
         let n = write_btc_session(&a).unwrap();
         assert_eq!(n, 6 * 3600 / 2);
         write_btc_session(&b).unwrap();
         assert_eq!(std::fs::read(&a).unwrap(), std::fs::read(&b).unwrap());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,7 +1,7 @@
 //! Backtests (decision 0025) over a synthetic ES recording and a recorded synthetic level
 //! map (decision 0010: synthetic data only, built in code).
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -29,11 +29,8 @@ fn ms(s: &str) -> i64 {
 }
 
 /// A fresh scratch directory for one test.
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lines-strategy-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn scratch(name: &str) -> lines_core::scratch::Scratch {
+    lines_core::scratch::Scratch::new(&format!("strategy-{name}"))
 }
 
 /// One trade a second from 14:31 UTC (09:31 New York): 6003.00 down a tick a second to
@@ -197,7 +194,6 @@ fn a_backtest_trades_and_is_deterministic() {
         !json.contains(&*dir.to_string_lossy()),
         "no local paths in reports"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -211,7 +207,6 @@ fn missing_levels_never_arm() {
     );
     assert!(r.states.iter().all(|s| s.state != StrategyState::Armed));
     assert!(r.decisions.is_empty() && r.trades.is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -232,7 +227,6 @@ fn the_core_gate_applies_in_backtests() {
         other => panic!("expected a denial, got {other:?}"),
     }
     assert!(r.trades.is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -245,7 +239,6 @@ fn bad_parameters_refuse_the_run() {
     assert!(e.contains("qty must be above 0"), "{e}");
     bt.params = serde_json::json!({"kind": "support"});
     assert!(backtest::run(&bt).is_err());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -258,5 +251,4 @@ fn bad_limits_refuse_the_run() {
     bt.limits.hours.tz = "America/New_York".into();
     bt.limits.max_orders_per_min = 0;
     assert!(backtest::run(&bt).is_err());
-    let _ = std::fs::remove_dir_all(&dir);
 }

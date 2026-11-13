@@ -722,7 +722,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_truncation() {
-        let dir = std::env::temp_dir().join(format!("lines-rec-test-{}", std::process::id()));
+        let dir = lines_core::scratch::Scratch::new("rec-test");
         let path = dir.join("t.lfr");
         let rec = Recorder::create(
             &path,
@@ -776,7 +776,6 @@ mod tests {
             n += 1;
         }
         assert_eq!(n, 999);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

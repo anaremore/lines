@@ -414,7 +414,7 @@ fn bracket_exits_wait_for_the_entry_and_cancel_each_other() {
 
 #[test]
 fn bracket_survives_a_restart_and_the_core_rebuilds_from_the_broker() {
-    let dir = std::env::temp_dir().join(format!("lines-trading-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("trading");
     let path = dir.join("paper.json");
     let mut r = Rig::new(FillModel::TradeThrough);
     r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
@@ -461,7 +461,6 @@ fn bracket_survives_a_restart_and_the_core_rebuilds_from_the_broker() {
     // A new order continues the numbering (no id reuse).
     let n = r2.place(Side::Buy, 1, limit(5990.00));
     assert!(n.0 > sl.0);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -750,7 +749,7 @@ fn contract_cap_counts_full_size_futures_without_a_micro_as_ten() {
 
 #[test]
 fn trading_file_round_trips_and_migrates_v0() {
-    let dir = std::env::temp_dir().join(format!("lines-trading-file-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("trading-file");
     let path = dir.join("paper.json");
     let mut r = Rig::new(FillModel::Touch);
     r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
@@ -783,7 +782,6 @@ fn trading_file_round_trips_and_migrates_v0() {
             .to_string()
             .contains("newer")
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---- OMS checklist (docs/inspiration.md, "Trading core, OMS, risk") ---------------------
@@ -1434,7 +1432,7 @@ fn checklist_11_one_updates_other_on_partial_fills() {
 /// assumed working; one the broker knows comes back as the broker has it.
 #[test]
 fn checklist_12_unanswered_submits_are_unresolved_after_restart() {
-    let dir = std::env::temp_dir().join(format!("lines-trading-12-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("trading-12");
     let path = dir.join("paper.json");
     let mut r = Rig::new(FillModel::TradeThrough);
     r.book(&[(5999.75, 10)], &[(6000.25, 10)]);
@@ -1469,7 +1467,6 @@ fn checklist_12_unanswered_submits_are_unresolved_after_restart() {
         !r2.core.order(in_flight).unwrap().is_open(),
         "never shown as working"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Chart trading (roadmap 8): a stop or target added for an open position is reduce-only at
@@ -2796,7 +2793,7 @@ fn checklist_13_moving_an_entry_moves_its_held_bracket() {
 /// fill of the entry after the restart activates them there.
 #[test]
 fn a_moved_bracket_survives_a_restart() {
-    let dir = std::env::temp_dir().join(format!("lines-trading-mb-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("trading-mb");
     let path = dir.join("paper.json");
     let mut r = Rig::new(FillModel::TradeThrough);
     r.book(&[(6000.75, 10)], &[(6001.00, 10)]);
@@ -2835,7 +2832,6 @@ fn a_moved_bracket_survives_a_restart() {
     assert_eq!(r.state(tp), OrderState::Filled);
     assert_eq!(r.fills(tp), vec![(px(6001.00), 2)]);
     assert_eq!(r.core.position(&acct(), es()), 0);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A broker that can't move a bracket's legs together: only the entry moves (the result names

@@ -7,11 +7,11 @@
 //! them slower. The mock's throughput budget (5k updates/s) is checked only by the ignored
 //! perf test `cqg_mock_sustains_5k_updates_per_second`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lines_core::UtcMillis;
+use lines_core::scratch::Scratch;
 use lines_core::{ContractKey, Month};
 use lines_feed::catalog::{self, Target};
 use lines_feed::cqg::mock::MockConfig;
@@ -19,10 +19,9 @@ use lines_feed::store::{ChartStore, FeedStatus};
 use lines_feed::{FeedConfig, Source, new_store, run_feed};
 use tokio::sync::watch;
 
-fn temp_path(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lines-feed-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(name)
+/// A scratch file path (its folder is removed when this drops).
+fn temp_path(name: &str) -> Scratch {
+    Scratch::file("feed-test", name)
 }
 
 /// How long a test waits for a real-time feed to get somewhere (far more than it needs
@@ -145,7 +144,7 @@ async fn record_then_replay_reproduces_bars_exactly() {
         history_bars: 300,
         ..Default::default()
     });
-    live.record = Some(path.clone());
+    live.record = Some(path.to_path_buf());
     let live_store = run_until(live, "5k updates recorded", |d| {
         d.stats.updates_in > 5_000 && d.stats.trades_in > 0
     })
@@ -153,7 +152,7 @@ async fn record_then_replay_reproduces_bars_exactly() {
 
     let started = Instant::now();
     let replay_store = run_to_end(FeedConfig::new(Source::Replay {
-        path: path.clone(),
+        path: path.to_path_buf(),
         speed: 0.0,
         stop_at: None,
     }))
@@ -184,7 +183,6 @@ async fn record_then_replay_reproduces_bars_exactly() {
         "replay (speed 0): {} updates in {elapsed:?} = {ups:.0}/s",
         b.stats.updates_in
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -194,14 +192,14 @@ async fn replay_stops_at_timestamp() {
         history_bars: 30,
         ..Default::default()
     });
-    live.record = Some(path.clone());
+    live.record = Some(path.to_path_buf());
     run_until(live, "100 frames recorded", |d| {
         d.stats.frames_in >= 100 && d.stats.trades_in > 0
     })
     .await;
 
     let full = run_to_end(FeedConfig::new(Source::Replay {
-        path: path.clone(),
+        path: path.to_path_buf(),
         speed: 0.0,
         stop_at: None,
     }))
@@ -218,13 +216,13 @@ async fn replay_stops_at_timestamp() {
     let cut = UtcMillis(times[times.len() / 2]);
     assert!(cut.0 < *times.last().unwrap(), "frames after the cut");
     let part = run_to_end(FeedConfig::new(Source::Replay {
-        path: path.clone(),
+        path: path.to_path_buf(),
         speed: 0.0,
         stop_at: Some(cut),
     }))
     .await;
     let again = run_to_end(FeedConfig::new(Source::Replay {
-        path: path.clone(),
+        path: path.to_path_buf(),
         speed: 0.0,
         stop_at: Some(cut),
     }))
@@ -239,7 +237,6 @@ async fn replay_stops_at_timestamp() {
     assert!(p.stats.frames_in > 0);
     assert_eq!(p.series.bars(), a.series.bars(), "same cut, same result");
     assert_eq!(p.last_trade, a.last_trade);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -284,8 +281,9 @@ async fn unmapped_or_unknown_instruments_fail_cleanly() {
 
 #[tokio::test]
 async fn replay_of_missing_file_fails_cleanly() {
+    let missing = temp_path("does-not-exist.lfr");
     let cfg = FeedConfig::new(Source::Replay {
-        path: temp_path("does-not-exist.lfr"),
+        path: missing.to_path_buf(),
         speed: 1.0,
         stop_at: None,
     });
@@ -317,7 +315,7 @@ async fn explicit_contract_is_requested_and_recorded() {
         ..Default::default()
     });
     c.target = Some(Target::Contract(h27));
-    c.record = Some(path.clone());
+    c.record = Some(path.to_path_buf());
     let store = run_until(c, "a trade", |d| d.stats.trades_in > 0).await;
     {
         let d = store.read();
@@ -333,7 +331,7 @@ async fn explicit_contract_is_requested_and_recorded() {
     // Replaying asks for the recorded contract only.
     let replay = |target| {
         let mut c = FeedConfig::new(Source::Replay {
-            path: path.clone(),
+            path: path.to_path_buf(),
             speed: 0.0,
             stop_at: None,
         });
@@ -349,7 +347,6 @@ async fn explicit_contract_is_requested_and_recorded() {
         .to_string();
     assert!(err.contains("ESH27") && err.contains("ESZ26"), "{err}");
     assert!(new_store(&replay(Some(Target::Product(catalog::NQ)))).is_err());
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The replay bar's control: a seek ahead stops exactly where a replay cut at that time
@@ -364,14 +361,14 @@ async fn a_controlled_replay_seeks_rewinds_and_finishes() {
         history_bars: 30,
         ..Default::default()
     });
-    live.record = Some(path.clone());
+    live.record = Some(path.to_path_buf());
     run_until(live, "100 frames recorded", |d| {
         d.stats.frames_in >= 100 && d.stats.trades_in > 0
     })
     .await;
     let replay = |stop_at| {
         FeedConfig::new(Source::Replay {
-            path: path.clone(),
+            path: path.to_path_buf(),
             speed: 0.0,
             stop_at,
         })
@@ -442,5 +439,4 @@ async fn a_controlled_replay_seeks_rewinds_and_finishes() {
 
     tx.send(true).unwrap();
     task.await.unwrap();
-    let _ = std::fs::remove_file(&path);
 }

@@ -2846,11 +2846,8 @@ mod tests {
 
     /// Ten minutes of ES (a Tuesday afternoon, market open): a static book, a trade every
     /// second around 6000, a dip to 5999.25 at +150 s and a pop to 6001.00 at +300 s.
-    fn recording(tag: &str) -> std::path::PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("lines-app-trading-{tag}-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("es.lfr");
+    fn recording(tag: &str) -> lines_core::scratch::Scratch {
+        let path = lines_core::scratch::Scratch::file(&format!("app-trading-{tag}"), "es.lfr");
         let t0 = start();
         let mut w = Writer::create(
             &path,
@@ -2920,8 +2917,9 @@ mod tests {
 
     /// The recording's feed batches, through the real feed driver.
     fn batches(tag: &str) -> Vec<Arc<[lines_feed::provider::MarketEvent]>> {
+        let rec = recording(tag);
         let config = FeedConfig::new(FeedSource::Replay {
-            path: recording(tag),
+            path: rec.to_path_buf(),
             speed: 0.0,
             stop_at: None,
         });
@@ -3704,8 +3702,7 @@ mod tests {
     /// in-memory journal has no folder and takes none.
     #[test]
     fn a_saved_journals_trade_leaves_a_chart_file() {
-        let dir = std::env::temp_dir().join(format!("lines-trading-shots-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = lines_core::scratch::Scratch::new("trading-shots");
         let mut setup = paper_setup(vec![AccountConfig::paper("ACCT-DISTINCTIVE-42", 50_000)]);
         setup.journal = Some((dir.join("mock.jsonl"), "mock".to_owned()));
         let t = trading_with(setup);
@@ -3752,7 +3749,6 @@ mod tests {
             "{line}"
         );
         drop(t);
-        let _ = std::fs::remove_dir_all(dir);
 
         let memory = trading(vec![AccountConfig::paper("paper", 50_000)]);
         assert_eq!(memory.shots_dir, None);

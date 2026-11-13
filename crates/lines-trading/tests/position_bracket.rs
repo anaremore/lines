@@ -599,7 +599,7 @@ fn back_to_per_entry_leaves_the_pair_to_the_trader() {
 /// position with no exits gets a pair at once.
 #[test]
 fn a_restart_adopts_the_pair_and_keeps_following_the_position() {
-    let dir = std::env::temp_dir().join(format!("lines-pb-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("pb");
     let path = dir.join("paper.json");
     let mut r = Rig::new();
     r.mode(MODE, false).unwrap();
@@ -663,7 +663,6 @@ fn a_restart_adopts_the_pair_and_keeps_following_the_position() {
     r2.wait(LAT);
     assert_eq!(r2.exits().len(), 2);
     assert_eq!(r2.exits()[0].1, 3);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A guardrail lockout refuses entries, never protection: a resting add that fills during the

@@ -24,6 +24,7 @@ pub mod price;
 pub mod profile;
 pub mod qty;
 pub mod roll;
+pub mod scratch;
 pub mod sessions;
 pub mod stitch;
 pub mod style;

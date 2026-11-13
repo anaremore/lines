@@ -422,7 +422,7 @@ fn a_reset_keeps_a_lockout() {
 
 #[test]
 fn a_lockout_survives_a_restart_and_settings_cannot_clear_it() {
-    let dir = std::env::temp_dir().join(format!("lines-guardrails-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("guardrails");
     let path = dir.join("paper.json");
     let mut r = Rig::new(Guardrails {
         max_trades_per_day: Some(1),
@@ -468,7 +468,6 @@ fn a_lockout_survives_a_restart_and_settings_cannot_clear_it() {
     r.losing_trade();
     r.losing_trade();
     assert_eq!(r.core.guard_state(&acct()), GuardState::Active);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -496,8 +495,7 @@ fn no_entries_just_before_the_close() {
 fn a_venue_lockout_survives_a_restart() {
     use lines_trading::service::{Clock, TradingService};
     use std::collections::BTreeMap;
-    let dir = std::env::temp_dir().join(format!("lines-venue-guards-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("venue-guards");
     let path = dir.join("venue.guardrails.json");
     let cfg = AccountConfig::paper("paper-1", 50_000);
     let t0 = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
@@ -607,7 +605,6 @@ fn a_venue_lockout_survives_a_restart() {
         .expect("answered");
     let e = r.expect_err("still locked");
     assert_eq!(e.code, RejectCode::Guardrail, "{e:?}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A venue core with `saved` guardrail progress and `defaults`, its account joining with

@@ -1244,8 +1244,7 @@ fn a_synthetic_recording_replays_through_the_feed() {
     use std::sync::Arc;
     use std::time::Duration;
 
-    let dir = std::env::temp_dir().join(format!("lines-databento-replay-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("databento-replay");
     let path = dir.join("synthetic.lfr");
     let header = Header {
         start_wall_ms: ms(T0).0,
@@ -1367,7 +1366,6 @@ fn a_synthetic_recording_replays_through_the_feed() {
         bars.iter().map(|b| b.volume.0).sum::<i64>(),
         2 + 1 + 4 + 1 + 3
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The real TCP transport against a fake gateway on loopback: the connection marker first,

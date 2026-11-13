@@ -1020,11 +1020,10 @@ mod tests {
     /// the lock frees, at its next try (feed time), not only after a reconnect.
     #[test]
     fn a_feed_stores_again_once_a_download_frees_the_contract() {
-        let root = std::env::temp_dir().join(format!("lines-late-writer-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = lines_core::scratch::Scratch::new("late-writer");
         let es = catalog::get(catalog::ES).unwrap();
         let k = ContractKey::monthly(es.id, 2026, lines_core::Month::new(12).unwrap());
-        let cfg = disk::StoreConfig::new(root.clone(), "test");
+        let cfg = disk::StoreConfig::new(root.to_path_buf(), "test");
         let store = Arc::new(ChartStore::new(
             es.clone(),
             Some(k),
@@ -1172,6 +1171,5 @@ mod tests {
         for &(a, b) in coverage_before.bars.ranges() {
             assert!(cov.bars.holes(a, b).is_empty(), "bar claims kept");
         }
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

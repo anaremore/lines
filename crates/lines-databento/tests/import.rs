@@ -26,11 +26,8 @@ fn es_z6() -> ContractKey {
     ContractKey::monthly(catalog::ES, 2026, Month::new(12).unwrap())
 }
 
-fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lines-databento-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn dir(name: &str) -> lines_core::scratch::Scratch {
+    lines_core::scratch::Scratch::new(&format!("databento-{name}"))
 }
 
 fn def(

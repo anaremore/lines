@@ -940,8 +940,10 @@ pub mod shot {
     pub fn open(state: &str, size: (f32, f32), cx: &mut App) -> Option<gpui::AnyWindowHandle> {
         let (state, depth) = split(state);
         let contents = if depth { demo::DEPTH } else { demo::TOB };
-        let root = std::env::temp_dir().join(format!("lines-download-shot-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        // A scratch store for the demo's days, read once below. It goes when this returns (an
+        // early `?` return included), before the screenshot run ends with `process::exit`.
+        let scratch = lines_core::scratch::Scratch::new("download-shot");
+        let root = scratch.to_path_buf();
         let es = lines_feed::catalog::get(lines_feed::catalog::ES)?;
         let target = Target {
             root: root.clone(),
@@ -1049,7 +1051,7 @@ pub mod shot {
             cx.notify();
         });
         // Everything shown came from the store already: the scratch store goes.
-        let _ = std::fs::remove_dir_all(&root);
+        drop(scratch);
         Some(h.into())
     }
 }
@@ -1065,9 +1067,8 @@ mod tests {
     /// next day never starts.
     #[test]
     fn closing_the_window_finishes_the_day_in_flight() {
-        let root =
-            std::env::temp_dir().join(format!("lines-download-close-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let scratch = lines_core::scratch::Scratch::new("download-close");
+        let root = scratch.to_path_buf();
         let es = lines_feed::catalog::get(lines_feed::catalog::ES).unwrap();
         let target = Target {
             root: root.clone(),
@@ -1114,6 +1115,5 @@ mod tests {
             "day 6 never asked"
         );
         assert!(target.dir().segment_path(d(5)).exists());
-        let _ = std::fs::remove_dir_all(&root);
     }
 }

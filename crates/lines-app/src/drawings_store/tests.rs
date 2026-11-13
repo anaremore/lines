@@ -144,8 +144,7 @@ fn unusable_drawings_are_skipped_and_reported() {
 /// new drawings don't reuse their ids.
 #[test]
 fn unusable_drawings_survive_saves() {
-    let dir = std::env::temp_dir().join(format!("lines-drawings-keep-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("drawings-keep");
     let mut f: DrawingsFile = serde_json::from_str(V1).unwrap();
     f.drawings[1].tool = "spiral".into(); // id 2: unusable
     f.drawings[1].id = 9;
@@ -153,7 +152,7 @@ fn unusable_drawings_survive_saves() {
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, f.encode()).unwrap();
     let writer = Writer::spawn();
-    let mut g = Drawings::new(Some(dir.clone()), Some(writer.clone()));
+    let mut g = Drawings::new(Some(dir.to_path_buf()), Some(writer.clone()));
     let (p, report) = g.product(&es());
     assert!(report.unwrap().contains("kept in the file"));
     let id = p.change(|s| (true, s.add(sample()[2].clone())));
@@ -166,7 +165,6 @@ fn unusable_drawings_survive_saves() {
     let spiral = saved.drawings.iter().find(|d| d.id == 9).unwrap();
     assert_eq!(spiral, &f.drawings[1], "written back exactly as read");
     assert_eq!(saved.drawings.len(), 4);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -187,10 +185,9 @@ fn files_are_named_by_product() {
 /// moves so other charts of the product repaint.
 #[test]
 fn changes_are_saved_and_restored() {
-    let dir = std::env::temp_dir().join(format!("lines-drawings-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("drawings");
     let writer = Writer::spawn();
-    let mut g = Drawings::new(Some(dir.clone()), Some(writer.clone()));
+    let mut g = Drawings::new(Some(dir.to_path_buf()), Some(writer.clone()));
     let (p, report) = g.product(&es());
     assert!(report.is_none());
     assert!(p.lock().items().is_empty());
@@ -205,20 +202,18 @@ fn changes_are_saved_and_restored() {
     p.change(|s| (s.undo(), ()));
     assert!(writer.flush(std::time::Duration::from_secs(5)));
 
-    let mut again = Drawings::new(Some(dir.clone()), None);
+    let mut again = Drawings::new(Some(dir.to_path_buf()), None);
     let (q, report) = again.product(&es());
     assert!(report.is_none(), "{report:?}");
     let ids: Vec<u64> = q.lock().items().iter().map(|d| d.id).collect();
     assert_eq!(ids, [1, 2], "the undone third drawing isn't saved");
     // The same Arc for every chart of the product.
     assert!(Arc::ptr_eq(&again.product(&es()).0, &q));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_seed_file_names_its_product() {
-    let dir = std::env::temp_dir().join(format!("lines-drawings-seed-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("drawings-seed");
     let f = dir.join("seed.json");
     std::fs::write(&f, V1).unwrap();
     let (p, items) = read_seed(&f).unwrap();
@@ -226,7 +221,6 @@ fn a_seed_file_names_its_product() {
     assert_eq!(items.len(), 3);
     std::fs::write(&f, V1.replace("\"ES\"", "\"XX\"")).unwrap();
     assert!(read_seed(&f).unwrap_err().contains("unknown product"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Every style field survives a save and a restart; a file written before styles loads with
@@ -275,8 +269,7 @@ fn styles_round_trip_through_the_file() {
 /// the drawing is edited here.
 #[test]
 fn a_newer_files_unknown_fields_survive() {
-    let dir = std::env::temp_dir().join(format!("lines-drawings-newer-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("drawings-newer");
     let mut v: serde_json::Value = serde_json::from_str(V1).unwrap();
     v["drawings"][0]["glow"] = serde_json::json!({"radius": 3});
     v["drawings"][0]["label_font"] = "serif".into();
@@ -285,7 +278,7 @@ fn a_newer_files_unknown_fields_survive() {
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, serde_json::to_vec(&v).unwrap()).unwrap();
     let writer = Writer::spawn();
-    let mut g = Drawings::new(Some(dir.clone()), Some(writer.clone()));
+    let mut g = Drawings::new(Some(dir.to_path_buf()), Some(writer.clone()));
     let (p, report) = g.product(&es());
     assert!(report.is_none(), "{report:?}");
     // Edit the drawing that carries them: restyled here, its unknown fields stay.
@@ -307,7 +300,6 @@ fn a_newer_files_unknown_fields_survive() {
     let doc: DrawingsFile = serde_json::from_value(saved).unwrap();
     assert!(!doc.drawings[0].extra.contains_key("width"));
     assert!(!doc.drawings[0].extra.contains_key("tool"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A brush stroke and an arrow round-trip through the file: the stroke's points in order (its

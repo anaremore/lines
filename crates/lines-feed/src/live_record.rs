@@ -289,14 +289,12 @@ mod tests {
 
     #[test]
     fn a_taken_name_gets_a_number() {
-        let dir = std::env::temp_dir().join(format!("lines-rec-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = lines_core::scratch::Scratch::new("rec");
         // Claimed at once: a second claim in the same instant gets the next name.
         let a = fresh_path(&dir, "x.lfr").unwrap();
         let b = fresh_path(&dir, "x.lfr").unwrap();
         assert_eq!(a.file_name().unwrap(), "x.lfr");
         assert_eq!(b.file_name().unwrap(), "x-2.lfr");
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Nothing live (a replay): no start. A second start while one is pending: refused.
@@ -327,12 +325,10 @@ mod tests {
     /// A stop while the feed thread creates the file: the recording never becomes active.
     #[test]
     fn a_stop_during_creation_wins() {
-        let dir = std::env::temp_dir().join(format!("lines-rec-race-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("rec-race");
         let c = RecordCtl::default();
         c.set_recordable(true);
-        assert!(c.start(dir.clone()));
+        assert!(c.start(dir.to_path_buf()));
         let d = c.take_pending().unwrap();
         assert_eq!(c.stop(), Stopped::Cancelled);
         let path = d.join("x.lfr");
@@ -340,6 +336,5 @@ mod tests {
         assert!(!c.set_active(path, 0, r.clone()));
         assert!(r.is_stopped());
         assert_eq!(c.state(), RecState::Off);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

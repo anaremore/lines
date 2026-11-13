@@ -178,8 +178,7 @@ fn price_conversion() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn synthetic_import_report_replay_and_reproducibility() {
-    let dir = std::env::temp_dir().join(format!("lines-sierra-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("sierra-test");
     write_fixture(&dir);
 
     let r = import(&opts(&dir, "a.lfr")).unwrap();
@@ -274,14 +273,11 @@ async fn synthetic_import_report_replay_and_reproducibility() {
             "unterminated final batch is still applied"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn missing_files_and_bad_symbols() {
-    let dir = std::env::temp_dir().join(format!("lines-sierra-missing-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("sierra-missing");
     assert!(import(&opts(&dir, "x.lfr")).is_err(), "no scid file");
     let mut o = opts(&dir, "x.lfr");
     o.symbol = "CLZ5.CME".into();
@@ -299,7 +295,6 @@ fn missing_files_and_bad_symbols() {
             .to_string()
             .contains("no ticks or depth")
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// One aggressor buy order sweeping three ask levels, written as Sierra writes it: the
@@ -309,8 +304,7 @@ fn missing_files_and_bad_symbols() {
 /// sell then hits the new bid in the same millisecond.
 #[test]
 fn sweep_bracket_and_same_millisecond_fills() {
-    let dir = std::env::temp_dir().join(format!("lines-sierra-sweep-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("sierra-sweep");
     std::fs::create_dir_all(dir.join("MarketDepthData")).unwrap();
     let t0 = sc(13, 45, 0, 0);
     let t1 = sc(13, 45, 0, 7); // the sweep's millisecond
@@ -379,5 +373,4 @@ fn sweep_bracket_and_same_millisecond_fills() {
         (2, 1),
         "{r}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }

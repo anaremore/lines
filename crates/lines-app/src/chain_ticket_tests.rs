@@ -360,8 +360,7 @@ fn the_script_trades_an_option_series() {
 #[test]
 fn a_saved_stop_comes_back_through_the_apps_start() {
     use lines_trading::trigger::{TriggerKind, TriggerSpec};
-    let dir = std::env::temp_dir().join(format!("lines-chain-stop-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("chain-stop");
     let file = dir.join("paper.json");
     let k = key(684, Right::Call);
     let c = contract_of(k);
@@ -438,7 +437,6 @@ fn a_saved_stop_comes_back_through_the_apps_start() {
         "the entry didn't come back"
     );
     drop(r);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

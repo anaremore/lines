@@ -2,10 +2,11 @@
 //! replayed through the real provider sessions, compared against the "exchange truth": every
 //! trade aggregated once. No gap, no double-counted volume.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use lines_core::scratch::Scratch;
 use lines_core::{Bar, BarSeries, ContractKey, FixedStr, Price, Qty, UtcMillis};
 use lines_feed::catalog;
 use lines_feed::connection::{ConnectionOptions, run_connection};
@@ -19,10 +20,9 @@ use tokio::sync::watch;
 
 const REST: &str = "https://api.exchange.coinbase.com/products/BTC-USD";
 
-fn temp_path(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lines-history-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(name)
+/// A scratch file path (its folder is removed when this drops).
+fn temp_path(name: &str) -> Scratch {
+    Scratch::file("history-test", name)
 }
 
 fn at(hms: &str) -> UtcMillis {
@@ -160,7 +160,7 @@ fn rest_trades(tape: &[T], newest_id: u64, n: usize) -> Frame {
 }
 
 /// Write a synthetic Coinbase recording whose clock starts at `start`.
-fn record(name: &str, start: UtcMillis, frames: &[Frame]) -> PathBuf {
+fn record(name: &str, start: UtcMillis, frames: &[Frame]) -> Scratch {
     let path = temp_path(name);
     let header = Header {
         start_wall_ms: start.0,
@@ -179,9 +179,9 @@ fn record(name: &str, start: UtcMillis, frames: &[Frame]) -> PathBuf {
     path
 }
 
-async fn replay(path: PathBuf) -> Arc<ChartStore> {
+async fn replay(path: &Path) -> Arc<ChartStore> {
     let config = FeedConfig::new(Source::Replay {
-        path,
+        path: path.to_path_buf(),
         speed: 0.0,
         stop_at: None,
     });
@@ -225,7 +225,8 @@ async fn coinbase_clean_backfill_then_live() {
     ];
     // Websocket overlaps the REST snapshot by three trades, then continues.
     frames.extend(ids(&tape, rest_newest - 2, u64::MAX).iter().map(ws_match));
-    let store = replay(record("clean.lfr", connect, &frames)).await;
+    let rec = record("clean.lfr", connect, &frames);
+    let store = replay(&rec).await;
     let d = store.read();
     assert_eq!(d.history, HistoryState::Complete);
     assert_eq!(
@@ -258,7 +259,8 @@ async fn coinbase_boundary_trade_counted_once() {
     ];
     // The websocket also replays the boundary trades (overlap reaching back to 14:04:59.999).
     frames.extend(ids(&tape, boundary[0] - 1, u64::MAX).iter().map(ws_match));
-    let store = replay(record("boundary.lfr", connect, &frames)).await;
+    let rec = record("boundary.lfr", connect, &frames);
+    let store = replay(&rec).await;
     let d = store.read();
     let bars = d.series.bars();
     let want = truth(&tape);
@@ -291,7 +293,8 @@ async fn coinbase_history_arriving_after_live_trades() {
     frames.push(candles(&tape, at("14:00:00"), at("14:05:00")));
     frames.push(rest_trades(&tape, rest_newest, 1000));
     frames.extend(ids(&tape, rest_newest + 2, u64::MAX).iter().map(ws_match));
-    let store = replay(record("late.lfr", connect, &frames)).await;
+    let rec = record("late.lfr", connect, &frames);
+    let store = replay(&rec).await;
     let d = store.read();
     assert_eq!(d.series.bars(), truth(&tape).as_slice());
     assert_eq!(d.history, HistoryState::Complete);
@@ -310,7 +313,8 @@ async fn coinbase_empty_history() {
         Frame::http(format!("{REST}/trades?limit=1000\n[]")),
     ];
     frames.extend(live.iter().map(ws_match));
-    let store = replay(record("empty.lfr", connect, &frames)).await;
+    let rec = record("empty.lfr", connect, &frames);
+    let store = replay(&rec).await;
     let d = store.read();
     assert_eq!(d.history, HistoryState::Complete);
     assert_eq!(
@@ -424,7 +428,7 @@ async fn a_hole_open_at_the_connection_end_is_reported_live_and_recorded() {
         1u64 << 40
     )));
     let path = record("open-at-end.lfr", c1, &f);
-    let store = replay(path.clone()).await;
+    let store = replay(&path).await;
     assert!(
         matches!(store.read().history, HistoryState::Incomplete { .. }),
         "{:?}",
@@ -538,7 +542,8 @@ async fn coinbase_stale_rest_hole_is_filled() {
         fill(&tape, boundary + 1, boundary + 3),
     ];
     frames.extend(ids(&tape, boundary + 2, u64::MAX).iter().map(ws_match));
-    let store = replay(record("stale.lfr", connect, &frames)).await;
+    let rec = record("stale.lfr", connect, &frames);
+    let store = replay(&rec).await;
     let d = store.read();
     assert_eq!(d.history, HistoryState::Complete);
     assert_eq!(d.series.bars(), truth(&tape).as_slice(), "hole filled once");
@@ -559,7 +564,8 @@ async fn coinbase_unfillable_hole_is_reported() {
     ];
     frames.extend((0..6).map(|_| fill(&tape, boundary + 1, stale)));
     frames.extend(ids(&tape, boundary + 1, u64::MAX).iter().map(ws_match));
-    let store = replay(record("unfillable.lfr", connect, &frames)).await;
+    let rec = record("unfillable.lfr", connect, &frames);
+    let store = replay(&rec).await;
     let d = store.read();
     assert!(
         matches!(d.history, HistoryState::Incomplete { .. }),
@@ -628,7 +634,7 @@ async fn coinbase_live_stitch_matches_exchange_candles() {
     let mut config = FeedConfig::new(Source::Coinbase {
         url: lines_feed::coinbase::WS_URL.into(),
     });
-    config.record = Some(path.clone());
+    config.record = Some(path.to_path_buf());
     config.history_ms = 60 * 60_000;
     let start = lines_feed::now_utc();
     let m0 = start.floor_to(60_000);
@@ -713,9 +719,8 @@ async fn coinbase_live_stitch_matches_exchange_candles() {
         assert_eq!(a, b, "bar {m}: ours vs Coinbase's candle");
     }
     // The recording replays to the same bars.
-    let replayed = replay(path.clone()).await;
+    let replayed = replay(&path).await;
     assert_eq!(replayed.read().series.bars(), ours.as_slice());
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -732,10 +737,8 @@ mod store {
     use lines_feed::disk::{ContractDir, ContractWriter, StoreConfig};
     use lines_feed::provider::MarketEvent;
 
-    fn root(name: &str) -> PathBuf {
-        let d = temp_path(&format!("store-{name}"));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    fn root(name: &str) -> lines_core::scratch::Scratch {
+        lines_core::scratch::Scratch::new(&format!("history-store-{name}"))
     }
 
     fn store_cfg(root: &std::path::Path) -> StoreConfig {
@@ -744,9 +747,9 @@ mod store {
 
     /// Run a recording through the full feed (`run_feed`) with the store on, as the app
     /// would after a launch; returns the chart store.
-    async fn run_with_store(path: PathBuf, root: &std::path::Path) -> Arc<ChartStore> {
+    async fn run_with_store(path: &std::path::Path, root: &std::path::Path) -> Arc<ChartStore> {
         let mut config = FeedConfig::new(Source::Replay {
-            path,
+            path: path.to_path_buf(),
             speed: 0.0,
             stop_at: None,
         });
@@ -798,7 +801,8 @@ mod store {
                 .iter()
                 .map(ws_match),
         );
-        let first = run_with_store(record("st1.lfr", c1, &f1), &root).await;
+        let rec = record("st1.lfr", c1, &f1);
+        let first = run_with_store(&rec, &root).await;
         let first_bars = first.read().series.bars().to_vec();
         assert!(!first_bars.is_empty());
 
@@ -816,7 +820,8 @@ mod store {
         let rest2 = id_at(&tape, c2);
         let mut f2 = vec![subscribed(), rest_trades(&tape, rest2, 1000)];
         f2.extend(ids(&tape, rest2 + 1, u64::MAX).iter().map(ws_match));
-        let second = run_with_store(record("st2.lfr", c2, &f2), &root).await;
+        let rec = record("st2.lfr", c2, &f2);
+        let second = run_with_store(&rec, &root).await;
         {
             let d = second.read();
             assert_eq!(d.series.bars(), truth(&tape).as_slice(), "counted once");
@@ -828,7 +833,7 @@ mod store {
         let dir = btc_dir(&root);
         let covered = dir.trade_coverage();
         assert!(!covered.is_empty());
-        let replayed = replay(dir.path.clone()).await;
+        let replayed = replay(&dir.path).await;
         let replayed = replayed.read().series.bars().to_vec();
         let mut compared = 0;
         for b in truth(&tape) {
@@ -1087,7 +1092,7 @@ mod store {
         w.finish().unwrap();
 
         let mut config = FeedConfig::new(Source::Replay {
-            path,
+            path: path.to_path_buf(),
             speed: 1.0,
             stop_at: None,
         });

@@ -5,6 +5,7 @@
 
 use std::time::{Duration, Instant};
 
+use lines_core::scratch::Scratch;
 use lines_core::{ContractKey, Month, Price, Qty, UtcMillis};
 use lines_feed::native::{self, NativeEvent};
 use lines_feed::provider::Frame;
@@ -35,10 +36,8 @@ fn at(iso: &str) -> UtcMillis {
 
 /// Ten minutes of ES: a static book, trades every second around 6000, a dip to 5999.25 at
 /// +150 s and a pop to 6001.00 at +300 s.
-fn recording() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lines-trading-session-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("es.lfr");
+fn recording() -> Scratch {
+    let path = Scratch::file("trading-session", "es.lfr");
     let start = at("2026-11-10T15:00:00Z");
     let mut w = Writer::create(
         &path,
@@ -109,8 +108,9 @@ fn recording() -> std::path::PathBuf {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replayed_session_with_scripted_orders_gives_exact_fills_and_pnl() {
     // 1. Replay through the real feed driver, catching batches with a listener.
+    let rec = recording();
     let config = FeedConfig::new(FeedSource::Replay {
-        path: recording(),
+        path: rec.to_path_buf(),
         speed: 0.0,
         stop_at: None,
     });

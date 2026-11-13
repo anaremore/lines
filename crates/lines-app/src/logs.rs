@@ -313,17 +313,16 @@ fn write_now(text: &str) {
 mod tests {
     use super::*;
 
-    fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("lines-logs-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    /// A fresh scratch folder, standing for `logs` inside it (not yet made).
+    fn temp(name: &str) -> lines_core::scratch::Scratch {
+        lines_core::scratch::Scratch::file(&format!("logs-{name}"), "logs")
     }
 
     #[test]
     fn files_rotate_by_size_and_keep_at_most_n() {
         let dir = temp("rotate");
         let cfg = LogConfig {
-            dir: dir.clone(),
+            dir: dir.to_path_buf(),
             files: 3,
             max_bytes: 1000,
         };
@@ -346,14 +345,13 @@ mod tests {
             .map(|f| std::fs::read_to_string(f).unwrap())
             .collect();
         assert!(!all.contains("line 0000"));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn lines_are_redacted_before_they_reach_the_disk() {
         let dir = temp("redact");
         let cfg = LogConfig {
-            dir: dir.clone(),
+            dir: dir.to_path_buf(),
             files: 2,
             max_bytes: 1 << 20,
         };
@@ -364,7 +362,6 @@ mod tests {
         let s = std::fs::read_to_string(cfg.file(0)).unwrap();
         assert!(!s.contains("hunter2") && !s.contains("trader7"), "{s}");
         assert!(s.contains("feed live\n"));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

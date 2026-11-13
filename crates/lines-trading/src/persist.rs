@@ -366,9 +366,7 @@ mod tests {
 
     #[test]
     fn a_backup_keeps_the_file_dated_and_never_overwrites_one() {
-        let dir = std::env::temp_dir().join(format!("lines-backup-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("backup");
         let path = dir.join("mock.json");
         let now = lines_core::UtcMillis::parse_iso("2026-11-09T22:15:00Z").unwrap();
         assert_eq!(backup(&path, now).unwrap(), None, "no file yet");
@@ -383,7 +381,6 @@ mod tests {
             b"before",
             "the file itself is left"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
     use crate::guardrails::GuardState;
 

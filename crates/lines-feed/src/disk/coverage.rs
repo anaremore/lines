@@ -160,8 +160,7 @@ mod tests {
 
     #[test]
     fn persists_and_tolerates_junk() {
-        let dir = std::env::temp_dir().join(format!("lines-cov-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("cov");
         let p = dir.join("coverage");
         let mut c = Coverage::default();
         c.bars.add(1, 100);

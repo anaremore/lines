@@ -1,18 +1,19 @@
 //! The UI gallery's quick set renders and passes the layout lint (`docs/design.md` "Checking
 //! a UI change"): `lines --gallery DIR`. The full set (`--gallery-full`) is `#[ignore]`d.
 
-use std::path::PathBuf;
 use std::process::Command;
 
+use lines_core::scratch::Scratch;
+
 fn run(full: bool) {
-    let dir: PathBuf = std::env::temp_dir().join(format!(
-        "lines-gallery-{}-{}",
-        if full { "full" } else { "quick" },
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&dir);
+    // Held until the gallery (and every scene it ran) has exited.
+    let dir = Scratch::new(if full {
+        "gallery-full"
+    } else {
+        "gallery-quick"
+    });
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lines"));
-    cmd.arg("--gallery").arg(&dir);
+    cmd.arg("--gallery").arg(dir.path());
     if full {
         cmd.arg("--gallery-full");
     }
@@ -25,7 +26,6 @@ fn run(full: bool) {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
