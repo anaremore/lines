@@ -2322,7 +2322,7 @@ fn table() -> Vec<Setting> {
             CONNECTIONS_LIST,
             Sec::Connections,
             "Data sources",
-            "Each connects only while a pane shows its symbols.",
+            "Each connects only when shown. Keys stay in the keychain.",
             Scope::App,
             Normal,
             Info,
