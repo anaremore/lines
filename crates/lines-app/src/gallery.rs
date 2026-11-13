@@ -297,6 +297,18 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             false,
             "--theme dark --demo-crowd --size 1400x260",
         ),
+        // An event (owner-approved, 2026-11-13): its lines begin at their bars, never earlier;
+        // A, E1 and V dots joined by a dashed path; a box from the anchor to the YL.
+        (
+            "levels-event-dark",
+            false,
+            "--theme dark --demo-event --size 1400x800",
+        ),
+        (
+            "levels-event-light-150",
+            false,
+            "--theme light --ui-zoom 150 --demo-event --size 1400x800",
+        ),
     ] {
         v.push(s(
             name,

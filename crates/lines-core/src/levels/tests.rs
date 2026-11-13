@@ -121,6 +121,9 @@ fn placement_filters_kinds_and_skips_off_screen_levels() {
         label: None,
         style: style(),
         meta: LevelMeta::default(),
+        from: None,
+        to: None,
+        group: None,
     });
     let mut out = Vec::with_capacity(16);
     place(&m, &vp(), None, |_| true, &mut out);
@@ -998,6 +1001,8 @@ fn labels_place_by_priority_first() {
         anchor: LabelAt::Own,
         on_edge: false,
         rank,
+        x0: 0.0,
+        x1: 800.0,
     };
     let low = LabelPriority::Low.rank();
     let normal = LabelPriority::Normal.rank();
@@ -1028,4 +1033,133 @@ fn labels_place_by_priority_first() {
     assert!(out[1].label_y.is_some(), "Normal shown");
     assert!(LabelPriority::High.rank() < normal && normal < low);
     assert_eq!(LabelPriority::default(), LabelPriority::Normal);
+}
+
+// ---- event levels -----------------------------------------------------------------------
+
+/// Ten 1-minute bars from 14:00 (a gap of one bar after the fifth), 10 px apart, the last at
+/// the plot's right edge (800 px wide).
+fn event_bars() -> (Vec<Bar>, Viewport) {
+    let mut bars: Vec<Bar> = (0..5)
+        .map(|m| bar(&format!("2026-11-05T14:0{m}:00"), 600_000))
+        .collect();
+    bars.extend((6..11).map(|m| bar(&format!("2026-11-05T14:{m:02}:00"), 600_000)));
+    let mut v = vp();
+    v.bar_px = 10.0;
+    v.right_index = 9.0;
+    (bars, v)
+}
+
+/// A level that begins at a time is drawn from that bar on, never earlier: a time inside a bar
+/// starts at that bar; before the first bar loaded, at the plot's left edge; in a gap, at the
+/// next bar; after the last bar, or at a bar right of the plot, not at all.
+#[test]
+fn a_level_starts_at_its_bar_never_earlier() {
+    let (bars, v) = event_bars();
+    let view = crate::timeframe::BarsView::fixed(&bars, 60_000);
+    let x = |i: f64| v.index_to_x(i) as f32;
+    // Inside the third bar (14:02:30): that bar.
+    assert_eq!(start_x(&view, &v, t("2026-11-05T14:02:30")), Some(x(2.0)));
+    // Its very start: the same bar.
+    assert_eq!(start_x(&view, &v, t("2026-11-05T14:02:00")), Some(x(2.0)));
+    // Before the first bar loaded: the left edge.
+    assert_eq!(start_x(&view, &v, t("2026-11-05T13:00:00")), Some(0.0));
+    // In the gap (14:05): the next bar (14:06, index 5).
+    assert_eq!(start_x(&view, &v, t("2026-11-05T14:05:30")), Some(x(5.0)));
+    // After the last bar: it hasn't begun.
+    assert_eq!(start_x(&view, &v, t("2026-11-05T15:00:00")), None);
+    // A bar right of the plot (panned back): not drawn.
+    let mut back = v;
+    back.right_index = 3.0;
+    assert_eq!(start_x(&view, &back, t("2026-11-05T14:08:00")), None);
+    // A bar left of the plot: from the left edge.
+    assert_eq!(
+        start_x(&view, &v, t("2026-11-05T14:00:00")).map(|x| x >= 0.0),
+        Some(true)
+    );
+    // An end time: the bar it falls in; after the last bar, the right edge; before the first,
+    // nothing (it ended before anything shown).
+    assert_eq!(end_x(&view, &v, t("2026-11-05T14:03:10")), Some(x(3.0)));
+    assert_eq!(end_x(&view, &v, t("2026-11-05T16:00:00")), Some(800.0));
+    assert_eq!(end_x(&view, &v, t("2026-11-05T13:00:00")), None);
+}
+
+/// A marker sits at its bar's centre and its price; a time outside the bars loaded has none.
+#[test]
+fn markers_sit_at_their_bar_and_price() {
+    let (bars, v) = event_bars();
+    let view = crate::timeframe::BarsView::fixed(&bars, 60_000);
+    let m = |at: &str| Marker {
+        at: t(at),
+        price: LevelValue::Tick(Price(600_000)),
+        label: Some("A".into()),
+        hollow: false,
+        joined: false,
+        group: None,
+    };
+    assert_eq!(
+        marker_xy(&view, &v, &m("2026-11-05T14:01:20")),
+        Some((v.index_to_x(1.0) as f32, v.price_to_y(600_000.0) as f32))
+    );
+    assert_eq!(marker_xy(&view, &v, &m("2026-11-05T13:00:00")), None);
+    assert_eq!(marker_xy(&view, &v, &m("2026-11-05T15:00:00")), None);
+}
+
+/// The event modifiers apply to the level or marker just added, and the map validates them:
+/// a group is interned once, a modifier with nothing to apply to or the wrong kind refuses the
+/// map, as does a level ending before it begins or a marker moving with the VWAP. A map built
+/// as before (no event fields) has none.
+#[test]
+fn event_fields_build_and_validate() {
+    let at = t("2026-11-05T14:02:00");
+    let m = LevelMap::builder("src", ES, t("2026-11-05T13:00:00"))
+        .line("a", LevelValue::Tick(Price(600_000)), Some("A"), style())
+        .from(at)
+        .group("ev-1")
+        .marker(at, LevelValue::Tick(Price(600_000)), Some("A"))
+        .group("ev-1")
+        .marker(at, LevelValue::Tick(Price(600_100)), Some("E1"))
+        .group("ev-1")
+        .joined()
+        .hollow()
+        .build(TICK)
+        .unwrap();
+    assert_eq!(m.groups, ["ev-1"]);
+    assert_eq!((m.levels[0].from, m.levels[0].group), (Some(at), Some(0)));
+    assert!(m.markers[1].joined && m.markers[1].hollow && m.markers[1].group == Some(0));
+    let old = LevelMap::builder("src", ES, at)
+        .line("a", LevelValue::Tick(Price(600_000)), None, style())
+        .build(TICK)
+        .unwrap();
+    assert!(old.markers.is_empty() && old.groups.is_empty());
+    assert_eq!(
+        (old.levels[0].from, old.levels[0].to, old.levels[0].group),
+        (None, None, None)
+    );
+    let refused = |b: LevelMapBuilder| b.build(TICK).unwrap_err();
+    let b = || LevelMap::builder("src", ES, at);
+    assert_eq!(refused(b().from(at)), LevelError::Misplaced("from"));
+    assert_eq!(
+        refused(
+            b().line("a", LevelValue::Tick(Price(600_000)), None, style())
+                .hollow()
+        ),
+        LevelError::Misplaced("hollow")
+    );
+    assert_eq!(
+        refused(
+            b().line("a", LevelValue::Tick(Price(600_000)), None, style())
+                .from(at)
+                .to(t("2026-11-05T14:00:00"))
+        ),
+        LevelError::BadTime
+    );
+    assert_eq!(
+        refused(b().marker(at, LevelValue::VwapOffset(1.0), None)),
+        LevelError::BadTime
+    );
+    assert_eq!(
+        refused(b().marker(at, LevelValue::Tick(Price(600_000)), Some("TOOLONGLABEL"))),
+        LevelError::TooLong("marker label")
+    );
 }

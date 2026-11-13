@@ -33,6 +33,11 @@
 //!   newest bar and moving with it; pinned to the plot's right edge when it is off screen;
 //!   one under the pointer fades). No room is ever reserved inside the plot: the bars run to
 //!   its edge.
+//! - Event levels (owner-approved, 2026-11-13): a level with a start time is drawn from its bar
+//!   to the right, never earlier (a time-bounded zone from its start to its end bar); a source's
+//!   markers are dots in the theme's accent at a bar and price, with short labels and a dashed
+//!   path joining an event's points; pointing at any member of an event (a level, a zone, a
+//!   marker) highlights its whole group and dims the rest ([`LevelsLayer::group_at`]).
 //! - Per pane ([`LevelsConfig`], saved with the workspace): all levels, per source, per kind,
 //!   and labels. The chart's study visibility applies on top: "hide studies" hides levels,
 //!   "hide study labels" and Clean chart hide their labels and legend rows.
@@ -250,6 +255,64 @@ pub struct LabelStrip {
     /// tag it would cover isn't drawn (never a tag cut to a sliver under it).
     pub cross_tag: Option<(f32, f32)>,
 }
+/// A marker's dot radius (logical px at 100 %).
+const MARKER_R: f32 = 3.5;
+/// How near a member the pointer must be to highlight its event (logical px at 100 %).
+const GROUP_HIT: f32 = 4.0;
+/// What the levels and markers outside a highlighted event are drawn at.
+pub(crate) const GROUP_DIM: f32 = 0.3;
+
+/// A member's opacity factor while event `hot` (source, group) is highlighted: whole for its
+/// own members (and everything while none is), [`GROUP_DIM`] for the rest.
+fn group_dim(hot: Option<(usize, u16)>, si: usize, g: Option<u16>) -> f32 {
+    match hot {
+        Some((hs, hg)) if !(hs == si && g == Some(hg)) => GROUP_DIM,
+        _ => 1.0,
+    }
+}
+
+/// A marker's dot and path: the theme's accent (the owner-approved mock's violet).
+pub(crate) fn marker_ink(theme: &Theme) -> Hsla {
+    theme.accent
+}
+
+/// A marker's label: the accent where it is AA on the chart, else the theme's text.
+pub(crate) fn marker_text(theme: &Theme) -> Hsla {
+    if crate::theme::contrast(theme.accent, theme.bg) >= 4.5 {
+        theme.accent
+    } else {
+        theme.text_main
+    }
+}
+
+/// A dashed segment from `a` to `b` (window px): 3 px dashes, 2 px gaps, each dash a run of
+/// `w`-sized squares. No allocation.
+fn dashed_segment(window: &mut Window, a: (f32, f32), b: (f32, f32), w: f32, c: Hsla) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 0.5 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let (dash, gap, step) = (3.0, 2.0, w.max(0.75));
+    let mut t = 0.0;
+    while t < len {
+        let end = (t + dash).min(len);
+        let mut u = t;
+        while u < end {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(a.0 + ux * u - w * 0.5), px(a.1 + uy * u - w * 0.5)),
+                    size(px(w), px(w)),
+                ),
+                c,
+            ));
+            u += step;
+        }
+        t += dash + gap;
+    }
+}
+
 /// Most labels shaped and kept, by (text, color) (cleared when exceeded).
 const MAX_SHAPED: usize = 512;
 
@@ -384,6 +447,9 @@ struct Slot {
     /// Kind visibility bit per kind index (maps have at most 64 kinds).
     kinds: u64,
     placed: Vec<Placed>,
+    /// This frame's markers on the plot: (marker index, x, y), fixed capacity
+    /// ([`lines_core::levels::MAX_MARKERS`]).
+    markers: Vec<(u32, f32, f32)>,
     /// The chart's style override for this source (decision 0026; default: the source's).
     looks: [Look; 2],
     /// The level types the source declares, and its own label mode.
@@ -837,6 +903,8 @@ pub struct LevelsLayer {
     seen_all: Vec<LabelSeen>,
     /// Each joined source: (its slot, its first index in `seen_all`).
     joint_slots: Vec<(usize, u32)>,
+    /// The pointer over the plot (plot px), for an event's highlight ([`Self::set_pointer`]).
+    pointer: Option<(f32, f32)>,
 }
 
 /// Columns kept for the VWAP that VWAP-relative levels follow.
@@ -895,6 +963,7 @@ impl LevelsLayer {
             joint: Vec::new(),
             seen_all: Vec::new(),
             joint_slots: Vec::new(),
+            pointer: None,
         }
     }
 
@@ -980,6 +1049,7 @@ impl LevelsLayer {
                     error: None,
                     kinds: u64::MAX,
                     placed: Vec::with_capacity(MAX_LEVELS),
+                    markers: Vec::with_capacity(lines_core::levels::MAX_MARKERS),
                 }
             })
             .collect();
@@ -1158,6 +1228,7 @@ impl LevelsLayer {
     /// The VWAP-relative levels' columns for this frame's bars (after the time axis is final:
     /// the labels' gutter moves it).
     pub fn columns(&mut self, bars: BarsView<'_>, vp: &Viewport) {
+        self.time_extents(&bars, vp);
         if let Some(h) = &self.vwap
             && let Some(out) = h.cell().try_read()
         {
@@ -1165,6 +1236,94 @@ impl LevelsLayer {
         } else if self.vwap.is_none() {
             self.vwap_cols.clear();
         }
+    }
+
+    /// Each placed level's extent across the plot (a level with a start time from its bar on,
+    /// never earlier; with an end time, to its bar; one that hasn't begun, or ended before the
+    /// plot, isn't drawn and shows no label), and each marker's place. After [`Self::place`],
+    /// once the time axis is final. No allocation.
+    fn time_extents(&mut self, bars: &BarsView<'_>, vp: &Viewport) {
+        use lines_core::levels::{end_x, marker_xy, start_x};
+        let w = vp.width as f32;
+        for s in &mut self.slots {
+            s.markers.clear();
+            let Some(map) = s.map.as_ref() else { continue };
+            for p in &mut s.placed {
+                let l = &map.levels[p.index as usize];
+                let x0 = match l.from {
+                    None => Some(0.0),
+                    Some(t) => start_x(bars, vp, t),
+                };
+                let x1 = match l.to {
+                    None => Some(w),
+                    Some(t) => end_x(bars, vp, t),
+                };
+                match (x0, x1) {
+                    (Some(a), Some(b)) if a <= b => (p.x0, p.x1) = (a, b),
+                    _ => {
+                        // Not begun, or over before the plot: nothing drawn, no label.
+                        (p.x0, p.x1) = (1.0, 0.0);
+                        p.label_y = None;
+                    }
+                }
+            }
+            if !self.config.source_shown(s.handle.source()) || s.status == LevelStatus::Missing {
+                continue;
+            }
+            for (i, m) in map.markers.iter().enumerate() {
+                if s.markers.len() == s.markers.capacity() {
+                    break;
+                }
+                if let Some((x, y)) = marker_xy(bars, vp, m) {
+                    s.markers.push((i as u32, x, y));
+                }
+            }
+        }
+    }
+
+    /// The pointer over the plot (plot px; `None`: away), before painting: an event under it is
+    /// highlighted ([`Self::group_at`]).
+    pub fn set_pointer(&mut self, at: Option<(f32, f32)>) {
+        self.pointer = at;
+    }
+
+    /// The event under the plot point `(x, y)`: its source and group, when the point is on one
+    /// of its members (within a few px of a marker or of a level's line where it is drawn,
+    /// inside a time-bounded zone). Markers first, then levels. No allocation.
+    pub fn group_at(&self, x: f32, y: f32) -> Option<(usize, u16)> {
+        let near = crate::zoom::f(GROUP_HIT);
+        for (si, s) in self.slots.iter().enumerate() {
+            let Some(map) = s.map.as_ref() else { continue };
+            for &(i, mx, my) in &s.markers {
+                let Some(g) = map.markers[i as usize].group else {
+                    continue;
+                };
+                if (mx - x).abs() <= near && (my - y).abs() <= near {
+                    return Some((si, g));
+                }
+            }
+        }
+        for (si, s) in self.slots.iter().enumerate() {
+            let Some(map) = s.map.as_ref() else { continue };
+            for p in &s.placed {
+                let l = &map.levels[p.index as usize];
+                let Some(g) = l.group else { continue };
+                if p.x0 > p.x1 || x < p.x0 - near || x > p.x1 + near {
+                    continue;
+                }
+                let on_line = (y - p.top).abs() <= near || (y - p.bottom).abs() <= near;
+                let in_box = l.to.is_some() && y >= p.top && y <= p.bottom;
+                if on_line || in_box {
+                    return Some((si, g));
+                }
+            }
+        }
+        None
+    }
+
+    /// The event the pointer highlights this frame.
+    fn hot(&self) -> Option<(usize, u16)> {
+        self.pointer.and_then(|(x, y)| self.group_at(x, y))
     }
 
     /// Under the store lock, after the price scale's update: each source's levels and labels
@@ -1337,7 +1496,8 @@ impl LevelsLayer {
     }
 
     fn each(&self, mut f: impl FnMut(&Arc<LevelMap>, &Placed, f32, &Slot)) {
-        for s in &self.slots {
+        let hot = self.hot();
+        for (si, s) in self.slots.iter().enumerate() {
             let Some(map) = &s.map else { continue };
             // Stale maps are dimmed (shown as stale, never as current).
             let dim = if matches!(s.status, LevelStatus::Stale { .. }) {
@@ -1346,7 +1506,104 @@ impl LevelsLayer {
                 1.0
             };
             for p in &s.placed {
-                f(map, p, dim, s);
+                if p.x0 > p.x1 {
+                    continue; // not begun, or over before the plot
+                }
+                let g = map.levels[p.index as usize].group;
+                f(map, p, dim * group_dim(hot, si, g), s);
+            }
+        }
+    }
+
+    /// The markers (dots in the theme's accent, rings when hollow, their short labels) and
+    /// each event's dashed path between its joined markers, over the levels; dimmed outside a
+    /// highlighted event. Allocates only to shape a label not seen before.
+    pub fn paint_markers(
+        &mut self,
+        plot: Bounds<Pixels>,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let scale = window.scale_factor();
+        let hair = 1.0 / scale;
+        let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
+        let hot = self.hot();
+        let r = crate::zoom::f(MARKER_R);
+        let ink = marker_ink(theme);
+        let text = marker_text(theme);
+        for si in 0..self.slots.len() {
+            let Some(map) = self.slots[si].map.clone() else {
+                continue;
+            };
+            let stale = matches!(self.slots[si].status, LevelStatus::Stale { .. });
+            // The paths first, under the dots: each joined marker back to the previous marker
+            // of its group (in map order) that is on the chart.
+            for k in 0..self.slots[si].markers.len() {
+                let (i, x, y) = self.slots[si].markers[k];
+                let m = &map.markers[i as usize];
+                if !m.joined || m.group.is_none() {
+                    continue;
+                }
+                let prev = self.slots[si].markers[..k]
+                    .iter()
+                    .rev()
+                    .find(|(j, ..)| map.markers[*j as usize].group == m.group);
+                let Some(&(_, px0, py0)) = prev else { continue };
+                let a = group_dim(hot, si, m.group) * if stale { 0.4 } else { 1.0 };
+                let c = ink.opacity(ink.a * a);
+                dashed_segment(
+                    window,
+                    (ox + px0, oy + py0),
+                    (ox + x, oy + y),
+                    hair.max(1.0),
+                    c,
+                );
+            }
+            for k in 0..self.slots[si].markers.len() {
+                let (i, x, y) = self.slots[si].markers[k];
+                let m = &map.markers[i as usize];
+                let a = group_dim(hot, si, m.group) * if stale { 0.4 } else { 1.0 };
+                let c = ink.opacity(ink.a * a);
+                let b = Bounds::new(
+                    point(px(ox + x - r), px(oy + y - r)),
+                    size(px(r * 2.0), px(r * 2.0)),
+                );
+                if m.hollow {
+                    window.paint_quad(gpui::quad(
+                        b,
+                        px(r),
+                        gpui::transparent_black(),
+                        px(hair.max(1.0)),
+                        c,
+                        gpui::BorderStyle::Solid,
+                    ));
+                } else {
+                    window.paint_quad(gpui::quad(
+                        b,
+                        px(r),
+                        c,
+                        px(0.0),
+                        c,
+                        gpui::BorderStyle::Solid,
+                    ));
+                }
+                let Some(label) = m.label.as_deref() else {
+                    continue;
+                };
+                let t = text.opacity(text.a * a);
+                let line = shaped_in(&mut self.shaped, label, t, window);
+                let _ = line.paint(
+                    point(
+                        px(ox + x + r + crate::zoom::f(2.0)),
+                        px(oy + y + r - label_px() * 0.2),
+                    ),
+                    px(label_px() * 1.3),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
         }
     }
@@ -1539,8 +1796,10 @@ impl LevelsLayer {
             if let LevelShape::Zone { .. } = l.shape {
                 let (top, bottom) = (snap(p.top as f64, scale), snap(p.bottom as f64, scale));
                 let h = (bottom - top).max(1.0 / scale);
+                // From its start bar to its end bar (the whole plot unless it says).
+                let (x0, x1) = (p.x0.clamp(0.0, pw), p.x1.clamp(0.0, pw));
                 window.paint_quad(fill(
-                    Bounds::new(point(px(ox), px(oy + top)), size(px(pw), px(h))),
+                    Bounds::new(point(px(ox + x0), px(oy + top)), size(px(x1 - x0), px(h))),
                     zone,
                 ));
             }
@@ -1590,20 +1849,22 @@ impl LevelsLayer {
             stroke_around_last(a, b, y, w, last, hair, fp, &mut quad);
         };
         // A stroke at 0 % (a fill-only zone's edges) draws nothing at all.
-        let line = |window: &mut Window, y: f32, st: Stroke| {
+        let line = |window: &mut Window, y: f32, st: Stroke, x0: f32, x1: f32| {
             if st.color.a <= 0.0 {
                 return;
             }
             let w = st.width.max(hair);
             let y = snap(f64::from(y - w * 0.5), scale);
+            let (x0, x1) = (x0.clamp(0.0, pw), x1.clamp(0.0, pw));
             crate::eyedropper::rect(
-                Bounds::new(point(px(ox), px(oy + y)), size(px(pw), px(w))),
+                Bounds::new(point(px(ox + x0), px(oy + y)), size(px(x1 - x0), px(w))),
                 st.color,
                 "Level",
             );
-            // Across the bars to the plot's edge; in the labels' gutter the chip covers it.
+            // From its start bar (the plot's left edge unless it says) across the bars to its
+            // end; in the labels' gutter the chip covers it.
             st.dash
-                .segments(pw, |a, b| row(window, a, b, y, w, st.color));
+                .segments(x1 - x0, |a, b| row(window, x0 + a, x0 + b, y, w, st.color));
         };
         let ppu = self.px_per_unit;
         let cols = &self.vwap_cols;
@@ -1650,9 +1911,9 @@ impl LevelsLayer {
                 }
                 return;
             }
-            line(window, p.top, st);
+            line(window, p.top, st, p.x0, p.x1);
             if zone {
-                line(window, p.bottom, st);
+                line(window, p.bottom, st, p.x0, p.x1);
             }
         });
     }

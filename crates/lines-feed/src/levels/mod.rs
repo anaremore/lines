@@ -38,7 +38,7 @@ use parking_lot::RwLock;
 
 pub use lines_core::levels::{
     LabelMode, LabelPriority, LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape,
-    LevelStyle, LevelType, LevelValue, NamedValue, Series, TypeStyle,
+    LevelStyle, LevelType, LevelValue, Marker, NamedValue, Series, TypeStyle,
 };
 
 /// How a source refreshes.
