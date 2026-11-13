@@ -273,17 +273,36 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     // with the demo source (`--features demo-levels`).
     #[cfg(feature = "demo-levels")]
     for (name, quick, theme) in [
-        ("levels-light", true, "--theme light"),
-        ("levels-light-cb", false, "--theme light --palette cb"),
-        ("levels-dark", false, "--theme dark"),
+        ("levels-light", true, "--theme light --size 1400x800"),
+        (
+            "levels-light-cb",
+            false,
+            "--theme light --palette cb --size 1400x800",
+        ),
+        ("levels-dark", false, "--theme dark --size 1400x800"),
+        // Two sources' labels at the same and adjacent prices (owner, 2026-11-13): one layout,
+        // none over another; the crowd's Low ones give way; a short pane hides by priority.
+        (
+            "levels-crowd-dark",
+            false,
+            "--theme dark --demo-crowd --size 1400x800",
+        ),
+        (
+            "levels-crowd-light-150",
+            false,
+            "--theme light --ui-zoom 150 --demo-crowd --size 1400x800",
+        ),
+        (
+            "levels-crowd-short-dark",
+            false,
+            "--theme dark --demo-crowd --size 1400x260",
+        ),
     ] {
         v.push(s(
             name,
             quick,
             end,
-            args(&format!(
-                "--layout chart --size 1400x800 {theme} --demo-levels"
-            )),
+            args(&format!("--layout chart {theme} --demo-levels")),
         ));
     }
     // Settings › Charts at the narrowest window: Bar period is a dropdown (one field), Hollow

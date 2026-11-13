@@ -3752,6 +3752,12 @@ impl ChartView {
             left: pw,
             newest_right,
             hover: self.hover,
+            // The crosshair's price tag (the plot's, not a sub-pane's): level tags under it
+            // aren't drawn.
+            cross_tag: self
+                .cross
+                .filter(|_| self.cross_in_sub.is_none())
+                .map(|c| (c.y, tag_h())),
         }
     }
 

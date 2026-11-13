@@ -1696,6 +1696,7 @@ fn labels_never_overlap_at_150_percent() {
             vwap_relative: false,
             anchor: lines_core::levels::LabelAt::Own,
             on_edge: false,
+            rank: 1,
         })
         .collect();
     let mut seen = vec![LabelSeen::New; 8];
@@ -1719,4 +1720,220 @@ fn labels_never_overlap_at_150_percent() {
     );
     let n_100 = placed_100.iter().filter(|p| p.label_y.is_some()).count();
     assert!(n_100 >= ys.len());
+}
+
+// ---- one label layout for every source -------------------------------------------------
+
+/// Whether [`Crowding`] serves ES now (only while a test holds a [`CrowdGuard`]): sources can't
+/// be unregistered, and one that serves nothing joins no other test's chart.
+static CROWD_SERVES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `demo-crowd` (labels at and beside the demo's, half of them Low priority), serving only
+/// while [`CROWD_SERVES`] says so.
+struct Crowding;
+
+impl lines_feed::levels::LevelSource for Crowding {
+    fn id(&self) -> &'static str {
+        lines_feed::levels::demo::CROWD_ID
+    }
+    fn label(&self) -> &'static str {
+        "Crowd levels"
+    }
+    fn serves(&self, p: &Product) -> bool {
+        CROWD_SERVES.load(std::sync::atomic::Ordering::Acquire)
+            && lines_feed::levels::demo::DemoCrowd.serves(p)
+    }
+    fn refresh(&self) -> lines_feed::levels::RefreshMode {
+        lines_feed::levels::RefreshMode::OneShot
+    }
+    fn synthetic(&self) -> bool {
+        true
+    }
+    fn stale_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(24 * 3600)
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &lines_feed::levels::demo::CROWD_TYPES
+    }
+    fn connect(
+        &self,
+        c: &LevelContext,
+    ) -> lines_feed::levels::BoxFuture<
+        'static,
+        anyhow::Result<Box<dyn lines_feed::levels::LevelTransport>>,
+    > {
+        lines_feed::levels::demo::DemoCrowd.connect(c)
+    }
+    fn decode(
+        &self,
+        c: &LevelContext,
+        p: &dyn lines_feed::levels::ChartPrices,
+        prev: Option<&LevelMap>,
+        f: &[lines_feed::levels::LevelFrame],
+    ) -> Result<Option<LevelMap>, String> {
+        lines_feed::levels::demo::DemoCrowd.decode(c, p, prev, f)
+    }
+}
+
+/// Serves [`Crowding`] for the test that holds it; serving nothing again however it ends.
+struct CrowdGuard;
+
+impl CrowdGuard {
+    fn on() -> CrowdGuard {
+        CROWD_SERVES.store(true, std::sync::atomic::Ordering::Release);
+        lines_feed::levels::serving_changed();
+        CrowdGuard
+    }
+}
+
+impl Drop for CrowdGuard {
+    fn drop(&mut self) {
+        CROWD_SERVES.store(false, std::sync::atomic::Ordering::Release);
+        lines_feed::levels::serving_changed();
+    }
+}
+
+/// A layer on ES with the demo and the crowding source, labels measured, laid out in a plot
+/// `h` px tall over 5980 to 6040 (the last price's tag at `blocked`, if any).
+fn crowded(h: f64, blocked: Option<(f32, f32)>) -> (LevelsLayer, Arc<ChartStore>) {
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    lines_feed::levels::register(Arc::new(Crowding)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let d = store.read();
+    layer.snapshot(d.market_time);
+    layer.measure_labels(|t| t.chars().count() as f32 * 6.0);
+    layer.set_room(Some(400.0));
+    layer.set_blocked(blocked);
+    let mut v = vp();
+    v.set_size(800.0, h);
+    let bars = BarsView::fixed(d.series.bars(), d.series.period_ms());
+    layer.prepare(&d, bars, &v);
+    drop(d);
+    (layer, store)
+}
+
+/// Every shown label of every source: (source id, kind, its row).
+fn shown(layer: &LevelsLayer) -> Vec<(String, String, f32)> {
+    let mut out = Vec::new();
+    for (i, (id, ..)) in layer.sources().iter().enumerate() {
+        let Some(map) = layer.map(i) else { continue };
+        for p in layer.placed(i) {
+            if let Some(y) = p.label_y {
+                let kind = map.kinds[usize::from(map.levels[p.index as usize].kind)].clone();
+                out.push((id.clone(), kind, y));
+            }
+        }
+    }
+    out
+}
+
+/// Labels from two sources at the same and adjacent prices (the demo's Pivot 6010 beside the
+/// crowd's Dyn HP 6010 and Det IRL 6010.25; R1 6025 beside 6024.75 and 6025) never overlap:
+/// both sources' labels are laid out together.
+#[test]
+fn two_sources_labels_never_overlap() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _crowd = CrowdGuard::on();
+    let (layer, _store) = crowded(400.0, None);
+    let rows = shown(&layer);
+    assert!(rows.iter().any(|(id, ..)| id == "demo"), "{rows:?}");
+    assert!(rows.iter().any(|(id, ..)| id == "demo-crowd"), "{rows:?}");
+    let h = LevelsLayer::label_h();
+    for (a, x) in rows.iter().enumerate() {
+        for y in &rows[a + 1..] {
+            assert!((x.2 - y.2).abs() >= h - 1e-3, "{x:?} over {y:?}");
+        }
+    }
+}
+
+/// A pane too short for every label hides the lowest priority first: while any Normal label
+/// is hidden, no Low one shows. Their lines stay placed.
+#[test]
+fn a_short_pane_hides_low_before_normal() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _crowd = CrowdGuard::on();
+    let (layer, _store) = crowded(70.0, None);
+    let crowd = layer
+        .sources()
+        .iter()
+        .position(|(id, ..)| id == "demo-crowd")
+        .expect("crowd serves ES");
+    let map = layer.map(crowd).unwrap().clone();
+    let kind = |p: &Placed| map.kinds[usize::from(map.levels[p.index as usize].kind)].clone();
+    let placed = layer.placed(crowd);
+    assert!(
+        placed.iter().any(|p| kind(p) == "det"),
+        "Low levels still placed (their lines draw)"
+    );
+    let low_shown = placed
+        .iter()
+        .any(|p| kind(p) == "det" && p.label_y.is_some());
+    let normal_hidden = (0..layer.sources().len()).any(|i| {
+        let m = layer.map(i).cloned();
+        layer.placed(i).iter().any(|p| {
+            m.as_ref().is_some_and(|m| {
+                m.levels[p.index as usize].label.is_some()
+                    && m.kinds[usize::from(m.levels[p.index as usize].kind)] != "det"
+            }) && p.label_y.is_none()
+        })
+    });
+    assert!(normal_hidden, "the pane is short enough to hide some");
+    assert!(
+        !low_shown,
+        "no Low label shows while a Normal one is hidden"
+    );
+}
+
+/// The last price's tag outranks every source: no label of either source sits on it, even at
+/// the crowd's busiest price.
+#[test]
+fn the_last_price_always_wins() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _crowd = CrowdGuard::on();
+    let at = vp().price_to_y(601_000.0) as f32;
+    let tag_h = 18.0;
+    let (layer, _store) = crowded(400.0, Some((at, tag_h)));
+    let h = LevelsLayer::label_h();
+    let rows = shown(&layer);
+    assert!(!rows.is_empty());
+    for (id, kind, y) in rows {
+        assert!(
+            (y - at).abs() >= (h + tag_h) * 0.5 - 1e-3,
+            "{id}/{kind} at {y} on the last price at {at}"
+        );
+    }
+}
+
+/// A hidden label shows while the pointer is at its level's row: the hover finds it (the
+/// highest priority, then the nearest), and only a hidden one.
+#[test]
+fn pointing_at_a_hidden_label_shows_it() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _crowd = CrowdGuard::on();
+    let ph = 70.0f32;
+    let (layer, _store) = crowded(f64::from(ph), None);
+    let half = LevelsLayer::label_h() * 0.5;
+    let mut hidden = None;
+    for i in 0..layer.sources().len() {
+        let Some(map) = layer.map(i) else { continue };
+        for p in layer.placed(i) {
+            if p.label_y.is_none() && map.levels[p.index as usize].label.is_some() {
+                hidden = Some(p.label_anchor(half).clamp(half, ph - half));
+            }
+        }
+    }
+    let hy = hidden.expect("a hidden label");
+    let (si, p, y) = layer
+        .revealed_label(hy, ph, 800.0)
+        .expect("shown for the pointer");
+    assert!(p.label_y.is_none(), "only a hidden label is revealed");
+    assert!((y - hy).abs() <= half + 1e-3);
+    assert!(layer.map(si).is_some());
+    // Far from every level: nothing.
+    assert_eq!(layer.revealed_label(-500.0, ph, 800.0), None);
 }

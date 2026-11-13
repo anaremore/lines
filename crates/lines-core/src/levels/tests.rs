@@ -984,3 +984,48 @@ fn legend_is_validated_with_the_map() {
     assert_eq!(demo().legend, None);
     assert!(!demo().legend_dropped);
 }
+
+/// A higher-priority label claims its row first whatever its order: a Low label listed first
+/// gives way to a Normal one at the same price, and a plot with room for one shows the Normal.
+#[test]
+fn labels_place_by_priority_first() {
+    let at = |index: u32, rank: u8| Placed {
+        index,
+        top: 100.0,
+        bottom: 100.0,
+        label_y: None,
+        vwap_relative: false,
+        anchor: LabelAt::Own,
+        on_edge: false,
+        rank,
+    };
+    let low = LabelPriority::Low.rank();
+    let normal = LabelPriority::Normal.rank();
+    let mut out = vec![at(0, low), at(1, normal)];
+    place_labels(
+        &mut out,
+        16.0,
+        400.0,
+        None,
+        &mut [LabelSeen::New; 2],
+        |_| true,
+    );
+    assert_eq!(out[1].label_y, Some(100.0), "Normal on its own row");
+    assert!(
+        out[0]
+            .label_y
+            .is_some_and(|y| (y - 100.0).abs() >= 16.0 - 1e-3)
+    );
+    // Room for one label only: the Normal one.
+    let mut out = vec![at(0, low), at(1, normal)];
+    for p in &mut out {
+        (p.top, p.bottom) = (8.0, 8.0);
+    }
+    place_labels(&mut out, 16.0, 16.0, None, &mut [LabelSeen::New; 2], |_| {
+        true
+    });
+    assert_eq!(out[0].label_y, None, "Low hidden");
+    assert!(out[1].label_y.is_some(), "Normal shown");
+    assert!(LabelPriority::High.rank() < normal && normal < low);
+    assert_eq!(LabelPriority::default(), LabelPriority::Normal);
+}

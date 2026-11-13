@@ -19,7 +19,11 @@
 //!   a **missing** one draws nothing and says "missing". Never shown as current.
 //! - Labels stay on their own levels (`place_labels`): the price never moves them, and only
 //!   labels that overlap each other give way (stacked a row away, else dropped), with
-//!   hysteresis so the layout doesn't flicker.
+//!   hysteresis so the layout doesn't flicker. Every source's labels share **one** layout
+//!   (`LevelsLayer::place` joins them): no source's label ever draws over another's. A
+//!   higher-priority type's label claims its row first (`LevelType::label_priority`), so a
+//!   short pane hides the lowest first; a hidden label's line stays, and pointing at it shows
+//!   its label (`LevelsLayer::paint_labels`).
 //! - Where labels go is the chart's choice ([`LabelPlace`], `LevelsConfig::label_place`; the
 //!   profile's tag follows it too): **tags in the price axis** (the default: each a tag at its
 //!   price, outlined in its color; a zone's at its labelled edge; the axis grows to its widest
@@ -43,8 +47,8 @@ use gpui::{
 };
 use lines_core::geometry::snap;
 use lines_core::levels::{
-    LabelAt, LabelColor, LabelMode, LabelSeen, LegendStat, Level, LevelMap, LevelShape, LevelType,
-    MAX_KINDS, MAX_LEVELS, Placed, label_text, place, place_labels,
+    LabelAt, LabelColor, LabelMode, LabelPriority, LabelSeen, LegendStat, Level, LevelMap,
+    LevelShape, LevelType, MAX_KINDS, MAX_LEVELS, Placed, label_text, place, place_labels,
 };
 use lines_core::style::DashPattern;
 use lines_core::{BarsView, PriceFormat, Product, UtcMillis, Viewport};
@@ -220,6 +224,18 @@ impl From<LabelPlace> for String {
     }
 }
 
+/// One frame's label geometry ([`LevelsLayer::paint_label`]).
+struct LabelPaint {
+    plot: Bounds<Pixels>,
+    strip: LabelStrip,
+    /// Labels on the chart: their x beside the newest bar, when the set fits there.
+    beside: Option<f32>,
+    /// Each label's text room.
+    room: f32,
+    /// A label's box height.
+    box_h: f32,
+}
+
 /// Where this frame's labels are drawn ([`LevelsLayer::paint_labels`]), in plot px.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct LabelStrip {
@@ -230,6 +246,9 @@ pub struct LabelStrip {
     pub newest_right: Option<f32>,
     /// The pointer, for the fade of a label on the chart under it.
     pub hover: Option<(f32, f32)>,
+    /// The crosshair's price tag in the axis (centre y and height), while it shows: a level
+    /// tag it would cover isn't drawn (never a tag cut to a sliver under it).
+    pub cross_tag: Option<(f32, f32)>,
 }
 /// Most labels shaped and kept, by (text, color) (cleared when exceeded).
 const MAX_SHAPED: usize = 512;
@@ -810,6 +829,14 @@ pub struct LevelsLayer {
     /// last-price line breaks around them ([`Self::label_chips`]); capacity kept, so steady
     /// frames don't allocate.
     chips: Vec<[f32; 4]>,
+    /// Every source's placed levels this frame, joined for one label layout (`place`): each
+    /// level's index offset by its source's place in `seen_all`. Capacity kept, so steady
+    /// frames don't allocate.
+    joint: Vec<Placed>,
+    /// Every source's label states, joined as `joint` is (each source's `seen` in turn).
+    seen_all: Vec<LabelSeen>,
+    /// Each joined source: (its slot, its first index in `seen_all`).
+    joint_slots: Vec<(usize, u32)>,
 }
 
 /// Columns kept for the VWAP that VWAP-relative levels follow.
@@ -865,6 +892,9 @@ impl LevelsLayer {
             serving_gen: 0,
             last_y: None,
             chips: Vec::new(),
+            joint: Vec::new(),
+            seen_all: Vec::new(),
+            joint_slots: Vec::new(),
         }
     }
 
@@ -1106,6 +1136,15 @@ impl LevelsLayer {
                 reset_seen(s.map.as_deref(), &mut s.seen);
             }
         }
+        // The joined label layout's buffers, grown here (a new map, render time) so placing
+        // never grows them in steady frames.
+        let levels: usize = self.slots.iter().map(|s| s.seen.len()).sum();
+        let placed: usize = self.slots.iter().map(|s| s.placed.capacity()).sum();
+        self.seen_all
+            .reserve(levels.saturating_sub(self.seen_all.len()));
+        self.joint.reserve(placed.saturating_sub(self.joint.len()));
+        self.joint_slots
+            .reserve(self.slots.len().saturating_sub(self.joint_slots.len()));
     }
 
     /// Under the store lock, after the viewport update. Draws from this frame's
@@ -1197,31 +1236,103 @@ impl LevelsLayer {
                     .map_or(LabelAt::Own, |t| t.label.at);
                 p.on_edge = on_edge;
             }
-            // A label that can't be drawn in its room (its full text measured, else its cut for
-            // this room: an empty cut means none fits) claims no room. No room at all (labels
-            // can't show): none placed.
-            let room = self.room.at(plot_w);
-            let (texts, widths, cuts) = (&s.texts, &self.widths, &self.cuts);
-            let blocked = self.blocked.filter(|_| on_edge);
-            place_labels(
-                &mut s.placed,
-                label_px() * 1.6,
-                plot_h,
-                blocked,
-                &mut s.seen,
-                |i| {
-                    let i = i as usize;
-                    let Some(name) = map.levels[i].label.as_deref() else {
-                        return false;
-                    };
-                    let Some(room) = room else {
-                        return false;
-                    };
-                    let full = texts.get(i).and_then(|t| t.as_deref()).unwrap_or(name);
-                    let w = widths.get(full).copied().unwrap_or_else(|| estimate(full));
-                    label_can_show(w, cuts.get(full), room)
-                },
+            // Its type's label priority (Normal unless the source declares one).
+            for p in &mut s.placed {
+                let kind = map
+                    .kinds
+                    .get(usize::from(map.levels[p.index as usize].kind));
+                p.rank = kind
+                    .and_then(|k| s.types.iter().find(|t| t.id == k))
+                    .map_or(LabelPriority::Normal, |t| t.label_priority)
+                    .rank();
+            }
+        }
+        self.place_all_labels(plot_w, plot_h);
+    }
+
+    /// One label layout for every source (`place_labels` over their levels joined): a label
+    /// gives way to any source's, never draws over it. Each source's levels keep their order;
+    /// their indices are offset into the joined label states. No allocation once the buffers
+    /// have grown to the maps' size.
+    fn place_all_labels(&mut self, plot_w: f32, plot_h: f32) {
+        self.joint.clear();
+        self.seen_all.clear();
+        self.joint_slots.clear();
+        let on_edge = self.config.label_place == LabelPlace::Axis;
+        for (si, s) in self.slots.iter().enumerate() {
+            if s.map.is_none() || s.placed.is_empty() {
+                continue;
+            }
+            // Each source's indices are offset by the levels before it: its label states are
+            // exactly one per level of its map (`reset_seen`).
+            debug_assert_eq!(
+                s.seen.len(),
+                s.map.as_ref().map_or(0, |m| m.levels.len()),
+                "label states per level"
             );
+            let base = self.seen_all.len() as u32;
+            self.joint_slots.push((si, base));
+            self.seen_all.extend_from_slice(&s.seen);
+            self.joint.extend(s.placed.iter().map(|p| Placed {
+                index: p.index + base,
+                ..*p
+            }));
+        }
+        // A label that can't be drawn in its room (its full text measured, else its cut for
+        // this room: an empty cut means none fits) claims no room; nor does one whose source's
+        // labels are off. No room at all (labels can't show): none placed.
+        let room = self.room.at(plot_w);
+        let (slots, joint_slots) = (&self.slots, &self.joint_slots);
+        let (texts_of, widths, cuts, config) = (
+            |si: usize| &slots[si].texts,
+            &self.widths,
+            &self.cuts,
+            &self.config,
+        );
+        let blocked = self.blocked.filter(|_| on_edge);
+        place_labels(
+            &mut self.joint,
+            label_px() * 1.6,
+            plot_h,
+            blocked,
+            &mut self.seen_all,
+            |g| {
+                let Some(&(si, base)) = joint_slots.iter().rev().find(|(_, b)| *b <= g) else {
+                    return false;
+                };
+                let s = &slots[si];
+                if config.hide_labels || !config.labels_shown(s.handle.source()) {
+                    return false;
+                }
+                let Some(map) = s.map.as_ref() else {
+                    return false;
+                };
+                let i = (g - base) as usize;
+                let Some(name) = map.levels.get(i).and_then(|l| l.label.as_deref()) else {
+                    return false;
+                };
+                let Some(room) = room else {
+                    return false;
+                };
+                let full = texts_of(si)
+                    .get(i)
+                    .and_then(|t| t.as_deref())
+                    .unwrap_or(name);
+                let w = widths.get(full).copied().unwrap_or_else(|| estimate(full));
+                label_can_show(w, cuts.get(full), room)
+            },
+        );
+        // Back to each source: its labels' rows and their states.
+        let mut j = 0;
+        for &(si, base) in &self.joint_slots {
+            let s = &mut self.slots[si];
+            for p in &mut s.placed {
+                p.label_y = self.joint[j].label_y;
+                j += 1;
+            }
+            let n = s.seen.len();
+            s.seen
+                .copy_from_slice(&self.seen_all[base as usize..base as usize + n]);
         }
     }
 
@@ -1549,7 +1660,9 @@ impl LevelsLayer {
     /// Labels, where the chart puts them ([`LabelPlace`]; `strip` says where that is this
     /// frame): on the legend box, in the level's color where that is AA there, else theme
     /// text (`Slot::label_colors`); a stale map's in dim text. Tags in the price axis are
-    /// outlined in that color and lead back to their price when stacked away from it.
+    /// outlined in that color and lead back to their price when stacked away from it. A label
+    /// the layout hid (no free row) shows while the pointer is at its level's row, over the
+    /// others, at its own price.
     pub fn paint_labels(
         &mut self,
         plot: Bounds<Pixels>,
@@ -1562,7 +1675,6 @@ impl LevelsLayer {
         if self.config.hide_labels {
             return;
         }
-        let place = self.config.label_place;
         // On the chart, the set decides together: beside the newest bar only if its widest
         // label fits there, else all pinned to the plot's edge (never split in two columns).
         let beside = strip.newest_right.and_then(|r| {
@@ -1572,14 +1684,22 @@ impl LevelsLayer {
                 f32::from(plot.size.width),
             )
         });
-        let scale = window.scale_factor();
-        let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
-        let (pw, ph) = (f32::from(plot.size.width), f32::from(plot.size.height));
+        let ph = f32::from(plot.size.height);
         let box_h = label_px() * 1.6;
-        let Some(room) = self.room.at(pw) else {
+        let Some(room) = self.room.at(f32::from(plot.size.width)) else {
             return;
         };
-        let hair = 1.0 / scale;
+        let at = LabelPaint {
+            plot,
+            strip,
+            beside,
+            room,
+            box_h,
+        };
+        let hair = 1.0 / window.scale_factor();
+        let reveal = strip
+            .hover
+            .and_then(|(_, hy)| self.revealed_label(hy, ph, f32::from(plot.size.width)));
         for si in 0..self.slots.len() {
             let Some(map) = self.slots[si].map.clone() else {
                 continue;
@@ -1587,147 +1707,237 @@ impl LevelsLayer {
             if !self.config.labels_shown(self.slots[si].handle.source()) {
                 continue;
             }
-            let dim = matches!(self.slots[si].status, LevelStatus::Stale { .. });
             // Resolved once per theme, map and looks (allocates only then).
             self.slots[si].label_colors(&map, theme, hair, self.px_per_unit);
             for pi in 0..self.slots[si].placed.len() {
                 let p = self.slots[si].placed[pi];
-                let level = &map.levels[p.index as usize];
-                let (Some(y), Some(name)) = (p.label_y, level.label.as_deref()) else {
-                    continue;
-                };
-                // The label mode's text (`name : price`), built with the map, in its room: the
-                // room for its text: the gutter's (the chip right-aligned in it), else the
-                // plot's. Too wide: the name is cut with "…" before the price (never the
-                // price); still too wide, none (never a label running past its room). A cut is
-                // made once per text and room (`cuts`, kept across maps), not per frame.
-                let i = p.index as usize;
-                let full = self.slots[si]
-                    .texts
-                    .get(i)
-                    .and_then(|t| t.as_deref())
-                    .unwrap_or(name);
-                // Measured in render (`measure_labels`); shaped only to be drawn.
-                let full_w = match self.widths.get(full) {
-                    Some(w) => *w,
-                    None => shaped_width(&mut self.shaped, full, theme, window),
-                };
-                let full_fits = full_w <= room;
-                if !full_fits {
-                    // Candidates measured without keeping them (only the cut is shaped and
-                    // cached): a narrow pane doesn't flood the shaped labels.
-                    ensure_cut(&mut self.cuts, full, name, room, |t| {
-                        measure(t, theme, window)
-                    });
+                let Some(y) = p.label_y else { continue };
+                // A tag the crosshair's price tag covers: none, while the pointer is there.
+                let under_cross = self.config.label_place == LabelPlace::Axis
+                    && strip
+                        .cross_tag
+                        .is_some_and(|(cy, ch)| (cy - y).abs() < (ch + box_h) * 0.5);
+                if !under_cross {
+                    self.paint_label(si, &map, p, y, false, &at, theme, window, cx);
                 }
-                let text: &str = if full_fits {
-                    full
-                } else {
-                    match self.cuts.get(full) {
-                        Some((_, t)) if !t.is_empty() => t.as_str(),
-                        _ => continue,
-                    }
-                };
-                // Its color (stale: dim text, as the whole map is dimmed).
-                let color = if dim {
-                    theme.stale_label_text()
-                } else {
-                    self.slots[si]
-                        .label_colors
-                        .get(i)
-                        .copied()
-                        .unwrap_or(theme.text_main)
-                };
-                let w = f32::from(shaped_in(&mut self.shaped, text, color, window).width)
-                    + label_chrome();
-                let top = snap(f64::from(y - box_h * 0.5), scale);
-                let (x, mut bg, mut ink) = match place {
-                    // Just right of the newest bar, moving with it; pinned to the plot's edge
-                    // when that doesn't fit (the newest bar off screen, or too near it).
-                    LabelPlace::Chart => {
-                        let x = beside.unwrap_or((pw - w - gutter_right()).max(0.0));
-                        (snap(f64::from(x), scale), theme.label_bg, color)
-                    }
-                    LabelPlace::Column => (
-                        snap(f64::from(strip.left + column_pad()), scale),
-                        theme.label_bg,
-                        color,
-                    ),
-                    LabelPlace::Axis => (
-                        snap(f64::from(strip.left + axis_leader()), scale),
-                        theme.label_bg,
-                        color,
-                    ),
-                };
-                match place {
-                    LabelPlace::Chart => {
-                        // Under the pointer: faded, so the bars under it show (and the last
-                        // price runs through it again).
-                        let hovered = strip.hover.is_some_and(|(hx, hy)| {
-                            hx >= x && hx <= x + w && hy >= top && hy <= top + box_h
-                        });
-                        if hovered {
-                            bg = bg.opacity(bg.a * HOVER_FADE);
-                            ink = ink.opacity(ink.a * HOVER_FADE);
-                        } else {
-                            self.chips.push([x, x + w, top, top + box_h]);
-                        }
-                        window.paint_quad(fill(
-                            Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
-                            bg,
-                        ));
-                    }
-                    LabelPlace::Column => {
-                        window.paint_quad(fill(
-                            Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
-                            bg,
-                        ));
-                    }
-                    LabelPlace::Axis => {
-                        // Stacked off its price: a short leader from the price to the tag (only
-                        // for a price on the plot: a tag held at an edge for a level off it has
-                        // nothing to lead to).
-                        let at = p.label_anchor(box_h * 0.5);
-                        if (0.0..=ph).contains(&at) && (at - y).abs() > 0.5 {
-                            let lead = |window: &mut Window, x0: f32, y0: f32, w: f32, h: f32| {
-                                window.paint_quad(fill(
-                                    Bounds::new(
-                                        point(px(ox + x0), px(oy + y0)),
-                                        size(px(w), px(h)),
-                                    ),
-                                    ink,
-                                ));
-                            };
-                            let stub = crate::zoom::f(2.0);
-                            let (lx, a, b) = (strip.left + stub, at.min(y), at.max(y));
-                            lead(window, strip.left, at - hair * 0.5, stub + hair, hair);
-                            lead(window, lx, a, hair, b - a);
-                            lead(window, lx, y - hair * 0.5, x - lx, hair);
-                        }
-                        window.paint_quad(gpui::quad(
-                            Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
-                            px(crate::zoom::f(2.0)),
-                            bg,
-                            px(1.0),
-                            ink,
-                            gpui::BorderStyle::Solid,
-                        ));
-                    }
-                }
-                let line = shaped_in(&mut self.shaped, text, ink, window);
-                let _ = line.paint(
-                    point(
-                        px(ox + x + label_pad()),
-                        px(oy + top + box_h * 0.5 - label_px() * 0.65),
-                    ),
-                    px(label_px() * 1.3),
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
             }
         }
+        if let Some((si, p, y)) = reveal
+            && let Some(map) = self.slots[si].map.clone()
+        {
+            self.paint_label(si, &map, p, y, true, &at, theme, window, cx);
+        }
+    }
+
+    /// The label the layout hid (no free row) that the pointer at `hy` points at: one whose
+    /// level's row (its label's anchor, held in a plot `ph` tall) is within half a label of it,
+    /// the highest priority first, then the nearest. Its source, its placement and the row it
+    /// shows on. No allocation.
+    pub fn revealed_label(&self, hy: f32, ph: f32, pw: f32) -> Option<(usize, Placed, f32)> {
+        if self.config.hide_labels {
+            return None;
+        }
+        // Shown in the plot at its right edge: the plot's room.
+        let room = LabelRoom::Plot.at(pw)?;
+        let half = label_px() * 1.6 * 0.5;
+        let mut best: Option<(u8, f32, usize, Placed, f32)> = None;
+        for (si, s) in self.slots.iter().enumerate() {
+            let Some(map) = s.map.as_ref() else { continue };
+            if !self.config.labels_shown(s.handle.source()) {
+                continue;
+            }
+            for p in &s.placed {
+                let i = p.index as usize;
+                let Some(name) = map.levels[i].label.as_deref() else {
+                    continue;
+                };
+                let full = s.texts.get(i).and_then(|t| t.as_deref()).unwrap_or(name);
+                let w = self
+                    .widths
+                    .get(full)
+                    .copied()
+                    .unwrap_or_else(|| estimate(full));
+                if p.label_y.is_some() || !label_can_show(w, self.cuts.get(full), room) {
+                    continue;
+                }
+                let y = p.label_anchor(half).clamp(half, (ph - half).max(half));
+                let d = (y - hy).abs();
+                if d <= half && best.is_none_or(|(r, bd, ..)| (p.rank, d) < (r, bd)) {
+                    best = Some((p.rank, d, si, *p, y));
+                }
+            }
+        }
+        best.map(|(_, _, si, p, y)| (si, p, y))
+    }
+
+    /// Paint one label of source `si` centred at `y` (`revealed`: a hidden label shown for
+    /// the pointer, in the plot at its right edge, never faded under it).
+    #[allow(clippy::too_many_arguments)]
+    fn paint_label(
+        &mut self,
+        si: usize,
+        map: &Arc<LevelMap>,
+        p: Placed,
+        y: f32,
+        revealed: bool,
+        at: &LabelPaint,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let level = &map.levels[p.index as usize];
+        let Some(name) = level.label.as_deref() else {
+            return;
+        };
+        let scale = window.scale_factor();
+        let (ox, oy) = (f32::from(at.plot.origin.x), f32::from(at.plot.origin.y));
+        let (pw, ph) = (
+            f32::from(at.plot.size.width),
+            f32::from(at.plot.size.height),
+        );
+        let (box_h, room, strip) = (at.box_h, at.room, at.strip);
+        let hair = 1.0 / scale;
+        let dim = matches!(self.slots[si].status, LevelStatus::Stale { .. });
+        // The label mode's text (`name : price`), built with the map, in its room: the room for
+        // its text: the gutter's (the chip right-aligned in it), else the plot's. Too wide: the
+        // name is cut with "…" before the price (never the price); still too wide, none (never
+        // a label running past its room). A cut is made once per text and room (`cuts`, kept
+        // across maps), not per frame.
+        let i = p.index as usize;
+        let full = self.slots[si]
+            .texts
+            .get(i)
+            .and_then(|t| t.as_deref())
+            .unwrap_or(name);
+        // Measured in render (`measure_labels`); shaped only to be drawn.
+        let full_w = match self.widths.get(full) {
+            Some(w) => *w,
+            None => shaped_width(&mut self.shaped, full, theme, window),
+        };
+        let full_fits = full_w <= room;
+        if !full_fits {
+            // Candidates measured without keeping them (only the cut is shaped and cached): a
+            // narrow pane doesn't flood the shaped labels.
+            ensure_cut(&mut self.cuts, full, name, room, |t| {
+                measure(t, theme, window)
+            });
+        }
+        let text: &str = if full_fits {
+            full
+        } else {
+            match self.cuts.get(full) {
+                Some((_, t)) if !t.is_empty() => t.as_str(),
+                _ => return,
+            }
+        };
+        // Its color (stale: dim text, as the whole map is dimmed).
+        let color = if dim {
+            theme.stale_label_text()
+        } else {
+            self.slots[si]
+                .label_colors
+                .get(i)
+                .copied()
+                .unwrap_or(theme.text_main)
+        };
+        let w = f32::from(shaped_in(&mut self.shaped, text, color, window).width) + label_chrome();
+        let top = snap(f64::from(y - box_h * 0.5), scale);
+        // One shown for the pointer goes in the plot against its right edge (as labels on the
+        // chart pinned there): in the axis or the column it would sit under the crosshair's
+        // own price tag at the pointer's row.
+        let place = if revealed {
+            LabelPlace::Chart
+        } else {
+            self.config.label_place
+        };
+        let (x, mut bg, mut ink) = match place {
+            // Just right of the newest bar, moving with it; pinned to the plot's edge when that
+            // doesn't fit (the newest bar off screen, or too near it).
+            LabelPlace::Chart => {
+                let pinned = (pw - w - gutter_right()).max(0.0);
+                let x = if revealed {
+                    pinned
+                } else {
+                    at.beside.unwrap_or(pinned)
+                };
+                (snap(f64::from(x), scale), theme.label_bg, color)
+            }
+            LabelPlace::Column => (
+                snap(f64::from(strip.left + column_pad()), scale),
+                theme.label_bg,
+                color,
+            ),
+            LabelPlace::Axis => (
+                snap(f64::from(strip.left + axis_leader()), scale),
+                theme.label_bg,
+                color,
+            ),
+        };
+        match place {
+            LabelPlace::Chart => {
+                // Under the pointer: faded, so the bars under it show (and the last price runs
+                // through it again); never one shown for the pointer.
+                let hovered = !revealed
+                    && strip.hover.is_some_and(|(hx, hy)| {
+                        hx >= x && hx <= x + w && hy >= top && hy <= top + box_h
+                    });
+                if hovered {
+                    bg = bg.opacity(bg.a * HOVER_FADE);
+                    ink = ink.opacity(ink.a * HOVER_FADE);
+                } else {
+                    self.chips.push([x, x + w, top, top + box_h]);
+                }
+                window.paint_quad(fill(
+                    Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
+                    bg,
+                ));
+            }
+            LabelPlace::Column => {
+                window.paint_quad(fill(
+                    Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
+                    bg,
+                ));
+            }
+            LabelPlace::Axis => {
+                // Stacked off its price: a short leader from the price to the tag (only for a
+                // price on the plot: a tag held at an edge for a level off it has nothing to
+                // lead to).
+                let anchor = p.label_anchor(box_h * 0.5);
+                if (0.0..=ph).contains(&anchor) && (anchor - y).abs() > 0.5 {
+                    let lead = |window: &mut Window, x0: f32, y0: f32, w: f32, h: f32| {
+                        window.paint_quad(fill(
+                            Bounds::new(point(px(ox + x0), px(oy + y0)), size(px(w), px(h))),
+                            ink,
+                        ));
+                    };
+                    let stub = crate::zoom::f(2.0);
+                    let (lx, a, b) = (strip.left + stub, anchor.min(y), anchor.max(y));
+                    lead(window, strip.left, anchor - hair * 0.5, stub + hair, hair);
+                    lead(window, lx, a, hair, b - a);
+                    lead(window, lx, y - hair * 0.5, x - lx, hair);
+                }
+                window.paint_quad(gpui::quad(
+                    Bounds::new(point(px(ox + x), px(oy + top)), size(px(w), px(box_h))),
+                    px(crate::zoom::f(2.0)),
+                    bg,
+                    px(1.0),
+                    ink,
+                    gpui::BorderStyle::Solid,
+                ));
+            }
+        }
+        let line = shaped_in(&mut self.shaped, text, ink, window);
+        let _ = line.paint(
+            point(
+                px(ox + x + label_pad()),
+                px(oy + top + box_h * 0.5 - label_px() * 0.65),
+            ),
+            px(label_px() * 1.3),
+            TextAlign::Left,
+            None,
+            window,
+            cx,
+        );
     }
 
     /// Source `i`'s map again as a new batch of the same levels (a new `Arc`), as the runtime
