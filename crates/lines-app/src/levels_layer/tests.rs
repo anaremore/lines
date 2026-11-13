@@ -1928,10 +1928,12 @@ fn pointing_at_a_hidden_label_shows_it() {
         }
     }
     let hy = hidden.expect("a hidden label");
-    let (si, p, y) = layer.revealed_label(hy, ph).expect("shown for the pointer");
+    let (si, p, y) = layer
+        .revealed_label(hy, ph, 800.0)
+        .expect("shown for the pointer");
     assert!(p.label_y.is_none(), "only a hidden label is revealed");
     assert!((y - hy).abs() <= half + 1e-3);
     assert!(layer.map(si).is_some());
     // Far from every level: nothing.
-    assert_eq!(layer.revealed_label(-500.0, ph), None);
+    assert_eq!(layer.revealed_label(-500.0, ph, 800.0), None);
 }

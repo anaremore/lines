@@ -1133,6 +1133,15 @@ impl LevelsLayer {
                 reset_seen(s.map.as_deref(), &mut s.seen);
             }
         }
+        // The joined label layout's buffers, grown here (a new map, render time) so placing
+        // never grows them in steady frames.
+        let levels: usize = self.slots.iter().map(|s| s.seen.len()).sum();
+        let placed: usize = self.slots.iter().map(|s| s.placed.capacity()).sum();
+        self.seen_all
+            .reserve(levels.saturating_sub(self.seen_all.len()));
+        self.joint.reserve(placed.saturating_sub(self.joint.len()));
+        self.joint_slots
+            .reserve(self.slots.len().saturating_sub(self.joint_slots.len()));
     }
 
     /// Under the store lock, after the viewport update. Draws from this frame's
@@ -1251,6 +1260,13 @@ impl LevelsLayer {
             if s.map.is_none() || s.placed.is_empty() {
                 continue;
             }
+            // Each source's indices are offset by the levels before it: its label states are
+            // exactly one per level of its map (`reset_seen`).
+            debug_assert_eq!(
+                s.seen.len(),
+                s.map.as_ref().map_or(0, |m| m.levels.len()),
+                "label states per level"
+            );
             let base = self.seen_all.len() as u32;
             self.joint_slots.push((si, base));
             self.seen_all.extend_from_slice(&s.seen);
@@ -1678,7 +1694,9 @@ impl LevelsLayer {
             box_h,
         };
         let hair = 1.0 / window.scale_factor();
-        let reveal = strip.hover.and_then(|(_, hy)| self.revealed_label(hy, ph));
+        let reveal = strip
+            .hover
+            .and_then(|(_, hy)| self.revealed_label(hy, ph, f32::from(plot.size.width)));
         for si in 0..self.slots.len() {
             let Some(map) = self.slots[si].map.clone() else {
                 continue;
@@ -1706,10 +1724,12 @@ impl LevelsLayer {
     /// level's row (its label's anchor, held in a plot `ph` tall) is within half a label of it,
     /// the highest priority first, then the nearest. Its source, its placement and the row it
     /// shows on. No allocation.
-    pub fn revealed_label(&self, hy: f32, ph: f32) -> Option<(usize, Placed, f32)> {
+    pub fn revealed_label(&self, hy: f32, ph: f32, pw: f32) -> Option<(usize, Placed, f32)> {
         if self.config.hide_labels {
             return None;
         }
+        // Shown in the plot at its right edge: the plot's room.
+        let room = LabelRoom::Plot.at(pw)?;
         let half = label_px() * 1.6 * 0.5;
         let mut best: Option<(u8, f32, usize, Placed, f32)> = None;
         for (si, s) in self.slots.iter().enumerate() {
@@ -1718,7 +1738,17 @@ impl LevelsLayer {
                 continue;
             }
             for p in &s.placed {
-                if p.label_y.is_some() || map.levels[p.index as usize].label.is_none() {
+                let i = p.index as usize;
+                let Some(name) = map.levels[i].label.as_deref() else {
+                    continue;
+                };
+                let full = s.texts.get(i).and_then(|t| t.as_deref()).unwrap_or(name);
+                let w = self
+                    .widths
+                    .get(full)
+                    .copied()
+                    .unwrap_or_else(|| estimate(full));
+                if p.label_y.is_some() || !label_can_show(w, self.cuts.get(full), room) {
                     continue;
                 }
                 let y = p.label_anchor(half).clamp(half, (ph - half).max(half));

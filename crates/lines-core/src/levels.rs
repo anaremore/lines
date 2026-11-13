@@ -1061,7 +1061,8 @@ pub enum LabelSeen {
 /// is dropped only when no such row is free (the level is still drawn). Labels are placed by
 /// priority ([`Placed::rank`]: a higher one claims its row first, so a short plot drops the
 /// lowest first), and within one priority those at fixed prices first, in order, then those
-/// moving with the VWAP, so a moving band never reshuffles the others. Every level source on a
+/// moving with the VWAP, so a moving band never reshuffles the others of its priority (a type
+/// declared above Normal outranks that: give a moving type High only if its label must win). Every level source on a
 /// chart is placed in one call (the layer joins their levels), so no two sources' labels
 /// overlap. The layout depends only on the levels and the viewport, never
 /// the price, and keeps last frame's decision near the threshold: `seen` (by level index,
