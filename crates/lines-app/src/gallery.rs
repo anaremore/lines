@@ -311,19 +311,42 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     v.push(set);
     // The pages at the narrowest window and 150 %: General (the Updates dropdown), Appearance
     // (the Light palette and UI zoom dropdowns), Order entry (P&L display's chips, the − / +
-    // number fields) and Accounts (the news blackout's chips, the prop preset's dropdown).
-    for (page, name, h) in [
-        ("general", "settings-general-narrow-light-150", 700),
-        ("appearance", "settings-appearance-narrow-light-150", 900),
-        ("order-entry", "settings-order-entry-narrow-light-150", 1100),
-        ("accounts", "settings-accounts-narrow-light-150", 900),
+    // number fields) and Accounts (the news blackout's chips, the prop preset's dropdown). Each
+    // page whole in its window, every row with its description; Accounts at 150 % is taller
+    // than a window can be, so its two parts are searched for.
+    for (page, name, h, search) in [
+        ("general", "settings-general-narrow-light-150", 700, ""),
+        (
+            "appearance",
+            "settings-appearance-narrow-light-150",
+            900,
+            "",
+        ),
+        (
+            "order-entry",
+            "settings-order-entry-narrow-light-150",
+            1400,
+            "",
+        ),
+        (
+            "accounts",
+            "settings-accounts-narrow-light-150",
+            900,
+            " --settings-search news",
+        ),
+        (
+            "accounts",
+            "settings-accounts-preset-narrow-light-150",
+            1200,
+            " --settings-search preset",
+        ),
     ] {
         let mut set = s(
             name,
             false,
             end,
             args(&format!(
-                "--layout chart --size 1000x700 --theme light --ui-zoom 150 --settings {page} --settings-size 640x{h}"
+                "--layout chart --size 1000x700 --theme light --ui-zoom 150 --settings {page} --settings-size 640x{h}{search}"
             )),
         );
         set.windows = 2;
@@ -364,7 +387,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         (
             "settings-drop-preset-light",
             "accounts",
-            "--theme light --settings-size 860x700 --settings-set prop.preset=open",
+            "--theme light --settings-size 860x1400 --settings-set prop.preset=open",
         ),
         (
             "settings-drop-zone-150",
