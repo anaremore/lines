@@ -1,7 +1,6 @@
 //! Download past days (decision 0030 §8): the engine and the store write path, driven by the
 //! synthetic demo source (no network, no vendor).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,10 +18,8 @@ use lines_feed::{FeedConfig, Source, new_store, run_feed};
 
 const SOURCE: &str = "demo";
 
-fn root(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lines-download-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    d
+fn root(name: &str) -> lines_core::scratch::Scratch {
+    lines_core::scratch::Scratch::new(&format!("download-{name}"))
 }
 
 fn es() -> Product {
@@ -181,7 +178,6 @@ fn estimate_excludes_stored_days() {
         Outcome::Skipped(DayState::Stored { complete: true })
     );
     assert!(asked.lock().unwrap().is_empty());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// The stored day holds exactly what the source delivered, and the full feed replays it to
@@ -261,7 +257,6 @@ async fn a_downloaded_day_replays_identically() {
     assert_eq!(store.read().series.bars(), want.bars());
     // Rebuilding from segments (what a lost bar index does) gives the same bars.
     assert_eq!(dir.rebuild_bars(60_000, 100_000).unwrap(), want.bars());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -293,7 +288,6 @@ fn cancel_mid_day_leaves_nothing() {
         get(Demo::default(), &t, &[(day(5), Charge::Included)])[0].1,
         Outcome::Stored(_)
     ));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -325,7 +319,6 @@ fn a_refusal_carries_the_providers_message() {
         Outcome::Refused(msg.into())
     );
     nothing_left(&t.dir(), day(5));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
@@ -351,7 +344,6 @@ fn never_more_than_the_accepted_price() {
         get(demo, &t, &[(day(5), accepted)])[0].1,
         Outcome::Stored(_)
     ));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Decided rule: a contract a live feed is storing is refused (its writer holds the coverage
@@ -360,7 +352,7 @@ fn never_more_than_the_accepted_price() {
 fn a_live_writer_and_a_download_never_share_a_contract() {
     let root = root("live");
     let t = target(&root);
-    let mut cfg = StoreConfig::new(root.clone(), SOURCE);
+    let mut cfg = StoreConfig::new(root.to_path_buf(), SOURCE);
     cfg.flush = Default::default();
     let store = Arc::new(ChartStore::new(
         es(),
@@ -397,7 +389,6 @@ fn a_live_writer_and_a_download_never_share_a_contract() {
         download::plan(&t, &[day(5)], during)[0].1,
         DayState::NotFinished
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Decision 0030 §10: an extension built for another download interface is refused.
@@ -487,7 +478,6 @@ fn retention_never_evicts_a_downloaded_day() {
     );
     assert!(t.dir().segment_path(day(3)).exists());
     assert!(evicted.kept > 0, "the pinned day still counts");
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A job whose thread dies still ends (the dialog never hangs).
@@ -523,7 +513,6 @@ fn a_job_that_panics_still_finishes() {
     ));
     assert!(matches!(updates[0], Update::Plan { .. }));
     assert_eq!(updates.last(), Some(&Update::Finished));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Closing the window drops the job, which is "Cancel remaining" (decided in round 3): the
@@ -566,7 +555,6 @@ fn dropping_a_job_finishes_the_day_in_flight() {
         vec![day(5)],
         "day 6 never asked"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Stop now mid-day: the day in flight leaves nothing; the request was reported first (a
@@ -596,7 +584,6 @@ fn stop_now_discards_the_day_in_flight() {
     assert_eq!(outcomes(&updates), vec![(day(5), Outcome::Canceled)]);
     nothing_left(&t.dir(), day(5));
     assert!(lines_feed::disk::day::pinned(&t.dir().path).is_empty());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// "Cancel remaining": the day in flight finishes and is stored; no later day starts.
@@ -627,7 +614,6 @@ fn cancel_remaining_keeps_the_day_in_flight() {
     );
     assert_eq!(out[1], (day(6), Outcome::Canceled));
     nothing_left(&t.dir(), day(6));
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A day the provider delivers nothing for is not stored (it would be pinned as complete).
@@ -646,7 +632,6 @@ fn an_empty_day_is_not_stored() {
     );
     nothing_left(&t.dir(), day(5));
     assert!(lines_feed::disk::day::pinned(&t.dir().path).is_empty());
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Stop now after everything paid has arrived (`fetched`) stops nothing: the day is converted
@@ -678,7 +663,6 @@ fn stop_now_after_the_paid_data_arrived_still_stores_the_day() {
         matches!(&outcomes(&updates)[0], (d, Outcome::Stored(_)) if *d == day(5)),
         "{updates:?}"
     );
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// A source that never says when it asked, delivers something and then fails is still counted
@@ -705,5 +689,4 @@ fn a_silent_source_that_fails_after_delivering_counts_as_charged() {
         vec![(day(5), Outcome::Failed("the connection dropped".into()))]
     );
     nothing_left(&t.dir(), day(5));
-    let _ = std::fs::remove_dir_all(&root);
 }

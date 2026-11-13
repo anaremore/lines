@@ -189,8 +189,7 @@ mod tests {
 
     #[test]
     fn a_recording_decodes_in_order_with_recorded_times() {
-        let dir = std::env::temp_dir().join(format!("lines-recorded-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("recorded");
         let path = dir.join("r.lfr");
         let es = ContractKey::monthly(crate::catalog::ES, 2026, Month::new(12).unwrap());
         let start = 1_800_000_000_000;
@@ -243,15 +242,13 @@ mod tests {
         }
         assert_eq!(got, vec![(0, 600_000), (500, 600_025), (1000, 600_050)]);
         assert_eq!(r.decode_errors(), 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A frame whose recorded time doesn't fit (a crafted header near `i64::MAX`) is skipped
     /// and counted for the backtest's warning, never given a wrapped time.
     #[test]
     fn frames_with_unrepresentable_times_are_counted() {
-        let dir = std::env::temp_dir().join(format!("lines-recorded-ovf-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("recorded-ovf");
         let path = dir.join("r.lfr");
         let header = Header {
             start_wall_ms: i64::MAX - 1_000,
@@ -275,7 +272,6 @@ mod tests {
         let mut r = RecordedEvents::open(&path).unwrap();
         while r.next_batch().unwrap().is_some() {}
         assert_eq!(r.unrepresentable(), 2);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A stored session decodes from its first frame: `SegmentReplay::open` reads that frame
@@ -286,10 +282,7 @@ mod tests {
         use crate::disk::ContractDir;
         use crate::disk::segment::{FlushPolicy, SegmentHeader, SegmentWriter};
 
-        let dir =
-            std::env::temp_dir().join(format!("lines-recorded-stored-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("recorded-stored");
         let es = ContractKey::monthly(crate::catalog::ES, 2026, Month::new(12).unwrap());
         let product = crate::catalog::get(crate::catalog::ES).unwrap();
         let start = UtcMillis::parse_iso("2026-11-05T15:00:00Z").unwrap().0;
@@ -330,6 +323,5 @@ mod tests {
             }
         }
         assert_eq!(got, vec![(0, 600_000), (500, 600_025), (1000, 600_050)]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -484,7 +484,8 @@ mod tests {
     }
 
     struct TestSink {
-        scratch: PathBuf,
+        /// Removed when the sink drops.
+        scratch: lines_core::scratch::Scratch,
         frames: Vec<Vec<NativeEvent>>,
         canceled: bool,
         requested: bool,
@@ -512,11 +513,8 @@ mod tests {
     }
 
     fn sink(name: &str) -> TestSink {
-        let d = std::env::temp_dir().join(format!("lines-days-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
         TestSink {
-            scratch: d,
+            scratch: lines_core::scratch::Scratch::new(&format!("days-{name}")),
             frames: Vec::new(),
             canceled: false,
             requested: false,

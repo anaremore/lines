@@ -359,7 +359,7 @@ mod recording_tests {
     /// (outbound frames are recorded as their time only); inbound frames still are.
     #[test]
     fn outbound_frames_such_as_a_logon_are_never_recorded() {
-        let dir = std::env::temp_dir().join(format!("lines-rec-out-{}", std::process::id()));
+        let dir = lines_core::scratch::Scratch::new("rec-out");
         let path = dir.join("logon.lfr");
         let rec = Recorder::create(&path, "cqg", "cqg-webapi-2", "ES", None).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -392,7 +392,6 @@ mod recording_tests {
         assert_eq!(second.direction, Direction::FromServer);
         assert_eq!(&second.frame.data[..], b"market data");
         assert!(r.next_record().unwrap().is_none());
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Replay's clock before any delivery is the first outbound marker's time (when start()
@@ -401,9 +400,8 @@ mod recording_tests {
     #[test]
     fn replay_starts_at_the_outbound_marker() {
         use crate::recording::{Header, Writer};
-        let dir = std::env::temp_dir().join(format!("lines-rec-clock-{}", std::process::id()));
+        let dir = lines_core::scratch::Scratch::new("rec-clock");
         let path = dir.join("c.lfr");
-        std::fs::create_dir_all(&dir).unwrap();
         let header = Header {
             start_wall_ms: 1_000_000,
             provider: "coinbase".into(),
@@ -424,6 +422,5 @@ mod recording_tests {
         w.finish().unwrap();
         let replay = ReplayTransport::open(&path, 1.0, None).unwrap();
         assert_eq!(replay.clock(), Some(UtcMillis(1_000_000)));
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

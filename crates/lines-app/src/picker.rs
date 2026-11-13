@@ -1016,9 +1016,8 @@ mod tests {
 
     #[test]
     fn settings_file_roundtrip_missing_corrupt_and_unversioned() {
-        let dir = std::env::temp_dir().join(format!("lines-picker-test-{}", std::process::id()));
+        let dir = lines_core::scratch::Scratch::new("picker-test");
         let path = dir.join("nested").join("settings.json");
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             Settings::load(&path),
             (Settings::default(), None, true),
@@ -1057,7 +1056,6 @@ mod tests {
         assert_eq!(loaded.recents, [2, 1]);
         assert!(loaded.favourites.is_empty());
         assert!(path.with_file_name("settings.v0.json").exists());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

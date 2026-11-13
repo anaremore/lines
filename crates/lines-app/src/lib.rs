@@ -2803,8 +2803,7 @@ mod tests {
         );
         assert!(names(&[("coinbase", false), ("kraken", false)]).is_empty());
         // The switches are read without the settings load; unreadable reads as all on.
-        let dir = std::env::temp_dir().join(format!("lines-src-prefs-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("src-prefs");
         let p = dir.join("settings.json");
         std::fs::write(
             &p,
@@ -2814,7 +2813,6 @@ mod tests {
         assert_eq!(source_prefs(&p).get("kraken").map(|s| s.on()), Some(false));
         std::fs::write(&p, "not json").unwrap();
         assert!(source_prefs(&p).is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
         let cli = parse(&["lines"]).unwrap();
         assert!(matches!(
             SourceChoice::parse(cli.source_name(), &Extensions::new()),

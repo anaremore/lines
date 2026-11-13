@@ -3,11 +3,8 @@
 use super::*;
 
 /// A fresh, empty folder for one test.
-fn dir(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lines-data-dir-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn dir(name: &str) -> lines_core::scratch::Scratch {
+    lines_core::scratch::Scratch::new(&format!("data-dir-{name}"))
 }
 
 fn write(p: &Path, bytes: &[u8]) {
@@ -89,7 +86,6 @@ fn env_beats_the_pointer_which_beats_the_default() {
     assert_eq!((r.root, r.by), (Some(chosen), By::Pointer));
     let r = resolve(None, Some(os.clone()), (None, None));
     assert_eq!((r.root, r.by, r.notice), (Some(os), By::Default, None));
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -124,7 +120,6 @@ fn a_pointer_is_read_leniently() {
     let text = String::from_utf8(read(&path)).unwrap();
     assert!(text.contains("\"version\": 1"), "{text}");
     assert!(!text.contains("pending_move"), "{text}");
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -152,7 +147,6 @@ fn paper_journal_and_backups_fall_back_to_the_config_folder() {
     let l = Locations::resolve(None, Some(&config));
     assert_eq!(l.backups, Some(config.join("backups")));
     assert_eq!(Locations::resolve(None, None), Locations::default());
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -202,7 +196,6 @@ fn a_move_copies_checks_switches_then_removes_only_what_it_moved() {
         !from.join(MARKER_FILE).exists(),
         "the marker goes with the move"
     );
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -251,7 +244,6 @@ fn a_failed_check_keeps_the_old_folder_and_both_copies() {
     );
     let (p, _) = read_pointer(&pointer_path(&os));
     assert_eq!(p.unwrap().pending_move.unwrap().from, from);
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -281,7 +273,6 @@ fn nested_folders_are_refused() {
     // A move between nested folders is refused at the start too.
     assert!(finish_move(&cur, MOVE, &cur.join("inner"), None, &mut None).is_err());
     assert!(finish_move(&cur.join("inner"), MOVE, &cur, None, &mut None).is_err());
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -329,7 +320,6 @@ fn an_interrupted_copy_resumes_at_the_next_start() {
         read(&to.join("recordings/mock-ES-20261105T140000Z.lfr")),
         b"lfr"
     );
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -376,7 +366,6 @@ fn files_that_grew_after_the_background_copy_are_copied_again() {
         !verified_path(&os).exists(),
         "the record goes with the switch"
     );
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// Set `p`'s modification time to `src`'s.
@@ -422,7 +411,6 @@ fn files_checked_in_the_background_are_trusted_at_the_start() {
         "trusted, not read again"
     );
     assert_eq!(read(&to.join("journal/shots/t1.svg")), b"<svg/>");
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// The record trusts only the big items, and only for its own move.
@@ -486,7 +474,6 @@ fn the_record_never_covers_small_items_or_another_move() {
         b"a log line
 "
     );
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -505,7 +492,6 @@ fn a_store_another_lines_is_writing_is_not_moved() {
     assert!(e.contains("another Lines"), "{e}");
     drop(lock);
     assert!(finish_move(&from, MOVE, &to, None, &mut None).is_ok());
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -524,7 +510,6 @@ fn without_finishing_moves_a_run_uses_the_old_folder() {
     let (run, _) = start(Some(env.clone()), Some(os), None, true);
     assert_eq!((run.locations.root, run.by), (Some(env), By::Env));
     assert!(from.join("logs").exists(), "no move with LINES_DATA_DIR");
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -616,7 +601,6 @@ fn store_settings_are_peeked_from_settings_json() {
     write(&path, b"garbage");
     assert_eq!(StorePrefs::peek(&path), StorePrefs::default());
     assert_eq!(read(&path), b"garbage", "never set aside here");
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -697,7 +681,6 @@ fn an_item_moved_onto_itself_is_refused_and_nothing_is_removed() {
     let other = PathBuf::from(config.display().to_string().replace('\\', "/"));
     assert!(finish_move(&from, MOVE, &other, Some(&config), &mut rec).is_err());
     assert!(config.join("paper/coinbase.json").exists());
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// A target already holding Lines data in any item is refused, at the pick and at the start,
@@ -727,7 +710,6 @@ fn lines_data_already_in_the_target_is_never_overwritten() {
         assert_eq!(run.locations.root, Some(from.clone()), "{item}");
         assert!(run.problem.unwrap().contains("already holds Lines data"));
         assert_eq!(read(&theirs), b"the target's own");
-        let _ = std::fs::remove_dir_all(&d);
     }
     // With this move's record, a colliding file it didn't write fails the move, unchanged.
     for (item, rel) in [
@@ -751,7 +733,6 @@ fn lines_data_already_in_the_target_is_never_overwritten() {
         let problem = run.problem.unwrap();
         assert!(problem.contains("already exists and differs"), "{problem}");
         assert_eq!(read(&to.join(rel)), b"DIFFERENT", "{item} not overwritten");
-        let _ = std::fs::remove_dir_all(&d);
     }
 }
 
@@ -776,7 +757,6 @@ fn a_missing_source_fails_the_move_and_keeps_it_pending() {
     assert_eq!(notices.len(), 1);
     let (p, _) = read_pointer(&pointer_path(&os));
     assert_eq!(p.unwrap().pending_move.unwrap().from, from);
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -875,7 +855,6 @@ fn a_copy_on_a_coarse_clock_drive_is_still_trusted() {
 ",
         "trusted, not copied again"
     );
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// A source file gone between the listing and its copy (a rotated log, a date the budget
@@ -895,7 +874,6 @@ fn a_source_file_that_vanishes_is_skipped() {
     assert_eq!(r, Ok(()));
     assert!(v.files.is_empty(), "nothing recorded as checked");
     assert!(!to.join(&key).exists());
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// "Use its data": a folder already holding Lines data is used as it is from the next start;
@@ -935,7 +913,6 @@ fn using_a_folder_with_data_never_writes_over_it() {
         "{line}"
     );
     assert!(!line.contains("empty"));
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// With LINES_DATA_DIR the row names the folder Settings saved, read without using it.
@@ -961,7 +938,6 @@ fn the_env_row_names_the_saved_folder() {
             saved.display()
         )
     );
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// No sentence ends with a period hard against a path.
@@ -977,7 +953,6 @@ fn no_period_hard_against_a_path() {
     for path in [&from, &to] {
         assert!(!p.contains(&format!("{}.", path.display())), "{p}");
     }
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// A source missing at a start, recreated empty by that run (or a different disk on its
@@ -1033,7 +1008,6 @@ fn only_the_marked_source_is_ever_moved_from() {
     assert_eq!(run.locations.root, Some(to.clone()), "{notices:?}");
     assert!(to.join("journal/coinbase.jsonl").exists());
     assert!(!from.join(MARKER_FILE).exists());
-    let _ = std::fs::remove_dir_all(&d);
 }
 
 /// The folder facts cache keeps only the facts for the key being worked out: a worker that

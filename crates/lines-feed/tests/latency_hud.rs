@@ -13,10 +13,9 @@ use tokio::sync::watch;
 
 /// A minute of ES trades, one a second, each received 20 ms after its exchange time (every
 /// tenth 120 ms).
-fn recording() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!("lines-feed-latency-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("es.lfr");
+/// The recording is in a scratch folder, removed when the returned guard drops.
+fn recording() -> lines_core::scratch::Scratch {
+    let path = lines_core::scratch::Scratch::file("feed-latency", "es.lfr");
     let start = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0;
     let mut w = Writer::create(
         &path,

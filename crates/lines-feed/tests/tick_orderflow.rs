@@ -4,7 +4,7 @@
 //! one asked for later (rebuilt from the warm start's stored trades, then the replay's file or
 //! the local store's live segments), equal bars built from both days in one run.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,11 +18,8 @@ use lines_feed::ticks::{TickKey, TickLease, TickSource};
 use lines_feed::{FeedConfig, Source, catalog, new_store, run_feed};
 use tokio::sync::watch;
 
-fn temp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lines-tof-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn temp(name: &str) -> lines_core::scratch::Scratch {
+    lines_core::scratch::Scratch::new(&format!("tof-{name}"))
 }
 
 fn at(s: &str) -> i64 {
@@ -223,7 +220,6 @@ async fn tick_bars_agree_with_the_stored_order_flow_across_a_restart() {
         );
     }
     drop((w, r));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn es_dir(root: &Path) -> ContractDir {

@@ -25,11 +25,8 @@ fn es() -> (Product, ContractKey) {
     )
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lines-ticks-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn scratch(name: &str) -> lines_core::scratch::Scratch {
+    lines_core::scratch::Scratch::new(&format!("ticks-{name}"))
 }
 
 /// Thu 2026-11-05 20:00 UTC (14:00 CST), in the session that closes at 22:00 UTC.
@@ -229,7 +226,6 @@ fn rebuilt_from_a_replay_equals_live_built() {
     assert_eq!(rebuilt.trades(), counted, "every counted trade once");
     // The recording starts mid-session: labelled from its first trade, as live-built.
     assert_eq!(status, TickStatus::From(live.bars()[0].time));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -247,8 +243,6 @@ fn rebuilt_from_the_local_store_equals_live_built() {
     assert!(rebuilt.same_bars(&live), "rebuilt from the local store");
     assert_eq!(rebuilt.trades(), counted, "every counted trade once");
     assert_eq!(status, TickStatus::From(live.bars()[0].time));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The live part is read from the segments regardless of trade coverage (a claim not saved
@@ -269,7 +263,6 @@ fn the_live_part_ignores_trade_coverage() {
     std::fs::remove_file(cdir.coverage_path()).unwrap();
     let (bars, _, _) = rebuilt_mid_feed(&frames, TickSource::Stored(cdir), 4_000);
     assert!(bars.same_bars(&live), "no coverage at all");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Stored trades from before this process that the warm start didn't replay (lookback off,
@@ -292,7 +285,6 @@ fn stored_trades_this_process_never_counted_stay_out() {
     };
     assert_eq!(bars.bars()[0].time, t);
     assert!(t > live.bars()[0].time, "from the tape");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Append `frames` to the store's segments as the writer does: one block per frame, under the
@@ -467,7 +459,6 @@ fn tick_bars_and_the_stored_order_flow_agree_across_a_restart() {
     }
     drop((at_start, during, after, later));
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A trade re-delivered at the `stored_through` boundary (a snapshot older than the store) is
@@ -518,7 +509,6 @@ fn no_double_count_at_the_stored_boundary() {
     }
     drop((at_start, later));
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A stored day evicted after the warm start: its trades can't be read again, so a rebuild
@@ -549,7 +539,6 @@ fn an_evicted_stored_day_falls_back_to_the_labelled_tape() {
     assert_eq!(d.ticks.bars(KEY).unwrap().bars()[0].time, t);
     assert_eq!(d.ticks.bars(KEY).unwrap().trades(), TAPE_PRINTS as u64);
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Trades whose times go backwards (late prints) around the cut: the split is by position, so
@@ -576,7 +565,6 @@ fn out_of_order_trades_are_split_by_position() {
         assert!(rebuilt.same_bars(&live), "stored, cut {cut}");
         assert_eq!(rebuilt.trades(), counted);
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A builder no chart holds stops taking trades at once; a rebuild nobody wants any more
@@ -631,7 +619,6 @@ fn released_builders_and_rebuilds_stop() {
     };
     assert!(rebuild(&job, || true).is_none());
     assert!(rebuild(&job, || false).is_some_and(|b| b.trades() == 20_000));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A replay read again that counts a different set before the tape (a provider session whose
@@ -673,7 +660,6 @@ fn a_replay_that_counts_a_different_set_is_refused() {
         assert_eq!(b.trades(), tape.len() as u64, "refused at {wrong}");
     }
     drop(d);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// History shows trading before the first counted trade: the chart says from when it has
@@ -995,7 +981,6 @@ fn a_landing_rebuild_never_moves_the_feed_clocks() {
     };
     drop(Rebuilding::new(Arc::downgrade(&s), KEY, generation));
     assert_eq!(s.last_data_ms(), last, "the fallback is not feed data");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Landing with many held trades applies them outside the lock in chunks: the same bars as
@@ -1102,5 +1087,4 @@ fn every_kind_rebuilt_from_a_replay_equals_live_built() {
             "{kind:?}: every counted trade once"
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }

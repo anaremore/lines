@@ -4,7 +4,7 @@
 //! segments give up their coverage after the last good block; a replay without the store is
 //! unchanged.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,11 +17,8 @@ use lines_feed::store::ChartStore;
 use lines_feed::{FeedConfig, Source, catalog, new_store, run_feed};
 use tokio::sync::watch;
 
-fn temp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lines-of-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&d);
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn temp(name: &str) -> lines_core::scratch::Scratch {
+    lines_core::scratch::Scratch::new(&format!("of-{name}"))
 }
 
 fn at(s: &str) -> i64 {
@@ -409,7 +406,7 @@ fn the_store_holds_exactly_the_counted_trades() {
         60_000,
         1000,
     ));
-    let cfg = StoreConfig::new(root.clone(), "test");
+    let cfg = StoreConfig::new(root.to_path_buf(), "test");
     let (mut w, _) = ContractWriter::open(&cfg, &es, Some(contract()), store.clone()).unwrap();
     let t0 = at("2026-11-10T15:00:00Z");
     let ms = |s: f64| t0 + (s * 1000.0) as i64;

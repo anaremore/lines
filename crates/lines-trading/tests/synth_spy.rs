@@ -18,7 +18,7 @@ const LAT: i64 = 20;
 
 #[test]
 fn the_synthetic_session_trades_on_fresh_quotes_all_day() {
-    let dir = std::env::temp_dir().join(format!("lines-synth-spy-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("synth-spy");
     let path = dir.join("spy.lfr");
     synth_chain::write_spy_chain(&path).unwrap();
     let mut replay = RecordedEvents::open(&path).unwrap();
@@ -113,5 +113,4 @@ fn the_synthetic_session_trades_on_fresh_quotes_all_day() {
     assert_eq!(seen.len(), 6 * 41 * 2);
     assert_eq!(sent, 13 * 2, "half-hourly through the session");
     assert_eq!(filled, sent);
-    let _ = std::fs::remove_dir_all(dir);
 }

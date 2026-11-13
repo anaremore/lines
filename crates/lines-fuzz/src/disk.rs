@@ -1,8 +1,8 @@
 //! Harness for the local market-data store (decision 0019): segment files, the coverage file
 //! and the bar cache as they are found on disk after a crash, a full disk or a bad sector.
 //!
-//! The store's readers take paths, so each input is written to a per-thread scratch
-//! directory and opened the way the feed opens it ([`ContractWriter::open`]: torn-tail
+//! The store's readers take paths, so each input is written to its own scratch
+//! directory (removed when the run returns) and opened the way the feed opens it ([`ContractWriter::open`]: torn-tail
 //! truncation, coverage, cached bars or a rebuild from segments), then the cached bars are
 //! loaded into a chart store as the feed does.
 //!
@@ -17,10 +17,10 @@
 //! contents get past the checksum).
 
 use std::io::Write;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use lines_core::CivilDate;
+use lines_core::scratch::Scratch;
 use lines_feed::catalog;
 use lines_feed::disk::segment::{FlushPolicy, SegmentHeader, SegmentReader, SegmentWriter};
 use lines_feed::disk::writer::ContractWriter;
@@ -33,16 +33,6 @@ use crate::{PERIOD_MS, frames};
 
 const SOURCE: &str = "fuzz";
 const MAX_BLOCKS: u64 = 100_000;
-
-fn scratch() -> PathBuf {
-    let id = format!("{:?}", std::thread::current().id())
-        .chars()
-        .filter(char::is_ascii_digit)
-        .collect::<String>();
-    std::env::temp_dir()
-        .join("lines-fuzz-disk")
-        .join(format!("{}-{id}", std::process::id()))
-}
 
 pub fn date() -> CivilDate {
     CivilDate::new(2026, 11, 6).expect("date")
@@ -96,8 +86,8 @@ pub fn crc32(data: &[u8]) -> u32 {
 
 pub fn disk_store(data: &[u8]) {
     let (cfg, ops) = frames::split(data);
-    let root = scratch();
-    let _ = std::fs::remove_dir_all(&root);
+    // Removed when this returns, early returns included.
+    let root = Scratch::new("fuzz-disk");
     let nq = catalog::get(catalog::NQ).expect("NQ");
     let dir = ContractDir::new(&root, SOURCE, &nq, None);
     if std::fs::create_dir_all(&dir.path).is_err() {
@@ -167,10 +157,9 @@ pub fn disk_store(data: &[u8]) {
         PERIOD_MS,
         5_000,
     ));
-    let config = StoreConfig::new(root.clone(), SOURCE);
+    let config = StoreConfig::new(root.to_path_buf(), SOURCE);
     if let Ok((writer, opened)) = ContractWriter::open(&config, &nq, None, store.clone()) {
         store.update(|d| d.load_cached(&opened.bars));
         drop(writer);
     }
-    let _ = std::fs::remove_dir_all(&root);
 }

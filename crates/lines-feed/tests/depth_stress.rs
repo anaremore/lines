@@ -9,7 +9,6 @@
 //! updates coalesce per frame, decision 0001). Wall time per build is reported, and checked
 //! only against a generous bound (CI machines vary).
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -38,10 +37,9 @@ impl Rng {
     }
 }
 
-fn recording() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lines-depth-stress-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("deep-book.lfr");
+/// The recording is in a scratch folder, removed when the returned guard drops.
+fn recording() -> lines_core::scratch::Scratch {
+    let path = lines_core::scratch::Scratch::file("depth-stress", "deep-book.lfr");
     let nq = catalog::get(catalog::NQ).unwrap();
     let header = Header {
         start_wall_ms: 1_793_973_600_000,
@@ -139,7 +137,7 @@ fn lvl(time_us: i64, side: Side, p: i64, q: i64) -> NativeEvent {
 async fn deep_book_at_max_speed_keeps_dom_work_bounded() {
     let path = recording();
     let config = FeedConfig::new(Source::Replay {
-        path: path.clone(),
+        path: path.to_path_buf(),
         speed: 0.0,
         stop_at: None,
     });
@@ -238,5 +236,4 @@ async fn deep_book_at_max_speed_keeps_dom_work_bounded() {
         max_build < Duration::from_millis(50),
         "a ladder build took {max_build:?}"
     );
-    let _ = std::fs::remove_file(&path);
 }

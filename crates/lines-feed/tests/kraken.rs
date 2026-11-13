@@ -5,10 +5,11 @@
 //! (internet, ~75 s): 60 s of live BTC/USD.KR, zero checksum mismatches, then replay
 //! determinism.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use lines_core::scratch::Scratch;
 use lines_core::{ContractKey, Price, Qty, Side};
 use lines_feed::catalog::{self, Target};
 use lines_feed::kraken::num::book_checksum;
@@ -18,13 +19,12 @@ use lines_feed::store::{ChartStore, FeedStatus};
 use lines_feed::{FeedConfig, Source, new_store, run_feed};
 use tokio::sync::watch;
 
-fn temp_path(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lines-kraken-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir.join(name)
+/// A scratch file path (its folder is removed when this drops).
+fn temp_path(name: &str) -> Scratch {
+    Scratch::file("kraken-test", name)
 }
 
-fn record(name: &str, frames: &[Frame]) -> PathBuf {
+fn record(name: &str, frames: &[Frame]) -> Scratch {
     let path = temp_path(name);
     let header = Header {
         start_wall_ms: 1_793_988_000_000,
@@ -43,9 +43,9 @@ fn record(name: &str, frames: &[Frame]) -> PathBuf {
     path
 }
 
-async fn replay(path: PathBuf) -> Arc<ChartStore> {
+async fn replay(path: &Path) -> Arc<ChartStore> {
     let config = FeedConfig::new(Source::Replay {
-        path,
+        path: path.to_path_buf(),
         speed: 0.0,
         stop_at: None,
     });
@@ -139,7 +139,8 @@ async fn corrupted_book_update_is_detected_and_resynced() {
             false,
         ),
     ];
-    let store = replay(record("corrupt.lfr", &frames)).await;
+    let rec = record("corrupt.lfr", &frames);
+    let store = replay(&rec).await;
     let d = store.read();
     assert_eq!(d.status, FeedStatus::ReplayFinished);
     assert_eq!(
@@ -209,7 +210,7 @@ async fn live_spot_book_matches_kraken_checksums_and_replays_deterministically()
         futures_url: lines_feed::kraken::FUTURES_WS_URL.into(),
     });
     config.target = Some(Target::Product(catalog::BTC_USD_KR));
-    config.record = Some(path.clone());
+    config.record = Some(path.to_path_buf());
     let store = new_store(&config).unwrap();
     let (tx, rx) = watch::channel(false);
     let task = tokio::spawn(run_feed(config, store.clone(), rx));
@@ -262,8 +263,8 @@ async fn live_spot_book_matches_kraken_checksums_and_replays_deterministically()
             d.stats.trades_in,
         )
     };
-    let a = snapshot(&*replay(path.clone()).await);
-    let b = snapshot(&*replay(path.clone()).await);
+    let a = snapshot(&*replay(&path).await);
+    let b = snapshot(&*replay(&path).await);
     assert_eq!(a, b, "two replays of one recording are identical");
     assert_eq!(
         a.3, live,
@@ -277,5 +278,4 @@ async fn live_spot_book_matches_kraken_checksums_and_replays_deterministically()
         a.2.len(),
         a.3
     );
-    let _ = std::fs::remove_file(&path);
 }

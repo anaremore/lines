@@ -264,15 +264,8 @@ pub fn on_start(state: Option<UpdateState>, current: &str) -> (Option<UpdateStat
 mod tests {
     use super::*;
 
-    fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "lines-update-{name}-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn dir(name: &str) -> lines_core::scratch::Scratch {
+        lines_core::scratch::Scratch::new(&format!("update-{name}"))
     }
 
     fn write(p: &Path, text: &str) {
@@ -294,7 +287,7 @@ mod tests {
         write(&c.join("workspaces/day.json"), "old day");
         write(&c.join("paper/replay.json"), "old paper");
         write(&c.join("journal/replay.jsonl"), "journal stays");
-        let d = Dirs::in_config(c.clone());
+        let d = Dirs::in_config(c.to_path_buf());
         assert_eq!(backup(&d, "0.3.11").unwrap(), 4);
         // The new version migrates them forward.
         write(&c.join("settings.json"), "new settings");
@@ -307,7 +300,6 @@ mod tests {
             !backup_dir(&d, "0.3.11").join("journal").exists(),
             "not the journal"
         );
-        let _ = std::fs::remove_dir_all(&c);
     }
 
     /// With paper accounts and backups in the data folder, a backup holds the paper files and
@@ -330,7 +322,6 @@ mod tests {
         assert_eq!(restore(&d, "0.3.11").unwrap(), 2);
         assert_eq!(read(&data.join("paper/coinbase.json")), "old paper");
         assert!(!c.join("paper").exists(), "never into the config folder");
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -351,7 +342,6 @@ mod tests {
         assert_eq!(read(&exe), "v0.3.11");
         assert_eq!(read(&d.join("lines.failed.exe")), "v0.3.12");
         assert!(roll_back_exe(&exe).is_err(), "nothing kept to roll back to");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A swap whose copy fails leaves the running version in place.
@@ -363,7 +353,6 @@ mod tests {
         assert!(swap(&exe, &d.join("missing.exe")).is_err());
         assert_eq!(read(&exe), "v0.3.11");
         assert!(!previous_exe(&exe).exists());
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Two failed starts of the new version: the third offers the rollback; once it ran long
@@ -401,7 +390,6 @@ mod tests {
         clean_staged(&d, "0.3.11");
         assert!(!d.join("0.3.10").exists() && !d.join("0.3.11").exists());
         assert!(d.join("0.3.12").exists(), "a newer one waits");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -415,6 +403,5 @@ mod tests {
         };
         save_state(&d, &s).unwrap();
         assert_eq!(load_state(&d), Some(s));
-        let _ = std::fs::remove_dir_all(&d);
     }
 }

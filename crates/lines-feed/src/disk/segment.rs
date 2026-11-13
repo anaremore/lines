@@ -404,10 +404,8 @@ mod tests {
         }
     }
 
-    fn dir(name: &str) -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!("lines-seg-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    fn seg(name: &str) -> lines_core::scratch::Scratch {
+        lines_core::scratch::Scratch::file(&format!("seg-{name}"), "s.lseg")
     }
 
     fn read_all(path: &Path) -> (Vec<Block>, End) {
@@ -451,7 +449,7 @@ mod tests {
 
     #[test]
     fn append_reopen_and_torn_tail() {
-        let path = dir("torn").join("s.lseg");
+        let path = seg("torn");
         let (mut w, rep) = SegmentWriter::open(&path, &header(), FlushPolicy::default()).unwrap();
         assert_eq!(rep, OpenReport::default());
         for i in 0..10 {
@@ -497,7 +495,7 @@ mod tests {
 
     #[test]
     fn another_stream_is_refused_and_a_cut_header_restarts() {
-        let path = dir("hdr").join("s.lseg");
+        let path = seg("hdr");
         SegmentWriter::open(&path, &header(), FlushPolicy::default())
             .unwrap()
             .0

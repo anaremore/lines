@@ -557,9 +557,7 @@ fn reading_tolerates_a_torn_tail_and_refuses_newer_versions() {
 /// header, so an older build refuses the file instead of reading an option trade as spot.
 #[test]
 fn a_v1_journal_migrates_to_v2_when_written() {
-    let dir = std::env::temp_dir().join(format!("lines-journal-v1-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("journal-v1");
     let path = dir.join("mock.jsonl");
     let trade = serde_json::to_string(&Record::Trade(Box::new(closed(10.0, 5, &["a"])))).unwrap();
     let v1 = format!("{{\"journal\":1,\"source\":\"mock\"}}\n{trade}\n");
@@ -590,16 +588,13 @@ fn a_v1_journal_migrates_to_v2_when_written() {
     // Opening again: already current, nothing moves.
     drop(JournalWriter::open(path.clone(), "mock", Some(&l)).unwrap());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), now);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A paper reset that clears its journal: that account's trades go, from memory and from the
 /// file (kept first as a dated `.bak`); another account's stay, and appends continue after.
 #[test]
 fn clearing_an_account_rewrites_the_file_and_keeps_a_copy() {
-    let dir = std::env::temp_dir().join(format!("lines-journal-clear-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("journal-clear");
     let path = dir.join("mock.jsonl");
     let mine = closed(10.0, 5, &["a"]);
     let mut theirs = closed(-5.0, 20, &[]);
@@ -641,13 +636,11 @@ fn clearing_an_account_rewrites_the_file_and_keeps_a_copy() {
     assert_eq!(baks.len(), 1, "{baks:?}");
     assert_eq!(std::fs::read_to_string(dir.join(&baks[0])).unwrap(), before);
     drop(w);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
-    let dir = std::env::temp_dir().join(format!("lines-journal-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("journal");
     let path = dir.join("journal").join("mock.jsonl");
     {
         let w = JournalWriter::open(path.clone(), "mock", None).unwrap();
@@ -692,7 +685,6 @@ fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
     let j = Journal::from_records(l2.records);
     assert_eq!(j.trade("t5").unwrap().tags, ["second"]);
     assert_eq!(l.records.len(), 2);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A round trip of `account` whose fill ids hold the account, as a broker's can.
@@ -880,9 +872,7 @@ fn only_a_saved_journal_asks_and_a_flush_waits_for_the_drawing() {
     assert!(snap.trades[0].screenshots.is_empty());
     assert!(rx.try_recv().is_err(), "nothing asked for");
 
-    let dir = std::env::temp_dir().join(format!("lines-journal-shots-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("journal-shots");
     let writer = JournalWriter::open(dir.join("t.jsonl"), "t", None).unwrap();
     let (tx, rx) = mpsc::channel();
     let saved = JournalShared::start_with_shots(Journal::new(), Some(writer), Some(tx));
@@ -909,7 +899,6 @@ fn only_a_saved_journal_asks_and_a_flush_waits_for_the_drawing() {
     // The saved line carries the name.
     let on_disk = std::fs::read_to_string(dir.join("t.jsonl")).unwrap();
     assert!(on_disk.contains("\"screenshots\":[\""), "{on_disk}");
-    let _ = std::fs::remove_dir_all(dir);
 }
 
 /// The journal on its own thread: the trading thread only sends messages, the UI reads

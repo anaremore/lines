@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lines_app::Extensions;
+use lines_core::scratch::Scratch;
 use lines_core::{ContractKey, Month, Price, Qty, UtcMillis};
 use lines_feed::catalog;
 use lines_feed::levels::demo::{BODY, DemoLevels, ID as DEMO};
@@ -85,9 +86,7 @@ fn write_inputs(dir: &Path) -> PathBuf {
 
 #[test]
 fn backtest_flag_writes_a_report() {
-    let dir = std::env::temp_dir().join(format!("lines-backtest-cli-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = Scratch::new("backtest-cli");
     let market = write_inputs(&dir);
     let config = dir.join("backtest.json");
     std::fs::write(
@@ -142,15 +141,12 @@ fn backtest_flag_writes_a_report() {
     .unwrap_err()
     .to_string();
     assert!(e.contains("available: level-touch"), "{e}");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `--run-strategy level-touch` on the synthetic replay at `speed`, for `headless` seconds;
-/// returns its `--report` and the directory with its inputs.
-fn run_strategy_on_replay(tag: &str, speed: &str, headless: &str) -> (serde_json::Value, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("lines-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+/// returns its `--report` and the scratch folder with its inputs (removed when it drops).
+fn run_strategy_on_replay(tag: &str, speed: &str, headless: &str) -> (serde_json::Value, Scratch) {
+    let dir = Scratch::new(tag);
     let market = write_inputs(&dir);
     let config = dir.join("strategy.json");
     std::fs::write(
@@ -244,14 +240,13 @@ fn run_strategy_flag_runs_it_through_the_host_on_a_replay() {
         e.contains("goes with --backtest, --run-strategy or --strategy"),
         "{e}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 #[ignore = "runs about 20 s of wall-clock replay; run with --ignored"]
 fn run_strategy_flag_makes_the_backtests_trade() {
     // Speed 2: the touch comes about 11 s in, far after the strategy is armed.
-    let (run, _) = run_strategy_on_replay("run-strategy-full", "2", "25");
+    let (run, _dir) = run_strategy_on_replay("run-strategy-full", "2", "25");
     assert_eq!(run["armed"], true, "{run:#}");
     assert_eq!(run["state"], "armed", "{run:#}");
     assert_eq!(run["fills"].as_array().unwrap().len(), 2, "{run:#}");

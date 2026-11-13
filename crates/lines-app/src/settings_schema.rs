@@ -4073,12 +4073,10 @@ mod tests {
     #[test]
     fn old_appearance_loads_unchanged() {
         let old = r#"{"version": 1, "appearance": {"theme": "light", "palette": "colorblind"}}"#;
-        let dir = std::env::temp_dir().join(format!("lines-settings-old-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("settings-old");
         let path = dir.join("settings.json");
         std::fs::write(&path, old).unwrap();
         let (s, report, writable) = Settings::load(&path);
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(
             (report, writable),
             (None, true),
@@ -5037,12 +5035,10 @@ mod tests {
         );
         s.unknown.insert("later".into(), serde_json::json!([1, 2]));
         let bytes = s.encode();
-        let dir = std::env::temp_dir().join(format!("lines-settings-rt-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = lines_core::scratch::Scratch::new("settings-rt");
         let path = dir.join("settings.json");
         std::fs::write(&path, &bytes).unwrap();
         let (got, report, _) = Settings::load(&path);
-        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(report, None);
         assert_eq!(got, s);
     }

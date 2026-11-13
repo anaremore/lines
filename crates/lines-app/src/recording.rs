@@ -210,10 +210,8 @@ mod tests {
             Path::new("/data/recordings/levels-20261109T143005Z")
         );
         // Taken (a stop and start in one second): numbered, never written over.
-        let tmp = std::env::temp_dir().join(format!("lines-levels-dir-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = lines_core::scratch::Scratch::new("levels-dir");
         std::fs::create_dir_all(tmp.join("levels-20261109T143005Z")).unwrap();
         assert_eq!(levels_dir(&tmp, t), tmp.join("levels-20261109T143005Z-2"));
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

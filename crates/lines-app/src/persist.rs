@@ -145,8 +145,7 @@ mod tests {
 
     #[test]
     fn writes_land_in_order_with_backups_and_flush_waits() {
-        let dir = std::env::temp_dir().join(format!("lines-persist-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = lines_core::scratch::Scratch::new("persist");
         let w = Writer::spawn();
         let p = workspace_path(&dir);
         for i in 0..50 {
@@ -160,6 +159,5 @@ mod tests {
         std::fs::write(named_dir(&dir).join("desk.json.bak"), b"{}").unwrap();
         std::fs::write(named_dir(&dir).join("alpha.json"), b"{}").unwrap();
         assert_eq!(list_named(&dir), vec!["alpha", "desk"]);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

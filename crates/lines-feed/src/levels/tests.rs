@@ -330,9 +330,8 @@ fn unrecorded_sources_are_missing_in_a_replay() {
         .enable_all()
         .build()
         .unwrap();
-    let empty = std::env::temp_dir().join(format!("lines-levels-none-{}", std::process::id()));
-    let _ = std::fs::create_dir_all(&empty);
-    for dir in [None, Some(empty.clone())] {
+    let empty = lines_core::scratch::Scratch::new("levels-none");
+    for dir in [None, Some(empty.to_path_buf())] {
         let src: Arc<dyn LevelSource> = Arc::new(DemoLevels);
         let prices: Arc<dyn ChartPrices> = Arc::new(Fixed {
             bars: vec![bar_at("2025-09-11T14:30:00", 600_100)],
@@ -355,7 +354,6 @@ fn unrecorded_sources_are_missing_in_a_replay() {
         assert_eq!(s.status(t("2025-09-11T15:00:00")), LevelStatus::Missing);
         assert!(loaded.load(std::sync::atomic::Ordering::Acquire));
     }
-    let _ = std::fs::remove_dir_all(&empty);
 }
 
 /// A real source that counts connects (any connect is a live fetch).
@@ -429,8 +427,7 @@ fn acquire_in_a_replay_without_recordings() {
 /// stopping ends it; batches before the start and after the stop are not in it.
 #[test]
 fn a_recording_started_mid_session_begins_with_the_newest_batch() {
-    let dir = std::env::temp_dir().join(format!("lines-levels-mid-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("levels-mid");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -481,13 +478,11 @@ fn a_recording_started_mid_session_begins_with_the_newest_batch() {
         !recording_path(&dir.join("app"), "demo", "ES").exists(),
         "nor a start move it"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn recorded_levels_replay_to_the_same_map() {
-    let dir = std::env::temp_dir().join(format!("lines-levels-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("levels");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -506,7 +501,7 @@ fn recorded_levels_replay_to_the_same_map() {
             ctx.clone(),
             prices.clone(),
             live_cell.clone(),
-            dir.clone(),
+            dir.to_path_buf(),
         );
         rt.block_on(async move {
             let rec = runtime::recorder_slot(&*src, &ctx, Some(dir), true);
@@ -545,7 +540,7 @@ fn recorded_levels_replay_to_the_same_map() {
             Arc::new(AtomicI64::new(0)),
             Arc::new(AtomicBool::new(false)),
         );
-        let (src2, ctx2, cell2, dir2) = (src.clone(), ctx.clone(), cell.clone(), dir.clone());
+        let (src2, ctx2, cell2, dir2) = (src.clone(), ctx.clone(), cell.clone(), dir.to_path_buf());
         rt.block_on(async move {
             let task = tokio::spawn(runtime::replay(
                 src2,
@@ -579,7 +574,7 @@ fn recorded_levels_replay_to_the_same_map() {
         src.clone(),
         ctx.clone(),
         cell.clone(),
-        dir.clone(),
+        dir.to_path_buf(),
         moving.clone(),
     );
     rt.block_on(async move {
@@ -612,7 +607,6 @@ fn recorded_levels_replay_to_the_same_map() {
         assert!(until(true).await, "applied again");
         task.abort();
     });
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -635,18 +629,16 @@ fn only_live_modes_are_live() {
 
 #[test]
 fn replays_know_which_products_were_recorded() {
-    let dir = std::env::temp_dir().join(format!("lines-levels-rec-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("levels-rec");
     std::fs::write(recording_path(&dir, "acme", "CL"), b"").unwrap();
-    let replay = LevelMode::Replay(dir.clone());
+    let replay = LevelMode::Replay(dir.to_path_buf());
     assert!(replay.recorded("acme", "CL"));
     assert!(!replay.recorded("acme", "ES"), "no file for ES");
     assert!(!replay.recorded("other", "CL"), "another source's file");
     // Only a levels replay reads files.
-    assert!(!LevelMode::Record(dir.clone()).recorded("acme", "CL"));
+    assert!(!LevelMode::Record(dir.to_path_buf()).recorded("acme", "CL"));
     assert!(!LevelMode::NotRecorded.recorded("acme", "CL"));
     assert!(!LevelMode::Live.recorded("acme", "CL"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

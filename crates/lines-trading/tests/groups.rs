@@ -525,11 +525,10 @@ fn groups_survive_a_restart() {
     create(&mut r, "Funded", &["c"]).unwrap();
     let file = trading_file(&r.core, &paper()).unwrap();
     assert_eq!(file.version, persist::VERSION);
-    let dir = std::env::temp_dir().join(format!("lines-trading-groups-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("trading-groups");
     let path = dir.join("trading.json");
     persist::save(&path, &file).unwrap();
     let back = persist::load(&path).unwrap().unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(
         back.groups,
         vec![group("Evals", &["b", "a"]), group("Funded", &["c"])]

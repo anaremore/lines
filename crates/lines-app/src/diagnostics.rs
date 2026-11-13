@@ -582,11 +582,8 @@ mod tests {
         "FAKEQUERYSIG",
     ];
 
-    fn temp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("lines-diag-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn temp(name: &str) -> lines_core::scratch::Scratch {
+        lines_core::scratch::Scratch::new(&format!("diag-{name}"))
     }
 
     #[test]
@@ -684,7 +681,6 @@ mod tests {
         ] {
             assert!(all.contains(keep), "{keep} lost");
         }
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// The journal folder (its lines hold account ids and its charts show trades) stays out of
@@ -703,7 +699,7 @@ mod tests {
         });
         std::fs::write(dir.join("journal").join("mock.jsonl"), line.to_string()).unwrap();
         let inputs = Inputs {
-            config_dir: Some(dir.clone()),
+            config_dir: Some(dir.to_path_buf()),
             ..Default::default()
         };
         let entries = zipw::read(&build(&inputs).unwrap());
@@ -720,7 +716,6 @@ mod tests {
         let red = redact::json(&line).to_string();
         assert!(!red.contains("FAKE-ACCT-0007"), "{red}");
         assert!(!red.contains('/') && !red.contains('\\'), "{red}");
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

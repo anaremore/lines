@@ -430,12 +430,11 @@ impl Drop for DayWriter {
 mod tests {
     use super::*;
     use crate::catalog;
+    use lines_core::scratch::Scratch;
     use lines_core::{Month, Price, Qty};
 
-    fn root(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("lines-day-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        d
+    fn root(name: &str) -> Scratch {
+        Scratch::new(&format!("day-{name}"))
     }
 
     fn es() -> (Product, Option<ContractKey>) {
@@ -484,7 +483,6 @@ mod tests {
             DayWriter::begin(&r, "test", &es, k, thu, after),
             Err(BeginError::Not(DayState::Stored { .. }))
         ));
-        let _ = std::fs::remove_dir_all(&r);
     }
 
     /// A commit whose coverage save or rename fails stores nothing: no segment, no pin, no
@@ -517,7 +515,6 @@ mod tests {
             assert!(pinned(&dir.path).is_empty(), "{step}: unpinned");
             assert!(dir.coverage().trades.is_empty(), "{step}: no claim");
             assert_eq!(day_state(&dir, thu, after), DayState::Missing, "{step}");
-            let _ = std::fs::remove_dir_all(&r);
         }
     }
 
@@ -546,6 +543,5 @@ mod tests {
             Err(BeginError::Busy)
         ));
         drop(probe);
-        let _ = std::fs::remove_dir_all(&r);
     }
 }

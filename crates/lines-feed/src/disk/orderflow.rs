@@ -161,15 +161,30 @@ mod tests {
     use crate::catalog;
     use crate::disk::Coverage;
     use crate::disk::segment::{ENCODING, FlushPolicy, SegmentHeader, SegmentWriter};
+    use lines_core::scratch::Scratch;
     use lines_core::{ContractKey, Month, Price, Qty};
 
-    fn dir(name: &str) -> ContractDir {
-        let root =
-            std::env::temp_dir().join(format!("lines-orderflow-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+    /// A contract folder in a scratch root, removed when this drops.
+    struct TestDir {
+        dir: ContractDir,
+        _root: Scratch,
+    }
+
+    impl std::ops::Deref for TestDir {
+        type Target = ContractDir;
+        fn deref(&self) -> &ContractDir {
+            &self.dir
+        }
+    }
+
+    fn dir(name: &str) -> TestDir {
+        let root = Scratch::new(&format!("orderflow-{name}"));
         let es = catalog::get(catalog::ES).unwrap();
         let k = ContractKey::monthly(es.id, 2026, Month::new(12).unwrap());
-        ContractDir::new(&root, "test", &es, Some(k))
+        TestDir {
+            dir: ContractDir::new(&root, "test", &es, Some(k)),
+            _root: root,
+        }
     }
 
     /// Monday 2026-11-10's ES session: 2026-11-09T23:00Z to 2026-11-10T22:00Z.

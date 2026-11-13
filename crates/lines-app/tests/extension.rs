@@ -2,7 +2,6 @@
 //! crates runs through the same entry point, connection loop, recording and replay as a
 //! built-in one. The dummy here speaks a made-up text protocol over an in-memory transport.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -182,10 +181,9 @@ fn extensions() -> Extensions {
     Extensions::new().with_source(Arc::new(DummyExtension))
 }
 
-fn temp(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("lines-extension-{}", std::process::id()));
-    std::fs::create_dir_all(&d).unwrap();
-    d.join(name)
+/// A fresh scratch folder, standing for the file `name` inside it.
+fn temp(name: &str) -> lines_core::scratch::Scratch {
+    lines_core::scratch::Scratch::file("extension", name)
 }
 
 #[test]
@@ -240,7 +238,7 @@ fn registered_source_runs_headless_records_and_replays() {
     .expect("headless replay of the extension's recording");
     let replay = || {
         let mut feed = lines_feed::spawn(lines_feed::FeedConfig::new(lines_feed::Source::Replay {
-            path: rec.clone(),
+            path: rec.to_path_buf(),
             speed: 0.0,
             stop_at: None,
         }))

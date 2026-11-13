@@ -558,11 +558,8 @@ mod tests {
     use super::*;
     use verify::test_key::TestKey;
 
-    fn dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("lines-stage-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn dir(name: &str) -> lines_core::scratch::Scratch {
+        lines_core::scratch::Scratch::new(&format!("stage-{name}"))
     }
 
     /// A verified download is staged; a tampered one or a wrong signature is discarded,
@@ -587,7 +584,6 @@ mod tests {
             }
             s => panic!("{s:?}"),
         }
-        let _ = std::fs::remove_dir_all(&c);
         let c = dir("tamper");
         let bad = b"MZ new lines, changed";
         assert!(matches!(
@@ -604,7 +600,6 @@ mod tests {
             Status::Rejected(_, _)
         ));
         assert!(!staged_path(&c, v).exists(), "nothing staged");
-        let _ = std::fs::remove_dir_all(&c);
     }
 
     /// Stage `data` as v0.3.12, signed by a run-time key the swap then checks against.
@@ -630,7 +625,7 @@ mod tests {
         std::fs::write(c.join("settings.json"), "old settings").unwrap();
         staged_for_swap(&c, b"v0.3.12");
         let up = Pending::Update {
-            dirs: install::Dirs::in_config(c.clone()),
+            dirs: install::Dirs::in_config(c.to_path_buf()),
             staged: c.join("download.exe"),
             from: "0.3.11".into(),
             to: "0.3.12".into(),
@@ -641,7 +636,7 @@ mod tests {
         // The new version saves its own format, then rolls back.
         std::fs::write(c.join("settings.json"), "new settings").unwrap();
         let back = Pending::Rollback {
-            dirs: install::Dirs::in_config(c.clone()),
+            dirs: install::Dirs::in_config(c.to_path_buf()),
             target: "0.3.11".into(),
         };
         apply_rollback(&exe, &back).unwrap();
@@ -651,7 +646,6 @@ mod tests {
             "old settings"
         );
         assert!(install::load_state(&c).is_none());
-        let _ = std::fs::remove_dir_all(&c);
     }
 
     /// Failures change nothing: a staged file replaced after the press isn't installed, a
@@ -664,7 +658,7 @@ mod tests {
         let staged = staged_for_swap(&c, b"v0.3.12");
         std::fs::write(&staged, b"swapped in after the press").unwrap();
         let up = Pending::Update {
-            dirs: install::Dirs::in_config(c.clone()),
+            dirs: install::Dirs::in_config(c.to_path_buf()),
             staged: staged.clone(),
             from: "0.3.11".into(),
             to: "0.3.12".into(),
@@ -676,12 +670,11 @@ mod tests {
         assert!(!install::previous_exe(&exe).exists());
         assert!(install::load_state(&c).is_none());
         let back = Pending::Rollback {
-            dirs: install::Dirs::in_config(c.clone()),
+            dirs: install::Dirs::in_config(c.to_path_buf()),
             target: "0.3.11".into(),
         };
         assert!(apply_rollback(&exe, &back).is_err());
         assert_eq!(std::fs::read_to_string(&exe).unwrap(), "v0.3.11");
-        let _ = std::fs::remove_dir_all(&c);
     }
 
     /// The held label names what waits, once.

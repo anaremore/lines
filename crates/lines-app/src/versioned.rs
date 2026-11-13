@@ -365,14 +365,8 @@ mod tests {
         );
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "lines-versioned-{name}-{}-{}",
-            std::process::id(),
-            stamp()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn temp(name: &str) -> lines_core::scratch::Scratch {
+        lines_core::scratch::Scratch::new(&format!("versioned-{name}"))
     }
 
     fn files(dir: &Path) -> Vec<String> {
@@ -386,15 +380,14 @@ mod tests {
 
     #[test]
     fn missing_file_is_defaults_without_a_report() {
-        let dir = temp_dir("missing");
+        let dir = temp("missing");
         let l: Loaded<Doc> = load(&FORMAT, &dir.join("w.json"));
         assert!(l.value.is_none() && l.report.is_none() && l.writable);
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn corrupt_and_newer_files_are_backed_up_and_reported() {
-        let dir = temp_dir("bad");
+        let dir = temp("bad");
         let path = dir.join("w.json");
         std::fs::write(&path, b"{ truncated").unwrap();
         let l: Loaded<Doc> = load(&FORMAT, &path);
@@ -413,12 +406,11 @@ mod tests {
         assert!(l.value.is_none());
         assert!(l.report.unwrap().contains("version 9, newer"));
         assert!(files(&dir).iter().any(|n| n.starts_with("w.v9-")));
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn migrated_files_keep_their_old_version() {
-        let dir = temp_dir("migrate");
+        let dir = temp("migrate");
         let path = dir.join("w.json");
         std::fs::write(&path, br#"{"version":1,"name":"old"}"#).unwrap();
         let l: Loaded<Doc> = load(&FORMAT, &path);
@@ -428,12 +420,11 @@ mod tests {
             std::fs::read(dir.join("w.v1.json")).unwrap(),
             br#"{"version":1,"name":"old"}"#
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn save_is_atomic_and_keeps_the_previous_file() {
-        let dir = temp_dir("save");
+        let dir = temp("save");
         let path = dir.join("sub").join("w.json");
         save(&path, b"one").unwrap();
         assert_eq!(files(&dir.join("sub")), vec!["w.json"]);
@@ -444,6 +435,5 @@ mod tests {
             b"one"
         );
         assert_eq!(files(&dir.join("sub")), vec!["w.json", "w.json.bak"]);
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

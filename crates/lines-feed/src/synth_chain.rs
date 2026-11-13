@@ -268,7 +268,7 @@ mod tests {
 
     #[test]
     fn the_file_replays_into_chains() {
-        let dir = std::env::temp_dir().join(format!("lines-synth-chain-{}", std::process::id()));
+        let dir = lines_core::scratch::Scratch::new("synth-chain");
         let path = dir.join("spy.lfr");
         let (trades, quotes) = write_spy_chain(&path).unwrap();
         assert_eq!(trades, 390 * 30);
@@ -306,6 +306,5 @@ mod tests {
             std::fs::read(&path).unwrap(),
             std::fs::read(&again).unwrap()
         );
-        let _ = std::fs::remove_dir_all(dir);
     }
 }

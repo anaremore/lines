@@ -95,9 +95,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_damage() {
-        let dir = std::env::temp_dir().join(format!("lines-bars-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("bars");
+        let p = lines_core::scratch::Scratch::file("bars", "bars");
         let bars: Vec<Bar> = (0..100)
             .map(|i| Bar {
                 time: UtcMillis(i * 60_000),

@@ -391,18 +391,12 @@ trades {} {}
 /// The segment header the store writes (via its own writer, in a scratch directory).
 fn segment_header_bytes() -> Vec<u8> {
     use lines_feed::disk::segment::{FlushPolicy, SegmentWriter};
-    // Unique per call: tests build seeds on several threads at once.
-    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("lines-fuzz-seed-{}-{n}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    let path = dir.join("h.lseg");
+    // Unique per call (tests build seeds on several threads at once); removed on return.
+    let path = lines_core::scratch::Scratch::file("fuzz-seed", "h.lseg");
     let (w, _) = SegmentWriter::open(&path, &crate::disk::header(), FlushPolicy::default())
         .expect("scratch segment");
     w.close().expect("close");
-    let bytes = std::fs::read(&path).expect("read back");
-    let _ = std::fs::remove_dir_all(&dir);
-    bytes
+    std::fs::read(&path).expect("read back")
 }
 
 fn esz26() -> ContractKey {

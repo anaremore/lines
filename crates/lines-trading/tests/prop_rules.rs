@@ -247,12 +247,11 @@ fn waiting_rules_survive_a_restart() {
         ..eod()
     });
     r.set(None).unwrap();
-    let dir = std::env::temp_dir().join(format!("lines-prop-rules-{}", std::process::id()));
+    let dir = lines_core::scratch::Scratch::new("prop-rules");
     let path = dir.join("paper.json");
     let file = trading_file(&r.core, &paper()).expect("a paper core saves");
     persist::save(&path, &file).unwrap();
     let back = persist::load(&path).unwrap().expect("saved");
-    let _ = std::fs::remove_dir_all(&dir);
     let a = back.accounts.into_iter().next().unwrap();
     assert_eq!(
         a.pending_rules,

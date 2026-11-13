@@ -15,8 +15,7 @@ async fn nqz5_2025_09_11_imports_and_replays() {
         eprintln!("LINES_SIERRA_DATA not set; skipping");
         return;
     };
-    let dir = std::env::temp_dir().join(format!("lines-sierra-real-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let dir = lines_core::scratch::Scratch::new("sierra-real");
     let opts = |out: &str| ImportOptions {
         data_dir: PathBuf::from(&data),
         symbol: "NQZ5.CME".into(),
@@ -108,7 +107,6 @@ async fn nqz5_2025_09_11_imports_and_replays() {
             d.book.len(lines_core::Side::Ask)
         );
     }
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The front month on the same day. NQZ25 above was the deferred contract then (8,253 lots
@@ -120,8 +118,7 @@ fn nqu5_2025_09_11_front_month_book() {
         eprintln!("LINES_SIERRA_DATA not set; skipping");
         return;
     };
-    let dir = std::env::temp_dir().join(format!("lines-sierra-real-u5-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = lines_core::scratch::Scratch::new("sierra-real-u5");
     let r = import(&ImportOptions {
         data_dir: PathBuf::from(&data),
         symbol: "NQU5.CME".into(),
@@ -131,7 +128,6 @@ fn nqu5_2025_09_11_front_month_book() {
     })
     .expect("import");
     println!("{r}");
-    let _ = std::fs::remove_dir_all(&dir);
 
     assert_eq!(r.contract, "NQU25");
     assert!(
