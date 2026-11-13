@@ -1732,7 +1732,7 @@ impl LevelsLayer {
     }
 
     /// Paint one label of source `si` centred at `y` (`revealed`: a hidden label shown for
-    /// the pointer, never faded under it).
+    /// the pointer, in the plot at its right edge, never faded under it).
     #[allow(clippy::too_many_arguments)]
     fn paint_label(
         &mut self,
@@ -1803,12 +1803,24 @@ impl LevelsLayer {
         };
         let w = f32::from(shaped_in(&mut self.shaped, text, color, window).width) + label_chrome();
         let top = snap(f64::from(y - box_h * 0.5), scale);
-        let place = self.config.label_place;
+        // One shown for the pointer goes in the plot against its right edge (as labels on the
+        // chart pinned there): in the axis or the column it would sit under the crosshair's
+        // own price tag at the pointer's row.
+        let place = if revealed {
+            LabelPlace::Chart
+        } else {
+            self.config.label_place
+        };
         let (x, mut bg, mut ink) = match place {
             // Just right of the newest bar, moving with it; pinned to the plot's edge when that
             // doesn't fit (the newest bar off screen, or too near it).
             LabelPlace::Chart => {
-                let x = at.beside.unwrap_or((pw - w - gutter_right()).max(0.0));
+                let pinned = (pw - w - gutter_right()).max(0.0);
+                let x = if revealed {
+                    pinned
+                } else {
+                    at.beside.unwrap_or(pinned)
+                };
                 (snap(f64::from(x), scale), theme.label_bg, color)
             }
             LabelPlace::Column => (
