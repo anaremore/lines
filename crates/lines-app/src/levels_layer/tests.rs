@@ -2091,7 +2091,9 @@ fn event_lines_start_at_their_bars() {
         .copied()
         .expect("the box");
     // Its bars' whole slots: half a bar either side of their centres.
-    assert_eq!((boxed.x0, boxed.x1), (x(8.0) - 5.0, x(9.0) + 5.0));
+    assert_eq!((boxed.x0, boxed.x1), (x(8.0) - 5.0, x(16.0) + 5.0));
+    // The run's line from V's bar (21:12: bar 22).
+    assert_eq!(placed_named(&layer, ev, "Run 6016").x0, x(22.0));
     // An old source's levels: across the whole plot, as before.
     let demo = source_at(&layer, "demo");
     assert!(
@@ -2181,5 +2183,21 @@ fn marker_colors_read_in_every_theme() {
             "label AA on its plate ({})",
             t.is_dark()
         );
+    }
+}
+
+/// The highlight sets everything else clearly back (the theme's fade, 35 %); a highlighted
+/// event's label the crosshair's tag would cover steps just beside the tag, never under it.
+#[test]
+fn a_highlighted_event_stands_out() {
+    assert!((0.35..=0.4).contains(&crate::theme::GROUP_FADE));
+    assert_eq!(GROUP_DIM, crate::theme::GROUP_FADE);
+    // A tag 20 tall at 100, a label 16 tall: above it from at or above its centre, else below,
+    // each clear of it.
+    let (cy, ch, bh) = (100.0, 20.0, 16.0);
+    for y in [92.0, 100.0, 108.0] {
+        let at = beside_cross(y, cy, ch, bh);
+        assert!((at - cy).abs() >= (ch + bh) * 0.5, "{y} -> {at}");
+        assert_eq!(at < cy, y <= cy);
     }
 }

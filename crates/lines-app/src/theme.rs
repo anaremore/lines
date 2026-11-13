@@ -842,6 +842,12 @@ impl Theme {
 /// The last-price line's alpha (over the plot and every study).
 pub const LAST_LINE_ALPHA: f32 = 0.6;
 
+/// What everything outside a highlighted event (a level source's group under the pointer) is
+/// drawn at: its lines, zones, points and labels, every source's, clearly set back. The
+/// highlighted event stays whole, so its labels keep their AA; the faded ones are not meant to
+/// be read over it.
+pub const GROUP_FADE: f32 = 0.35;
+
 /// The contrast the candles and the last-price line keep over a fill drawn under them (WCAG
 /// 1.4.11 graphics, 3:1), with a margin for the GPU's blend rounding.
 pub const UNDER_CANDLES_CONTRAST: f64 = 3.0 + 0.05;

@@ -698,12 +698,13 @@ pub const EVENT_ID: &str = "demo-event";
 pub const EVENT_GROUP: &str = "demo/event-1";
 
 /// A synthetic event on the synthetic ES session (`--demo-event`): an anchor (A) at 15:58 ET
-/// (20:58 UTC), a first-wave extreme (E1) at 16:06 and a V low (hollow: unconfirmed) at 16:12, joined by a
-/// dashed path; the event's lines begin at their own bars (A's, the impact and the target lines
-/// at the anchor's, E1's at its own), never earlier; a box from the anchor to the target over
-/// the anchor's bar. All one group: pointing at any of them highlights the event. A second, ungrouped line
-/// across the whole plot stays as lines always were.
-pub static EVENT_TYPES: [LevelType; 5] = [
+/// (20:58 UTC), a first-wave extreme (E1) at 16:06 and a V low (hollow: unconfirmed) at 16:12,
+/// joined by a dashed path; the event's lines begin at their own bars (A's, the impact and the
+/// target lines at the anchor's, E1's at its own, the run's at V's), never earlier; a box from
+/// the anchor to the target, from the anchor's bar to E1's. All one group: pointing at any of
+/// them highlights the event. A second, ungrouped line across the whole plot stays as lines
+/// always were.
+pub static EVENT_TYPES: [LevelType; 6] = [
     LevelType::line(
         "ev-anchor",
         "Event anchor",
@@ -727,6 +728,12 @@ pub static EVENT_TYPES: [LevelType; 5] = [
         "Target line",
         "Event",
         themed(OLIVE.0, Some(OLIVE.1), LineType::Solid, 1),
+    ),
+    LevelType::line(
+        "ev-run",
+        "Run line",
+        "Event",
+        themed(GRAY.0, Some(GRAY.1), LineType::Dashed, 1),
     ),
     LevelType::zone(
         "ev-box",
@@ -824,8 +831,8 @@ impl LevelSource for DemoEvent {
             .group(EVENT_GROUP)
             .line(
                 "ev-target",
-                tick(602_600),
-                Some("Target 6026"),
+                tick(602_400),
+                Some("Target 6024"),
                 style(0xa87719ff, false),
             )
             .from(a_at)
@@ -833,12 +840,21 @@ impl LevelSource for DemoEvent {
             .zone(
                 "ev-box",
                 tick(600_500),
-                tick(602_600),
+                tick(602_400),
                 None,
                 style(0x868686ff, false),
             )
             .from(a_at)
-            .to(t("2026-11-05T20:59:00")?)
+            .to(e1_at)
+            .group(EVENT_GROUP)
+            // The run's line: at V's low, from V's bar (when the run ended).
+            .line(
+                "ev-run",
+                tick(601_600),
+                Some("Run 6016"),
+                style(0xc8c8c8ff, true),
+            )
+            .from(v_at)
             .group(EVENT_GROUP)
             .marker(a_at, tick(600_500), Some("A"))
             .group(EVENT_GROUP)

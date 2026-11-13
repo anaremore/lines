@@ -259,8 +259,8 @@ pub struct LabelStrip {
 const MARKER_R: f32 = 3.5;
 /// How near a member the pointer must be to highlight its event (logical px at 100 %).
 const GROUP_HIT: f32 = 4.0;
-/// What the levels and markers outside a highlighted event are drawn at.
-pub(crate) const GROUP_DIM: f32 = 0.3;
+/// What the levels, markers and labels outside a highlighted event are drawn at.
+pub(crate) const GROUP_DIM: f32 = crate::theme::GROUP_FADE;
 
 /// A member's opacity factor while event `hot` (source, group) is highlighted: whole for its
 /// own members (and everything while none is), [`GROUP_DIM`] for the rest.
@@ -269,6 +269,22 @@ fn group_dim(hot: Option<(usize, u16)>, si: usize, g: Option<u16>) -> f32 {
         Some((hs, hg)) if !(hs == si && g == Some(hg)) => GROUP_DIM,
         _ => 1.0,
     }
+}
+
+/// Where a label at `y` (`box_h` tall) goes beside the crosshair's price tag (centre `cy`,
+/// `ch` tall) that would cover it: just above it when it is at or above the tag's centre, else
+/// just below.
+fn beside_cross(y: f32, cy: f32, ch: f32, box_h: f32) -> f32 {
+    let off = (ch + box_h) * 0.5 + 1.0;
+    if y <= cy { cy - off } else { cy + off }
+}
+
+/// A color set back by a fade (a theme token's, with less alpha).
+type Faded = Hsla;
+
+/// `c` at `f` of its alpha.
+fn faded(c: Hsla, f: f32) -> Faded {
+    c.opacity(c.a * f)
 }
 
 /// A marker's color (a theme token, chosen by the helpers below).
@@ -2038,6 +2054,7 @@ impl LevelsLayer {
         let reveal = strip
             .hover
             .and_then(|(_, hy)| self.revealed_label(hy, ph, f32::from(plot.size.width)));
+        let hot = self.hot();
         for si in 0..self.slots.len() {
             let Some(map) = self.slots[si].map.clone() else {
                 continue;
@@ -2051,12 +2068,21 @@ impl LevelsLayer {
                 let p = self.slots[si].placed[pi];
                 let Some(y) = p.label_y else { continue };
                 // A tag the crosshair's price tag covers: none, while the pointer is there.
-                let under_cross = self.config.label_place == LabelPlace::Axis
-                    && strip
-                        .cross_tag
-                        .is_some_and(|(cy, ch)| (cy - y).abs() < (ch + box_h) * 0.5);
-                if !under_cross {
-                    self.paint_label(si, &map, p, y, false, &at, theme, window, cx);
+                let cross = strip
+                    .cross_tag
+                    .filter(|(cy, ch)| (cy - y).abs() < (ch + box_h) * 0.5)
+                    .filter(|_| self.config.label_place == LabelPlace::Axis);
+                let g = map.levels[p.index as usize].group;
+                match cross {
+                    None => self.paint_label(si, &map, p, y, false, &at, theme, window, cx),
+                    // A highlighted event's own: beside the crosshair's tag (the side it is
+                    // on), never hidden under it.
+                    Some((cy, ch)) if hot.is_some() && group_dim(hot, si, g) == 1.0 => {
+                        let y = beside_cross(y, cy, ch, box_h);
+                        self.paint_label(si, &map, p, y, false, &at, theme, window, cx);
+                    }
+                    // Any other tag the crosshair's price tag covers: none, while it's there.
+                    Some(_) => {}
                 }
             }
         }
@@ -2191,6 +2217,8 @@ impl LevelsLayer {
         } else {
             self.config.label_place
         };
+        // Outside a highlighted event: set back with its level.
+        let fade = group_dim(self.hot(), si, level.group);
         let (x, mut bg, mut ink) = match place {
             // Just right of the newest bar, moving with it; pinned to the plot's edge when that
             // doesn't fit (the newest bar off screen, or too near it).
@@ -2214,6 +2242,9 @@ impl LevelsLayer {
                 color,
             ),
         };
+        if fade < 1.0 {
+            (bg, ink) = (faded(bg, fade), faded(ink, fade));
+        }
         match place {
             LabelPlace::Chart => {
                 // Under the pointer: faded, so the bars under it show (and the last price runs
