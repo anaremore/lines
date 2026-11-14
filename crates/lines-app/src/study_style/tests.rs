@@ -495,7 +495,7 @@ unsafe impl std::alloc::GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-fn allocs_during(f: impl FnOnce()) -> usize {
+pub(crate) fn allocs_during(f: impl FnOnce()) -> usize {
     let before = ALLOCS.with(|c| c.get());
     f();
     ALLOCS.with(|c| c.get()) - before
@@ -1605,4 +1605,35 @@ fn a_merged_kind_loads_the_styles_of_the_kinds_it_replaced() {
     // Its own entry wins over a replaced one.
     let m = saved(serde_json::json!({"demand": {"width": 4}, "demand-upper": upper}));
     assert_eq!(width(&m), 4);
+}
+
+/// A hover-only type's editor says what Show off means (one short line); other types have no
+/// note.
+#[test]
+fn a_hover_only_type_says_so_in_its_editor() {
+    static HOVER: [LevelType; 2] = [
+        LevelType::line(
+            "anchor",
+            "Event anchor",
+            "Lines",
+            TypeStyle {
+                shown: false,
+                ..TypeStyle::OWN
+            },
+        )
+        .hover_only(),
+        LevelType::line("other", "Other", "Lines", TypeStyle::OWN),
+    ];
+    let e = level_editor(
+        "Levels".into(),
+        &PartStyles::new(),
+        &HOVER,
+        LabelMode::Name,
+        None,
+        |_| None,
+    );
+    let note = |title: &str| e.parts.iter().find(|p| p.title == title).unwrap().note;
+    assert_eq!(note("Event anchor"), Some(HOVER_ONLY_NOTE));
+    assert_eq!(note("Other"), None);
+    assert!(HOVER_ONLY_NOTE.chars().count() <= 60 && !HOVER_ONLY_NOTE.contains('\n'));
 }

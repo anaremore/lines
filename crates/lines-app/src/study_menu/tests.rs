@@ -8,7 +8,9 @@ fn sources() -> Vec<SourceInfo> {
         kinds: vec!["pivot".into(), "zone".into()],
         series: Vec::new(),
         parents: Vec::new(),
+        kind_labels: Vec::new(),
         styled_off: Vec::new(),
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
     }]
 }
@@ -263,7 +265,9 @@ fn a_sources_series_studies_are_offered_added_and_removed() {
             ("swing".into(), "Demo swing".into()),
         ],
         parents: Vec::new(),
+        kind_labels: Vec::new(),
         styled_off: Vec::new(),
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
     }];
     let mut set = StudySet::default();
@@ -712,7 +716,9 @@ fn kinds_hidden_through_their_parent() {
         label: "Src".into(),
         kinds: vec!["open".into(), "mid".into(), "pivot".into()],
         parents: vec![Some("session"), Some("session"), None],
+        kind_labels: Vec::new(),
         styled_off: Vec::new(),
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
         series: Vec::new(),
     }];
@@ -741,7 +747,9 @@ fn a_type_off_in_style_reads_unchecked() {
         label: "Src".into(),
         kinds: vec!["pivot".into(), "zone".into()],
         parents: Vec::new(),
+        kind_labels: Vec::new(),
         styled_off: vec![true, false],
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
         series: Vec::new(),
     }];
@@ -754,6 +762,14 @@ fn a_type_off_in_style_reads_unchecked() {
     let on = |name: &str| option(&items, name).map(|(on, _)| on);
     assert_eq!(on("pivot (off in Style…)"), Some(false));
     assert_eq!(on("zone"), Some(true));
+    // A hover-only type with Show off: "on hover", read as the pane shows it.
+    let src = vec![SourceInfo {
+        styled_hover: vec![true, false],
+        ..src[0].clone()
+    }];
+    let items = m.items(&input(&set, &src, &[]));
+    let on = |name: &str| option(&items, name).map(|(on, _)| on);
+    assert_eq!(on("pivot (on hover)"), Some(true));
 }
 
 /// Trade history on new charts is optional in the saved defaults (absent: on) and written only
@@ -1029,7 +1045,9 @@ fn level_kinds_are_a_multi_select() {
         label: "RS Levels".into(),
         kinds: vec!["pivot".into(), "zone".into(), "varis".into()],
         parents: Vec::new(),
+        kind_labels: Vec::new(),
         styled_off: Vec::new(),
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
         series: Vec::new(),
     }];
@@ -1261,4 +1279,32 @@ fn an_open_list_follows_its_item() {
     assert_ne!(i, j, "the lines moved");
     assert_eq!(m.drop.as_ref().map(|d| d.at), Some(j));
     assert_eq!(m.cursor, j);
+}
+
+/// The Kinds list shows each kind by the name its source declares (`LevelType::label`), the
+/// id where it declares none; toggling still acts on the id.
+#[test]
+fn kinds_read_by_their_declared_names() {
+    let src = vec![SourceInfo {
+        id: "src".into(),
+        label: "Src".into(),
+        kinds: vec!["det-anchor".into(), "det-irl".into(), "raw-kind".into()],
+        parents: Vec::new(),
+        kind_labels: vec![Some("Anchor (A)"), Some("Impact red line"), None],
+        styled_off: vec![false, true, false],
+        styled_hover: Vec::new(),
+        plugin: Vec::new(),
+        series: Vec::new(),
+    }];
+    let set = StudySet::default();
+    let m = StudyMenu {
+        editing: Some(StudyRef::Levels("src".into())),
+        ..StudyMenu::default()
+    };
+    let items = m.items(&input(&set, &src, &[]));
+    let on = |name: &str| option(&items, name).map(|(on, _)| on);
+    assert_eq!(on("Anchor (A)"), Some(true));
+    assert_eq!(on("Impact red line (off in Style…)"), Some(false));
+    assert_eq!(on("raw-kind"), Some(true));
+    assert_eq!(on("det-anchor"), None, "never the id when it has a name");
 }

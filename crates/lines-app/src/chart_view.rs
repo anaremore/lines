@@ -1374,9 +1374,17 @@ impl ChartView {
                     .iter()
                     .map(|k| self.levels.kind_parent(&id, k))
                     .collect(),
+                kind_labels: kinds
+                    .iter()
+                    .map(|k| self.levels.kind_label(&id, k))
+                    .collect(),
                 styled_off: kinds
                     .iter()
                     .map(|k| !self.levels.kind_styled_shown(&id, k))
+                    .collect(),
+                styled_hover: kinds
+                    .iter()
+                    .map(|k| self.levels.kind_hover_only(&id, k))
                     .collect(),
                 // Its own settings (app-wide: one feed serves every chart).
                 plugin: lines_feed::levels::registered()
@@ -5008,6 +5016,10 @@ impl ChartView {
             if !self.visibility.draws_studies() {
                 self.footprint.reset(); // hidden: no cells, no line gaps
             }
+            // The pointer before the levels' columns: a hover-only level of the event under it
+            // is laid out (its label row) this frame.
+            self.levels
+                .set_pointer(self.hover.filter(|_| self.cross_in_sub.is_none()));
             prepare_studies(
                 self.visibility,
                 &mut self.profile,
@@ -6232,6 +6244,11 @@ impl ChartView {
                 // An event under the pointer (in the price plot) is highlighted.
                 self.levels
                     .set_pointer(self.hover.filter(|_| self.cross_in_sub.is_none()));
+                // Another event than this frame's layout: laid out on the next (a refresh
+                // during this draw wouldn't bring one).
+                if self.levels.needs_layout() {
+                    window.on_next_frame(|window, _| window.refresh());
+                }
                 self.levels.paint_back(plot, &t, window);
                 self.studies.paint_back((ox, oy), &self.vp, &t, window);
             }

@@ -495,6 +495,12 @@ struct Slot {
     error: Option<String>,
     /// Kind visibility bit per kind index (maps have at most 64 kinds).
     kinds: u64,
+    /// The kinds among `kinds` placed only to be shown on hover (`Slot::type_latent`): their
+    /// levels are drawn only while their event is highlighted.
+    latent: u64,
+    /// This frame's hover-only levels on the plot, held back: (index in `placed`, x0, x1), so
+    /// the highlighted event's are drawn again ([`LevelsLayer::hover_only`]). Fixed capacity.
+    held: Vec<(u32, f32, f32)>,
     placed: Vec<Placed>,
     /// This frame's markers on the plot: (marker index, x, y), fixed capacity
     /// ([`lines_core::levels::MAX_MARKERS`]).
@@ -562,6 +568,30 @@ impl Slot {
             .and_then(|t| t.parent)
             .and_then(|p| map.kinds.iter().position(|q| q == p));
         shown(k) && parent.is_none_or(shown)
+    }
+
+    /// Whether map kind `k`'s type is shown on hover only now: declared hover-only
+    /// (`LevelType::hover_only`), its style's Show off (Show on draws it always), and its
+    /// parent's type drawn where it has one (a child stays hidden with its parent).
+    fn type_latent(&self, map: &LevelMap, k: usize) -> bool {
+        let shown = |j: usize| {
+            self.kind_looks
+                .get(j)
+                .copied()
+                .flatten()
+                .is_none_or(|t| t.shown)
+        };
+        let Some(ty) = map
+            .kinds
+            .get(k)
+            .and_then(|id| self.types.iter().find(|t| t.id == id))
+        else {
+            return false;
+        };
+        let parent = ty
+            .parent
+            .and_then(|p| map.kinds.iter().position(|q| q == p));
+        ty.hover_only && !shown(k) && parent.is_none_or(shown)
     }
 
     /// A zone's fill at `dim`, before the under-candles scale: its type's fill (per-type
@@ -962,6 +992,12 @@ pub struct LevelsLayer {
     pointer: Option<(f32, f32)>,
     /// The event it highlights this frame (source, group), found once in `set_pointer`.
     hot: Option<(usize, u16)>,
+    /// The event whose hover-only levels the last layout drew ([`Self::hover_only`]): a
+    /// pointer that now finds another (or none) holds them back again at once.
+    laid_hot: Option<(usize, u16)>,
+    /// Paint held hover-only levels back since the last layout: the other labels are laid
+    /// out again on the next frame (rows made for them are free).
+    held_back: bool,
     /// The plot's size as of [`Self::place`], for laying the labels out in [`Self::columns`].
     label_plot: (f32, f32),
 }
@@ -1026,6 +1062,8 @@ impl LevelsLayer {
             joint_slots: Vec::new(),
             pointer: None,
             hot: None,
+            laid_hot: None,
+            held_back: false,
             label_plot: (0.0, 0.0),
         }
     }
@@ -1111,6 +1149,8 @@ impl LevelsLayer {
                     series_status: LevelStatus::Missing,
                     error: None,
                     kinds: u64::MAX,
+                    latent: 0,
+                    held: Vec::with_capacity(MAX_LEVELS),
                     placed: Vec::with_capacity(MAX_LEVELS),
                     markers: Vec::with_capacity(lines_core::levels::MAX_MARKERS),
                 }
@@ -1158,6 +1198,13 @@ impl LevelsLayer {
         s.map
             .as_ref()
             .is_none_or(|m| s.type_drawn(m, usize::from(k)))
+    }
+
+    /// Kind `kind` of source `id` as the source names it (`LevelType::label`), when it declares
+    /// the type with a name; the menus show the id otherwise.
+    pub fn kind_label(&self, id: &str, kind: &str) -> Option<&'static str> {
+        let s = self.slots.iter().find(|s| s.handle.source() == id)?;
+        Some(s.types.iter().find(|t| t.id == kind)?.label).filter(|l| !l.trim().is_empty())
     }
 
     /// The kind `kind` of source `id` was split from (`LevelType::parent`).
@@ -1295,6 +1342,7 @@ impl LevelsLayer {
     /// the labels' gutter moves it).
     pub fn columns(&mut self, bars: BarsView<'_>, vp: &Viewport) {
         self.time_extents(&bars, vp);
+        self.hover_only();
         let (w, h) = self.label_plot;
         self.place_all_labels(w, h);
         if let Some(h) = &self.vwap
@@ -1360,11 +1408,79 @@ impl LevelsLayer {
         }
     }
 
+    /// The hover-only levels (`Slot::latent`) this frame: hidden (no line, no label row), but
+    /// the highlighted event's, found from its members always drawn (the pointer as last set,
+    /// [`Self::set_pointer`], before [`Self::columns`]). After [`Self::time_extents`], before
+    /// the labels are laid out. No allocation.
+    fn hover_only(&mut self) {
+        for s in &mut self.slots {
+            s.held.clear();
+            if s.latent == 0 {
+                continue;
+            }
+            let Some(map) = s.map.as_ref() else { continue };
+            for (pi, p) in s.placed.iter_mut().enumerate() {
+                let k = map.levels[p.index as usize].kind;
+                if k < 64 && s.latent & (1u64 << k) != 0 {
+                    if p.x0 <= p.x1 && s.held.len() < s.held.capacity() {
+                        s.held.push((pi as u32, p.x0, p.x1));
+                    }
+                    (p.x0, p.x1, p.label_y) = (1.0, 0.0, None);
+                }
+            }
+        }
+        self.hot = self.pointer.and_then(|(x, y)| self.group_at(x, y));
+        (self.laid_hot, self.held_back) = (self.hot, false);
+        let Some((hs, hg)) = self.hot else { return };
+        let s = &mut self.slots[hs];
+        let Some(map) = s.map.as_ref() else { return };
+        for j in 0..s.held.len() {
+            let (pi, x0, x1) = s.held[j];
+            let p = &mut s.placed[pi as usize];
+            if map.levels[p.index as usize].group == Some(hg) {
+                (p.x0, p.x1) = (x0, x1);
+            }
+        }
+    }
+
     /// The pointer over the plot (plot px; `None`: away), before painting: an event under it is
     /// highlighted ([`Self::group_at`]).
     pub fn set_pointer(&mut self, at: Option<(f32, f32)>) {
         self.pointer = at;
         self.hot = at.and_then(|(x, y)| self.group_at(x, y));
+        // Another event (or none) than the layout revealed: its hover-only levels are held
+        // back again (no line, no label) until the next layout reveals the new one's.
+        if self.hot != self.laid_hot
+            && let Some((hs, _)) = self.laid_hot.take()
+            && let Some(s) = self.slots.get_mut(hs)
+        {
+            for j in 0..s.held.len() {
+                let pi = s.held[j].0 as usize;
+                if let Some(p) = s.placed.get_mut(pi) {
+                    (p.x0, p.x1, p.label_y) = (1.0, 0.0, None);
+                }
+            }
+            self.held_back = !s.held.is_empty();
+        }
+    }
+
+    /// Whether the last layout no longer fits the pointer: the event under it isn't the one
+    /// laid out (its hover-only levels need laying out), or paint held some back (the rows
+    /// they had are free). The chart asks for another frame.
+    pub fn needs_layout(&self) -> bool {
+        self.held_back || (self.hot.is_some() && self.hot != self.laid_hot)
+    }
+
+    /// Whether kind `kind` of source `id` is hover-only now ([`Slot::type_latent`]): the
+    /// studies menu says "on hover" where it would say "off".
+    pub fn kind_hover_only(&self, id: &str, kind: &str) -> bool {
+        let Some(s) = self.slots.iter().find(|s| s.handle.source() == id) else {
+            return false;
+        };
+        s.map.as_ref().is_some_and(|m| {
+            m.kind_index(kind)
+                .is_some_and(|k| s.type_latent(m, usize::from(k)))
+        })
     }
 
     /// The event under the plot point `(x, y)`: its source and group, when the point is on one
@@ -1448,22 +1564,31 @@ impl LevelsLayer {
         // 3. Placement.
         for s in &mut self.slots {
             s.placed.clear();
+            // Its held indices were into the old placement.
+            s.held.clear();
             let source = s.handle.source();
             let Some(map) = s.map.as_ref() else { continue };
             if !self.config.source_shown(source) || s.status == LevelStatus::Missing {
                 continue;
             }
             let on_edge = self.config.label_place == LabelPlace::Axis;
-            let mut mask = 0u64;
+            let (mut mask, mut latent) = (0u64, 0u64);
             for (i, k) in map.kinds.iter().enumerate().take(64) {
                 // Shown on this pane (its parent kind too), and its type (if declared) drawn.
                 // A child kind is also hidden while its parent's type is (`Slot::type_drawn`).
+                // A hover-only type is placed too, drawn only while its event is highlighted
+                // (`Self::columns`).
                 let parent = s.types.iter().find(|t| t.id == k).and_then(|t| t.parent);
-                if self.config.kind_shown_under(source, k, parent) && s.type_drawn(map, i) {
+                if !self.config.kind_shown_under(source, k, parent) {
+                    continue;
+                }
+                if s.type_drawn(map, i) {
                     mask |= 1 << i;
+                } else if s.type_latent(map, i) {
+                    (mask, latent) = (mask | 1 << i, latent | 1 << i);
                 }
             }
-            s.kinds = mask;
+            (s.kinds, s.latent) = (mask, latent);
             place(map, vp, vwap_now, |k| mask & (1 << k) != 0, &mut s.placed);
             // Each label at its type's edge (kept through collisions: one that clashes stacks
             // a row further from its zone, or is dropped; never moved to the other edge).
@@ -1760,9 +1885,12 @@ impl LevelsLayer {
                 let parent = kind
                     .and_then(|k| s.types.iter().find(|t| t.id == k))
                     .and_then(|t| t.parent);
-                let shown = kind.is_some_and(|k| self.config.kind_shown_under(source, k, parent))
-                    && s.type_drawn(map, usize::from(l.kind));
-                if !shown {
+                // A hover-only one in an event counts toward the widest (the axis never
+                // resizes on a hover), never toward the cut (one unseen never turns every
+                // label off).
+                let pane = kind.is_some_and(|k| self.config.kind_shown_under(source, k, parent));
+                let latent = l.group.is_some() && s.type_latent(map, usize::from(l.kind));
+                if !pane || !(s.type_drawn(map, usize::from(l.kind)) || latent) {
                     continue;
                 }
                 let text = s.texts.get(i).and_then(|t| t.as_deref()).unwrap_or(name);
@@ -1772,6 +1900,9 @@ impl LevelsLayer {
                     .copied()
                     .unwrap_or_else(|| estimate(text));
                 widest = widest.max(w);
+                if latent {
+                    continue;
+                }
                 // Its shortest cut, under the same filter (a hidden type's long price never
                 // decides whether the shown labels fit).
                 let c = self.shortest.get(text).copied().unwrap_or_else(|| {

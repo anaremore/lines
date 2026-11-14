@@ -685,9 +685,15 @@ pub struct SourceInfo {
     pub series: Vec<(String, String)>,
     /// Each kind's parent kind (`LevelType::parent`), in `kinds` order (empty: none).
     pub parents: Vec<Option<&'static str>>,
+    /// Each kind's name as its source declares it (`LevelType::label`), in `kinds` order
+    /// (empty, or `None` for one: the kind's id is shown).
+    pub kind_labels: Vec<Option<&'static str>>,
     /// Kinds whose type is turned off in the style editor (Show), in `kinds` order (empty:
     /// none).
     pub styled_off: Vec<bool>,
+    /// Kinds among `styled_off` shown on hover only (`LevelType::hover_only`), in `kinds`
+    /// order (empty: none).
+    pub styled_hover: Vec<bool>,
     /// Its own settings ("Source settings", `crate::plugin_settings`; empty: none). App-wide.
     pub plugin: Vec<crate::plugin_settings::Row>,
 }
@@ -1574,13 +1580,30 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     _ => StudyAction::ToggleLevelKind(id.clone(), k.clone()),
                 };
                 // A type turned off in its style editor reads unchecked and says where.
+                // One shown on hover only says so and reads as the pane shows it.
                 let off = s.styled_off.get(i).copied().unwrap_or(false);
-                let label = if off {
-                    format!("{k} (off in Style…)")
+                let hover = off && s.styled_hover.get(i).copied().unwrap_or(false);
+                // The source's name for it, else its id.
+                let name = s
+                    .kind_labels
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(k.as_str());
+                let label = if hover {
+                    format!("{name} (on hover)")
+                } else if off {
+                    format!("{name} (off in Style…)")
                 } else {
-                    k.clone()
+                    name.to_owned()
                 };
-                c!("Kinds", label, shown && !off, Swatch::None, set(action));
+                c!(
+                    "Kinds",
+                    label,
+                    shown && (!off || hover),
+                    Swatch::None,
+                    set(action)
+                );
             }
             c!(
                 "Labels",

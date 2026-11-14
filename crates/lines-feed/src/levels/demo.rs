@@ -704,16 +704,31 @@ pub const EVENT_GROUP: &str = "demo/event-1";
 /// the anchor to the target, from the anchor's bar to E1's. All one group: pointing at any of
 /// them highlights the event. A second, ungrouped line across the whole plot stays as lines
 /// always were.
-pub static EVENT_TYPES: [LevelType; 6] = [
+pub static EVENT_TYPES: [LevelType; 7] = [
+    // A's and E1's lines: shown on hover only (Show on draws them always).
     LevelType::line(
         "ev-anchor",
         "Event anchor",
         "Event",
-        themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1),
-    ),
+        TypeStyle {
+            shown: false,
+            ..themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1)
+        },
+    )
+    .hover_only(),
     LevelType::line(
         "ev-e1",
         "First-wave extreme",
+        "Event",
+        TypeStyle {
+            shown: false,
+            ..themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1)
+        },
+    )
+    .hover_only(),
+    LevelType::line(
+        "ev-prior",
+        "Prior anchor",
         "Event",
         themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1),
     ),
@@ -867,7 +882,7 @@ impl LevelSource for DemoEvent {
             .hollow()
             // An ordinary level beside the event: across the whole plot, as always.
             .line(
-                "ev-anchor",
+                "ev-prior",
                 tick(599_300),
                 Some("Prior A 5993"),
                 style(0x838799ff, false),
