@@ -1200,6 +1200,13 @@ impl LevelsLayer {
             .is_none_or(|m| s.type_drawn(m, usize::from(k)))
     }
 
+    /// Kind `kind` of source `id` as the source names it (`LevelType::label`), when it declares
+    /// the type with a name; the menus show the id otherwise.
+    pub fn kind_label(&self, id: &str, kind: &str) -> Option<&'static str> {
+        let s = self.slots.iter().find(|s| s.handle.source() == id)?;
+        Some(s.types.iter().find(|t| t.id == kind)?.label).filter(|l| !l.trim().is_empty())
+    }
+
     /// The kind `kind` of source `id` was split from (`LevelType::parent`).
     pub fn kind_parent(&self, id: &str, kind: &str) -> Option<&'static str> {
         let s = self.slots.iter().find(|s| s.handle.source() == id)?;

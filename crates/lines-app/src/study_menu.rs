@@ -685,6 +685,9 @@ pub struct SourceInfo {
     pub series: Vec<(String, String)>,
     /// Each kind's parent kind (`LevelType::parent`), in `kinds` order (empty: none).
     pub parents: Vec<Option<&'static str>>,
+    /// Each kind's name as its source declares it (`LevelType::label`), in `kinds` order
+    /// (empty, or `None` for one: the kind's id is shown).
+    pub kind_labels: Vec<Option<&'static str>>,
     /// Kinds whose type is turned off in the style editor (Show), in `kinds` order (empty:
     /// none).
     pub styled_off: Vec<bool>,
@@ -1580,12 +1583,19 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                 // One shown on hover only says so and reads as the pane shows it.
                 let off = s.styled_off.get(i).copied().unwrap_or(false);
                 let hover = off && s.styled_hover.get(i).copied().unwrap_or(false);
+                // The source's name for it, else its id.
+                let name = s
+                    .kind_labels
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(k.as_str());
                 let label = if hover {
-                    format!("{k} (on hover)")
+                    format!("{name} (on hover)")
                 } else if off {
-                    format!("{k} (off in Style…)")
+                    format!("{name} (off in Style…)")
                 } else {
-                    k.clone()
+                    name.to_owned()
                 };
                 c!(
                     "Kinds",

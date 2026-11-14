@@ -1374,6 +1374,10 @@ impl ChartView {
                     .iter()
                     .map(|k| self.levels.kind_parent(&id, k))
                     .collect(),
+                kind_labels: kinds
+                    .iter()
+                    .map(|k| self.levels.kind_label(&id, k))
+                    .collect(),
                 styled_off: kinds
                     .iter()
                     .map(|k| !self.levels.kind_styled_shown(&id, k))
