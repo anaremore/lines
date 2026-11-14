@@ -2192,12 +2192,30 @@ fn marker_colors_read_in_every_theme() {
 fn a_highlighted_event_stands_out() {
     assert!((0.35..=0.4).contains(&crate::theme::GROUP_FADE));
     assert_eq!(GROUP_DIM, crate::theme::GROUP_FADE);
-    // A tag 20 tall at 100, a label 16 tall: above it from at or above its centre, else below,
-    // each clear of it.
-    let (cy, ch, bh) = (100.0, 20.0, 16.0);
+    // A tag 20 tall at 100, a label 16 tall, a plot 400 tall: above it from at or above its
+    // centre, else below, each clear of it.
+    let (cy, ch, bh, ph) = (100.0, 20.0, 16.0, 400.0);
     for y in [92.0, 100.0, 108.0] {
-        let at = beside_cross(y, cy, ch, bh);
+        let at = beside_cross(y, cy, ch, bh, ph, &[], None).unwrap();
         assert!((at - cy).abs() >= (ch + bh) * 0.5, "{y} -> {at}");
         assert_eq!(at < cy, y <= cy);
     }
+    // Two of the event's labels on the same side: the second takes the next free row, never
+    // the first's.
+    let first = beside_cross(95.0, cy, ch, bh, ph, &[], None).unwrap();
+    let second = beside_cross(90.0, cy, ch, bh, ph, &[first], None).unwrap();
+    assert!((second - first).abs() >= bh, "{first} {second}");
+    // Another source's label already drawn just above the tag: stepped past it.
+    let other = cy - 22.5;
+    let at = beside_cross(95.0, cy, ch, bh, ph, &[other], None).unwrap();
+    assert!((at - other).abs() >= bh && (at - cy).abs() >= (ch + bh) * 0.5);
+    // Clear of the last-price tag.
+    let last = Some((cy - 19.0, 18.0));
+    let at = beside_cross(95.0, cy, ch, bh, ph, &[], last).unwrap();
+    assert!((at - (cy - 19.0)).abs() >= (18.0 + bh) * 0.5);
+    // At the plot's top: below the tag instead, never off the plot.
+    let at = beside_cross(3.0, 5.0, ch, bh, ph, &[], None).unwrap();
+    assert!(at > 5.0 && at <= ph - bh * 0.5);
+    // No room either way (a plot hardly taller than the tag): none.
+    assert_eq!(beside_cross(10.0, 10.0, ch, bh, 24.0, &[], None), None);
 }

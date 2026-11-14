@@ -271,12 +271,38 @@ fn group_dim(hot: Option<(usize, u16)>, si: usize, g: Option<u16>) -> f32 {
     }
 }
 
-/// Where a label at `y` (`box_h` tall) goes beside the crosshair's price tag (centre `cy`,
-/// `ch` tall) that would cover it: just above it when it is at or above the tag's centre, else
-/// just below.
-fn beside_cross(y: f32, cy: f32, ch: f32, box_h: f32) -> f32 {
+/// Where a highlighted event's label at `y` (`box_h` tall) goes when the crosshair's price
+/// tag (centre `cy`, `ch` tall) would cover it: the nearest row beside the tag, on the label's
+/// own side first (above when at or above the tag's centre), then the other, that keeps clear
+/// of the tag, of each label row in `taken`, of `blocked` (the last-price tag: centre, height)
+/// and inside a plot `ph` tall. `None` when no row within a few labels of the tag is free.
+/// No allocation.
+fn beside_cross(
+    y: f32,
+    cy: f32,
+    ch: f32,
+    box_h: f32,
+    ph: f32,
+    taken: &[f32],
+    blocked: Option<(f32, f32)>,
+) -> Option<f32> {
     let off = (ch + box_h) * 0.5 + 1.0;
-    if y <= cy { cy - off } else { cy + off }
+    let up = y <= cy;
+    for above in [up, !up] {
+        for k in 0..8u8 {
+            let d = off + f32::from(k) * box_h;
+            let at = if above { cy - d } else { cy + d };
+            if at < box_h * 0.5 || at > ph - box_h * 0.5 {
+                break; // off the plot this way
+            }
+            let clear = taken.iter().all(|r| (r - at).abs() >= box_h)
+                && blocked.is_none_or(|(by, bh)| (by - at).abs() >= (bh + box_h) * 0.5);
+            if clear {
+                return Some(at);
+            }
+        }
+    }
+    None
 }
 
 /// A color set back by a fade (a theme token's, with less alpha).
@@ -918,6 +944,9 @@ pub struct LevelsLayer {
     /// last-price line breaks around them ([`Self::label_chips`]); capacity kept, so steady
     /// frames don't allocate.
     chips: Vec<[f32; 4]>,
+    /// Each label row drawn this frame (centre y): a highlighted event's label stepping beside
+    /// the crosshair's tag keeps clear of them ([`beside_cross`]). Grown with the maps.
+    rows: Vec<f32>,
     /// Every source's placed levels this frame, joined for one label layout (`place`): each
     /// level's index offset by its source's place in `seen_all`. Capacity kept, so steady
     /// frames don't allocate.
@@ -990,6 +1019,7 @@ impl LevelsLayer {
             serving_gen: 0,
             last_y: None,
             chips: Vec::new(),
+            rows: Vec::new(),
             joint: Vec::new(),
             seen_all: Vec::new(),
             drawn_all: Vec::new(),
@@ -1247,6 +1277,7 @@ impl LevelsLayer {
             .reserve(levels.saturating_sub(self.seen_all.len()));
         self.drawn_all
             .reserve(levels.saturating_sub(self.drawn_all.len()));
+        self.rows.reserve(levels.saturating_sub(self.rows.len()));
         self.joint.reserve(placed.saturating_sub(self.joint.len()));
         self.joint_slots
             .reserve(self.slots.len().saturating_sub(self.joint_slots.len()));
@@ -2055,37 +2086,50 @@ impl LevelsLayer {
             .hover
             .and_then(|(_, hy)| self.revealed_label(hy, ph, f32::from(plot.size.width)));
         let hot = self.hot();
-        for si in 0..self.slots.len() {
-            let Some(map) = self.slots[si].map.clone() else {
-                continue;
-            };
-            if !self.config.labels_shown(self.slots[si].handle.source()) {
-                continue;
-            }
-            // Resolved once per theme, map and looks (allocates only then).
-            self.slots[si].label_colors(&map, theme, hair, self.px_per_unit);
-            for pi in 0..self.slots[si].placed.len() {
-                let p = self.slots[si].placed[pi];
-                let Some(y) = p.label_y else { continue };
-                // A tag the crosshair's price tag covers: none, while the pointer is there.
-                let cross = strip
-                    .cross_tag
-                    .filter(|(cy, ch)| (cy - y).abs() < (ch + box_h) * 0.5)
-                    .filter(|_| self.config.label_place == LabelPlace::Axis);
-                let g = map.levels[p.index as usize].group;
-                match cross {
-                    None => self.paint_label(si, &map, p, y, false, &at, theme, window, cx),
-                    // A highlighted event's own: beside the crosshair's tag (the side it is
-                    // on), never hidden under it.
-                    Some((cy, ch)) if hot.is_some() && group_dim(hot, si, g) == 1.0 => {
-                        let y = beside_cross(y, cy, ch, box_h);
-                        self.paint_label(si, &map, p, y, false, &at, theme, window, cx);
-                    }
-                    // Any other tag the crosshair's price tag covers: none, while it's there.
-                    Some(_) => {}
+        // Two passes: every label where the layout put it (but those under the crosshair's
+        // tag), then a highlighted event's own that the tag covers, each beside the tag on a
+        // row clear of the tag, the last-price tag and every label drawn (else none).
+        let mut rows = std::mem::take(&mut self.rows);
+        rows.clear();
+        let blocked = self.blocked;
+        for pass in 0..2 {
+            for si in 0..self.slots.len() {
+                let Some(map) = self.slots[si].map.clone() else {
+                    continue;
+                };
+                if !self.config.labels_shown(self.slots[si].handle.source()) {
+                    continue;
+                }
+                // Resolved once per theme, map and looks (allocates only then).
+                self.slots[si].label_colors(&map, theme, hair, self.px_per_unit);
+                for pi in 0..self.slots[si].placed.len() {
+                    let p = self.slots[si].placed[pi];
+                    let Some(y) = p.label_y else { continue };
+                    let cross = strip
+                        .cross_tag
+                        .filter(|(cy, ch)| (cy - y).abs() < (ch + box_h) * 0.5)
+                        .filter(|_| self.config.label_place == LabelPlace::Axis);
+                    let g = map.levels[p.index as usize].group;
+                    let y = match (pass, cross) {
+                        (0, None) => y,
+                        // A highlighted event's own: beside the crosshair's tag, never hidden
+                        // under it while a row is free.
+                        (1, Some((cy, ch))) if hot.is_some() && group_dim(hot, si, g) == 1.0 => {
+                            match beside_cross(y, cy, ch, box_h, ph, &rows, blocked) {
+                                Some(y) => y,
+                                None => continue,
+                            }
+                        }
+                        // Any other tag the crosshair's price tag covers: none, while it's
+                        // there.
+                        _ => continue,
+                    };
+                    rows.push(y);
+                    self.paint_label(si, &map, p, y, false, &at, theme, window, cx);
                 }
             }
         }
+        self.rows = rows;
         if let Some((si, p, y)) = reveal
             && let Some(map) = self.slots[si].map.clone()
         {
@@ -2217,7 +2261,8 @@ impl LevelsLayer {
         } else {
             self.config.label_place
         };
-        // Outside a highlighted event: set back with its level.
+        // Outside a highlighted event: set back with its level (one shown for the pointer
+        // too).
         let fade = group_dim(self.hot(), si, level.group);
         let (x, mut bg, mut ink) = match place {
             // Just right of the newest bar, moving with it; pinned to the plot's edge when that
