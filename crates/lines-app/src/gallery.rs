@@ -317,6 +317,19 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             args(&format!("--layout chart {theme} --demo-levels")),
         ));
     }
+    // A plugin's two-point drawing tool (decision 0020; the synthetic one): its button in the
+    // toolbar, its levels in the levels layer's style, the drawing selected (its two handles).
+    for (name, theme) in [
+        ("draw-tool-dark", "--theme dark"),
+        ("draw-tool-light-150", "--theme light --ui-zoom 150"),
+    ] {
+        let mut a = args(&format!(
+            "--layout chart {theme} --size 1400x800 --price-zoom 0.45 --drawing-tools --demo-draw-tool"
+        ));
+        a.push("--plugin-drawing".into());
+        a.push("demo-span 2026-11-05T19:40:00Z@6002.00 2026-11-05T20:30:00Z@6016.00".into());
+        v.push(s(name, false, end, a));
+    }
     // Settings › Charts at the narrowest window: Bar period is a dropdown (one field), Hollow
     // candles' chips keep to their line. Dark at 100 %, light at 150 % (tall enough that the page
     // needs no scrolling, so nothing is cut at its edge).

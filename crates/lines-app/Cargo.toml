@@ -87,6 +87,10 @@ required-features = ["screenshot"]
 name = "gallery"
 required-features = ["screenshot"]
 
+[[test]]
+name = "plugin_draw_tool"
+required-features = ["screenshot", "demo-levels"]
+
 [build-dependencies]
 # Windows icon + version resources. Pinned to the version GPUI already uses for its manifest.
 embed-resource = "=3.0.12"

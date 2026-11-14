@@ -27,6 +27,7 @@ mod dom_trail;
 mod dom_view;
 mod download_days;
 mod download_view;
+mod draw_tools;
 mod drawing_toolbar;
 mod drawings_store;
 mod drop_list;
@@ -126,7 +127,7 @@ use lines_core::UtcMillis;
 use lines_feed::cqg::mock::MockConfig;
 use lines_feed::extension::ExtensionSource;
 pub use lines_feed::extension::{BoxFuture, DynTransport, SourceExtension, Timing};
-pub use lines_feed::levels::LevelSource;
+pub use lines_feed::levels::{DrawTool, DrawToolContext, LevelSource};
 use lines_feed::registry::FeedRegistry;
 use lines_feed::{FeedConfig, Source, catalog};
 pub use lines_trading::extension::{AccountKind, AccountSource, BrokerExtension, ExtensionAccount};
@@ -165,6 +166,7 @@ pub struct Extensions {
     /// these come after Coinbase and Kraken, and only when set up.
     builtin: Vec<&'static str>,
     level_sources: Vec<Arc<dyn LevelSource>>,
+    draw_tools: Vec<Arc<dyn DrawTool>>,
     brokers: Vec<Arc<dyn BrokerExtension>>,
     strategies: Vec<Arc<dyn lines_strategy::StrategyExtension>>,
 }
@@ -206,6 +208,18 @@ impl Extensions {
 
     pub fn level_sources(&self) -> &[Arc<dyn LevelSource>] {
         &self.level_sources
+    }
+
+    /// Add a plugin's two-point drawing tool: a button in the drawing toolbar of the charts of
+    /// the products it serves; its drawings' levels show as a level source's (keyed by its id)
+    /// and are never saved.
+    pub fn with_draw_tool(mut self, tool: Arc<dyn DrawTool>) -> Self {
+        self.draw_tools.push(tool);
+        self
+    }
+
+    pub fn draw_tools(&self) -> &[Arc<dyn DrawTool>] {
+        &self.draw_tools
     }
 
     /// Add a broker (decision 0004): its capabilities, its accounts and the `Broker` the trading
@@ -793,6 +807,11 @@ struct Cli {
     /// Screenshot: drawing ID of --drawings selected on the first chart, as a click would.
     #[arg(long, requires = "drawings")]
     select_drawing: Option<lines_core::drawings::DrawingId>,
+    /// Screenshot: a plugin tool's drawing on the first chart, placed and selected as two
+    /// clicks would: "TOOL-ID TIME@PRICE TIME@PRICE" (ISO times, prices as the chart shows
+    /// them), e.g. "demo-span 2026-11-05T19:30:00Z@6005.00 2026-11-05T20:15:00Z@6024.00".
+    #[arg(long, requires = "screenshot")]
+    plugin_drawing: Option<String>,
     /// Screenshot: the order strip with a limit's price pick armed (`buy` or `sell`).
     #[arg(long, requires = "screenshot", value_parser = ["buy", "sell"])]
     strip_pick: Option<String>,
@@ -875,6 +894,12 @@ struct Cli {
     #[cfg(feature = "demo-levels")]
     #[arg(long)]
     demo_event: bool,
+    /// Also register a synthetic two-point drawing tool for ES/MES charts (`Span`: lines at
+    /// both points, the midpoint, a box between them), as a plugin's would be (builds with
+    /// `demo-levels`).
+    #[cfg(feature = "demo-levels")]
+    #[arg(long)]
+    demo_draw_tool: bool,
     /// Add a VWAP to the first chart (repeatable): eth (default reset), rth, week, month or
     /// anchor@2026-11-06T14:30:00Z, optionally with σ bands after a slash: eth/1,2,3 (quote it
     /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
@@ -1913,6 +1938,9 @@ where
     for l in &ext.level_sources {
         lines_feed::levels::register(l.clone())?;
     }
+    for t in &ext.draw_tools {
+        lines_feed::levels::register_draw_tool(t.clone())?;
+    }
     ext.validate()?;
     for b in &ext.brokers {
         // Counts only: account ids never go to logs.
@@ -1973,6 +2001,16 @@ where
     #[cfg(feature = "demo-levels")]
     if cli.demo_event {
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoEvent))?;
+    }
+    #[cfg(feature = "demo-levels")]
+    if cli.demo_draw_tool {
+        lines_feed::levels::register_draw_tool(Arc::new(lines_feed::levels::demo::DemoSpan))?;
+    }
+    if let Some(spec) = &cli.plugin_drawing {
+        let id = spec.split_whitespace().next().unwrap_or_default();
+        if lines_feed::levels::draw_tool(id).is_none() {
+            bail!("--plugin-drawing: no drawing tool {id:?} is registered");
+        }
     }
 
     if cli.backtest_config.is_some()
@@ -2103,6 +2141,7 @@ where
             drawing_tools: cli.drawing_tools.is_some(),
             draw_tool: cli.draw_tool,
             select_drawing: cli.select_drawing,
+            plugin_drawing: cli.plugin_drawing.clone(),
             strip_pick: cli.strip_pick.as_deref().map(|s| {
                 if s == "buy" {
                     crate::chart_trade::StripOrder::BuyLimit

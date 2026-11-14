@@ -482,8 +482,40 @@ impl LevelsConfig {
 }
 
 /// One source on this chart.
+/// Where a slot's maps come from: a level source's task, or a plugin drawing tool's drawings on
+/// this chart (`crate::draw_tools`: the app draws them and hands the map in).
+enum Feed {
+    Source(LevelHandle),
+    Tool {
+        id: &'static str,
+        /// The tool map's revision ([`crate::draw_tools::ToolMaps`]).
+        rev: u64,
+        map: Option<Arc<LevelMap>>,
+    },
+}
+
+impl Feed {
+    fn source(&self) -> &str {
+        match self {
+            Feed::Source(h) => h.source(),
+            Feed::Tool { id, .. } => id,
+        }
+    }
+
+    fn revision(&self) -> u64 {
+        match self {
+            Feed::Source(h) => h.cell().revision(),
+            Feed::Tool { rev, .. } => *rev,
+        }
+    }
+
+    fn is_tool(&self) -> bool {
+        matches!(self, Feed::Tool { .. })
+    }
+}
+
 struct Slot {
-    handle: LevelHandle,
+    handle: Feed,
     label: &'static str,
     /// The clock its freshness was judged on at the last snapshot (wall live, market in a
     /// replay): external series end where fresh data stopped by it.
@@ -1107,13 +1139,18 @@ impl LevelsLayer {
             lines_feed::levels::serving(&product)
         };
         let market = (product.id, contract);
+        // A drawing tool's slot stays (its drawings follow the chart's product: `set_tool_maps`).
+        let tools: Vec<Slot> = {
+            let (tools, rest) = old.into_iter().partition(|s| s.handle.is_tool());
+            old = rest;
+            tools
+        };
         self.slots = sources
             .into_iter()
             .map(|source| {
-                if let Some(i) = old
-                    .iter()
-                    .position(|s| s.handle.source() == source.id() && s.handle.market() == market)
-                {
+                if let Some(i) = old.iter().position(|s| {
+                    matches!(&s.handle, Feed::Source(h) if h.source() == source.id() && h.market() == market)
+                }) {
                     return old.swap_remove(i);
                 }
                 let ctx = LevelContext {
@@ -1124,40 +1161,97 @@ impl LevelsLayer {
                 let label = source.label();
                 let looks = looks_for(&self.styles, source.id());
                 let (types, label_default) = (source.types(), source.label_mode());
-                let handle = runtime::acquire(source, ctx, Arc::new(StorePrices(store.clone())));
-                Slot {
-                    zone_scale: Cell::new(None),
-                    label_colors: Vec::new(),
-                    label_colors_key: None,
-                    label_zones: Vec::new(),
-                    label_moving: Vec::new(),
-                    label_unders: Vec::new(),
-                    looks,
-                    types,
-                    label_default,
-                    label_mode: label_default,
-                    kind_looks: [None; MAX_KINDS],
-                    texts: Vec::new(),
-                    rev: 0,
-                    seen: Vec::new(),
-                    measured_texts: Vec::new(),
-                    handle,
-                    label,
-                    now: UtcMillis(i64::MIN),
-                    map: None,
-                    status: LevelStatus::Missing,
-                    series_status: LevelStatus::Missing,
-                    error: None,
-                    kinds: u64::MAX,
-                    latent: 0,
-                    held: Vec::with_capacity(MAX_LEVELS),
-                    placed: Vec::with_capacity(MAX_LEVELS),
-                    markers: Vec::with_capacity(lines_core::levels::MAX_MARKERS),
-                }
+                let handle = Feed::Source(runtime::acquire(
+                    source,
+                    ctx,
+                    Arc::new(StorePrices(store.clone())),
+                ));
+                Slot::new(handle, label, looks, types, label_default)
             })
             .collect();
+        self.slots.extend(tools);
     }
 
+    /// The chart's plugin drawing tools' maps this frame (render time, before
+    /// [`Self::snapshot`]): one slot per tool with drawings on this chart, keyed by the tool's
+    /// id as a level source's would be (its kinds, styles and labels); a tool with none has no
+    /// slot (nothing drawn, no menu row). Only a changed map allocates.
+    pub fn set_tool_maps(&mut self, maps: &crate::draw_tools::ToolMaps) {
+        // Gone: tools without drawings now.
+        self.slots.retain(|s| match &s.handle {
+            Feed::Tool { id, .. } => maps.map(id).is_some(),
+            Feed::Source(_) => true,
+        });
+        for (tool, map, rev) in maps.maps() {
+            let Some(map) = map else { continue };
+            let id = tool.id();
+            if let Some(s) = self.slots.iter_mut().find(|s| s.handle.source() == id) {
+                if let Feed::Tool { rev: r, map: m, .. } = &mut s.handle
+                    && *r != rev
+                {
+                    *r = rev;
+                    *m = Some(map.clone());
+                }
+                continue;
+            }
+            let looks = looks_for(&self.styles, id);
+            let handle = Feed::Tool {
+                id,
+                rev,
+                map: Some(map.clone()),
+            };
+            self.slots.push(Slot::new(
+                handle,
+                tool.label(),
+                looks,
+                tool.types(),
+                LabelMode::Name,
+            ));
+        }
+    }
+}
+
+impl Slot {
+    fn new(
+        handle: Feed,
+        label: &'static str,
+        looks: [Look; 2],
+        types: &'static [LevelType],
+        label_default: LabelMode,
+    ) -> Slot {
+        Slot {
+            zone_scale: Cell::new(None),
+            label_colors: Vec::new(),
+            label_colors_key: None,
+            label_zones: Vec::new(),
+            label_moving: Vec::new(),
+            label_unders: Vec::new(),
+            looks,
+            types,
+            label_default,
+            label_mode: label_default,
+            kind_looks: [None; MAX_KINDS],
+            texts: Vec::new(),
+            rev: 0,
+            seen: Vec::new(),
+            measured_texts: Vec::new(),
+            handle,
+            label,
+            now: UtcMillis(i64::MIN),
+            map: None,
+            status: LevelStatus::Missing,
+            series_status: LevelStatus::Missing,
+            error: None,
+            kinds: u64::MAX,
+            latent: 0,
+            held: Vec::with_capacity(MAX_LEVELS),
+            placed: Vec::with_capacity(MAX_LEVELS),
+            markers: Vec::with_capacity(lines_core::levels::MAX_MARKERS),
+        }
+    }
+}
+
+impl LevelsLayer {
     /// Source `id`'s map, its series' freshness and its clock as of this frame's
     /// [`Self::snapshot`] (`None`:
     /// the source doesn't serve this chart). Lower-pane series studies read their lines here.
@@ -1263,7 +1357,7 @@ impl LevelsLayer {
             .wrapping_add((self.slots.len() as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F));
         self.slots
             .iter()
-            .fold(start, |a, s| a.wrapping_add(s.handle.cell().revision()))
+            .fold(start, |a, s| a.wrapping_add(s.handle.revision()))
     }
 
     /// This frame's view of every source (map, freshness, error), taken once per frame
@@ -1283,7 +1377,18 @@ impl LevelsLayer {
         let (styles, price) = (&self.styles, self.price.unwrap_or(FALLBACK_PRICE));
         for s in &mut self.slots {
             let mut fresh = false;
-            if let Some(st) = s.handle.cell().try_read() {
+            if let Feed::Tool { map, .. } = &s.handle {
+                // Drawn here, now: always current (a tool with no map has no slot).
+                s.status = LevelStatus::Current;
+                s.series_status = LevelStatus::Current;
+                s.now = clock.unwrap_or_else(lines_feed::now_utc);
+                if !same(&s.map, map) {
+                    s.map = map.clone();
+                    fresh = true;
+                }
+            } else if let Feed::Source(h) = &s.handle
+                && let Some(st) = h.cell().try_read()
+            {
                 // Freshness on the source's clock: the replay clock in a replay.
                 let now = if st.replay {
                     clock.unwrap_or(UtcMillis(i64::MIN))
@@ -2593,6 +2698,8 @@ impl LevelsLayer {
         }
         self.slots
             .iter()
+            // Drawings have no legend rows (the Studies menu lists the tool's kinds).
+            .filter(|s| !s.handle.is_tool())
             .map(|s| {
                 let id = s.handle.source().to_owned();
                 // Hidden here: listed, dimmed, so it is one click from coming back.
