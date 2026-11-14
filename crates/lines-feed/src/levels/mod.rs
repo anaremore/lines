@@ -392,15 +392,15 @@ pub struct DrawToolContext {
 }
 
 /// A two-point drawing tool a plugin provides. The app owns input (placing both points, handles,
-/// drag, select, delete); the tool only turns the points into levels, purely (no I/O: anything it
-/// needs from files it loads when constructed).
+/// drag, select, delete); the tool only turns the points into levels, purely: `draw` does no I/O
+/// (anything it needs from files it reads beforehand, when constructed or on its own thread).
 pub trait DrawTool: Send + Sync {
     /// Stable slug (as a level source id: lowercase, `-`, ≤ 32 bytes); also its level-source id
     /// for styles and the Kinds list.
     fn id(&self) -> &'static str;
-    /// The toolbar tooltip / name ("RS event").
+    /// The toolbar tooltip / name ("Range split").
     fn label(&self) -> &'static str;
-    /// A short glyph for the toolbar button (one to three characters, e.g. "RS").
+    /// A short glyph for the toolbar button (one to three characters, e.g. "Rs").
     fn icon(&self) -> &'static str;
     fn serves(&self, product: &Product) -> bool;
     /// The kinds it draws (labels, groups, default styles incl. `shown: false` for kinds off by

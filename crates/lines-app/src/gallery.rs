@@ -319,6 +319,8 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     }
     // A plugin's two-point drawing tool (decision 0020; the synthetic one): its button in the
     // toolbar, its levels in the levels layer's style, the drawing selected (its two handles).
+    // The demo tool exists only with `demo-levels` (as the `levels-*` scenes above).
+    #[cfg(feature = "demo-levels")]
     for (name, theme) in [
         ("draw-tool-dark", "--theme dark"),
         ("draw-tool-light-150", "--theme light --ui-zoom 150"),
