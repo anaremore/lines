@@ -1004,6 +1004,12 @@ pub struct LevelType {
     /// layout): higher first. [`LabelPriority::Normal`] unless the source says otherwise
     /// ([`LevelType::label_priority`]), so a source that doesn't know of it is Normal.
     pub label_priority: LabelPriority,
+    /// Shown on hover only (`false` unless the source says, [`LevelType::hover_only`]): while
+    /// the type isn't shown (its style's Show off, the default for such a type), its levels
+    /// that belong to an event (`Level::group`) are drawn, with their labels, only while that
+    /// event is highlighted; otherwise not at all, and they claim no label row. Show on draws
+    /// them always, as any type; a level of it in no event is drawn only then.
+    pub hover_only: bool,
 }
 
 /// A level type's label priority: when labels from every source on a chart crowd, a higher
@@ -1044,6 +1050,7 @@ impl LevelType {
             parent: None,
             replaces: &[],
             label_priority: LabelPriority::Normal,
+            hover_only: false,
         }
     }
 
@@ -1062,6 +1069,7 @@ impl LevelType {
             parent: None,
             replaces: &[],
             label_priority: LabelPriority::Normal,
+            hover_only: false,
         }
     }
 
@@ -1077,6 +1085,16 @@ impl LevelType {
     pub const fn replacing(self, ids: &'static [&'static str]) -> LevelType {
         LevelType {
             replaces: ids,
+            ..self
+        }
+    }
+
+    /// This type, shown on hover only (see [`LevelType::hover_only`]). Give it a style that
+    /// isn't shown (`TypeStyle { shown: false, .. }`): that is what makes it hover-only until
+    /// the trader turns Show on.
+    pub const fn hover_only(self) -> LevelType {
+        LevelType {
+            hover_only: true,
             ..self
         }
     }

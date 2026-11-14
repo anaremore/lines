@@ -1187,7 +1187,8 @@ pub fn level_editor(
             stroke: true,
             own: Some(type_own(t.style.line.color, t.style.light, kind)),
             shown: Some(look.shown),
-            note: None,
+            // A hover-only type: what Show off means (Show on draws it always).
+            note: t.hover_only.then_some(HOVER_ONLY_NOTE),
             group: Some(t.group),
             fill: look
                 .fill
@@ -1199,6 +1200,9 @@ pub fn level_editor(
     e.options.label_price = Some(read_label(styles, label_default) == LabelMode::NamePrice);
     e
 }
+
+/// A hover-only level type's note in the style editor (`LevelType::hover_only`).
+pub const HOVER_ONLY_NOTE: &str = "Show off: drawn only while its event is pointed at";
 
 /// The style editor for a study's parts, titled `title`. `source`: a level source's first
 /// color (its own color's swatch).
@@ -1537,4 +1541,4 @@ pub fn warnings(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

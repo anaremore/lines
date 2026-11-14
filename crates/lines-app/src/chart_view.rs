@@ -5008,6 +5008,10 @@ impl ChartView {
             if !self.visibility.draws_studies() {
                 self.footprint.reset(); // hidden: no cells, no line gaps
             }
+            // The pointer before the levels' columns: a hover-only level of the event under it
+            // is laid out (its label row) this frame.
+            self.levels
+                .set_pointer(self.hover.filter(|_| self.cross_in_sub.is_none()));
             prepare_studies(
                 self.visibility,
                 &mut self.profile,

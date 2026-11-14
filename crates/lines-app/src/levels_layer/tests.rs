@@ -2028,6 +2028,17 @@ fn event_bars() -> Vec<lines_core::Bar> {
 /// A layer on ES with the demo and the event source, placed over 5990 to 6030 on `bars` with
 /// the plot's right edge at bar `right`.
 fn evented(bars: &[lines_core::Bar], right: f64) -> (LevelsLayer, Arc<ChartStore>, Viewport) {
+    evented_at(bars, right, None, None)
+}
+
+/// [`evented`], with the pointer at `pointer` (plot px) before the frame and the source's
+/// saved styles `styles` (JSON).
+fn evented_at(
+    bars: &[lines_core::Bar],
+    right: f64,
+    pointer: Option<(f32, f32)>,
+    styles: Option<&str>,
+) -> (LevelsLayer, Arc<ChartStore>, Viewport) {
     lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
     lines_feed::levels::register(Arc::new(Eventing)).unwrap();
     let store = es_store();
@@ -2036,6 +2047,9 @@ fn evented(bars: &[lines_core::Bar], right: f64) -> (LevelsLayer, Arc<ChartStore
     assert!(lines_feed::levels::runtime::wait_settled(
         std::time::Duration::from_secs(10)
     ));
+    if let Some(s) = styles {
+        layer.set_styles(&serde_json::from_str(s).unwrap());
+    }
     let d = store.read();
     layer.snapshot(d.market_time);
     layer.measure_labels(|t| t.chars().count() as f32 * 6.0);
@@ -2045,6 +2059,7 @@ fn evented(bars: &[lines_core::Bar], right: f64) -> (LevelsLayer, Arc<ChartStore
     (v.price_lo, v.price_hi) = (599_000.0, 603_000.0);
     v.bar_px = 10.0;
     v.right_index = right;
+    layer.set_pointer(pointer);
     layer.prepare(&d, BarsView::fixed(bars, 60_000), &v);
     drop(d);
     (layer, store, v)
@@ -2076,7 +2091,9 @@ fn event_lines_start_at_their_bars() {
     let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
     let _ev = EventGuard::on();
     let bars = event_bars();
-    let (layer, _store, v) = evented(&bars, 30.0);
+    // A and E1 are hover-only: pointed at (the Impact line), so drawn.
+    let impact = |v: &Viewport| (700.0, v.price_to_y(601_350.0) as f32);
+    let (layer, _store, v) = evented_at(&bars, 30.0, Some(impact(&event_vp(30.0))), None);
     let x = |i: f64| v.index_to_x(i) as f32;
     let ev = source_at(&layer, "demo-event");
     let a = placed_named(&layer, ev, "A 6005");
@@ -2218,4 +2235,94 @@ fn a_highlighted_event_stands_out() {
     assert!(at > 5.0 && at <= ph - bh * 0.5);
     // No room either way (a plot hardly taller than the tag): none.
     assert_eq!(beside_cross(10.0, 10.0, ch, bh, 24.0, &[], None), None);
+}
+
+/// The viewport [`evented`] places on (for a pointer before the frame).
+fn event_vp(right: f64) -> Viewport {
+    let mut v = Viewport::default();
+    v.set_size(800.0, 400.0);
+    (v.price_lo, v.price_hi) = (599_000.0, 603_000.0);
+    v.bar_px = 10.0;
+    v.right_index = right;
+    v
+}
+
+/// Hover-only types (the demo event's A and E1 lines): without the event highlighted, not
+/// drawn and no label row; pointing at any member of the event (its Impact line, its A dot)
+/// draws them with their labels; pointing elsewhere doesn't. Show on (the type's style) draws
+/// them always. The dots stay drawn either way.
+#[test]
+fn hover_only_levels_show_with_their_event() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _ev = EventGuard::on();
+    let bars = event_bars();
+    let v = event_vp(30.0);
+    let hidden = |layer: &LevelsLayer, ev: usize| {
+        for name in ["A 6005", "E1 6022"] {
+            let p = placed_named(layer, ev, name);
+            assert!(p.x0 > p.x1, "{name} not drawn");
+            assert_eq!(p.label_y, None, "{name} claims no label row");
+        }
+    };
+    let shown = |layer: &LevelsLayer, ev: usize| {
+        for name in ["A 6005", "E1 6022"] {
+            let p = placed_named(layer, ev, name);
+            assert!(p.x0 <= p.x1, "{name} drawn");
+            assert!(p.label_y.is_some(), "{name} labelled");
+        }
+    };
+    // No pointer.
+    let (layer, _s, _) = evented_at(&bars, 30.0, None, None);
+    let ev = source_at(&layer, "demo-event");
+    hidden(&layer, ev);
+    assert_eq!(layer.map(ev).unwrap().markers.len(), 3, "the dots stay");
+    let mut rows = Vec::new();
+    layer.tag_rows(|y| rows.push(y));
+    let a_row = v.price_to_y(600_500.0) as f32;
+    assert!(rows.iter().all(|y| (y - a_row).abs() > 1.0), "{rows:?}");
+    drop(layer);
+    // On the Impact line.
+    let impact = (700.0, v.price_to_y(601_350.0) as f32 + 1.0);
+    let (layer, _s, _) = evented_at(&bars, 30.0, Some(impact), None);
+    shown(&layer, ev);
+    drop(layer);
+    // On the A dot.
+    let dot = (v.index_to_x(8.0) as f32, v.price_to_y(600_500.0) as f32);
+    let (layer, _s, _) = evented_at(&bars, 30.0, Some(dot), None);
+    shown(&layer, ev);
+    drop(layer);
+    // Elsewhere (left of every event line, away from the demo's): hidden.
+    let (layer, _s, _) = evented_at(&bars, 30.0, Some((20.0, 395.0)), None);
+    hidden(&layer, ev);
+    drop(layer);
+    // Show on: always, no pointer needed.
+    let on =
+        r#"{"demo-event": {"types": {"ev-anchor": {"shown": true}, "ev-e1": {"shown": true}}}}"#;
+    let (layer, _s, _) = evented_at(&bars, 30.0, None, Some(on));
+    shown(&layer, ev);
+}
+
+/// A frame with hover-only levels (held back, the event found, its own drawn again) and the
+/// pointer moving on and off the event allocates nothing once the maps are in.
+#[test]
+fn hover_only_frames_do_not_allocate() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _ev = EventGuard::on();
+    let bars = event_bars();
+    let v = event_vp(30.0);
+    let (mut layer, _s, _) = evented_at(&bars, 30.0, None, None);
+    let on = (700.0, v.price_to_y(601_350.0) as f32 + 1.0);
+    let view = BarsView::fixed(&bars, 60_000);
+    // Warm: one frame each way.
+    for at in [Some(on), None] {
+        layer.set_pointer(at);
+        layer.columns(view, &v);
+    }
+    let n = crate::study_style::tests::allocs_during(|| {
+        for at in [Some(on), None, Some(on), Some((20.0, 395.0))] {
+            layer.set_pointer(at);
+            layer.columns(view, &v);
+        }
+    });
+    assert_eq!(n, 0);
 }
