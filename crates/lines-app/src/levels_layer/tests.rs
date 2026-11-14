@@ -2326,3 +2326,32 @@ fn hover_only_frames_do_not_allocate() {
     });
     assert_eq!(n, 0);
 }
+
+/// The pointer as paint sets it, after the frame's layout: leaving the event (or the window)
+/// holds its hover-only levels back at once (no line, no label), never drawn with nothing
+/// highlighted; pointing at an event the layout wasn't for asks for another layout.
+#[test]
+fn hover_only_levels_never_outlive_their_highlight() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _ev = EventGuard::on();
+    let bars = event_bars();
+    let v = event_vp(30.0);
+    let on = (700.0, v.price_to_y(601_350.0) as f32 + 1.0);
+    let (mut layer, _s, _) = evented_at(&bars, 30.0, Some(on), None);
+    let ev = source_at(&layer, "demo-event");
+    assert!(placed_named(&layer, ev, "A 6005").x0 <= placed_named(&layer, ev, "A 6005").x1);
+    assert!(!layer.needs_layout());
+    // Paint's pointer: gone.
+    layer.set_pointer(None);
+    for name in ["A 6005", "E1 6022"] {
+        let p = placed_named(&layer, ev, name);
+        assert!(p.x0 > p.x1 && p.label_y.is_none(), "{name} held back");
+    }
+    assert!(!layer.needs_layout());
+    // Back on the event without a layout: wants one.
+    layer.set_pointer(Some(on));
+    assert!(layer.needs_layout());
+    layer.columns(BarsView::fixed(&bars, 60_000), &v);
+    assert!(!layer.needs_layout());
+    assert!(placed_named(&layer, ev, "A 6005").label_y.is_some());
+}

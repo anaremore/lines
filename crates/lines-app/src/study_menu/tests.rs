@@ -9,6 +9,7 @@ fn sources() -> Vec<SourceInfo> {
         series: Vec::new(),
         parents: Vec::new(),
         styled_off: Vec::new(),
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
     }]
 }
@@ -264,6 +265,7 @@ fn a_sources_series_studies_are_offered_added_and_removed() {
         ],
         parents: Vec::new(),
         styled_off: Vec::new(),
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
     }];
     let mut set = StudySet::default();
@@ -713,6 +715,7 @@ fn kinds_hidden_through_their_parent() {
         kinds: vec!["open".into(), "mid".into(), "pivot".into()],
         parents: vec![Some("session"), Some("session"), None],
         styled_off: Vec::new(),
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
         series: Vec::new(),
     }];
@@ -742,6 +745,7 @@ fn a_type_off_in_style_reads_unchecked() {
         kinds: vec!["pivot".into(), "zone".into()],
         parents: Vec::new(),
         styled_off: vec![true, false],
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
         series: Vec::new(),
     }];
@@ -754,6 +758,14 @@ fn a_type_off_in_style_reads_unchecked() {
     let on = |name: &str| option(&items, name).map(|(on, _)| on);
     assert_eq!(on("pivot (off in Style…)"), Some(false));
     assert_eq!(on("zone"), Some(true));
+    // A hover-only type with Show off: "on hover", read as the pane shows it.
+    let src = vec![SourceInfo {
+        styled_hover: vec![true, false],
+        ..src[0].clone()
+    }];
+    let items = m.items(&input(&set, &src, &[]));
+    let on = |name: &str| option(&items, name).map(|(on, _)| on);
+    assert_eq!(on("pivot (on hover)"), Some(true));
 }
 
 /// Trade history on new charts is optional in the saved defaults (absent: on) and written only
@@ -1030,6 +1042,7 @@ fn level_kinds_are_a_multi_select() {
         kinds: vec!["pivot".into(), "zone".into(), "varis".into()],
         parents: Vec::new(),
         styled_off: Vec::new(),
+        styled_hover: Vec::new(),
         plugin: Vec::new(),
         series: Vec::new(),
     }];

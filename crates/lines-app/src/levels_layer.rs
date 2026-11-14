@@ -992,6 +992,9 @@ pub struct LevelsLayer {
     pointer: Option<(f32, f32)>,
     /// The event it highlights this frame (source, group), found once in `set_pointer`.
     hot: Option<(usize, u16)>,
+    /// The event whose hover-only levels the last layout drew ([`Self::hover_only`]): a
+    /// pointer that now finds another (or none) holds them back again at once.
+    laid_hot: Option<(usize, u16)>,
     /// The plot's size as of [`Self::place`], for laying the labels out in [`Self::columns`].
     label_plot: (f32, f32),
 }
@@ -1056,6 +1059,7 @@ impl LevelsLayer {
             joint_slots: Vec::new(),
             pointer: None,
             hot: None,
+            laid_hot: None,
             label_plot: (0.0, 0.0),
         }
     }
@@ -1415,6 +1419,7 @@ impl LevelsLayer {
             }
         }
         self.hot = self.pointer.and_then(|(x, y)| self.group_at(x, y));
+        self.laid_hot = self.hot;
         let Some((hs, hg)) = self.hot else { return };
         let s = &mut self.slots[hs];
         let Some(map) = s.map.as_ref() else { return };
@@ -1432,6 +1437,37 @@ impl LevelsLayer {
     pub fn set_pointer(&mut self, at: Option<(f32, f32)>) {
         self.pointer = at;
         self.hot = at.and_then(|(x, y)| self.group_at(x, y));
+        // Another event (or none) than the layout revealed: its hover-only levels are held
+        // back again (no line, no label) until the next layout reveals the new one's.
+        if self.hot != self.laid_hot
+            && let Some((hs, _)) = self.laid_hot.take()
+            && let Some(s) = self.slots.get_mut(hs)
+        {
+            for j in 0..s.held.len() {
+                let pi = s.held[j].0 as usize;
+                if let Some(p) = s.placed.get_mut(pi) {
+                    (p.x0, p.x1, p.label_y) = (1.0, 0.0, None);
+                }
+            }
+        }
+    }
+
+    /// Whether the event under the pointer isn't the one the last layout was for: the chart
+    /// asks for another frame so its hover-only levels are laid out.
+    pub fn needs_layout(&self) -> bool {
+        self.hot.is_some() && self.hot != self.laid_hot
+    }
+
+    /// Whether kind `kind` of source `id` is hover-only now ([`Slot::type_latent`]): the
+    /// studies menu says "on hover" where it would say "off".
+    pub fn kind_hover_only(&self, id: &str, kind: &str) -> bool {
+        let Some(s) = self.slots.iter().find(|s| s.handle.source() == id) else {
+            return false;
+        };
+        s.map.as_ref().is_some_and(|m| {
+            m.kind_index(kind)
+                .is_some_and(|k| s.type_latent(m, usize::from(k)))
+        })
     }
 
     /// The event under the plot point `(x, y)`: its source and group, when the point is on one
@@ -1834,11 +1870,12 @@ impl LevelsLayer {
                 let parent = kind
                     .and_then(|k| s.types.iter().find(|t| t.id == k))
                     .and_then(|t| t.parent);
-                // A hover-only one counts too: the axis never resizes on a hover.
-                let shown = kind.is_some_and(|k| self.config.kind_shown_under(source, k, parent))
-                    && (s.type_drawn(map, usize::from(l.kind))
-                        || s.type_latent(map, usize::from(l.kind)));
-                if !shown {
+                // A hover-only one in an event counts toward the widest (the axis never
+                // resizes on a hover), never toward the cut (one unseen never turns every
+                // label off).
+                let pane = kind.is_some_and(|k| self.config.kind_shown_under(source, k, parent));
+                let latent = l.group.is_some() && s.type_latent(map, usize::from(l.kind));
+                if !pane || !(s.type_drawn(map, usize::from(l.kind)) || latent) {
                     continue;
                 }
                 let text = s.texts.get(i).and_then(|t| t.as_deref()).unwrap_or(name);
@@ -1848,6 +1885,9 @@ impl LevelsLayer {
                     .copied()
                     .unwrap_or_else(|| estimate(text));
                 widest = widest.max(w);
+                if latent {
+                    continue;
+                }
                 // Its shortest cut, under the same filter (a hidden type's long price never
                 // decides whether the shown labels fit).
                 let c = self.shortest.get(text).copied().unwrap_or_else(|| {

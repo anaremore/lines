@@ -688,6 +688,9 @@ pub struct SourceInfo {
     /// Kinds whose type is turned off in the style editor (Show), in `kinds` order (empty:
     /// none).
     pub styled_off: Vec<bool>,
+    /// Kinds among `styled_off` shown on hover only (`LevelType::hover_only`), in `kinds`
+    /// order (empty: none).
+    pub styled_hover: Vec<bool>,
     /// Its own settings ("Source settings", `crate::plugin_settings`; empty: none). App-wide.
     pub plugin: Vec<crate::plugin_settings::Row>,
 }
@@ -1574,13 +1577,23 @@ fn controls_of(input: &MenuInput, r: &StudyRef, out: &mut Vec<Item>) {
                     _ => StudyAction::ToggleLevelKind(id.clone(), k.clone()),
                 };
                 // A type turned off in its style editor reads unchecked and says where.
+                // One shown on hover only says so and reads as the pane shows it.
                 let off = s.styled_off.get(i).copied().unwrap_or(false);
-                let label = if off {
+                let hover = off && s.styled_hover.get(i).copied().unwrap_or(false);
+                let label = if hover {
+                    format!("{k} (on hover)")
+                } else if off {
                     format!("{k} (off in Style…)")
                 } else {
                     k.clone()
                 };
-                c!("Kinds", label, shown && !off, Swatch::None, set(action));
+                c!(
+                    "Kinds",
+                    label,
+                    shown && (!off || hover),
+                    Swatch::None,
+                    set(action)
+                );
             }
             c!(
                 "Labels",

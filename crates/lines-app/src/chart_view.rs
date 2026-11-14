@@ -1378,6 +1378,10 @@ impl ChartView {
                     .iter()
                     .map(|k| !self.levels.kind_styled_shown(&id, k))
                     .collect(),
+                styled_hover: kinds
+                    .iter()
+                    .map(|k| self.levels.kind_hover_only(&id, k))
+                    .collect(),
                 // Its own settings (app-wide: one feed serves every chart).
                 plugin: lines_feed::levels::registered()
                     .iter()
@@ -6236,6 +6240,10 @@ impl ChartView {
                 // An event under the pointer (in the price plot) is highlighted.
                 self.levels
                     .set_pointer(self.hover.filter(|_| self.cross_in_sub.is_none()));
+                // Another event than this frame's layout: laid out on the next.
+                if self.levels.needs_layout() {
+                    window.refresh();
+                }
                 self.levels.paint_back(plot, &t, window);
                 self.studies.paint_back((ox, oy), &self.vp, &t, window);
             }
