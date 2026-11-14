@@ -6229,6 +6229,9 @@ impl ChartView {
             );
             if studies {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
+                // An event under the pointer (in the price plot) is highlighted.
+                self.levels
+                    .set_pointer(self.hover.filter(|_| self.cross_in_sub.is_none()));
                 self.levels.paint_back(plot, &t, window);
                 self.studies.paint_back((ox, oy), &self.vp, &t, window);
             }
@@ -6427,6 +6430,8 @@ impl ChartView {
                         .map(|p| self.vp.price_to_y(p.0 as f64) as f32),
                 );
                 self.levels.paint_front(plot, &t, &self.footprint, window);
+                // Event markers and their paths, over the level lines.
+                self.levels.paint_markers(plot, labels, &t, window, cx);
                 self.footprint.paint_numbers(plot, &self.vp, &t, window, cx);
                 // On the chart: under the drawings and the strategy markers, as study labels
                 // always were (in the axis or the column: after the plot, outside it).

@@ -496,6 +496,65 @@ fn level_placement_does_not_allocate() {
     assert!(!out.is_empty());
 }
 
+/// Event levels: where a level begins and ends across the plot and where its markers sit, each
+/// frame, for every level and marker.
+#[test]
+fn event_level_extents_do_not_allocate() {
+    use lines_core::Qty;
+    use lines_core::levels::{LevelMap, LevelStyle, LevelValue, end_x, marker_xy, start_x};
+    use lines_core::timeframe::BarsView;
+    let bars: Vec<lines_core::Bar> = (0..600i64)
+        .map(|m| lines_core::Bar {
+            time: UtcMillis(m * 60_000),
+            open: Price(600_000),
+            high: Price(600_100),
+            low: Price(599_900),
+            close: Price(600_025),
+            volume: Qty(1),
+        })
+        .collect();
+    let mut b = LevelMap::builder("demo", lines_core::ProductId(1), UtcMillis(0));
+    for k in 0..100i64 {
+        b = b
+            .line(
+                "line",
+                LevelValue::Tick(Price(600_000)),
+                Some("L"),
+                LevelStyle::default(),
+            )
+            .from(UtcMillis(k * 300_000))
+            .group("ev")
+            .marker(
+                UtcMillis(k * 300_000),
+                LevelValue::Tick(Price(600_000)),
+                Some("A"),
+            )
+            .group("ev")
+            .joined();
+    }
+    let map = b.build(25).unwrap();
+    let mut vp = Viewport::default();
+    vp.set_size(1200.0, 700.0);
+    (vp.price_lo, vp.price_hi) = (596_000.0, 604_000.0);
+    vp.right_index = 599.0;
+    let view = BarsView::fixed(&bars, 60_000);
+    let mut sum = 0.0f32;
+    let n = allocs_during(|| {
+        for i in 0..20 {
+            vp.right_index = 599.0 - f64::from(i);
+            for l in &map.levels {
+                sum += start_x(&view, &vp, l.from.unwrap()).unwrap_or(0.0);
+                sum += end_x(&view, &vp, UtcMillis(1_000_000)).unwrap_or(0.0);
+            }
+            for m in &map.markers {
+                sum += marker_xy(&view, &vp, m).map_or(0.0, |(x, _)| x);
+            }
+        }
+    });
+    assert_eq!(n, 0, "event extents allocated {n} times");
+    assert!(sum.is_finite());
+}
+
 /// The DOM price trail (`lines_core::trail`): taking trades (including recentering the ring
 /// and far jumps), decaying, re-targeting the scale, reading cells for every visible row and
 /// the animation check all run without allocating once the trail exists.

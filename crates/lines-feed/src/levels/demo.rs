@@ -689,3 +689,191 @@ impl LevelSource for DemoCrowd {
             .map_err(|e| e.to_string())
     }
 }
+
+// ---- a synthetic event: lines that begin at its bar, markers, a box, one group -------------
+
+/// The event source's id.
+pub const EVENT_ID: &str = "demo-event";
+/// Its one event's group id.
+pub const EVENT_GROUP: &str = "demo/event-1";
+
+/// A synthetic event on the synthetic ES session (`--demo-event`): an anchor (A) at 15:58 ET
+/// (20:58 UTC), a first-wave extreme (E1) at 16:06 and a V low (hollow: unconfirmed) at 16:12,
+/// joined by a dashed path; the event's lines begin at their own bars (A's, the impact and the
+/// target lines at the anchor's, E1's at its own, the run's at V's), never earlier; a box from
+/// the anchor to the target, from the anchor's bar to E1's. All one group: pointing at any of
+/// them highlights the event. A second, ungrouped line across the whole plot stays as lines
+/// always were.
+pub static EVENT_TYPES: [LevelType; 6] = [
+    LevelType::line(
+        "ev-anchor",
+        "Event anchor",
+        "Event",
+        themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1),
+    ),
+    LevelType::line(
+        "ev-e1",
+        "First-wave extreme",
+        "Event",
+        themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1),
+    ),
+    LevelType::line(
+        "ev-impact",
+        "Impact line",
+        "Event",
+        themed(OLIVE.0, Some(OLIVE.1), LineType::Dashed, 1),
+    ),
+    LevelType::line(
+        "ev-target",
+        "Target line",
+        "Event",
+        themed(OLIVE.0, Some(OLIVE.1), LineType::Solid, 1),
+    ),
+    LevelType::line(
+        "ev-run",
+        "Run line",
+        "Event",
+        themed(GRAY.0, Some(GRAY.1), LineType::Dashed, 1),
+    ),
+    LevelType::zone(
+        "ev-box",
+        "Anchor to target",
+        "Event",
+        themed(EDGE.0, Some(EDGE.1), LineType::Solid, 1),
+    ),
+];
+
+pub struct DemoEvent;
+
+struct EventTransport;
+
+impl LevelTransport for EventTransport {
+    fn fetch(&mut self) -> BoxFuture<'_, Result<Vec<LevelFrame>>> {
+        Box::pin(async { Ok(vec![LevelFrame::new("demo-event/levels", "{}")]) })
+    }
+}
+
+impl LevelSource for DemoEvent {
+    fn id(&self) -> &'static str {
+        EVENT_ID
+    }
+    fn label(&self) -> &'static str {
+        "Event levels"
+    }
+    fn serves(&self, product: &Product) -> bool {
+        matches!(product.symbol, "ES" | "MES")
+    }
+    fn refresh(&self) -> RefreshMode {
+        RefreshMode::OneShot
+    }
+    fn synthetic(&self) -> bool {
+        true
+    }
+    fn stale_after(&self) -> Duration {
+        Duration::from_secs(24 * 3600)
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &EVENT_TYPES
+    }
+    fn connect(&self, _: &LevelContext) -> BoxFuture<'static, Result<Box<dyn LevelTransport>>> {
+        Box::pin(async { Ok(Box::new(EventTransport) as Box<dyn LevelTransport>) })
+    }
+    fn decode(
+        &self,
+        ctx: &LevelContext,
+        _prices: &dyn ChartPrices,
+        _prev: Option<&LevelMap>,
+        frames: &[LevelFrame],
+    ) -> Result<Option<LevelMap>, String> {
+        if !frames.iter().any(|f| f.topic == "demo-event/levels") {
+            return Ok(None);
+        }
+        let t = |s: &str| UtcMillis::parse_iso(s).ok_or_else(|| format!("bad time {s:?}"));
+        let (a_at, e1_at, v_at) = (
+            t("2026-11-05T20:58:00")?,
+            t("2026-11-05T21:06:00")?,
+            t("2026-11-05T21:12:00")?,
+        );
+        let style = |rgba: u32, dashed: bool| LevelStyle {
+            rgba,
+            weight: 1,
+            dashed,
+        };
+        let tick = |p: i64| LevelValue::Tick(Price(p));
+        let mut b = LevelMap::builder(EVENT_ID, ctx.product.id, t("2026-11-05T13:00:00")?);
+        if let Some(c) = ctx.contract {
+            b = b.contract(c);
+        }
+        b = b
+            .line(
+                "ev-anchor",
+                tick(600_500),
+                Some("A 6005"),
+                style(0x838799ff, false),
+            )
+            .from(a_at)
+            .group(EVENT_GROUP)
+            .line(
+                "ev-e1",
+                tick(602_200),
+                Some("E1 6022"),
+                style(0x838799ff, false),
+            )
+            .from(e1_at)
+            .group(EVENT_GROUP)
+            .line(
+                "ev-impact",
+                tick(601_350),
+                Some("Impact 6013.50"),
+                style(0xa87719ff, true),
+            )
+            .from(a_at)
+            .group(EVENT_GROUP)
+            .line(
+                "ev-target",
+                tick(602_400),
+                Some("Target 6024"),
+                style(0xa87719ff, false),
+            )
+            .from(a_at)
+            .group(EVENT_GROUP)
+            .zone(
+                "ev-box",
+                tick(600_500),
+                tick(602_400),
+                None,
+                style(0x868686ff, false),
+            )
+            .from(a_at)
+            .to(e1_at)
+            .group(EVENT_GROUP)
+            // The run's line: at V's low, from V's bar (when the run ended).
+            .line(
+                "ev-run",
+                tick(601_600),
+                Some("Run 6016"),
+                style(0xc8c8c8ff, true),
+            )
+            .from(v_at)
+            .group(EVENT_GROUP)
+            .marker(a_at, tick(600_500), Some("A"))
+            .group(EVENT_GROUP)
+            .marker(e1_at, tick(602_200), Some("E1"))
+            .group(EVENT_GROUP)
+            .joined()
+            .marker(v_at, tick(601_600), Some("V"))
+            .group(EVENT_GROUP)
+            .joined()
+            .hollow()
+            // An ordinary level beside the event: across the whole plot, as always.
+            .line(
+                "ev-anchor",
+                tick(599_300),
+                Some("Prior A 5993"),
+                style(0x838799ff, false),
+            );
+        b.build(ctx.product.price.tick)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+}

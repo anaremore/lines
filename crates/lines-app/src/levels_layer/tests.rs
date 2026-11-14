@@ -1697,6 +1697,8 @@ fn labels_never_overlap_at_150_percent() {
             anchor: lines_core::levels::LabelAt::Own,
             on_edge: false,
             rank: 1,
+            x0: 0.0,
+            x1: 800.0,
         })
         .collect();
     let mut seen = vec![LabelSeen::New; 8];
@@ -1936,4 +1938,284 @@ fn pointing_at_a_hidden_label_shows_it() {
     assert!(layer.map(si).is_some());
     // Far from every level: nothing.
     assert_eq!(layer.revealed_label(-500.0, ph, 800.0), None);
+}
+
+// ---- event levels ------------------------------------------------------------------------
+
+/// Whether [`Eventing`] serves ES now (only while a test holds an [`EventGuard`]).
+static EVENT_SERVES: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `demo-event` (an event: lines from its bars, markers, a box, one group), serving only while
+/// [`EVENT_SERVES`] says so.
+struct Eventing;
+
+impl lines_feed::levels::LevelSource for Eventing {
+    fn id(&self) -> &'static str {
+        lines_feed::levels::demo::EVENT_ID
+    }
+    fn label(&self) -> &'static str {
+        "Event levels"
+    }
+    fn serves(&self, p: &Product) -> bool {
+        EVENT_SERVES.load(std::sync::atomic::Ordering::Acquire)
+            && lines_feed::levels::demo::DemoEvent.serves(p)
+    }
+    fn refresh(&self) -> lines_feed::levels::RefreshMode {
+        lines_feed::levels::RefreshMode::OneShot
+    }
+    fn synthetic(&self) -> bool {
+        true
+    }
+    fn stale_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(24 * 3600)
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &lines_feed::levels::demo::EVENT_TYPES
+    }
+    fn connect(
+        &self,
+        c: &LevelContext,
+    ) -> lines_feed::levels::BoxFuture<
+        'static,
+        anyhow::Result<Box<dyn lines_feed::levels::LevelTransport>>,
+    > {
+        lines_feed::levels::demo::DemoEvent.connect(c)
+    }
+    fn decode(
+        &self,
+        c: &LevelContext,
+        p: &dyn lines_feed::levels::ChartPrices,
+        prev: Option<&LevelMap>,
+        f: &[lines_feed::levels::LevelFrame],
+    ) -> Result<Option<LevelMap>, String> {
+        lines_feed::levels::demo::DemoEvent.decode(c, p, prev, f)
+    }
+}
+
+/// Serves [`Eventing`] for the test that holds it; nothing again however it ends.
+struct EventGuard;
+
+impl EventGuard {
+    fn on() -> EventGuard {
+        EVENT_SERVES.store(true, std::sync::atomic::Ordering::Release);
+        lines_feed::levels::serving_changed();
+        EventGuard
+    }
+}
+
+impl Drop for EventGuard {
+    fn drop(&mut self) {
+        EVENT_SERVES.store(false, std::sync::atomic::Ordering::Release);
+        lines_feed::levels::serving_changed();
+    }
+}
+
+/// 31 one-minute bars from 20:50 to 21:20 UTC (the demo event's A at 20:58, E1 21:06, V
+/// 21:12), 10 px apart, the newest `right` bars from the start at the plot's right edge.
+fn event_bars() -> Vec<lines_core::Bar> {
+    (0..31i64)
+        .map(|m| lines_core::Bar {
+            time: UtcMillis(UtcMillis::parse_iso("2026-11-05T20:50:00").unwrap().0 + m * 60_000),
+            open: Price(601_000),
+            high: Price(601_100),
+            low: Price(600_900),
+            close: Price(601_025),
+            volume: Qty(1),
+        })
+        .collect()
+}
+
+/// A layer on ES with the demo and the event source, placed over 5990 to 6030 on `bars` with
+/// the plot's right edge at bar `right`.
+fn evented(bars: &[lines_core::Bar], right: f64) -> (LevelsLayer, Arc<ChartStore>, Viewport) {
+    lines_feed::levels::register(Arc::new(DemoLevels)).unwrap();
+    lines_feed::levels::register(Arc::new(Eventing)).unwrap();
+    let store = es_store();
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.attach(&store);
+    assert!(lines_feed::levels::runtime::wait_settled(
+        std::time::Duration::from_secs(10)
+    ));
+    let d = store.read();
+    layer.snapshot(d.market_time);
+    layer.measure_labels(|t| t.chars().count() as f32 * 6.0);
+    layer.set_room(Some(400.0));
+    let mut v = Viewport::default();
+    v.set_size(800.0, 400.0);
+    (v.price_lo, v.price_hi) = (599_000.0, 603_000.0);
+    v.bar_px = 10.0;
+    v.right_index = right;
+    layer.prepare(&d, BarsView::fixed(bars, 60_000), &v);
+    drop(d);
+    (layer, store, v)
+}
+
+fn source_at(layer: &LevelsLayer, id: &str) -> usize {
+    layer
+        .sources()
+        .iter()
+        .position(|(s, ..)| s == id)
+        .unwrap_or_else(|| panic!("{id} serves ES"))
+}
+
+/// The placed level labelled `label` of source `i`.
+fn placed_named(layer: &LevelsLayer, i: usize, label: &str) -> Placed {
+    let map = layer.map(i).unwrap();
+    *layer
+        .placed(i)
+        .iter()
+        .find(|p| map.levels[p.index as usize].label.as_deref() == Some(label))
+        .unwrap_or_else(|| panic!("{label} placed"))
+}
+
+/// An event's lines begin at their own bars, never earlier: A's, the IRL and the YL at the
+/// anchor's (20:58: bar 8), E1's at its own (21:06: bar 16); the box from the anchor's bar to
+/// its end bar; an ordinary level (no start time) and every other source's across the plot.
+#[test]
+fn event_lines_start_at_their_bars() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _ev = EventGuard::on();
+    let bars = event_bars();
+    let (layer, _store, v) = evented(&bars, 30.0);
+    let x = |i: f64| v.index_to_x(i) as f32;
+    let ev = source_at(&layer, "demo-event");
+    let a = placed_named(&layer, ev, "A 6005");
+    assert_eq!((a.x0, a.x1), (x(8.0), 800.0));
+    assert_eq!(placed_named(&layer, ev, "Impact 6013.50").x0, x(8.0));
+    assert_eq!(placed_named(&layer, ev, "E1 6022").x0, x(16.0));
+    let prior = layer.map(ev).unwrap();
+    let boxed = layer
+        .placed(ev)
+        .iter()
+        .find(|p| prior.levels[p.index as usize].to.is_some())
+        .copied()
+        .expect("the box");
+    // Its bars' whole slots: half a bar either side of their centres.
+    assert_eq!((boxed.x0, boxed.x1), (x(8.0) - 5.0, x(16.0) + 5.0));
+    // The run's line from V's bar (21:12: bar 22).
+    assert_eq!(placed_named(&layer, ev, "Run 6016").x0, x(22.0));
+    // An old source's levels: across the whole plot, as before.
+    let demo = source_at(&layer, "demo");
+    assert!(
+        layer
+            .placed(demo)
+            .iter()
+            .all(|p| (p.x0, p.x1) == (0.0, 800.0))
+    );
+}
+
+/// Panned back so the anchor's bar is right of the plot: the event's lines haven't begun, so
+/// none is drawn and none keeps a label; the ordinary line still is.
+#[test]
+fn an_event_not_begun_draws_nothing() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _ev = EventGuard::on();
+    let bars = event_bars();
+    let (layer, _store, _) = evented(&bars, 4.0);
+    let ev = source_at(&layer, "demo-event");
+    let a = placed_named(&layer, ev, "A 6005");
+    assert!(a.x0 > a.x1, "not drawn");
+    assert_eq!(a.label_y, None, "no label");
+    // It claims no label row (laid out once the times are known), and pointing at its row
+    // reveals nothing of it.
+    let half = LevelsLayer::label_h() * 0.5;
+    let row = a.label_anchor(half);
+    let mut rows = Vec::new();
+    layer.tag_rows(|y| rows.push(y));
+    assert!(rows.iter().all(|y| (y - row).abs() > 1e-3), "{rows:?}");
+    assert!(
+        layer
+            .revealed_label(row, 400.0, 800.0)
+            .is_none_or(|(si, p, _)| !(si == ev && p.index == a.index)),
+        "an undrawn level isn't revealed"
+    );
+}
+
+/// Pointing at any member (a marker, a level's line where it is drawn) finds its event; left
+/// of where a line begins, or on an ungrouped level, nothing. While an event is highlighted
+/// its members stay whole and everything else dims.
+#[test]
+fn pointing_at_a_member_finds_its_event() {
+    let _one = DEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let _ev = EventGuard::on();
+    let bars = event_bars();
+    let (layer, _store, v) = evented(&bars, 30.0);
+    let ev = source_at(&layer, "demo-event");
+    let g = layer
+        .map(ev)
+        .unwrap()
+        .groups
+        .iter()
+        .position(|g| g == "demo/event-1");
+    let want = Some((ev, g.unwrap() as u16));
+    // On the A marker.
+    let (ax, ay) = (v.index_to_x(8.0) as f32, v.price_to_y(600_500.0) as f32);
+    assert_eq!(layer.group_at(ax + 1.0, ay - 1.0), want);
+    // On the IRL line, right of where it begins.
+    let irl = v.price_to_y(601_350.0) as f32;
+    assert_eq!(layer.group_at(700.0, irl + 1.0), want);
+    // Left of where it begins: not on it.
+    assert_eq!(layer.group_at(100.0, irl), None);
+    // Far from everything.
+    assert_eq!(layer.group_at(100.0, 395.0), None);
+    // The highlight: members whole, the rest dimmed.
+    let hot = want;
+    let g = want.map(|(_, g)| g);
+    assert_eq!(group_dim(hot, ev, g), 1.0);
+    assert_eq!(group_dim(hot, ev, None), GROUP_DIM);
+    assert_eq!(group_dim(hot, ev + 1, g), GROUP_DIM);
+    assert_eq!(group_dim(None, ev, None), 1.0);
+}
+
+/// The markers' ink is the accent (the approved violet) and their labels are AA on their plates
+/// in every theme: the accent where it is, else the theme's text. Dots keep 3:1.
+#[test]
+fn marker_colors_read_in_every_theme() {
+    use crate::theme::{Theme, contrast};
+    for t in Theme::all() {
+        assert!(
+            contrast(marker_ink(&t), t.bg) >= 3.0,
+            "dot 3:1 ({})",
+            t.is_dark()
+        );
+        assert!(
+            contrast(marker_text(&t), t.legend_box()) >= 4.5,
+            "label AA on its plate ({})",
+            t.is_dark()
+        );
+    }
+}
+
+/// The highlight sets everything else clearly back (the theme's fade, 35 %); a highlighted
+/// event's label the crosshair's tag would cover steps just beside the tag, never under it.
+#[test]
+fn a_highlighted_event_stands_out() {
+    assert!((0.35..=0.4).contains(&crate::theme::GROUP_FADE));
+    assert_eq!(GROUP_DIM, crate::theme::GROUP_FADE);
+    // A tag 20 tall at 100, a label 16 tall, a plot 400 tall: above it from at or above its
+    // centre, else below, each clear of it.
+    let (cy, ch, bh, ph) = (100.0, 20.0, 16.0, 400.0);
+    for y in [92.0, 100.0, 108.0] {
+        let at = beside_cross(y, cy, ch, bh, ph, &[], None).unwrap();
+        assert!((at - cy).abs() >= (ch + bh) * 0.5, "{y} -> {at}");
+        assert_eq!(at < cy, y <= cy);
+    }
+    // Two of the event's labels on the same side: the second takes the next free row, never
+    // the first's.
+    let first = beside_cross(95.0, cy, ch, bh, ph, &[], None).unwrap();
+    let second = beside_cross(90.0, cy, ch, bh, ph, &[first], None).unwrap();
+    assert!((second - first).abs() >= bh, "{first} {second}");
+    // Another source's label already drawn just above the tag: stepped past it.
+    let other = cy - 22.5;
+    let at = beside_cross(95.0, cy, ch, bh, ph, &[other], None).unwrap();
+    assert!((at - other).abs() >= bh && (at - cy).abs() >= (ch + bh) * 0.5);
+    // Clear of the last-price tag.
+    let last = Some((cy - 19.0, 18.0));
+    let at = beside_cross(95.0, cy, ch, bh, ph, &[], last).unwrap();
+    assert!((at - (cy - 19.0)).abs() >= (18.0 + bh) * 0.5);
+    // At the plot's top: below the tag instead, never off the plot.
+    let at = beside_cross(3.0, 5.0, ch, bh, ph, &[], None).unwrap();
+    assert!(at > 5.0 && at <= ph - bh * 0.5);
+    // No room either way (a plot hardly taller than the tag): none.
+    assert_eq!(beside_cross(10.0, 10.0, ch, bh, 24.0, &[], None), None);
 }

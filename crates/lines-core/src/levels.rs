@@ -118,7 +118,41 @@ pub struct Level {
     pub label: Option<String>,
     pub style: LevelStyle,
     pub meta: LevelMeta,
+    /// When it begins (an event's lines start at its bar): drawn from that bar to the right,
+    /// never earlier; `None`: across the whole plot.
+    pub from: Option<UtcMillis>,
+    /// When it ends (a time-bounded zone: from–to, low–high): drawn up to that bar; `None`: to
+    /// the plot's right edge.
+    pub to: Option<UtcMillis>,
+    /// The event it belongs to (an index into [`LevelMap::groups`]): pointing at any member
+    /// highlights them all.
+    pub group: Option<u16>,
 }
+
+/// A point an event passed through (time and price): a small dot in the theme's accent, with
+/// an optional short label (`A`, `E1`, `V`), and a dashed path to the previous marker of its
+/// group when `joined`. Drawn only where its time is among the chart's bars.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Marker {
+    pub at: UtcMillis,
+    /// Its price (a [`LevelValue::Tick`] or [`LevelValue::Raw`]; never VWAP-relative).
+    pub price: LevelValue,
+    /// At most [`MAX_MARKER_LABEL`] characters.
+    pub label: Option<String>,
+    /// A ring instead of a dot (a point not yet confirmed, say).
+    pub hollow: bool,
+    /// A dashed path from the previous marker of its group (in map order) to this one.
+    pub joined: bool,
+    /// The event it belongs to: see [`Level::group`].
+    pub group: Option<u16>,
+}
+
+/// Markers a map may carry, and a marker label's longest.
+pub const MAX_MARKERS: usize = 256;
+pub const MAX_MARKER_LABEL: usize = 8;
+/// Event groups a map may name, and a group id's longest.
+pub const MAX_GROUPS: usize = 256;
+pub const MAX_GROUP_ID: usize = 64;
 
 impl Level {
     /// `(low, high)` in catalog price units at the chart's current ETH VWAP (`None`: a
@@ -246,6 +280,10 @@ pub struct LevelMap {
     /// The source sent a legend that isn't valid ([`LevelError::BadLegend`]): it was dropped
     /// and the levels kept (a legend is never worth the levels). The runtime logs it.
     pub legend_dropped: bool,
+    /// Event points: see [`Marker`].
+    pub markers: Vec<Marker>,
+    /// Event group ids, in first-use order; levels and markers refer to them by index.
+    pub groups: Vec<String>,
 }
 
 /// A source's legend content (generic: the source decides the words): a short title after
@@ -337,8 +375,11 @@ impl LevelMap {
                 series_update: false,
                 legend: None,
                 legend_dropped: false,
+                markers: Vec::new(),
+                groups: Vec::new(),
             },
             error: None,
+            last: Last::None,
         }
     }
 
@@ -385,6 +426,12 @@ pub enum LevelError {
     /// up or down without its sign ([`LevelLegend::check`]; the builder drops such a legend
     /// and keeps the map: [`LevelMap::legend_dropped`]).
     BadLegend,
+    /// An event modifier (`from`, `to`, `group`, `hollow`, `joined`) with nothing it applies
+    /// to (no level or marker before it, or the wrong one).
+    Misplaced(&'static str),
+    /// A level that ends before it begins, a level moving with the VWAP given a time, or a
+    /// marker whose price moves with the VWAP.
+    BadTime,
 }
 
 impl fmt::Display for LevelError {
@@ -397,6 +444,13 @@ impl fmt::Display for LevelError {
             LevelError::TooMany(what) => write!(f, "too many {what}"),
             LevelError::BadSeries(k) => write!(f, "series {k:?} is malformed"),
             LevelError::BadLegend => write!(f, "the legend is malformed"),
+            LevelError::Misplaced(what) => write!(f, "{what} with no level or marker to apply to"),
+            LevelError::BadTime => {
+                write!(
+                    f,
+                    "a level ends before it begins, or a time on something moving with the VWAP"
+                )
+            }
             LevelError::NotFinite => write!(f, "a level value is not a finite number"),
             LevelError::OffTick(p) => write!(f, "level {} is not on the tick grid", p.0),
             LevelError::Inverted => write!(f, "a zone's lower bound is above its upper bound"),
@@ -438,6 +492,16 @@ fn name_ok(s: &str, extra: &[u8]) -> bool {
 pub struct LevelMapBuilder {
     map: LevelMap,
     error: Option<LevelError>,
+    /// What the event modifiers ([`LevelMapBuilder::from`], `to`, `group`, `hollow`,
+    /// `joined`) apply to: the last level or marker added.
+    last: Last,
+}
+
+#[derive(Copy, Clone)]
+enum Last {
+    None,
+    Level,
+    Marker,
 }
 
 impl LevelMapBuilder {
@@ -487,7 +551,92 @@ impl LevelMapBuilder {
             label: label.map(str::to_owned),
             style,
             meta,
+            from: None,
+            to: None,
+            group: None,
         });
+        self.last = Last::Level;
+        self
+    }
+
+    /// Add an event point (see [`Marker`]): a dot at `price` at time `at`, labelled `label`.
+    pub fn marker(mut self, at: UtcMillis, price: LevelValue, label: Option<&str>) -> Self {
+        self.map.markers.push(Marker {
+            at,
+            price,
+            label: label.map(str::to_owned),
+            hollow: false,
+            joined: false,
+            group: None,
+        });
+        self.last = Last::Marker;
+        self
+    }
+
+    /// The last level added begins at `t` ([`Level::from`]): drawn from that bar on.
+    pub fn from(mut self, t: UtcMillis) -> Self {
+        match (self.last, self.map.levels.last_mut()) {
+            (Last::Level, Some(l)) => l.from = Some(t),
+            _ => self.fail(LevelError::Misplaced("from")),
+        }
+        self
+    }
+
+    /// The last level added ends at `t` ([`Level::to`]).
+    pub fn to(mut self, t: UtcMillis) -> Self {
+        match (self.last, self.map.levels.last_mut()) {
+            (Last::Level, Some(l)) => l.to = Some(t),
+            _ => self.fail(LevelError::Misplaced("to")),
+        }
+        self
+    }
+
+    /// The last level or marker added belongs to event `id` (any text, at most
+    /// [`MAX_GROUP_ID`] characters): pointing at any member highlights them all.
+    pub fn group(mut self, id: &str) -> Self {
+        let g = if id.is_empty() || id.chars().count() > MAX_GROUP_ID {
+            self.fail(LevelError::TooLong("group id"));
+            0
+        } else if let Some(i) = self.map.groups.iter().position(|g| g == id) {
+            i as u16
+        } else if self.map.groups.len() >= MAX_GROUPS {
+            self.fail(LevelError::TooMany("groups"));
+            0
+        } else {
+            self.map.groups.push(id.to_owned());
+            (self.map.groups.len() - 1) as u16
+        };
+        match self.last {
+            Last::Level => {
+                if let Some(l) = self.map.levels.last_mut() {
+                    l.group = Some(g);
+                }
+            }
+            Last::Marker => {
+                if let Some(m) = self.map.markers.last_mut() {
+                    m.group = Some(g);
+                }
+            }
+            Last::None => self.fail(LevelError::Misplaced("group")),
+        }
+        self
+    }
+
+    /// The last marker added is a ring ([`Marker::hollow`]).
+    pub fn hollow(mut self) -> Self {
+        match (self.last, self.map.markers.last_mut()) {
+            (Last::Marker, Some(m)) => m.hollow = true,
+            _ => self.fail(LevelError::Misplaced("hollow")),
+        }
+        self
+    }
+
+    /// The last marker added joins the previous marker of its group ([`Marker::joined`]).
+    pub fn joined(mut self) -> Self {
+        match (self.last, self.map.markers.last_mut()) {
+            (Last::Marker, Some(m)) => m.joined = true,
+            _ => self.fail(LevelError::Misplaced("joined")),
+        }
         self
     }
 
@@ -520,6 +669,7 @@ impl LevelMapBuilder {
 
     /// Add a named value (not a price): see [`NamedValue`].
     pub fn value(mut self, name: &str, value: f64, as_of: Option<UtcMillis>) -> Self {
+        self.last = Last::None;
         self.map.values.push(NamedValue {
             name: name.to_owned(),
             value,
@@ -530,6 +680,7 @@ impl LevelMapBuilder {
 
     /// Add a line series for lower panes: see [`Series`].
     pub fn series(mut self, s: std::sync::Arc<Series>) -> Self {
+        self.last = Last::None;
         self.map.series.push(s);
         self
     }
@@ -542,6 +693,7 @@ impl LevelMapBuilder {
 
     /// The source's legend content: see [`LevelLegend`].
     pub fn legend(mut self, legend: LevelLegend) -> Self {
+        self.last = Last::None;
         self.map.legend = Some(legend);
         self
     }
@@ -620,9 +772,39 @@ impl LevelMapBuilder {
         if let Some(e) = bad {
             self.fail(e);
         }
+        if self.map.markers.len() > MAX_MARKERS {
+            self.fail(LevelError::TooMany("markers"));
+        }
+        let bad_marker = self.map.markers.iter().find_map(|m| {
+            check(m.price).err().or_else(|| {
+                if m.price.is_vwap_relative() {
+                    Some(LevelError::BadTime)
+                } else if m
+                    .label
+                    .as_ref()
+                    .is_some_and(|s| s.chars().count() > MAX_MARKER_LABEL)
+                {
+                    Some(LevelError::TooLong("marker label"))
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(e) = bad_marker {
+            self.fail(e);
+        }
         for i in 0..self.map.levels.len() {
             let l = &self.map.levels[i];
             let r = (|| {
+                if let (Some(a), Some(b)) = (l.from, l.to)
+                    && b < a
+                {
+                    return Err(LevelError::BadTime);
+                }
+                // A level moving with the VWAP is drawn bar by bar along it: it takes no times.
+                if l.is_vwap_relative() && (l.from.is_some() || l.to.is_some()) {
+                    return Err(LevelError::BadTime);
+                }
                 match l.shape {
                     LevelShape::Line(v) => check(v)?,
                     LevelShape::Zone { lower, upper } => {
@@ -981,6 +1163,11 @@ pub struct Placed {
     /// Its label's placement order ([`LabelPriority::rank`]: 0 first): Normal's from
     /// [`place`]; the layer sets its type's.
     pub rank: u8,
+    /// Where it is drawn across the plot (x from the plot's left, px): the whole width from
+    /// [`place`]; a level with a start or end time ([`Level::from`], [`Level::to`]) only from
+    /// its bar ([`start_x`], [`end_x`]; the layer sets them).
+    pub x0: f32,
+    pub x1: f32,
 }
 
 impl Placed {
@@ -1030,8 +1217,110 @@ pub fn place(
             anchor: LabelAt::Own,
             on_edge: false,
             rank: LabelPriority::Normal.rank(),
+            x0: 0.0,
+            x1: vp.width as f32,
         });
     }
+}
+
+/// Where a level beginning at `from` starts across the plot (px from its left): the centre of
+/// the bar `from` falls in (in a gap between bars, the next bar's); the plot's left edge when
+/// `from` is before the first bar loaded or left of the plot. `None` when that bar is right
+/// of the plot, or `from` is after the last bar (the level isn't drawn: it hasn't begun).
+/// Never earlier than `from`'s bar. No allocation.
+pub fn start_x(
+    bars: &crate::timeframe::BarsView<'_>,
+    vp: &Viewport,
+    from: UtcMillis,
+) -> Option<f32> {
+    let i = match bars.bars.partition_point(|b| b.time <= from).checked_sub(1) {
+        None => return Some(0.0), // before the first bar loaded
+        Some(i) if from < bars.end(i) => i,
+        Some(i) => i + 1, // in a gap after bar i, or after the last
+    };
+    if i >= bars.len() {
+        return None;
+    }
+    let x = vp.index_to_x(i as f64) as f32;
+    if x > vp.width as f32 {
+        return None;
+    }
+    Some(x.max(0.0))
+}
+
+/// Where a level ending at `to` stops across the plot: the centre of the bar `to` falls in
+/// (in a gap, the bar before it); the plot's right edge when `to` is after the last bar.
+/// `None` when that bar is left of the plot or `to` is before the first bar (it has ended
+/// before anything shown). No allocation.
+pub fn end_x(bars: &crate::timeframe::BarsView<'_>, vp: &Viewport, to: UtcMillis) -> Option<f32> {
+    let i = bars.bars.partition_point(|b| b.time <= to).checked_sub(1)?;
+    if to >= bars.end(i) && i + 1 == bars.len() {
+        return Some(vp.width as f32); // after the last bar: still going
+    }
+    let x = vp.index_to_x(i as f64) as f32;
+    if x < 0.0 {
+        return None;
+    }
+    Some(x.min(vp.width as f32))
+}
+
+/// The part of segment `a`–`b` inside the rectangle `0..=w` × `0..=h` (Liang–Barsky), or
+/// `None` when none of it is. For drawing a path between markers only where it shows: never a
+/// loop over points far off the plot. No allocation.
+pub fn clip_segment(
+    a: (f32, f32),
+    b: (f32, f32),
+    w: f32,
+    h: f32,
+) -> Option<((f32, f32), (f32, f32))> {
+    let (x0, y0, x1, y1) = (
+        f64::from(a.0),
+        f64::from(a.1),
+        f64::from(b.0),
+        f64::from(b.1),
+    );
+    let (dx, dy) = (x1 - x0, y1 - y0);
+    let (mut t0, mut t1) = (0.0f64, 1.0f64);
+    for (p, q) in [
+        (-dx, x0),
+        (dx, f64::from(w) - x0),
+        (-dy, y0),
+        (dy, f64::from(h) - y0),
+    ] {
+        if p == 0.0 {
+            if q < 0.0 || !q.is_finite() {
+                return None;
+            }
+            continue;
+        }
+        let r = q / p;
+        if p < 0.0 {
+            t0 = t0.max(r);
+        } else {
+            t1 = t1.min(r);
+        }
+        if t0 > t1 {
+            return None;
+        }
+    }
+    let at = |t: f64| ((x0 + t * dx) as f32, (y0 + t * dy) as f32);
+    Some((at(t0), at(t1)))
+}
+
+/// A marker's place on the plot (px from its top-left), unclamped: its bar's centre (`None`
+/// when its time isn't among the bars loaded) and its price. No allocation.
+pub fn marker_xy(
+    bars: &crate::timeframe::BarsView<'_>,
+    vp: &Viewport,
+    m: &Marker,
+) -> Option<(f32, f32)> {
+    let i = bars.bar_at(m.at).or_else(|| {
+        // In a gap: the next bar.
+        let j = bars.bars.partition_point(|b| b.time <= m.at);
+        (j > 0 && j < bars.len()).then_some(j)
+    })?;
+    let price = m.price.resolve(None)?;
+    Some((vp.index_to_x(i as f64) as f32, vp.price_to_y(price) as f32))
 }
 
 /// The extra separation (a fraction of a label's height) a label hidden last frame needs

@@ -33,6 +33,11 @@
 //!   newest bar and moving with it; pinned to the plot's right edge when it is off screen;
 //!   one under the pointer fades). No room is ever reserved inside the plot: the bars run to
 //!   its edge.
+//! - Event levels (owner-approved, 2026-11-13): a level with a start time is drawn from its bar
+//!   to the right, never earlier (a time-bounded zone from its start to its end bar); a source's
+//!   markers are dots in the theme's accent at a bar and price, with short labels and a dashed
+//!   path joining an event's points; pointing at any member of an event (a level, a zone, a
+//!   marker) highlights its whole group and dims the rest ([`LevelsLayer::group_at`]).
 //! - Per pane ([`LevelsConfig`], saved with the workspace): all levels, per source, per kind,
 //!   and labels. The chart's study visibility applies on top: "hide studies" hides levels,
 //!   "hide study labels" and Clean chart hide their labels and legend rows.
@@ -250,6 +255,113 @@ pub struct LabelStrip {
     /// tag it would cover isn't drawn (never a tag cut to a sliver under it).
     pub cross_tag: Option<(f32, f32)>,
 }
+/// A marker's dot radius (logical px at 100 %).
+const MARKER_R: f32 = 3.5;
+/// How near a member the pointer must be to highlight its event (logical px at 100 %).
+const GROUP_HIT: f32 = 4.0;
+/// What the levels, markers and labels outside a highlighted event are drawn at.
+pub(crate) const GROUP_DIM: f32 = crate::theme::GROUP_FADE;
+
+/// A member's opacity factor while event `hot` (source, group) is highlighted: whole for its
+/// own members (and everything while none is), [`GROUP_DIM`] for the rest.
+fn group_dim(hot: Option<(usize, u16)>, si: usize, g: Option<u16>) -> f32 {
+    match hot {
+        Some((hs, hg)) if !(hs == si && g == Some(hg)) => GROUP_DIM,
+        _ => 1.0,
+    }
+}
+
+/// Where a highlighted event's label at `y` (`box_h` tall) goes when the crosshair's price
+/// tag (centre `cy`, `ch` tall) would cover it: the nearest row beside the tag, on the label's
+/// own side first (above when at or above the tag's centre), then the other, that keeps clear
+/// of the tag, of each label row in `taken`, of `blocked` (the last-price tag: centre, height)
+/// and inside a plot `ph` tall. `None` when no row within a few labels of the tag is free.
+/// No allocation.
+fn beside_cross(
+    y: f32,
+    cy: f32,
+    ch: f32,
+    box_h: f32,
+    ph: f32,
+    taken: &[f32],
+    blocked: Option<(f32, f32)>,
+) -> Option<f32> {
+    let off = (ch + box_h) * 0.5 + 1.0;
+    let up = y <= cy;
+    for above in [up, !up] {
+        for k in 0..8u8 {
+            let d = off + f32::from(k) * box_h;
+            let at = if above { cy - d } else { cy + d };
+            if at < box_h * 0.5 || at > ph - box_h * 0.5 {
+                break; // off the plot this way
+            }
+            let clear = taken.iter().all(|r| (r - at).abs() >= box_h)
+                && blocked.is_none_or(|(by, bh)| (by - at).abs() >= (bh + box_h) * 0.5);
+            if clear {
+                return Some(at);
+            }
+        }
+    }
+    None
+}
+
+/// A color set back by a fade (a theme token's, with less alpha).
+type Faded = Hsla;
+
+/// `c` at `f` of its alpha.
+fn faded(c: Hsla, f: f32) -> Faded {
+    c.opacity(c.a * f)
+}
+
+/// A marker's color (a theme token, chosen by the helpers below).
+pub(crate) type MarkerInk = Hsla;
+
+/// A marker's dot and path: the theme's accent (the owner-approved mock's violet).
+pub(crate) fn marker_ink(theme: &Theme) -> MarkerInk {
+    theme.accent
+}
+
+/// A marker's label: the accent where it is AA on its plate (the legend box, opaque), else the
+/// theme's text.
+pub(crate) fn marker_text(theme: &Theme) -> MarkerInk {
+    if crate::theme::contrast(theme.accent, theme.legend_box()) >= 4.5 {
+        theme.accent
+    } else {
+        theme.text_main
+    }
+}
+
+/// A dashed segment from `a` to `b` (window px; already clipped to the plot): 3 px dashes, 2 px
+/// gaps, each dash a run of `w`-sized squares, counted in steps (bounded by the segment's
+/// length on the plot, never a loop that can't end). No allocation.
+fn dashed_segment(window: &mut Window, a: (f32, f32), b: (f32, f32), w: f32, c: Hsla) {
+    let (dx, dy) = (f64::from(b.0 - a.0), f64::from(b.1 - a.1));
+    let len = (dx * dx + dy * dy).sqrt();
+    if !len.is_finite() || len < 0.5 {
+        return;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let step = f64::from(w.max(0.75));
+    let steps = (len / step).ceil().min(20_000.0) as u32;
+    for k in 0..steps {
+        let u = f64::from(k) * step;
+        // 3 px on, 2 px off.
+        if u % 5.0 >= 3.0 {
+            continue;
+        }
+        window.paint_quad(fill(
+            Bounds::new(
+                point(
+                    px(a.0 + (ux * u) as f32 - w * 0.5),
+                    px(a.1 + (uy * u) as f32 - w * 0.5),
+                ),
+                size(px(w), px(w)),
+            ),
+            c,
+        ));
+    }
+}
+
 /// Most labels shaped and kept, by (text, color) (cleared when exceeded).
 const MAX_SHAPED: usize = 512;
 
@@ -384,6 +496,9 @@ struct Slot {
     /// Kind visibility bit per kind index (maps have at most 64 kinds).
     kinds: u64,
     placed: Vec<Placed>,
+    /// This frame's markers on the plot: (marker index, x, y), fixed capacity
+    /// ([`lines_core::levels::MAX_MARKERS`]).
+    markers: Vec<(u32, f32, f32)>,
     /// The chart's style override for this source (decision 0026; default: the source's).
     looks: [Look; 2],
     /// The level types the source declares, and its own label mode.
@@ -829,14 +944,26 @@ pub struct LevelsLayer {
     /// last-price line breaks around them ([`Self::label_chips`]); capacity kept, so steady
     /// frames don't allocate.
     chips: Vec<[f32; 4]>,
+    /// Each label row drawn this frame (centre y): a highlighted event's label stepping beside
+    /// the crosshair's tag keeps clear of them ([`beside_cross`]). Grown with the maps.
+    rows: Vec<f32>,
     /// Every source's placed levels this frame, joined for one label layout (`place`): each
     /// level's index offset by its source's place in `seen_all`. Capacity kept, so steady
     /// frames don't allocate.
     joint: Vec<Placed>,
     /// Every source's label states, joined as `joint` is (each source's `seen` in turn).
     seen_all: Vec<LabelSeen>,
+    /// Whether each joined level is drawn this frame (by `seen_all` index): one that isn't
+    /// (not begun, or over before the plot) claims no label row.
+    drawn_all: Vec<bool>,
     /// Each joined source: (its slot, its first index in `seen_all`).
     joint_slots: Vec<(usize, u32)>,
+    /// The pointer over the plot (plot px), for an event's highlight ([`Self::set_pointer`]).
+    pointer: Option<(f32, f32)>,
+    /// The event it highlights this frame (source, group), found once in `set_pointer`.
+    hot: Option<(usize, u16)>,
+    /// The plot's size as of [`Self::place`], for laying the labels out in [`Self::columns`].
+    label_plot: (f32, f32),
 }
 
 /// Columns kept for the VWAP that VWAP-relative levels follow.
@@ -892,9 +1019,14 @@ impl LevelsLayer {
             serving_gen: 0,
             last_y: None,
             chips: Vec::new(),
+            rows: Vec::new(),
             joint: Vec::new(),
             seen_all: Vec::new(),
+            drawn_all: Vec::new(),
             joint_slots: Vec::new(),
+            pointer: None,
+            hot: None,
+            label_plot: (0.0, 0.0),
         }
     }
 
@@ -980,6 +1112,7 @@ impl LevelsLayer {
                     error: None,
                     kinds: u64::MAX,
                     placed: Vec::with_capacity(MAX_LEVELS),
+                    markers: Vec::with_capacity(lines_core::levels::MAX_MARKERS),
                 }
             })
             .collect();
@@ -1142,6 +1275,9 @@ impl LevelsLayer {
         let placed: usize = self.slots.iter().map(|s| s.placed.capacity()).sum();
         self.seen_all
             .reserve(levels.saturating_sub(self.seen_all.len()));
+        self.drawn_all
+            .reserve(levels.saturating_sub(self.drawn_all.len()));
+        self.rows.reserve(levels.saturating_sub(self.rows.len()));
         self.joint.reserve(placed.saturating_sub(self.joint.len()));
         self.joint_slots
             .reserve(self.slots.len().saturating_sub(self.joint_slots.len()));
@@ -1158,6 +1294,9 @@ impl LevelsLayer {
     /// The VWAP-relative levels' columns for this frame's bars (after the time axis is final:
     /// the labels' gutter moves it).
     pub fn columns(&mut self, bars: BarsView<'_>, vp: &Viewport) {
+        self.time_extents(&bars, vp);
+        let (w, h) = self.label_plot;
+        self.place_all_labels(w, h);
         if let Some(h) = &self.vwap
             && let Some(out) = h.cell().try_read()
         {
@@ -1165,6 +1304,108 @@ impl LevelsLayer {
         } else if self.vwap.is_none() {
             self.vwap_cols.clear();
         }
+    }
+
+    /// Each placed level's extent across the plot (a level with a start time from its bar on,
+    /// never earlier; with an end time, to its bar; one that hasn't begun, or ended before the
+    /// plot, isn't drawn and shows no label), and each marker's place. After [`Self::place`],
+    /// once the time axis is final. No allocation.
+    fn time_extents(&mut self, bars: &BarsView<'_>, vp: &Viewport) {
+        use lines_core::levels::{end_x, marker_xy, start_x};
+        let w = vp.width as f32;
+        for s in &mut self.slots {
+            s.markers.clear();
+            let Some(map) = s.map.as_ref() else { continue };
+            for p in &mut s.placed {
+                let l = &map.levels[p.index as usize];
+                let x0 = match l.from {
+                    None => Some(0.0),
+                    Some(t) => start_x(bars, vp, t),
+                };
+                let x1 = match l.to {
+                    None => Some(w),
+                    Some(t) => end_x(bars, vp, t),
+                };
+                match (x0, x1) {
+                    // A time-bounded zone spans its bars' whole slots (a box one bar wide
+                    // stays a box).
+                    (Some(a), Some(b)) if a <= b && l.to.is_some() => {
+                        let half = (vp.bar_px * 0.5) as f32;
+                        let a = if l.from.is_some() {
+                            (a - half).max(0.0)
+                        } else {
+                            a
+                        };
+                        (p.x0, p.x1) = (a, (b + half).min(w));
+                    }
+                    (Some(a), Some(b)) if a <= b => (p.x0, p.x1) = (a, b),
+                    _ => {
+                        // Not begun, or over before the plot: nothing drawn, no label.
+                        (p.x0, p.x1) = (1.0, 0.0);
+                        p.label_y = None;
+                    }
+                }
+            }
+            if !self.config.source_shown(s.handle.source()) || s.status == LevelStatus::Missing {
+                continue;
+            }
+            for (i, m) in map.markers.iter().enumerate() {
+                if s.markers.len() == s.markers.capacity() {
+                    break;
+                }
+                if let Some((x, y)) = marker_xy(bars, vp, m) {
+                    s.markers.push((i as u32, x, y));
+                }
+            }
+        }
+    }
+
+    /// The pointer over the plot (plot px; `None`: away), before painting: an event under it is
+    /// highlighted ([`Self::group_at`]).
+    pub fn set_pointer(&mut self, at: Option<(f32, f32)>) {
+        self.pointer = at;
+        self.hot = at.and_then(|(x, y)| self.group_at(x, y));
+    }
+
+    /// The event under the plot point `(x, y)`: its source and group, when the point is on one
+    /// of its members (within a few px of a marker or of a level's line where it is drawn,
+    /// inside a time-bounded zone). Markers first, then levels. No allocation.
+    pub fn group_at(&self, x: f32, y: f32) -> Option<(usize, u16)> {
+        let near = crate::zoom::f(GROUP_HIT);
+        for (si, s) in self.slots.iter().enumerate() {
+            let Some(map) = s.map.as_ref() else { continue };
+            for &(i, mx, my) in &s.markers {
+                let Some(g) = map.markers.get(i as usize).and_then(|m| m.group) else {
+                    continue;
+                };
+                if (mx - x).abs() <= near && (my - y).abs() <= near {
+                    return Some((si, g));
+                }
+            }
+        }
+        for (si, s) in self.slots.iter().enumerate() {
+            let Some(map) = s.map.as_ref() else { continue };
+            for p in &s.placed {
+                let Some(l) = map.levels.get(p.index as usize) else {
+                    continue;
+                };
+                let Some(g) = l.group else { continue };
+                if p.x0 > p.x1 || x < p.x0 - near || x > p.x1 + near {
+                    continue;
+                }
+                let on_line = (y - p.top).abs() <= near || (y - p.bottom).abs() <= near;
+                let in_box = l.to.is_some() && y >= p.top && y <= p.bottom;
+                if on_line || in_box {
+                    return Some((si, g));
+                }
+            }
+        }
+        None
+    }
+
+    /// The event the pointer highlights this frame.
+    fn hot(&self) -> Option<(usize, u16)> {
+        self.hot
     }
 
     /// Under the store lock, after the price scale's update: each source's levels and labels
@@ -1247,7 +1488,9 @@ impl LevelsLayer {
                     .rank();
             }
         }
-        self.place_all_labels(plot_w, plot_h);
+        // The labels are laid out once the time axis is final ([`Self::columns`]): a level that
+        // isn't drawn there (not begun, or over before the plot) claims no label row.
+        self.label_plot = (plot_w, plot_h);
     }
 
     /// One label layout for every source (`place_labels` over their levels joined): a label
@@ -1257,6 +1500,7 @@ impl LevelsLayer {
     fn place_all_labels(&mut self, plot_w: f32, plot_h: f32) {
         self.joint.clear();
         self.seen_all.clear();
+        self.drawn_all.clear();
         self.joint_slots.clear();
         let on_edge = self.config.label_place == LabelPlace::Axis;
         for (si, s) in self.slots.iter().enumerate() {
@@ -1273,6 +1517,12 @@ impl LevelsLayer {
             let base = self.seen_all.len() as u32;
             self.joint_slots.push((si, base));
             self.seen_all.extend_from_slice(&s.seen);
+            self.drawn_all.resize(self.seen_all.len(), true);
+            for p in &s.placed {
+                if p.x0 > p.x1 {
+                    self.drawn_all[(base + p.index) as usize] = false;
+                }
+            }
             self.joint.extend(s.placed.iter().map(|p| Placed {
                 index: p.index + base,
                 ..*p
@@ -1282,7 +1532,7 @@ impl LevelsLayer {
         // this room: an empty cut means none fits) claims no room; nor does one whose source's
         // labels are off. No room at all (labels can't show): none placed.
         let room = self.room.at(plot_w);
-        let (slots, joint_slots) = (&self.slots, &self.joint_slots);
+        let (slots, joint_slots, drawn) = (&self.slots, &self.joint_slots, &self.drawn_all);
         let (texts_of, widths, cuts, config) = (
             |si: usize| &slots[si].texts,
             &self.widths,
@@ -1302,6 +1552,10 @@ impl LevelsLayer {
                 };
                 let s = &slots[si];
                 if config.hide_labels || !config.labels_shown(s.handle.source()) {
+                    return false;
+                }
+                // Not drawn (not begun, or over before the plot): no label, no row.
+                if !drawn.get(g as usize).copied().unwrap_or(true) {
                     return false;
                 }
                 let Some(map) = s.map.as_ref() else {
@@ -1337,7 +1591,8 @@ impl LevelsLayer {
     }
 
     fn each(&self, mut f: impl FnMut(&Arc<LevelMap>, &Placed, f32, &Slot)) {
-        for s in &self.slots {
+        let hot = self.hot();
+        for (si, s) in self.slots.iter().enumerate() {
             let Some(map) = &s.map else { continue };
             // Stale maps are dimmed (shown as stale, never as current).
             let dim = if matches!(s.status, LevelStatus::Stale { .. }) {
@@ -1346,7 +1601,133 @@ impl LevelsLayer {
                 1.0
             };
             for p in &s.placed {
-                f(map, p, dim, s);
+                if p.x0 > p.x1 {
+                    continue; // not begun, or over before the plot
+                }
+                let g = map.levels[p.index as usize].group;
+                f(map, p, dim * group_dim(hot, si, g), s);
+            }
+        }
+    }
+
+    /// The markers (dots in the theme's accent, rings when hollow, their short labels) and
+    /// each event's dashed path between its joined markers, over the levels; dimmed outside a
+    /// highlighted event. Allocates only to shape a label not seen before.
+    pub fn paint_markers(
+        &mut self,
+        plot: Bounds<Pixels>,
+        labels: bool,
+        theme: &Theme,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let scale = window.scale_factor();
+        let hair = 1.0 / scale;
+        let (ox, oy) = (f32::from(plot.origin.x), f32::from(plot.origin.y));
+        let (pw, ph) = (f32::from(plot.size.width), f32::from(plot.size.height));
+        let hot = self.hot();
+        let r = crate::zoom::f(MARKER_R);
+        let ink = marker_ink(theme);
+        let text = marker_text(theme);
+        let plate = theme.legend_box();
+        for si in 0..self.slots.len() {
+            let Some(map) = self.slots[si].map.clone() else {
+                continue;
+            };
+            let stale = matches!(self.slots[si].status, LevelStatus::Stale { .. });
+            // Their labels follow the label switches (study labels, Clean chart, this source's).
+            let words = labels
+                && !self.config.hide_labels
+                && self.config.labels_shown(self.slots[si].handle.source());
+            // The paths first, under the dots: each joined marker back to the previous marker
+            // of its group (in map order) that is on the chart, only where it crosses the plot.
+            for k in 0..self.slots[si].markers.len() {
+                let (i, x, y) = self.slots[si].markers[k];
+                let Some(m) = map.markers.get(i as usize) else {
+                    continue;
+                };
+                if !m.joined || m.group.is_none() {
+                    continue;
+                }
+                let prev = self.slots[si].markers[..k].iter().rev().find(|(j, ..)| {
+                    map.markers
+                        .get(*j as usize)
+                        .is_some_and(|o| o.group == m.group)
+                });
+                let Some(&(_, px0, py0)) = prev else { continue };
+                let Some((a0, b0)) = lines_core::levels::clip_segment((px0, py0), (x, y), pw, ph)
+                else {
+                    continue;
+                };
+                let a = group_dim(hot, si, m.group) * if stale { 0.4 } else { 1.0 };
+                let c = ink.opacity(ink.a * a);
+                dashed_segment(
+                    window,
+                    (ox + a0.0, oy + a0.1),
+                    (ox + b0.0, oy + b0.1),
+                    hair.max(1.0),
+                    c,
+                );
+            }
+            for k in 0..self.slots[si].markers.len() {
+                let (i, x, y) = self.slots[si].markers[k];
+                let Some(m) = map.markers.get(i as usize) else {
+                    continue;
+                };
+                if !(-r..=pw + r).contains(&x) || !(-r..=ph + r).contains(&y) {
+                    continue; // off the plot
+                }
+                let a = group_dim(hot, si, m.group) * if stale { 0.4 } else { 1.0 };
+                let c = ink.opacity(ink.a * a);
+                let b = Bounds::new(
+                    point(px(ox + x - r), px(oy + y - r)),
+                    size(px(r * 2.0), px(r * 2.0)),
+                );
+                if m.hollow {
+                    window.paint_quad(gpui::quad(
+                        b,
+                        px(r),
+                        gpui::transparent_black(),
+                        px(hair.max(1.0)),
+                        c,
+                        gpui::BorderStyle::Solid,
+                    ));
+                } else {
+                    window.paint_quad(gpui::quad(
+                        b,
+                        px(r),
+                        c,
+                        px(0.0),
+                        c,
+                        gpui::BorderStyle::Solid,
+                    ));
+                }
+                let Some(label) = m.label.as_deref().filter(|_| words) else {
+                    continue;
+                };
+                let t = text.opacity(text.a * a);
+                let line = shaped_in(&mut self.shaped, label, t, window);
+                // On a plate (the legend box: opaque), so no candle or line runs through it.
+                // Dimmed with its label (outside the highlighted event, or stale): a dimmed
+                // label is set back, not meant to be read over the bars.
+                let pad = crate::zoom::f(2.0);
+                let (lx, ly) = (ox + x + r + pad * 2.0, oy + y + r - label_px() * 0.2);
+                let lh = label_px() * 1.3;
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(px(lx - pad), px(ly)),
+                        size(px(f32::from(line.width) + pad * 2.0), px(lh)),
+                    ),
+                    plate.opacity(plate.a * a),
+                ));
+                let _ = line.paint(
+                    point(px(lx), px(ly)),
+                    px(lh),
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
             }
         }
     }
@@ -1436,7 +1817,7 @@ impl LevelsLayer {
                 continue;
             }
             for p in &s.placed {
-                if let Some(y) = p.label_y {
+                if let (Some(y), true) = (p.label_y, p.x0 <= p.x1) {
                     f(y);
                 }
             }
@@ -1539,8 +1920,10 @@ impl LevelsLayer {
             if let LevelShape::Zone { .. } = l.shape {
                 let (top, bottom) = (snap(p.top as f64, scale), snap(p.bottom as f64, scale));
                 let h = (bottom - top).max(1.0 / scale);
+                // From its start bar to its end bar (the whole plot unless it says).
+                let (x0, x1) = (p.x0.clamp(0.0, pw), p.x1.clamp(0.0, pw));
                 window.paint_quad(fill(
-                    Bounds::new(point(px(ox), px(oy + top)), size(px(pw), px(h))),
+                    Bounds::new(point(px(ox + x0), px(oy + top)), size(px(x1 - x0), px(h))),
                     zone,
                 ));
             }
@@ -1590,20 +1973,22 @@ impl LevelsLayer {
             stroke_around_last(a, b, y, w, last, hair, fp, &mut quad);
         };
         // A stroke at 0 % (a fill-only zone's edges) draws nothing at all.
-        let line = |window: &mut Window, y: f32, st: Stroke| {
+        let line = |window: &mut Window, y: f32, st: Stroke, x0: f32, x1: f32| {
             if st.color.a <= 0.0 {
                 return;
             }
             let w = st.width.max(hair);
             let y = snap(f64::from(y - w * 0.5), scale);
+            let (x0, x1) = (x0.clamp(0.0, pw), x1.clamp(0.0, pw));
             crate::eyedropper::rect(
-                Bounds::new(point(px(ox), px(oy + y)), size(px(pw), px(w))),
+                Bounds::new(point(px(ox + x0), px(oy + y)), size(px(x1 - x0), px(w))),
                 st.color,
                 "Level",
             );
-            // Across the bars to the plot's edge; in the labels' gutter the chip covers it.
+            // From its start bar (the plot's left edge unless it says) across the bars to its
+            // end; in the labels' gutter the chip covers it.
             st.dash
-                .segments(pw, |a, b| row(window, a, b, y, w, st.color));
+                .segments(x1 - x0, |a, b| row(window, x0 + a, x0 + b, y, w, st.color));
         };
         let ppu = self.px_per_unit;
         let cols = &self.vwap_cols;
@@ -1650,9 +2035,9 @@ impl LevelsLayer {
                 }
                 return;
             }
-            line(window, p.top, st);
+            line(window, p.top, st, p.x0, p.x1);
             if zone {
-                line(window, p.bottom, st);
+                line(window, p.bottom, st, p.x0, p.x1);
             }
         });
     }
@@ -1700,28 +2085,51 @@ impl LevelsLayer {
         let reveal = strip
             .hover
             .and_then(|(_, hy)| self.revealed_label(hy, ph, f32::from(plot.size.width)));
-        for si in 0..self.slots.len() {
-            let Some(map) = self.slots[si].map.clone() else {
-                continue;
-            };
-            if !self.config.labels_shown(self.slots[si].handle.source()) {
-                continue;
-            }
-            // Resolved once per theme, map and looks (allocates only then).
-            self.slots[si].label_colors(&map, theme, hair, self.px_per_unit);
-            for pi in 0..self.slots[si].placed.len() {
-                let p = self.slots[si].placed[pi];
-                let Some(y) = p.label_y else { continue };
-                // A tag the crosshair's price tag covers: none, while the pointer is there.
-                let under_cross = self.config.label_place == LabelPlace::Axis
-                    && strip
+        let hot = self.hot();
+        // Two passes: every label where the layout put it (but those under the crosshair's
+        // tag), then a highlighted event's own that the tag covers, each beside the tag on a
+        // row clear of the tag, the last-price tag and every label drawn (else none).
+        let mut rows = std::mem::take(&mut self.rows);
+        rows.clear();
+        let blocked = self.blocked;
+        for pass in 0..2 {
+            for si in 0..self.slots.len() {
+                let Some(map) = self.slots[si].map.clone() else {
+                    continue;
+                };
+                if !self.config.labels_shown(self.slots[si].handle.source()) {
+                    continue;
+                }
+                // Resolved once per theme, map and looks (allocates only then).
+                self.slots[si].label_colors(&map, theme, hair, self.px_per_unit);
+                for pi in 0..self.slots[si].placed.len() {
+                    let p = self.slots[si].placed[pi];
+                    let Some(y) = p.label_y else { continue };
+                    let cross = strip
                         .cross_tag
-                        .is_some_and(|(cy, ch)| (cy - y).abs() < (ch + box_h) * 0.5);
-                if !under_cross {
+                        .filter(|(cy, ch)| (cy - y).abs() < (ch + box_h) * 0.5)
+                        .filter(|_| self.config.label_place == LabelPlace::Axis);
+                    let g = map.levels[p.index as usize].group;
+                    let y = match (pass, cross) {
+                        (0, None) => y,
+                        // A highlighted event's own: beside the crosshair's tag, never hidden
+                        // under it while a row is free.
+                        (1, Some((cy, ch))) if hot.is_some() && group_dim(hot, si, g) == 1.0 => {
+                            match beside_cross(y, cy, ch, box_h, ph, &rows, blocked) {
+                                Some(y) => y,
+                                None => continue,
+                            }
+                        }
+                        // Any other tag the crosshair's price tag covers: none, while it's
+                        // there.
+                        _ => continue,
+                    };
+                    rows.push(y);
                     self.paint_label(si, &map, p, y, false, &at, theme, window, cx);
                 }
             }
         }
+        self.rows = rows;
         if let Some((si, p, y)) = reveal
             && let Some(map) = self.slots[si].map.clone()
         {
@@ -1757,7 +2165,10 @@ impl LevelsLayer {
                     .get(full)
                     .copied()
                     .unwrap_or_else(|| estimate(full));
-                if p.label_y.is_some() || !label_can_show(w, self.cuts.get(full), room) {
+                if p.label_y.is_some()
+                    || p.x0 > p.x1
+                    || !label_can_show(w, self.cuts.get(full), room)
+                {
                     continue;
                 }
                 let y = p.label_anchor(half).clamp(half, (ph - half).max(half));
@@ -1850,6 +2261,9 @@ impl LevelsLayer {
         } else {
             self.config.label_place
         };
+        // Outside a highlighted event: set back with its level (one shown for the pointer
+        // too).
+        let fade = group_dim(self.hot(), si, level.group);
         let (x, mut bg, mut ink) = match place {
             // Just right of the newest bar, moving with it; pinned to the plot's edge when that
             // doesn't fit (the newest bar off screen, or too near it).
@@ -1873,6 +2287,9 @@ impl LevelsLayer {
                 color,
             ),
         };
+        if fade < 1.0 {
+            (bg, ink) = (faded(bg, fade), faded(ink, fade));
+        }
         match place {
             LabelPlace::Chart => {
                 // Under the pointer: faded, so the bars under it show (and the last price runs

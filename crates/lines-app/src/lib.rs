@@ -870,6 +870,11 @@ struct Cli {
     #[cfg(feature = "demo-levels")]
     #[arg(long)]
     demo_crowd: bool,
+    /// Also show a synthetic event on ES/MES charts: markers joined by a dashed path, lines
+    /// that begin at their bars, a time-bounded box, all one group (builds with `demo-levels`).
+    #[cfg(feature = "demo-levels")]
+    #[arg(long)]
+    demo_event: bool,
     /// Add a VWAP to the first chart (repeatable): eth (default reset), rth, week, month or
     /// anchor@2026-11-06T14:30:00Z, optionally with σ bands after a slash: eth/1,2,3 (quote it
     /// in PowerShell). In the app, Ctrl+I opens a chart's indicator menu.
@@ -1964,6 +1969,10 @@ where
     #[cfg(feature = "demo-levels")]
     if cli.demo_crowd {
         lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoCrowd))?;
+    }
+    #[cfg(feature = "demo-levels")]
+    if cli.demo_event {
+        lines_feed::levels::register(Arc::new(lines_feed::levels::demo::DemoEvent))?;
     }
 
     if cli.backtest_config.is_some()
