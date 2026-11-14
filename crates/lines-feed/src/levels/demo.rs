@@ -892,3 +892,140 @@ impl LevelSource for DemoEvent {
             .map_err(|e| e.to_string())
     }
 }
+
+// ---- a synthetic two-point drawing tool ----------------------------------------------------
+
+/// The demo drawing tool's id.
+pub const SPAN_ID: &str = "demo-span";
+
+/// The demo tool's kinds: its two points' lines, the line halfway between them, a zone between
+/// them (from the first point's bar to the second's), and the quarter lines, off by default
+/// and shown on hover only.
+pub static SPAN_TYPES: [LevelType; 4] = [
+    LevelType::line(
+        "span-end",
+        "Span end",
+        "Span",
+        themed(OLIVE.0, Some(OLIVE.1), LineType::Solid, 1),
+    ),
+    LevelType::line(
+        "span-mid",
+        "Span midpoint",
+        "Span",
+        themed(GRAY.0, Some(GRAY.1), LineType::Dashed, 1),
+    ),
+    LevelType::line(
+        "span-quarter",
+        "Span quarter",
+        "Span",
+        TypeStyle {
+            shown: false,
+            ..themed(GRAY.0, Some(GRAY.1), LineType::Dotted, 1)
+        },
+    )
+    .hover_only(),
+    LevelType::zone(
+        "span-box",
+        "Span box",
+        "Span",
+        themed(EDGE.0, Some(EDGE.1), LineType::Solid, 1),
+    ),
+];
+
+/// A synthetic two-point drawing tool (`--demo-draw-tool`, tests): from points A and B, a line
+/// at each (from its own bar), the midpoint and the quarters (from the later bar), and a box
+/// between them. Pure, as a plugin's tool must be.
+pub struct DemoSpan;
+
+impl super::DrawTool for DemoSpan {
+    fn id(&self) -> &'static str {
+        SPAN_ID
+    }
+    fn label(&self) -> &'static str {
+        "Span"
+    }
+    fn icon(&self) -> &'static str {
+        "Sp"
+    }
+    fn serves(&self, product: &Product) -> bool {
+        matches!(product.symbol, "ES" | "MES")
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &SPAN_TYPES
+    }
+    fn draw(
+        &self,
+        ctx: &super::DrawToolContext,
+        a: super::Anchor,
+        b: super::Anchor,
+    ) -> Result<LevelMap, String> {
+        let tick = ctx.product.price.tick.max(1);
+        let grid = |num: i64, den: i64| {
+            let raw = num as f64 / den as f64;
+            LevelValue::Tick(Price((raw / tick as f64).round() as i64 * tick))
+        };
+        let (lo, hi) = (a.price.0.min(b.price.0), a.price.0.max(b.price.0));
+        let later = a.time.max(b.time);
+        let style = |rgba: u32, dashed: bool| LevelStyle {
+            rgba,
+            weight: 1,
+            dashed,
+        };
+        let fmt = ctx.product.price;
+        let text = |p: Price| {
+            let mut s = String::new();
+            let _ = fmt.write(p, &mut s);
+            s
+        };
+        let mut m = LevelMap::builder(SPAN_ID, ctx.product.id, later);
+        if let Some(c) = ctx.contract {
+            m = m.contract(c);
+        }
+        m = m
+            .line(
+                "span-end",
+                LevelValue::Tick(a.price),
+                Some(&format!("A {}", text(a.price))),
+                style(0xbbdd44ff, false),
+            )
+            .from(a.time)
+            .line(
+                "span-end",
+                LevelValue::Tick(b.price),
+                Some(&format!("B {}", text(b.price))),
+                style(0xbbdd44ff, false),
+            )
+            .from(b.time)
+            .line(
+                "span-mid",
+                grid(lo + hi, 2),
+                Some("Mid"),
+                style(0xc8c8c8ff, true),
+            )
+            .from(later)
+            .line(
+                "span-quarter",
+                grid(3 * lo + hi, 4),
+                Some("Q1"),
+                style(0xc8c8c8ff, true),
+            )
+            .from(later)
+            .line(
+                "span-quarter",
+                grid(lo + 3 * hi, 4),
+                Some("Q3"),
+                style(0xc8c8c8ff, true),
+            )
+            .from(later)
+            .zone(
+                "span-box",
+                LevelValue::Tick(Price(lo)),
+                LevelValue::Tick(Price(hi)),
+                None,
+                style(0x868686ff, false),
+            )
+            .from(a.time.min(b.time))
+            .to(later);
+        m.build(tick).map_err(|e| e.to_string())
+    }
+}

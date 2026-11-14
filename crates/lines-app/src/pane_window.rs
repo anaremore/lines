@@ -639,6 +639,7 @@ mod tests {
             },
             MenuObject::Drawing {
                 title: "Trend line".into(),
+                style: true,
             },
             MenuObject::Measure {
                 show: crate::chart_draw::MeasureShow::default(),

@@ -114,8 +114,9 @@ pub enum MenuObject {
     /// A working order's tag: its id, its tag's text and P&L, and whether breakeven would move
     /// it ([`offers_breakeven`]).
     Order { id: u64, title: String, stop: bool },
-    /// A drawing (now the selection): what it is.
-    Drawing { title: String },
+    /// A drawing (now the selection): what it is, and whether it has a style to edit (a plugin
+    /// tool's levels are styled by kind, in the Studies menu).
+    Drawing { title: String, style: bool },
     /// The temporary measure: which parts its readout shows.
     Measure {
         show: crate::chart_draw::MeasureShow,
@@ -306,13 +307,15 @@ pub fn object_items(o: &MenuObject) -> Vec<MenuItem> {
             }
             v
         }
-        MenuObject::Drawing { title } => vec![
-            MenuItem::title(title),
-            MenuItem::sep(),
-            row("Style…", Command::Draw(DrawCmd::Style)),
-            MenuItem::sep(),
-            row("Delete", Command::Draw(DrawCmd::DeleteSelected)).destructive(),
-        ],
+        MenuObject::Drawing { title, style } => {
+            let mut v = vec![MenuItem::title(title), MenuItem::sep()];
+            if *style {
+                v.push(row("Style…", Command::Draw(DrawCmd::Style)));
+                v.push(MenuItem::sep());
+            }
+            v.push(row("Delete", Command::Draw(DrawCmd::DeleteSelected)).destructive());
+            v
+        }
     }
 }
 
@@ -1163,9 +1166,16 @@ mod tests {
         );
         let d = object_items(&MenuObject::Drawing {
             title: "Trend line".into(),
+            style: true,
         });
         assert_eq!(labels(&d), ["Trend line", "---", "Style…", "---", "Delete"]);
         assert!(d.last().unwrap().destructive);
+        // A plugin tool's drawing: no drawing style (its levels are styled by kind).
+        let d = object_items(&MenuObject::Drawing {
+            title: "Span".into(),
+            style: false,
+        });
+        assert_eq!(labels(&d), ["Span", "---", "Delete"]);
     }
 
     /// A legend row's menu: hide (or show), settings, add to the tab, the moves it can make

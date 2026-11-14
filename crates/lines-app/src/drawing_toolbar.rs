@@ -5,7 +5,10 @@
 //! row, `Settings::drawing_tools_dock`). It runs the drawing commands the keys run, never its
 //! own path: a tool's button is `DrawCmd::Tool` (again: back to pointing), Delete is
 //! `DrawCmd::DeleteSelected`. Icons are Lucide's (`lines_icons`, drawn with `icons::lucide`); the
-//! measure tool's is the ruler (owner).
+//! measure tool's is the ruler (owner). Plugin drawing tools (`crate::draw_tools`) that serve
+//! the chart's product follow the built-in ones in the group, each a button showing its short
+//! glyph (one to three characters), its name as the tooltip; none are registered in the public
+//! build.
 
 use gpui::prelude::FluentBuilder;
 use gpui::{App, Context, Div, InteractiveElement, MouseButton, ParentElement, Styled, div};
@@ -112,20 +115,21 @@ pub const GAP: f32 = 8.0;
 /// The strip's padding along its length.
 pub const PAD: f32 = 6.0;
 
-/// The row's length docked top (logical px at 100 %): the group with its edges, the gap and
-/// Delete, and the padding at both ends.
-pub fn row_len() -> f32 {
-    let n = TOOLS.len() as f32;
+/// The row's length docked top (logical px at 100 %) with `plugins` plugin tools: the group with
+/// its edges, the gap and Delete, and the padding at both ends.
+pub fn row_len(plugins: usize) -> f32 {
+    let n = (TOOLS.len() + plugins) as f32;
     // Buttons, the 1 px separators between them and the group's 1 px edge each side.
     let group = n * BUTTON + (n - 1.0) + 2.0;
     PAD + group + GAP + BUTTON + PAD
 }
 
-/// Where the toolbar goes on a chart `width` logical px wide (at 100 %): as chosen, except
-/// that a row that doesn't fit becomes the column (never wrapped or cut).
-pub fn dock_for(chosen: Dock, width: f32) -> Dock {
+/// Where the toolbar goes on a chart `width` logical px wide (at 100 %) with `plugins` plugin
+/// tools: as chosen, except that a row that doesn't fit becomes the column (never wrapped or
+/// cut).
+pub fn dock_for(chosen: Dock, width: f32, plugins: usize) -> Dock {
     match chosen {
-        Dock::Top if width < row_len() => Dock::Left,
+        Dock::Top if width < row_len(plugins) => Dock::Left,
         d => d,
     }
 }
@@ -140,13 +144,13 @@ pub const MIN_PANE: f32 = 180.0;
 /// change needs a pixel to spare (the column back to the row, the toolbar back at all), so a
 /// width that pixel rounding moves by a fraction never flips it back and forth (each flip
 /// renders again).
-pub fn dock_from(chosen: Dock, width: f32, was: Option<Dock>) -> Option<Dock> {
+pub fn dock_from(chosen: Dock, width: f32, was: Option<Dock>, plugins: usize) -> Option<Dock> {
     let back = if was.is_none() { 1.0 } else { 0.0 };
     if width < MIN_PANE + back {
         return None;
     }
     let slack = if was == Some(Dock::Left) { 1.0 } else { 0.0 };
-    Some(dock_for(chosen, width - slack))
+    Some(dock_for(chosen, width - slack, plugins))
 }
 
 /// A chart pane's width (window logical px) from its chart's (the body beside the toolbar)
@@ -162,11 +166,13 @@ pub fn pane_width(chart: f32, dock: Option<Dock>, zoom: f32) -> f32 {
 }
 
 /// The toolbar for a chart: `active` the tool in use (`None`: pointing), `selected` whether a
-/// drawing is selected (Delete is live), `dock` where it sits (after [`dock_for`]).
+/// drawing is selected (Delete is live), `dock` where it sits (after [`dock_for`]), `plugins`
+/// the plugin tools serving the chart's product and their glyphs (after the built-in tools).
 pub fn render(
     dock: Dock,
     active: Option<Tool>,
     selected: bool,
+    plugins: &[(Tool, &'static str)],
     t: &Theme,
     cx: &mut Context<ChartView>,
 ) -> Div {
@@ -237,6 +243,56 @@ pub fn render(
         let el = crate::tooltip::with_tip(el, b.name, Some(cmd), t);
         group = group.child(el);
     }
+    for (i, &(tool, glyph)) in plugins.iter().enumerate() {
+        let on = active == Some(tool);
+        let (fg, bg) = if on {
+            (t.bg, Some(t.accent))
+        } else {
+            (t.text_dim, None)
+        };
+        let main = t.text_main;
+        let label = div()
+            .text_size(z(11.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(fg)
+            .child(glyph);
+        let label = if on {
+            label
+        } else {
+            label.group_hover("draw-tool", move |s| s.text_color(main))
+        };
+        let mut el = div()
+            .id(("draw-plugin", i))
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .w(z(BUTTON))
+            .h(z(BUTTON))
+            .cursor_pointer()
+            .group("draw-tool")
+            .when_some(bg, |d, c| d.bg(c))
+            .child(label);
+        if !on {
+            let hover_bg = t.ghost_hover;
+            el = el.hover(move |s| s.bg(hover_bg));
+        }
+        el = if left {
+            el.border_t_1()
+        } else {
+            el.border_l_1()
+        }
+        .border_color(t.axis_line);
+        let el = el.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |v: &mut ChartView, _, window, cx| {
+                cx.stop_propagation();
+                v.toolbar_command(DrawCmd::Tool(tool), window, cx);
+            }),
+        );
+        let el = crate::tooltip::with_tip(el, tool.label(), None, t);
+        group = group.child(el);
+    }
     // Delete: last, apart, destructive; dimmed (a dashed edge, no fill) with nothing selected.
     let (fg, edge) = if selected {
         (t.destructive, t.destructive)
@@ -293,10 +349,10 @@ pub fn render(
 /// The toolbar's place on a pane `width` wide (window logical px; `None` before the first
 /// layout: the choice stands) with the app's choice, from where it is now (`was`); `None`:
 /// the pane is too narrow for it ([`MIN_PANE`]).
-pub fn dock_now(width: Option<f32>, was: Option<Dock>, cx: &App) -> Option<Dock> {
+pub fn dock_now(width: Option<f32>, was: Option<Dock>, plugins: usize, cx: &App) -> Option<Dock> {
     let chosen = crate::picker_view::settings(cx).drawing_tools_dock;
     width.map_or(Some(chosen), |w| {
-        dock_from(chosen, w / crate::zoom::f(1.0), was)
+        dock_from(chosen, w / crate::zoom::f(1.0), was, plugins)
     })
 }
 
@@ -308,34 +364,36 @@ mod tests {
     /// the column instead (never a wrapped or cut row); left stays left.
     #[test]
     fn a_row_that_does_not_fit_becomes_the_column() {
-        assert_eq!(row_len(), 245.0);
-        assert_eq!(dock_for(Dock::Top, 245.0), Dock::Top);
-        assert_eq!(dock_for(Dock::Top, 244.0), Dock::Left);
-        assert_eq!(dock_for(Dock::Left, 1000.0), Dock::Left);
-        assert_eq!(dock_for(Dock::Left, 100.0), Dock::Left);
+        assert_eq!(row_len(0), 245.0);
+        // Each plugin tool adds its button and a separator.
+        assert_eq!(row_len(2), 245.0 + 2.0 * (BUTTON + 1.0));
+        assert_eq!(dock_for(Dock::Top, 245.0, 0), Dock::Top);
+        assert_eq!(dock_for(Dock::Top, 244.0, 0), Dock::Left);
+        assert_eq!(dock_for(Dock::Left, 1000.0, 0), Dock::Left);
+        assert_eq!(dock_for(Dock::Left, 100.0, 0), Dock::Left);
         // Back from the column only with a pixel to spare (no flip-flop on rounding).
         assert_eq!(
-            dock_from(Dock::Top, 245.5, Some(Dock::Left)),
+            dock_from(Dock::Top, 245.5, Some(Dock::Left), 0),
             Some(Dock::Left)
         );
         assert_eq!(
-            dock_from(Dock::Top, 246.0, Some(Dock::Left)),
+            dock_from(Dock::Top, 246.0, Some(Dock::Left), 0),
             Some(Dock::Top)
         );
         assert_eq!(
-            dock_from(Dock::Top, 245.0, Some(Dock::Top)),
+            dock_from(Dock::Top, 245.0, Some(Dock::Top), 0),
             Some(Dock::Top)
         );
-        assert_eq!(dock_from(Dock::Top, 245.0, None), Some(Dock::Top));
+        assert_eq!(dock_from(Dock::Top, 245.0, None, 0), Some(Dock::Top));
         // Under 180 px the toolbar steps aside (never squeezing the price axis); back with a
         // pixel to spare.
-        assert_eq!(dock_from(Dock::Left, 179.0, Some(Dock::Left)), None);
+        assert_eq!(dock_from(Dock::Left, 179.0, Some(Dock::Left), 0), None);
         assert_eq!(
-            dock_from(Dock::Top, 185.0, Some(Dock::Top)),
+            dock_from(Dock::Top, 185.0, Some(Dock::Top), 0),
             Some(Dock::Left)
         );
-        assert_eq!(dock_from(Dock::Left, 180.5, None), None);
-        assert_eq!(dock_from(Dock::Left, 181.0, None), Some(Dock::Left));
+        assert_eq!(dock_from(Dock::Left, 180.5, None, 0), None);
+        assert_eq!(dock_from(Dock::Left, 181.0, None, 0), Some(Dock::Left));
         const { assert!(MIN_PANE >= STRIP + crate::chart_view::AXIS_W_100 + 64.0) };
     }
 
