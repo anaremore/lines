@@ -2347,6 +2347,9 @@ fn hover_only_levels_never_outlive_their_highlight() {
         let p = placed_named(&layer, ev, name);
         assert!(p.x0 > p.x1 && p.label_y.is_none(), "{name} held back");
     }
+    // Their rows are free: the others are laid out again next frame.
+    assert!(layer.needs_layout());
+    layer.columns(BarsView::fixed(&bars, 60_000), &v);
     assert!(!layer.needs_layout());
     // Back on the event without a layout: wants one.
     layer.set_pointer(Some(on));

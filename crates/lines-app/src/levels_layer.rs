@@ -995,6 +995,9 @@ pub struct LevelsLayer {
     /// The event whose hover-only levels the last layout drew ([`Self::hover_only`]): a
     /// pointer that now finds another (or none) holds them back again at once.
     laid_hot: Option<(usize, u16)>,
+    /// Paint held hover-only levels back since the last layout: the other labels are laid
+    /// out again on the next frame (rows made for them are free).
+    held_back: bool,
     /// The plot's size as of [`Self::place`], for laying the labels out in [`Self::columns`].
     label_plot: (f32, f32),
 }
@@ -1060,6 +1063,7 @@ impl LevelsLayer {
             pointer: None,
             hot: None,
             laid_hot: None,
+            held_back: false,
             label_plot: (0.0, 0.0),
         }
     }
@@ -1419,7 +1423,7 @@ impl LevelsLayer {
             }
         }
         self.hot = self.pointer.and_then(|(x, y)| self.group_at(x, y));
-        self.laid_hot = self.hot;
+        (self.laid_hot, self.held_back) = (self.hot, false);
         let Some((hs, hg)) = self.hot else { return };
         let s = &mut self.slots[hs];
         let Some(map) = s.map.as_ref() else { return };
@@ -1449,13 +1453,15 @@ impl LevelsLayer {
                     (p.x0, p.x1, p.label_y) = (1.0, 0.0, None);
                 }
             }
+            self.held_back = !s.held.is_empty();
         }
     }
 
-    /// Whether the event under the pointer isn't the one the last layout was for: the chart
-    /// asks for another frame so its hover-only levels are laid out.
+    /// Whether the last layout no longer fits the pointer: the event under it isn't the one
+    /// laid out (its hover-only levels need laying out), or paint held some back (the rows
+    /// they had are free). The chart asks for another frame.
     pub fn needs_layout(&self) -> bool {
-        self.hot.is_some() && self.hot != self.laid_hot
+        self.held_back || (self.hot.is_some() && self.hot != self.laid_hot)
     }
 
     /// Whether kind `kind` of source `id` is hover-only now ([`Slot::type_latent`]): the
@@ -1551,6 +1557,8 @@ impl LevelsLayer {
         // 3. Placement.
         for s in &mut self.slots {
             s.placed.clear();
+            // Its held indices were into the old placement.
+            s.held.clear();
             let source = s.handle.source();
             let Some(map) = s.map.as_ref() else { continue };
             if !self.config.source_shown(source) || s.status == LevelStatus::Missing {
