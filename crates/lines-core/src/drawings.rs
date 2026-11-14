@@ -56,12 +56,25 @@ pub enum Tool {
     Brush,
     /// A segment between two anchors with an arrowhead at the second (on by default).
     Arrow,
+    /// A plugin's two-point tool (decision 0020): the app places its two anchors, shows their
+    /// handles when selected and moves them; the plugin turns the points into levels, which
+    /// the chart's levels layer draws. Nothing of it is drawn here, and it is never saved
+    /// (the drawings file skips it): it lives for the run only. Not in [`Tool::ALL`].
+    Plugin(PluginTool),
+}
+
+/// A plugin drawing tool's identity: its id (a level-source slug) and its name.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PluginTool {
+    pub id: &'static str,
+    pub label: &'static str,
 }
 
 /// The most points a brush stroke keeps (after smoothing and simplification).
 pub const MAX_STROKE: usize = 512;
 
 impl Tool {
+    /// The built-in tools (plugin tools are registered at run time).
     pub const ALL: [Tool; 10] = [
         Tool::HLine,
         Tool::HRay,
@@ -79,7 +92,13 @@ impl Tool {
     pub fn anchors(self) -> usize {
         match self {
             Tool::HLine | Tool::HRay | Tool::VLine | Tool::Note => 1,
-            Tool::Trend | Tool::Ray | Tool::Rect | Tool::Measure | Tool::Brush | Tool::Arrow => 2,
+            Tool::Trend
+            | Tool::Ray
+            | Tool::Rect
+            | Tool::Measure
+            | Tool::Brush
+            | Tool::Arrow
+            | Tool::Plugin(_) => 2,
         }
     }
 
@@ -97,10 +116,16 @@ impl Tool {
             Tool::Measure => "measure",
             Tool::Brush => "brush",
             Tool::Arrow => "arrow",
+            Tool::Plugin(p) => p.label,
         }
     }
 
-    /// The file's name for it.
+    /// A plugin's tool (never saved).
+    pub fn is_plugin(self) -> bool {
+        matches!(self, Tool::Plugin(_))
+    }
+
+    /// The file's name for it (a plugin tool's is its id, though it is never saved).
     pub fn key(self) -> &'static str {
         match self {
             Tool::HLine => "hline",
@@ -113,6 +138,7 @@ impl Tool {
             Tool::Measure => "measure",
             Tool::Brush => "brush",
             Tool::Arrow => "arrow",
+            Tool::Plugin(p) => p.id,
         }
     }
 
@@ -237,9 +263,10 @@ impl Tool {
         matches!(self, Tool::HLine | Tool::HRay | Tool::Rect)
     }
 
-    /// Whether its line has a type and width (a note's line is only its edge marker).
+    /// Whether its line has a type and width (a note's line is only its edge marker; a plugin
+    /// tool draws levels, styled by their kinds).
     pub fn has_stroke(self) -> bool {
-        self != Tool::Note
+        !matches!(self, Tool::Note | Tool::Plugin(_))
     }
 
     /// Whether it can end in an arrowhead (trend lines and brush strokes off by default,
@@ -537,6 +564,18 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
                 return None;
             }
         }
+        Tool::Plugin(_) => {
+            // Only its two points (handles, hit-testing); its levels are the levels layer's.
+            let (x0, x1) = (xa?, xb?);
+            out.handles = [(x0, ya), (x1, yb)];
+            out.n_handles = 2;
+            out.p0 = (x0, ya);
+            out.p1 = (x1, yb);
+            let (lo, hi) = (x0.min(x1), x0.max(x1));
+            if hi < 0.0 || lo > w || ya.max(yb) < 0.0 || ya.min(yb) > h {
+                return None;
+            }
+        }
         Tool::Trend | Tool::Ray | Tool::Arrow => {
             let (x0, x1) = (xa?, xb?);
             out.handles = [(x0, ya), (x1, yb)];
@@ -739,8 +778,13 @@ pub fn hit(
             .iter()
             .any(|&(s, e)| segment_distance(p, s, e) <= tol)
     };
+    let near = |(hx, hy): (f32, f32)| (x - hx).abs() <= handle_r && (y - hy).abs() <= handle_r;
     let on = match d.tool {
         Tool::Note => inside(d.p0, d.p1),
+        // Its points (nothing else of it is drawn here) and the segment between them.
+        Tool::Plugin(_) => {
+            near(d.handles[0]) || near(d.handles[1]) || segment_distance(p, d.p0, d.p1) <= tol
+        }
         Tool::Rect | Tool::Measure => edges(d.p0, d.p1),
         _ => segment_distance(p, d.p0, d.p1) <= tol,
     };

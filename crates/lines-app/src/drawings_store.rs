@@ -110,7 +110,8 @@ fn anchor(d: &AnchorDoc, tick: i64) -> Result<Anchor, String> {
 }
 
 impl DrawingsFile {
-    /// The file for `items`, with each drawing's unknown fields from `extras` (by id).
+    /// The file for `items`, with each drawing's unknown fields from `extras` (by id). Plugin
+    /// tools' drawings are never saved (`crate::draw_tools`): they are left out.
     pub fn from_drawings(
         product: &Product,
         items: &[Drawing],
@@ -120,6 +121,7 @@ impl DrawingsFile {
             product: product.symbol.to_owned(),
             drawings: items
                 .iter()
+                .filter(|d| !d.tool.is_plugin())
                 .map(|d| DrawingDoc {
                     id: d.id,
                     tool: d.tool.key().to_owned(),

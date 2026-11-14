@@ -18,6 +18,14 @@
 //!   replay shows exactly the levels the live run showed.
 //!
 //! Fetching and decoding run on the levels runtime thread, never the UI thread.
+//!
+//! # Plugin drawing tools
+//!
+//! A [`DrawTool`] is a two-point drawing tool a plugin provides ([`register_draw_tool`]): the
+//! app owns its input (placing both points, the handles, dragging, selecting, deleting) and
+//! asks the tool, purely, for the levels those two points make. The chart draws them as a
+//! level source's (keyed by the tool's id: kinds, styles, labels). Its drawings live for the
+//! run only: never saved.
 
 pub mod runtime;
 pub mod setting;
@@ -36,6 +44,7 @@ pub use futures_util::future::BoxFuture;
 use lines_core::{ContractKey, Price, Product, UtcMillis};
 use parking_lot::RwLock;
 
+pub use lines_core::drawings::Anchor;
 pub use lines_core::levels::{
     LabelMode, LabelPriority, LevelError, LevelMap, LevelMapBuilder, LevelMeta, LevelShape,
     LevelStyle, LevelType, LevelValue, Marker, NamedValue, Series, TypeStyle,
@@ -374,6 +383,93 @@ pub trait LevelSource: Send + Sync + 'static {
     ) -> Result<Option<LevelMap>, String>;
 }
 
+/// What a [`DrawTool`] draws for: the chart's market.
+#[derive(Clone, Debug)]
+pub struct DrawToolContext {
+    pub product: Product,
+    /// The chart's contract (`None`: unknown, e.g. an old recording).
+    pub contract: Option<ContractKey>,
+}
+
+/// A two-point drawing tool a plugin provides. The app owns input (placing both points, handles,
+/// drag, select, delete); the tool only turns the points into levels, purely: `draw` does no I/O
+/// (anything it needs from files it reads beforehand, when constructed or on its own thread).
+pub trait DrawTool: Send + Sync {
+    /// Stable slug (as a level source id: lowercase, `-`, ≤ 32 bytes); also its level-source id
+    /// for styles and the Kinds list.
+    fn id(&self) -> &'static str;
+    /// The toolbar tooltip / name ("Range split").
+    fn label(&self) -> &'static str;
+    /// A short glyph for the toolbar button (one to three characters, e.g. "Rs").
+    fn icon(&self) -> &'static str;
+    fn serves(&self, product: &Product) -> bool;
+    /// The kinds it draws (labels, groups, default styles incl. `shown: false` for kinds off by
+    /// default, label priority, hover-only), exactly as `LevelSource::types`.
+    fn types(&self) -> &'static [LevelType];
+    /// The levels for points `a` (placed first) and `b`. Lines start at their own `from` times;
+    /// they run to the plot's right edge. `Err`: nothing drawn, the reason shown nowhere but the log.
+    fn draw(&self, ctx: &DrawToolContext, a: Anchor, b: Anchor) -> Result<LevelMap, String>;
+}
+
+/// Whether `id` is a usable source id: 1-32 lowercase letters, digits and `-`.
+fn id_ok(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn tools() -> &'static RwLock<Vec<Arc<dyn DrawTool>>> {
+    static T: OnceLock<RwLock<Vec<Arc<dyn DrawTool>>>> = OnceLock::new();
+    T.get_or_init(Default::default)
+}
+
+/// Register a plugin drawing tool for this process (official builds: through the extension
+/// point's `Extensions::with_draw_tool`, decision 0020). Its id is checked as a level source's
+/// and may not be a registered level source's (its levels are drawn under that id); its icon is
+/// one to three characters and its label not empty. The same id again replaces it.
+pub fn register_draw_tool(tool: Arc<dyn DrawTool>) -> Result<()> {
+    let id = tool.id();
+    if !id_ok(id) {
+        bail!("draw tool id {id:?}: use 1-32 lowercase letters, digits and '-'");
+    }
+    if by_id(id).is_some() {
+        bail!("draw tool id {id:?} is a level source's");
+    }
+    let icon = tool.icon().trim().chars().count();
+    if !(1..=3).contains(&icon) {
+        bail!("draw tool {id:?}: its icon is one to three characters");
+    }
+    if tool.label().trim().is_empty() {
+        bail!("draw tool {id:?}: its label is empty");
+    }
+    let mut t = tools().write();
+    t.retain(|x| x.id() != id);
+    t.push(tool);
+    Ok(())
+}
+
+/// Every registered drawing tool, in registration order.
+pub fn draw_tools() -> Vec<Arc<dyn DrawTool>> {
+    tools().read().clone()
+}
+
+/// The registered drawing tools that serve `product`, in registration order.
+pub fn draw_tools_serving(product: &Product) -> Vec<Arc<dyn DrawTool>> {
+    tools()
+        .read()
+        .iter()
+        .filter(|t| t.serves(product))
+        .cloned()
+        .collect()
+}
+
+/// A registered drawing tool by id.
+pub fn draw_tool(id: &str) -> Option<Arc<dyn DrawTool>> {
+    tools().read().iter().find(|t| t.id() == id).cloned()
+}
+
 fn table() -> &'static RwLock<Vec<Arc<dyn LevelSource>>> {
     static T: OnceLock<RwLock<Vec<Arc<dyn LevelSource>>>> = OnceLock::new();
     T.get_or_init(Default::default)
@@ -383,13 +479,11 @@ fn table() -> &'static RwLock<Vec<Arc<dyn LevelSource>>> {
 /// point's `Extensions`, decision 0020). The same id again replaces it.
 pub fn register(source: Arc<dyn LevelSource>) -> Result<()> {
     let id = source.id();
-    let ok = !id.is_empty()
-        && id.len() <= 32
-        && id
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    if !ok {
+    if !id_ok(id) {
         bail!("level source id {id:?}: use 1-32 lowercase letters, digits and '-'");
+    }
+    if draw_tool(id).is_some() {
+        bail!("level source id {id:?} is a draw tool's");
     }
     {
         let mut t = table().write();

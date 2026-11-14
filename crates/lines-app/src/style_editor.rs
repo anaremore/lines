@@ -255,6 +255,8 @@ pub fn tool_names(tool: Tool) -> (&'static str, &'static str) {
         Tool::Measure => ("Measure", "measures"),
         Tool::Brush => ("Brush", "brushes"),
         Tool::Arrow => ("Arrow", "arrows"),
+        // Never opened on one (a plugin tool's levels are styled by kind), but named as itself.
+        Tool::Plugin(p) => (p.label, p.label),
     }
 }
 

@@ -373,6 +373,9 @@ pub struct Fixture {
     pub draw_tool: Option<lines_core::drawings::Tool>,
     /// Start with this drawing selected (screenshots: `--select-drawing`).
     pub select_drawing: Option<lines_core::drawings::DrawingId>,
+    /// Start with a plugin tool's drawing placed and selected (screenshots: `--plugin-drawing
+    /// "TOOL-ID TIME@PRICE TIME@PRICE"`).
+    pub plugin_drawing: Option<String>,
     /// Start with a strip limit's price pick armed (screenshots: `--strip-pick buy|sell`).
     pub strip_pick: Option<crate::chart_trade::StripOrder>,
     /// Start with an order staged from the menu's "…with bracket" (screenshots: `--stage-order
@@ -905,6 +908,7 @@ impl ChartView {
         drawings.defaults = saved_styles;
         let fixture_style_editor = fixture.style_editor;
         let (fixture_draw_tool, fixture_select) = (fixture.draw_tool, fixture.select_drawing);
+        let fixture_plugin = fixture.plugin_drawing.clone();
         let fixture_picker = fixture.color_picker.clone();
         let fixture_recent = fixture.recent_colors.clone();
         let fixture_dropper = fixture.dropper;
@@ -1093,6 +1097,12 @@ impl ChartView {
         }
         if let Some(id) = fixture_select {
             view.drawings.selected = Some(id);
+        }
+        if let Some(spec) = fixture_plugin {
+            match crate::draw_tools::parse_spec(&spec, &view.instrument) {
+                Ok((tool, a, b)) => view.drawings.place(tool, a, b),
+                Err(e) => tracing::warn!("--plugin-drawing: {e}"),
+            }
         }
         if let Some((id, tab, focus)) = fixture_style_editor
             && view.open_style_editor(id, cx)
@@ -3663,6 +3673,12 @@ impl ChartView {
         cx.notify();
     }
 
+    /// The chart's product's drawings now (tests on GPUI's test platform).
+    #[cfg(all(test, feature = "screenshot"))]
+    pub fn drawings_now(&self) -> Vec<lines_core::drawings::Drawing> {
+        self.drawings.data().lock().items().to_vec()
+    }
+
     /// External level sources on this chart, `(id, label, kinds)`, for menus.
     pub fn level_sources(&self) -> Vec<(String, &'static str, Vec<String>)> {
         self.levels.sources()
@@ -5080,6 +5096,8 @@ impl ChartView {
                 }
             }
             self.drawings.set_pointer(self.hover);
+            self.drawings.set_contract(d.contract);
+            let tools_rev = self.drawings.tool_maps().revision();
             self.drawings.prepare(
                 &TimeAxis::new(view),
                 &self.vp,
@@ -5088,6 +5106,11 @@ impl ChartView {
                 &fmt,
                 self.instrument.point_value,
             );
+            // A plugin tool drew new levels (a drawing placed or its handle moved): the levels
+            // layer takes them at the next render.
+            if self.drawings.tool_maps().revision() != tools_rev {
+                cx.notify();
+            }
         }
         if !self.frozen && !window.is_window_hovered() {
             // GPUI on Windows reports leaving the window only through this flag (it redraws
@@ -8214,6 +8237,7 @@ impl ChartView {
             self.menu_price = None;
             self.menu_object = Some(crate::pane_menu::MenuObject::Drawing {
                 title: crate::pane_menu::capitalized(tool.label()),
+                style: !tool.is_plugin(),
             });
         }
         if self.drawings.selected != before {
@@ -10677,6 +10701,8 @@ impl Render for ChartView {
         // This frame's level-source snapshot: the legend below and the levels painted later
         // in this frame both describe it.
         let market_time = self.store.try_read().and_then(|d| d.market_time);
+        // Plugin drawing tools' levels (drawn by the drawings: `crate::draw_tools`).
+        self.levels.set_tool_maps(self.drawings.tool_maps());
         self.levels.snapshot(market_time);
         // The shown sources' label texts, measured once each (kept by text) for the labels'
         // gutter, here in render rather than in paint (a hidden pane isn't rendered).
@@ -10725,16 +10751,19 @@ impl Render for ChartView {
         // choice stands. A pane too narrow for it shows none (`drawing_toolbar::MIN_PANE`).
         let dock = if self.drawing_tools {
             let w = self.pane_width(f32::from(self.chart.size.width));
-            crate::drawing_toolbar::dock_now((w > 0.0).then_some(w), self.toolbar_dock, cx)
+            let plugins = self.drawings.tool_maps().tools().count();
+            crate::drawing_toolbar::dock_now((w > 0.0).then_some(w), self.toolbar_dock, plugins, cx)
         } else {
             None
         };
         self.toolbar_dock = dock;
         let toolbar = dock.map(|dock| {
+            let plugins: Vec<(Tool, &'static str)> = self.drawings.tool_maps().tools().collect();
             let bar = crate::drawing_toolbar::render(
                 dock,
                 self.drawings.tool(),
                 self.drawings.can_delete(),
+                &plugins,
                 &t,
                 cx,
             );

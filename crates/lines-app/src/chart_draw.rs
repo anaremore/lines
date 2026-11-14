@@ -25,6 +25,7 @@ use lines_core::instrument::Ratio;
 use lines_core::style::DashPattern;
 use lines_core::{PriceFormat, UtcMillis, Viewport};
 
+use crate::draw_tools::{PREVIEW, ToolMaps};
 use crate::drawings_store::{MAX_NOTE, ProductDrawings};
 use crate::style_editor::{Outcome, StyleEditor};
 use crate::theme::{Theme, drawing_dash};
@@ -136,11 +137,19 @@ pub struct ChartDrawings {
     pinned: Vec<(usize, MeasureStats)>,
     measure_drawn: Option<(Projected, MeasureStats)>,
     note_drawn: Option<Projected>,
+    /// The plugin drawing tools serving this product and their drawings' levels
+    /// (`crate::draw_tools`), updated in `prepare` when a drawing's points change.
+    tools: ToolMaps,
 }
 
 impl ChartDrawings {
     pub fn new(data: Arc<ProductDrawings>) -> ChartDrawings {
+        let tools = ToolMaps::new(lines_feed::levels::DrawToolContext {
+            product: data.product.clone(),
+            contract: None,
+        });
         ChartDrawings {
+            tools,
             data,
             seen: u64::MAX,
             hidden: false,
@@ -198,6 +207,17 @@ impl ChartDrawings {
 
     pub fn tool(&self) -> Option<Tool> {
         self.tool
+    }
+
+    /// The plugin drawing tools on this chart and their levels (the toolbar's buttons; the
+    /// levels layer's maps).
+    pub fn tool_maps(&self) -> &ToolMaps {
+        &self.tools
+    }
+
+    /// The chart's contract (plugin tools draw for it).
+    pub fn set_contract(&mut self, contract: Option<lines_core::ContractKey>) {
+        self.tools.set_contract(contract);
     }
 
     /// Typing a note: every key goes to it.
@@ -322,7 +342,7 @@ impl ChartDrawings {
         !self.hidden
             && self
                 .selected
-                .is_some_and(|id| self.drawn.iter().any(|d| d.id == id))
+                .is_some_and(|id| self.drawn.iter().any(|d| d.id == id && !d.tool.is_plugin()))
     }
 
     /// A drawing command that needs only the drawings (the chart handles choosing a tool and
@@ -401,7 +421,8 @@ impl ChartDrawings {
         let Some(d) = self.data.lock().get(id).cloned() else {
             return false;
         };
-        if self.hidden {
+        // A plugin tool's levels are styled by kind (the Studies menu), not as a drawing.
+        if self.hidden || d.tool.is_plugin() {
             return false;
         }
         self.tool = None;
@@ -806,6 +827,13 @@ impl ChartDrawings {
         }
     }
 
+    /// A two-anchor drawing placed from `a` to `b` and selected, as two clicks would place it
+    /// (screenshots, tests).
+    #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
+    pub fn place(&mut self, tool: Tool, a: Anchor, b: Anchor) {
+        self.finish(tool, a, b);
+    }
+
     fn add(&mut self, d: Drawing) {
         let id = self.data.change(|s| (true, s.add(d)));
         self.selected = Some(id);
@@ -930,6 +958,8 @@ impl ChartDrawings {
             .selected
             .and_then(|id| self.data.lock().get(id).cloned())
         {
+            // A plugin tool's drawing has no drawing style.
+            Some(d) if d.tool.is_plugin() => {}
             Some(mut d) => {
                 d.style = f(d.style).normalised();
                 self.data.change(|s| (s.edit(d), ()));
@@ -1020,6 +1050,8 @@ impl ChartDrawings {
         self.measure_drawn = None;
         self.note_drawn = None;
         if self.hidden {
+            // Hidden drawings draw no levels either.
+            self.tools.update(std::iter::empty(), tick);
             return;
         }
         // A brush stroke: each new sample to data space on the frame it arrived (a view that
@@ -1103,6 +1135,28 @@ impl ChartDrawings {
                 self.drawn.push(p);
             }
         }
+        // Plugin tools' levels: drawn again only for a drawing whose points moved (placed, a
+        // handle dragged), and for the placement's preview.
+        let preview = match (self.tool, self.pending, pointer) {
+            (Some(t @ Tool::Plugin(_)), Some((first, _)), Some(at)) => {
+                Some((PREVIEW, t, first, at))
+            }
+            _ => None,
+        };
+        let dragged = &self.dragged;
+        let plugin = set
+            .items()
+            .iter()
+            .filter(|d| d.tool.is_plugin())
+            .map(move |d| {
+                let d = match dragged {
+                    Some(x) if x.id == d.id => x,
+                    _ => d,
+                };
+                (d.id, d.tool, d.a, d.b)
+            })
+            .chain(preview);
+        self.tools.update(plugin, tick);
         drop(set);
         if self.quick && pointer.is_some() {
             self.quick_at = pointer;
@@ -1185,9 +1239,12 @@ impl ChartDrawings {
             let color = if stats.units >= 0 { t.up } else { t.down };
             paint_shape(&m, &self.pts, Some(color), t, origin, hair, window);
         }
-        if let Some(id) = self.selected
-            && let Some(d) = self.drawn.iter().find(|d| d.id == id)
-        {
+        let selected = self
+            .selected
+            .and_then(|id| self.drawn.iter().find(|d| d.id == id));
+        // A plugin tool's placement shows its points as handles (its levels are drawn apart).
+        let placing = self.preview.as_ref().filter(|d| d.tool.is_plugin());
+        for d in selected.into_iter().chain(placing) {
             // Handles are opaque in the line's color, whatever its opacity.
             let color = t.style_color(d.style.line.color, &t.drawing, 100);
             for &(x, y) in &d.handles[..usize::from(d.n_handles)] {
@@ -1840,6 +1897,8 @@ fn paint_shape(
             let (x, y) = d.p0;
             window.paint_quad(fill(rect(origin, x, y, 2.0, d.p1.1 - y), line));
         }
+        // Its levels are the levels layer's; its points show as handles when selected.
+        Tool::Plugin(_) => {}
     }
 }
 
