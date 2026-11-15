@@ -262,11 +262,35 @@ const GROUP_HIT: f32 = 4.0;
 /// What the levels, markers and labels outside a highlighted event are drawn at.
 pub(crate) const GROUP_DIM: f32 = crate::theme::GROUP_FADE;
 
-/// A member's opacity factor while event `hot` (source, group) is highlighted: whole for its
-/// own members (and everything while none is), [`GROUP_DIM`] for the rest.
-fn group_dim(hot: Option<(usize, u16)>, si: usize, g: Option<u16>) -> f32 {
+/// The event highlighted: its source's slot and its groups `lo..hi` (one group; a plugin
+/// drawing's own groups, all of them).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Hot {
+    slot: usize,
+    lo: u16,
+    hi: u16,
+}
+
+impl Hot {
+    fn one((slot, g): (usize, u16)) -> Hot {
+        Hot {
+            slot,
+            lo: g,
+            hi: g.saturating_add(1),
+        }
+    }
+
+    /// Whether group `g` of slot `si` is (one of) the highlighted event's.
+    fn has(self, si: usize, g: Option<u16>) -> bool {
+        si == self.slot && g.is_some_and(|g| (self.lo..self.hi).contains(&g))
+    }
+}
+
+/// A member's opacity factor while event `hot` is highlighted: whole for its own members (and
+/// everything while none is), [`GROUP_DIM`] for the rest.
+fn group_dim(hot: Option<Hot>, si: usize, g: Option<u16>) -> f32 {
     match hot {
-        Some((hs, hg)) if !(hs == si && g == Some(hg)) => GROUP_DIM,
+        Some(h) if !h.has(si, g) => GROUP_DIM,
         _ => 1.0,
     }
 }
@@ -1022,11 +1046,14 @@ pub struct LevelsLayer {
     joint_slots: Vec<(usize, u32)>,
     /// The pointer over the plot (plot px), for an event's highlight ([`Self::set_pointer`]).
     pointer: Option<(f32, f32)>,
-    /// The event it highlights this frame (source, group), found once in `set_pointer`.
-    hot: Option<(usize, u16)>,
+    /// The event it highlights this frame (source, groups), found once in `set_pointer`.
+    hot: Option<Hot>,
+    /// The plugin drawing under the pointer as the drawings hit-test it (any part of it:
+    /// [`Self::set_hot_drawing`]): highlighted in place of what [`Self::group_at`] finds.
+    hot_drawing: Option<Hot>,
     /// The event whose hover-only levels the last layout drew ([`Self::hover_only`]): a
     /// pointer that now finds another (or none) holds them back again at once.
-    laid_hot: Option<(usize, u16)>,
+    laid_hot: Option<Hot>,
     /// Paint held hover-only levels back since the last layout: the other labels are laid
     /// out again on the next frame (rows made for them are free).
     held_back: bool,
@@ -1094,6 +1121,7 @@ impl LevelsLayer {
             joint_slots: Vec::new(),
             pointer: None,
             hot: None,
+            hot_drawing: None,
             laid_hot: None,
             held_back: false,
             label_plot: (0.0, 0.0),
@@ -1170,6 +1198,25 @@ impl LevelsLayer {
             })
             .collect();
         self.slots.extend(tools);
+    }
+
+    /// Which kinds of plugin tool `id`'s map are drawn this frame (a bit per kind index, the
+    /// hover-only ones included: a highlight reveals them), after [`Self::place`]: none while
+    /// the tool's levels are hidden (levels off, the tool off in the Studies menu), and none
+    /// while the layer has no slot for it yet (nothing of it is drawn before the next render).
+    /// No allocation.
+    pub fn tool_kinds(&self, id: &str) -> u64 {
+        let Some(s) = self
+            .slots
+            .iter()
+            .find(|s| matches!(&s.handle, Feed::Tool { id: t, .. } if *t == id))
+        else {
+            return 0;
+        };
+        if !self.config.source_shown(id) || s.status == LevelStatus::Missing {
+            return 0;
+        }
+        s.kinds
     }
 
     /// The chart's plugin drawing tools' maps this frame (render time, before
@@ -1464,35 +1511,16 @@ impl LevelsLayer {
     /// plot, isn't drawn and shows no label), and each marker's place. After [`Self::place`],
     /// once the time axis is final. No allocation.
     fn time_extents(&mut self, bars: &BarsView<'_>, vp: &Viewport) {
-        use lines_core::levels::{end_x, marker_xy, start_x};
-        let w = vp.width as f32;
+        use lines_core::levels::{extent_x, marker_xy};
         for s in &mut self.slots {
             s.markers.clear();
             let Some(map) = s.map.as_ref() else { continue };
             for p in &mut s.placed {
                 let l = &map.levels[p.index as usize];
-                let x0 = match l.from {
-                    None => Some(0.0),
-                    Some(t) => start_x(bars, vp, t),
-                };
-                let x1 = match l.to {
-                    None => Some(w),
-                    Some(t) => end_x(bars, vp, t),
-                };
-                match (x0, x1) {
-                    // A time-bounded zone spans its bars' whole slots (a box one bar wide
-                    // stays a box).
-                    (Some(a), Some(b)) if a <= b && l.to.is_some() => {
-                        let half = (vp.bar_px * 0.5) as f32;
-                        let a = if l.from.is_some() {
-                            (a - half).max(0.0)
-                        } else {
-                            a
-                        };
-                        (p.x0, p.x1) = (a, (b + half).min(w));
-                    }
-                    (Some(a), Some(b)) if a <= b => (p.x0, p.x1) = (a, b),
-                    _ => {
+                // A time-bounded zone spans its bars' whole slots (`extent_x`).
+                match extent_x(bars, vp, l) {
+                    Some((a, b)) => (p.x0, p.x1) = (a, b),
+                    None => {
                         // Not begun, or over before the plot: nothing drawn, no label.
                         (p.x0, p.x1) = (1.0, 0.0);
                         p.label_y = None;
@@ -1534,15 +1562,17 @@ impl LevelsLayer {
                 }
             }
         }
-        self.hot = self.pointer.and_then(|(x, y)| self.group_at(x, y));
+        self.hot = self.hot_at(self.pointer);
         (self.laid_hot, self.held_back) = (self.hot, false);
-        let Some((hs, hg)) = self.hot else { return };
-        let s = &mut self.slots[hs];
+        let Some(hot) = self.hot else { return };
+        let Some(s) = self.slots.get_mut(hot.slot) else {
+            return;
+        };
         let Some(map) = s.map.as_ref() else { return };
         for j in 0..s.held.len() {
             let (pi, x0, x1) = s.held[j];
             let p = &mut s.placed[pi as usize];
-            if map.levels[p.index as usize].group == Some(hg) {
+            if hot.has(hot.slot, map.levels[p.index as usize].group) {
                 (p.x0, p.x1) = (x0, x1);
             }
         }
@@ -1552,11 +1582,11 @@ impl LevelsLayer {
     /// highlighted ([`Self::group_at`]).
     pub fn set_pointer(&mut self, at: Option<(f32, f32)>) {
         self.pointer = at;
-        self.hot = at.and_then(|(x, y)| self.group_at(x, y));
+        self.hot = self.hot_at(at);
         // Another event (or none) than the layout revealed: its hover-only levels are held
         // back again (no line, no label) until the next layout reveals the new one's.
         if self.hot != self.laid_hot
-            && let Some((hs, _)) = self.laid_hot.take()
+            && let Some(Hot { slot: hs, .. }) = self.laid_hot.take()
             && let Some(s) = self.slots.get_mut(hs)
         {
             for j in 0..s.held.len() {
@@ -1625,8 +1655,50 @@ impl LevelsLayer {
     }
 
     /// The event the pointer highlights this frame.
-    fn hot(&self) -> Option<(usize, u16)> {
+    fn hot(&self) -> Option<Hot> {
         self.hot
+    }
+
+    /// The event highlighted now: (slot, first group, end group) (tests).
+    #[cfg(test)]
+    pub fn hot_groups(&self) -> Option<(usize, u16, u16)> {
+        self.hot.map(|h| (h.slot, h.lo, h.hi))
+    }
+
+    /// The event a pointer at `at` highlights: the plugin drawing the drawings found under it
+    /// ([`Self::set_hot_drawing`]), else the event [`Self::group_at`] finds.
+    fn hot_at(&self, at: Option<(f32, f32)>) -> Option<Hot> {
+        let (x, y) = at?;
+        self.hot_drawing
+            .or_else(|| self.group_at(x, y).map(Hot::one))
+    }
+
+    /// The plugin drawing under the pointer (tool id, drawing id) as the drawings hit-test it
+    /// (`ChartDrawings::plugin_at`: any part of it, its connector and points included), before
+    /// [`Self::set_pointer`]: its levels are highlighted, every group of it (merged as `d<id>`
+    /// and `d<id>/<group>`: `crate::draw_tools`). No allocation.
+    pub fn set_hot_drawing(&mut self, d: Option<(&str, lines_core::drawings::DrawingId)>) {
+        self.hot_drawing = d.and_then(|(tool, id)| {
+            let (slot, s) = self
+                .slots
+                .iter()
+                .enumerate()
+                .find(|(_, s)| matches!(&s.handle, Feed::Tool { id: t, .. } if *t == tool))?;
+            let map = s.map.as_ref()?;
+            let of = |name: &str| {
+                name.strip_prefix('d')
+                    .and_then(|r| r.split('/').next())
+                    .and_then(|n| n.parse::<u64>().ok())
+                    == Some(id)
+            };
+            let lo = map.groups.iter().position(|g| of(g))?;
+            let n = map.groups[lo..].iter().take_while(|g| of(g)).count();
+            Some(Hot {
+                slot,
+                lo: lo as u16,
+                hi: (lo + n) as u16,
+            })
+        });
     }
 
     /// Under the store lock, after the price scale's update: each source's levels and labels

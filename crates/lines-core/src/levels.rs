@@ -1282,6 +1282,40 @@ pub fn end_x(bars: &crate::timeframe::BarsView<'_>, vp: &Viewport, to: UtcMillis
     Some(x.min(vp.width as f32))
 }
 
+/// Where level `l` is drawn across the plot, `(x0, x1)` (px from its left): from its start
+/// bar ([`start_x`]; the left edge without one) to its end bar ([`end_x`]; the right edge
+/// without one); a time-bounded zone spans its bars' whole slots (a box one bar wide stays a
+/// box). `None` when it hasn't begun, or ended before the plot. The levels layer draws, and a
+/// plugin drawing is hit-tested, on this one geometry. No allocation.
+pub fn extent_x(
+    bars: &crate::timeframe::BarsView<'_>,
+    vp: &Viewport,
+    l: &Level,
+) -> Option<(f32, f32)> {
+    let w = vp.width as f32;
+    let x0 = match l.from {
+        None => Some(0.0),
+        Some(t) => start_x(bars, vp, t),
+    };
+    let x1 = match l.to {
+        None => Some(w),
+        Some(t) => end_x(bars, vp, t),
+    };
+    match (x0?, x1?) {
+        (a, b) if a <= b && l.to.is_some() => {
+            let half = (vp.bar_px * 0.5) as f32;
+            let a = if l.from.is_some() {
+                (a - half).max(0.0)
+            } else {
+                a
+            };
+            Some((a, (b + half).min(w)))
+        }
+        (a, b) if a <= b => Some((a, b)),
+        _ => None,
+    }
+}
+
 /// The part of segment `a`–`b` inside the rectangle `0..=w` × `0..=h` (Liang–Barsky), or
 /// `None` when none of it is. For drawing a path between markers only where it shows: never a
 /// loop over points far off the plot. No allocation.

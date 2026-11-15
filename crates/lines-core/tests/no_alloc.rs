@@ -752,10 +752,11 @@ fn tick_bar_updates_do_not_allocate() {
 #[test]
 fn drawings_do_not_allocate() {
     use lines_core::drawings::{
-        Anchor, Drawing, MeasureParts, Style, TimeAxis, Tool, measure, pick, project,
-        project_points, snap_anchor, write_measure,
+        Anchor, Drawing, MeasureParts, PluginTool, Style, TimeAxis, Tool, measure, pick, project,
+        project_levels, project_points, snap_anchor, write_measure,
     };
     use lines_core::instrument::Ratio;
+    use lines_core::levels::{LevelMap, LevelStyle, LevelValue};
     use lines_core::{BarsView, Derived, Timeframe};
     let fmt = PriceFormat::new(
         PriceScale::decimal(2),
@@ -814,7 +815,49 @@ fn drawings_do_not_allocate() {
         d.id = 1_000 + k as u64;
         drawings.push(d);
     }
-    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(4 * 200);
+    // Plugin drawings: their levels (lines from a time on, a time-bounded zone) placed into the
+    // same buffer and hit on them.
+    let plugin = Tool::Plugin(PluginTool {
+        id: "test",
+        label: "Test",
+    });
+    let mut levels = LevelMap::builder("test", lines_core::ProductId(1), UtcMillis(0));
+    for i in 0..8i64 {
+        levels = levels
+            .line(
+                "a",
+                LevelValue::Tick(Price(600_000 + i * 100)),
+                None,
+                LevelStyle::default(),
+            )
+            .from(UtcMillis(i * 3_600_000));
+    }
+    let levels = levels
+        .zone(
+            "z",
+            LevelValue::Tick(Price(600_000)),
+            LevelValue::Tick(Price(601_000)),
+            None,
+            LevelStyle::default(),
+        )
+        .from(UtcMillis(3_600_000))
+        .to(UtcMillis(20_000_000))
+        .build(25)
+        .unwrap();
+    for k in 0..4i64 {
+        let a = Anchor {
+            time: UtcMillis(k * 3_600_000),
+            price: Price(600_000 + k * 100),
+        };
+        let b = Anchor {
+            time: UtcMillis(k * 3_600_000 + 7_200_000),
+            price: Price(601_000),
+        };
+        let mut d = Drawing::new(plugin, a, b, Style::DEFAULT);
+        d.id = 2_000 + k as u64;
+        drawings.push(d);
+    }
+    let mut pts: Vec<(f32, f32)> = Vec::with_capacity(4 * 200 + 4 * 2 * levels.levels.len());
     let mut drawn = Vec::with_capacity(drawings.len());
     let n = allocs_during(|| {
         for frame in 0..300 {
@@ -829,6 +872,10 @@ fn drawings_do_not_allocate() {
                 if let Some(mut p) = project(d, &axis, &vp) {
                     if d.tool == Tool::Brush {
                         p.pts = project_points(d, &axis, &vp, &mut pts);
+                    }
+                    if d.tool.is_plugin() {
+                        p.pts =
+                            project_levels(&levels, usize::MAX, &axis, &vp, |k| k != "x", &mut pts);
                     }
                     drawn.push(p);
                 }

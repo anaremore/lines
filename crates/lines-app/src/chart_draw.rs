@@ -19,9 +19,11 @@ use std::sync::Arc;
 use gpui::{Bounds, Hsla, PathBuilder, Pixels, Window, fill, point, px, size};
 use lines_core::drawings::{
     Anchor, Drawing, DrawingId, Hit, MAX_STROKE, MeasureStats, Projected, Style, TimeAxis, Tool,
-    grid_price, measure, pick, project, project_points, simplify_stroke, snap_anchor,
+    grid_price, measure, pick, project, project_levels, project_points, simplify_stroke,
+    snap_anchor,
 };
 use lines_core::instrument::Ratio;
+use lines_core::levels::clip_segment;
 use lines_core::style::DashPattern;
 use lines_core::{PriceFormat, UtcMillis, Viewport};
 
@@ -101,6 +103,9 @@ pub struct ChartDrawings {
     drag: Option<Drag>,
     /// A drag's drawing this frame (committed on release as one undo step).
     dragged: Option<Drawing>,
+    /// A press inside a plugin drawing's zone only (a weak hit, `Hit::Inside`): the chart pans;
+    /// released without moving (a click), the drawing is selected. Where it was pressed.
+    weak_press: Option<(DrawingId, (f32, f32))>,
     /// The temporary measure (pinned with Enter).
     measure: Option<(Anchor, Anchor)>,
     /// A Shift+drag measure in progress: the measure tool and its first anchor are set for
@@ -137,6 +142,8 @@ pub struct ChartDrawings {
     pinned: Vec<(usize, MeasureStats)>,
     measure_drawn: Option<(Projected, MeasureStats)>,
     note_drawn: Option<Projected>,
+    /// The plot's size this frame (px).
+    plot: (f32, f32),
     /// The plugin drawing tools serving this product and their drawings' levels
     /// (`crate::draw_tools`), updated in `prepare` when a drawing's points change.
     tools: ToolMaps,
@@ -158,6 +165,7 @@ impl ChartDrawings {
             selected: None,
             drag: None,
             dragged: None,
+            weak_press: None,
             measure: None,
             quick: false,
             quick_at: None,
@@ -176,6 +184,7 @@ impl ChartDrawings {
             pinned: Vec::with_capacity(8),
             measure_drawn: None,
             note_drawn: None,
+            plot: (0.0, 0.0),
         }
     }
 
@@ -279,6 +288,7 @@ impl ChartDrawings {
             self.selected = None;
             self.drag = None;
             self.dragged = None;
+            self.weak_press = None;
             self.confirm_clear = false;
             self.close_editor();
         }
@@ -291,7 +301,15 @@ impl ChartDrawings {
     }
 
     /// The drawing under plot-local (`x`, `y`), if any (top-most).
+    /// Strong hits only: inside a plugin drawing's zone (`Hit::Inside`) is no drawing here, so
+    /// a right-click there keeps the chart's price items and the Shift ruler starts there.
     pub fn hit_at(&self, x: f32, y: f32) -> Option<DrawingId> {
+        self.strong_at(x, y).map(|(id, _)| id)
+    }
+
+    /// The drawing strongly hit at plot-local (`x`, `y`) (top-most; a weak hit inside a plugin
+    /// drawing's zone doesn't count). `None` with drawings hidden.
+    fn strong_at(&self, x: f32, y: f32) -> Option<(DrawingId, Hit)> {
         if self.hidden {
             return None;
         }
@@ -304,7 +322,7 @@ impl ChartDrawings {
             HIT_TOL,
             HANDLE_R,
         )
-        .map(|(id, _)| id)
+        .filter(|(_, h)| h.strong())
     }
 
     /// A double click at plot-local (`x`, `y`): the drawing whose style editor it opens. Never
@@ -630,6 +648,7 @@ impl ChartDrawings {
             self.selected = None;
             self.drag = None;
             self.dragged = None;
+            self.weak_press = None;
         } else {
             return false;
         }
@@ -737,6 +756,13 @@ impl ChartDrawings {
             HIT_TOL,
             HANDLE_R,
         ) {
+            // Only inside a plugin drawing's zone (weak): the chart pans, never a drag; a click
+            // (released where it was pressed) selects it (`on_up`).
+            Some((id, Hit::Inside)) => {
+                self.measure = None;
+                self.weak_press = Some((id, (x, y)));
+                false
+            }
             // The selected drawing (a handle or its body) drags.
             Some((id, hit)) if Some(id) == self.selected => {
                 if let (Some(d), Some(from)) = (self.data.lock().get(id).cloned(), anchor) {
@@ -767,6 +793,15 @@ impl ChartDrawings {
 
     /// The press ended at plot-local (`x`, `y`). Returns whether it was the drawings'.
     pub fn on_up(&mut self, x: f32, y: f32, anchor: Option<Anchor>) -> bool {
+        if let Some((id, at)) = self.weak_press.take() {
+            // A click inside a plugin drawing's zone selects it; a pan from there doesn't.
+            let moved = (x - at.0).abs().max((y - at.1).abs()) > CLICK_SLOP;
+            if !moved && !self.hidden {
+                self.selected = Some(id);
+                return true;
+            }
+            return false;
+        }
         if let Some(st) = &mut self.stroke {
             // Where it was released, if on the plot (`prepare` drops points off it).
             if anchor.is_some() {
@@ -1007,16 +1042,31 @@ impl ChartDrawings {
             return None;
         }
         let (x, y) = self.pointer?;
-        pick(
-            &self.drawn,
-            &self.pts,
-            self.selected,
-            x,
-            y,
-            HIT_TOL,
-            HANDLE_R,
-        )
-        .map(|(_, h)| h)
+        // Inside a plugin drawing's zone the cursor stays the chart's.
+        self.strong_at(x, y).map(|(_, h)| h)
+    }
+
+    /// The plugin drawing under plot-local (`x`, `y`) (top-most, as a click would pick it):
+    /// its tool's id and its id, so the levels layer highlights that drawing's levels while
+    /// any part of it (a level, a zone, the connector, a point) is under the pointer. Not in
+    /// drawing mode or with drawings hidden. No allocation.
+    pub fn plugin_at(&self, x: f32, y: f32) -> Option<(&'static str, DrawingId)> {
+        if self.tool.is_some() {
+            return None;
+        }
+        // Strong hits only: inside its zone, a level source's event keeps its highlight.
+        let (id, _) = self.strong_at(x, y)?;
+        match self.drawn.iter().find(|d| d.id == id)?.tool {
+            Tool::Plugin(t) => Some((t.id, id)),
+            _ => None,
+        }
+    }
+
+    /// Which kinds of each plugin tool the levels layer draws now (`kinds(tool id)`, a bit
+    /// per merged kind), before [`Self::prepare`]: a plugin drawing is hit-tested only on
+    /// levels that are drawn.
+    pub fn set_drawn_kinds(&mut self, kinds: impl Fn(&str) -> u64) {
+        self.tools.set_drawn_kinds(kinds);
     }
 
     /// Whether drawing mode or a drag owns the pointer (the chart shows a crosshair cursor
@@ -1046,6 +1096,7 @@ impl ChartDrawings {
         self.drawn.clear();
         self.pts.clear();
         self.pinned.clear();
+        self.plot = (vp.width as f32, vp.height as f32);
         self.preview = None;
         self.measure_drawn = None;
         self.note_drawn = None;
@@ -1096,12 +1147,42 @@ impl ChartDrawings {
             _ => self.dragged.take(),
         };
         let set = self.data.lock();
+        // Plugin tools' levels: drawn again only for a drawing whose points moved (placed, a
+        // handle dragged), and for the placement's preview. Before projecting: a plugin
+        // drawing is hit-tested on the levels drawn for where it is now.
+        let preview = match (self.tool, self.pending, pointer) {
+            (Some(t @ Tool::Plugin(_)), Some((first, _)), Some(at)) => {
+                Some((PREVIEW, t, first, at))
+            }
+            _ => None,
+        };
+        let dragged = &self.dragged;
+        let plugin = set
+            .items()
+            .iter()
+            .filter(|d| d.tool.is_plugin())
+            .map(move |d| {
+                let d = match dragged {
+                    Some(x) if x.id == d.id => x,
+                    _ => d,
+                };
+                (d.id, d.tool, d.a, d.b)
+            })
+            .chain(preview);
+        self.tools.update(plugin, tick);
         if self.drawn.capacity() < set.items().len() {
             self.drawn.reserve(set.items().len() - self.drawn.len());
         }
-        let stroke_pts: usize = set.items().iter().map(|d| d.points.len()).sum();
-        if self.pts.capacity() < stroke_pts {
-            self.pts.reserve(stroke_pts - self.pts.len());
+        let tools = &self.tools;
+        let level_pts = |d: &Drawing| match d.tool {
+            Tool::Plugin(p) => tools
+                .drawing_map(p.id, d.id)
+                .map_or(0, |(m, n, _)| 2 * n.min(m.levels.len())),
+            _ => d.points.len(),
+        };
+        let buffer_pts: usize = set.items().iter().map(level_pts).sum();
+        if self.pts.capacity() < buffer_pts {
+            self.pts.reserve(buffer_pts - self.pts.len());
         }
         let notes_stale = set
             .items()
@@ -1127,6 +1208,17 @@ impl ChartDrawings {
                 if d.tool == Tool::Brush {
                     p.pts = project_points(d, axis, vp, &mut self.pts);
                 }
+                if let Tool::Plugin(t) = d.tool {
+                    // Its levels as the levels layer draws them (the kinds it draws now).
+                    if let Some((map, n, shown)) = self.tools.drawing_map(t.id, d.id) {
+                        p.pts = project_levels(map, n, axis, vp, shown, &mut self.pts);
+                    }
+                    // Kept while its connector or any of its levels is on the plot.
+                    let (w, h) = (vp.width as f32, vp.height as f32);
+                    if p.pts.0 == p.pts.1 && clip_segment(p.p0, p.p1, w, h).is_none() {
+                        continue;
+                    }
+                }
                 if d.tool == Tool::Measure {
                     // Grows only with the number of pinned measures on screen.
                     self.pinned
@@ -1135,28 +1227,6 @@ impl ChartDrawings {
                 self.drawn.push(p);
             }
         }
-        // Plugin tools' levels: drawn again only for a drawing whose points moved (placed, a
-        // handle dragged), and for the placement's preview.
-        let preview = match (self.tool, self.pending, pointer) {
-            (Some(t @ Tool::Plugin(_)), Some((first, _)), Some(at)) => {
-                Some((PREVIEW, t, first, at))
-            }
-            _ => None,
-        };
-        let dragged = &self.dragged;
-        let plugin = set
-            .items()
-            .iter()
-            .filter(|d| d.tool.is_plugin())
-            .map(move |d| {
-                let d = match dragged {
-                    Some(x) if x.id == d.id => x,
-                    _ => d,
-                };
-                (d.id, d.tool, d.a, d.b)
-            })
-            .chain(preview);
-        self.tools.update(plugin, tick);
         drop(set);
         if self.quick && pointer.is_some() {
             self.quick_at = pointer;
@@ -1225,7 +1295,7 @@ impl ChartDrawings {
     /// owns the shaped-text cache and the axis.
     pub fn paint(&self, origin: (f32, f32), hair: f32, t: &Theme, window: &mut Window) {
         for d in self.drawn.iter().chain(self.preview.as_ref()) {
-            paint_shape(d, &self.pts, None, t, origin, hair, window);
+            paint_shape(d, &self.pts, None, t, origin, self.plot, hair, window);
         }
         // A brush stroke being drawn, in the brush's style (not for the eyedropper).
         if let Some(st) = &self.stroke {
@@ -1237,7 +1307,16 @@ impl ChartDrawings {
         }
         if let Some((m, stats)) = self.measure_drawn {
             let color = if stats.units >= 0 { t.up } else { t.down };
-            paint_shape(&m, &self.pts, Some(color), t, origin, hair, window);
+            paint_shape(
+                &m,
+                &self.pts,
+                Some(color),
+                t,
+                origin,
+                self.plot,
+                hair,
+                window,
+            );
         }
         let selected = self
             .selected
@@ -1548,6 +1627,8 @@ impl MeasureDrag {
 fn dragged(drag: &Drag, at: Anchor, axis: &TimeAxis<'_>, tick: i64) -> Drawing {
     match drag.hit {
         Hit::Handle(i) => drag.original.with_handle(i, at),
+        // A weak hit never starts a drag (`on_down`).
+        Hit::Inside => drag.original.clone(),
         Hit::Body => {
             // Move by whole bars of this chart and whole ticks. Each anchor keeps its offset
             // inside its bar's bucket, so a 1-minute anchor moved on a 15-minute chart keeps
@@ -1826,13 +1907,15 @@ fn aim(pts: &[(f32, f32)], width: f32) -> Option<usize> {
 }
 
 /// One drawing in its style (`color`: a fixed line color instead: the temporary measure's
-/// direction color). `pts`: the frame's brush point buffer.
+/// direction color). `pts`: the frame's brush point buffer; `plot`: the plot's size.
+#[allow(clippy::too_many_arguments)]
 fn paint_shape(
     d: &Projected,
     pts: &[(f32, f32)],
     color: Option<Hsla>,
     t: &Theme,
     origin: (f32, f32),
+    plot: (f32, f32),
     hair: f32,
     window: &mut Window,
 ) {
@@ -1897,8 +1980,16 @@ fn paint_shape(
             let (x, y) = d.p0;
             window.paint_quad(fill(rect(origin, x, y, 2.0, d.p1.1 - y), line));
         }
-        // Its levels are the levels layer's; its points show as handles when selected.
-        Tool::Plugin(_) => {}
+        // Its levels are the levels layer's; its points show as handles when selected. The
+        // connector between them, thin and dashed, is always drawn: the drawing's own spine
+        // (clipped to the plot, so a far-off point never walks a long dash pattern).
+        Tool::Plugin(_) => {
+            let w = hair.max(1.0);
+            let dash = drawing_dash(lines_core::style::LineType::Dashed, w);
+            if let Some((a, b)) = clip_segment(d.p0, d.p1, plot.0, plot.1) {
+                paint_line(a, b, w, &dash, line, origin, hair, window);
+            }
+        }
     }
 }
 

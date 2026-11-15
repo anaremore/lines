@@ -20,7 +20,7 @@ use crate::levels_layer::{LevelsConfig, LevelsLayer};
 /// The dummy's id: it serves ZN only, so the other tests' charts (ES, MES, NQ...) never see it.
 const ID: &str = "test-pair";
 
-static TYPES: [LevelType; 2] = [
+static TYPES: [LevelType; 3] = [
     LevelType::line("pair-a", "Pair start", "Pair", TypeStyle::OWN),
     LevelType::line(
         "pair-b",
@@ -32,6 +32,7 @@ static TYPES: [LevelType; 2] = [
         },
     )
     .hover_only(),
+    LevelType::zone("pair-zone", "Pair box", "Pair", TypeStyle::OWN),
 ];
 
 /// Every call's points, in order.
@@ -67,11 +68,22 @@ impl DrawTool for Pair {
             weight: 1,
             dashed: false,
         };
+        // A line from each point to the plot's right edge, and the box between them.
+        let (lo, hi) = (a.price.min(b.price), a.price.max(b.price));
         LevelMap::builder(ID, ctx.product.id, a.time)
             .line("pair-a", LevelValue::Tick(a.price), Some("A"), style)
             .from(a.time)
             .line("pair-b", LevelValue::Tick(b.price), Some("B"), style)
             .from(b.time)
+            .zone(
+                "pair-zone",
+                LevelValue::Tick(lo),
+                LevelValue::Tick(hi),
+                None,
+                style,
+            )
+            .from(a.time.min(b.time))
+            .to(a.time.max(b.time))
             .build(ctx.product.price.tick)
             .map_err(|e| e.to_string())
     }
@@ -159,6 +171,24 @@ impl Rig {
         self.frame(x, y);
         let a = self.anchor(x, y);
         self.d.on_up(x, y, a)
+    }
+
+    /// The levels layer's view of this chart's tools (render: their maps; paint: placed), and
+    /// the kinds it draws handed to the drawings, as the chart does every frame.
+    fn layer_kinds(&mut self, layer: &mut LevelsLayer) {
+        layer.set_tool_maps(self.d.tool_maps());
+        layer.snapshot(None);
+        let store = lines_feed::store::ChartStore::new(
+            zn(),
+            None,
+            lines_core::Capabilities::default(),
+            "test",
+            M,
+            100,
+        );
+        layer.place(&store.read(), &self.vp);
+        self.d.set_drawn_kinds(|id| layer.tool_kinds(id));
+        self.frame(0.0, 0.0);
     }
 
     fn items(&self) -> Vec<lines_core::drawings::Drawing> {
@@ -249,7 +279,7 @@ fn draw_is_called_with_the_placed_points_and_again_while_a_handle_drags() {
     r.frame(0.0, 0.0);
     assert_eq!(calls().last(), Some(&(a, b)));
     let map = r.map().expect("its levels");
-    assert_eq!(map.levels.len(), 2);
+    assert_eq!(map.levels.len(), 3);
     assert_eq!(
         map.levels[0].shape,
         LevelShape::Line(LevelValue::Tick(a.price))
@@ -304,23 +334,23 @@ fn a_refused_drawing_draws_nothing_and_delete_removes_one() {
     r.d.place(pair(), a2, b2);
     r.frame(0.0, 0.0);
     let map = r.map().unwrap();
-    assert_eq!(map.levels.len(), 4, "both drawings in one map");
+    assert_eq!(map.levels.len(), 6, "both drawings in one map");
     // Each drawing is one event (pointing at one highlights it).
     assert_eq!(map.groups.len(), 2);
-    assert_ne!(map.levels[0].group, map.levels[2].group);
+    assert_ne!(map.levels[0].group, map.levels[3].group);
 
     // The second is selected (placed last): Delete removes it and its levels.
     assert_eq!(r.d.key("delete", None), crate::chart_draw::Key::Handled);
     r.frame(0.0, 0.0);
     assert_eq!(r.items().len(), 1);
-    assert_eq!(r.map().unwrap().levels.len(), 2);
+    assert_eq!(r.map().unwrap().levels.len(), 3);
 
     // Refused: nothing for it, the other stays.
     REFUSE.store(a2.price.0 as usize, Ordering::Relaxed);
     r.d.place(pair(), a2, b2);
     r.frame(0.0, 0.0);
     assert_eq!(r.items().len(), 2);
-    assert_eq!(r.map().unwrap().levels.len(), 2);
+    assert_eq!(r.map().unwrap().levels.len(), 3);
 
     // Hidden: no levels; shown again: back.
     r.d.set_hidden(true);
@@ -328,7 +358,7 @@ fn a_refused_drawing_draws_nothing_and_delete_removes_one() {
     assert!(r.map().is_none());
     r.d.set_hidden(false);
     r.frame(0.0, 0.0);
-    assert_eq!(r.map().unwrap().levels.len(), 2);
+    assert_eq!(r.map().unwrap().levels.len(), 3);
 
     // All deleted: no map at all (the layer drops the tool).
     r.d.selected = Some(r.items()[0].id);
@@ -359,14 +389,21 @@ fn the_levels_go_to_the_levels_layer_under_the_tools_id() {
     assert_eq!(sources.len(), 1);
     assert_eq!(sources[0].0, ID);
     assert_eq!(sources[0].1, "Pair");
-    assert_eq!(sources[0].2, vec!["pair-a".to_owned(), "pair-b".to_owned()]);
+    assert_eq!(
+        sources[0].2,
+        vec![
+            "pair-a".to_owned(),
+            "pair-b".to_owned(),
+            "pair-zone".to_owned()
+        ]
+    );
     assert_eq!(layer.kind_label(ID, "pair-a"), Some("Pair start"));
     assert_eq!(layer.kind_label(ID, "pair-b"), Some("Pair end"));
     assert!(layer.kind_styled_shown(ID, "pair-a"));
     assert!(!layer.kind_styled_shown(ID, "pair-b"), "off by default");
     assert!(layer.kind_hover_only(ID, "pair-b"));
     assert!(layer.legend().is_empty(), "drawings have no legend rows");
-    assert_eq!(layer.map(0).map(|m| m.levels.len()), Some(2));
+    assert_eq!(layer.map(0).map(|m| m.levels.len()), Some(3));
 
     // A handle moved: the layer takes the new map.
     let rev = layer.revision();
@@ -433,33 +470,370 @@ fn merged_maps_keep_kinds_and_refuse_off_grid_levels() {
     };
     let one = drawn(&Pair, &ctx, at(1, 600), at(2, 610), tick).unwrap();
     let two = drawn(&Pair, &ctx, at(3, 620), at(4, 630), tick).unwrap();
-    let parts = [
+    let mut parts = [
         Cached {
             id: 1,
             a: at(1, 600),
             b: at(2, 610),
             map: Some(one),
+            merged: 0,
         },
         Cached {
             id: 2,
             a: at(3, 620),
             b: at(4, 630),
             map: Some(two),
+            merged: 0,
         },
     ];
-    let m = merge(&Pair, &ctx, &parts, tick).unwrap();
+    let m = merge(&Pair, &ctx, &mut parts, tick).unwrap();
+    assert_eq!(
+        (parts[0].merged, parts[1].merged),
+        (3, 3),
+        "all of both merged"
+    );
     assert_eq!(m.source, ID);
-    assert_eq!(m.kinds, vec!["pair-a".to_owned(), "pair-b".to_owned()]);
-    assert_eq!(m.levels.len(), 4);
-    assert_eq!(m.levels[2].kind, 0);
+    assert_eq!(
+        m.kinds,
+        vec![
+            "pair-a".to_owned(),
+            "pair-b".to_owned(),
+            "pair-zone".to_owned()
+        ]
+    );
+    assert_eq!(m.levels.len(), 6);
+    assert_eq!(m.levels[3].kind, 0);
     assert_eq!(m.groups, vec!["d1".to_owned(), "d2".to_owned()]);
-    assert!(merge(&Pair, &ctx, &[], tick).is_none());
+    assert!(merge(&Pair, &ctx, &mut [], tick).is_none());
     if tick > 1 {
         // A tool whose own build skipped the grid check: refused here.
         let mut off = drawn(&Pair, &ctx, at(1, 600), at(2, 610), tick).unwrap();
         off.levels[0].shape = LevelShape::Line(LevelValue::Tick(Price(600 * tick + 1)));
         assert!(checked(off, tick).is_err());
     }
+}
+
+/// One drawing placed from plot (100, 100) to (300, 250), not selected, and its points as
+/// drawn: A's line runs from A to the plot's right edge, B's from B, the box spans A to B.
+fn placed_one(r: &mut Rig) -> (DrawingId, (f32, f32), (f32, f32)) {
+    let (a, b) = (
+        r.anchor(100.0, 100.0).unwrap(),
+        r.anchor(300.0, 250.0).unwrap(),
+    );
+    r.d.place(pair(), a, b);
+    r.d.selected = None;
+    r.frame(0.0, 0.0);
+    let p = r.d.drawn()[0];
+    (r.items()[0].id, p.handles[0], p.handles[1])
+}
+
+/// A click (press and release, no move) at plot (`x`, `y`): what is selected after it.
+fn click(r: &mut Rig, x: f32, y: f32) -> Option<DrawingId> {
+    r.down(x, y);
+    r.up(x, y);
+    r.frame(x, y);
+    r.d.selected
+}
+
+/// A plugin drawing is picked on what it draws: its levels where they are drawn (a line far
+/// to the right of both points, the line starting at B, inside its box), not only its points.
+/// Empty chart beside them picks nothing; a click elsewhere drops the selection.
+#[test]
+fn a_plugin_drawing_is_selected_by_clicking_its_levels() {
+    let _s = serial();
+    let mut r = Rig::new();
+    let (id, ha, hb) = placed_one(&mut r);
+    // The kinds the levels layer draws (B's line is a hover-only kind: hit, as hovering it
+    // reveals it).
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    r.layer_kinds(&mut layer);
+    // A's line, far right of both points.
+    assert_eq!(click(&mut r, 760.0, ha.1 + 2.0), Some(id), "A's line");
+    // Empty chart: right of the box, between the two lines; then left of the drawing.
+    assert_eq!(click(&mut r, 700.0, (ha.1 + hb.1) * 0.5), None, "empty");
+    assert_eq!(click(&mut r, 40.0, 380.0), None, "empty");
+    // B's line, right of B.
+    assert_eq!(click(&mut r, 600.0, hb.1 - 2.0), Some(id), "B's line");
+    r.d.selected = None;
+    // Inside the box, far from its edges, both lines and the connector: a click selects it.
+    let inside = (hb.0 - 20.0, ha.1 + 20.0);
+    assert_eq!(
+        click(&mut r, inside.0, inside.1),
+        Some(id),
+        "inside the box"
+    );
+    // The box's edge (left, below A) is a strong hit: the cursor shows it.
+    r.d.selected = None;
+    let left = ha.0 - (r.vp.bar_px * 0.5) as f32;
+    r.frame(left, ha.1 + 30.0);
+    assert_eq!(
+        r.d.hover_hit(),
+        Some(lines_core::drawings::Hit::Body),
+        "edge"
+    );
+    assert_eq!(click(&mut r, left, ha.1 + 30.0), Some(id), "the box's edge");
+    r.d.selected = None;
+    // Inside only: weak, so no hover cursor, no highlight, no right-click.
+    r.frame(inside.0, inside.1);
+    assert_eq!(r.d.hover_hit(), None, "the chart's cursor inside the box");
+    assert_eq!(r.d.plugin_at(inside.0, inside.1), None);
+    assert!(!r.d.right_click(inside.0, inside.1), "price items kept");
+    assert_eq!(
+        r.d.hit_at(inside.0, inside.1),
+        None,
+        "the Shift ruler starts here"
+    );
+    // Hovering any of it: the hover cursor's hit and the drawing to highlight.
+    r.d.selected = None;
+    r.frame(760.0, ha.1);
+    assert_eq!(r.d.hover_hit(), Some(lines_core::drawings::Hit::Body));
+    assert_eq!(r.d.plugin_at(760.0, ha.1), Some((ID, id)));
+    assert_eq!(r.d.plugin_at(700.0, (ha.1 + hb.1) * 0.5), None);
+    // Right-click selects it too (the pane menu then offers Delete).
+    assert!(r.d.right_click(600.0, hb.1));
+    assert_eq!(r.d.selected, Some(id));
+}
+
+/// The connector between A and B is the drawing's visible spine and is hit too; levels of a
+/// kind the levels layer doesn't draw (hidden in the Studies menu, levels off) are not.
+#[test]
+fn the_connector_is_hit_and_undrawn_levels_are_not() {
+    let _s = serial();
+    let mut r = Rig::new();
+    // The layer draws none of the tool's kinds: only the points and the connector are left.
+    r.d.set_drawn_kinds(|_| 0);
+    let (id, ha, hb) = placed_one(&mut r);
+    let mid = ((ha.0 + hb.0) * 0.5, (ha.1 + hb.1) * 0.5);
+    assert_eq!(click(&mut r, 760.0, ha.1), None, "A's line isn't drawn");
+    assert_eq!(click(&mut r, hb.0 - 20.0, ha.1 + 20.0), None, "nor the box");
+    assert_eq!(click(&mut r, mid.0, mid.1 + 2.0), Some(id), "the connector");
+    // Only the box drawn (kind 2 of the merged map): inside it hits again, the lines don't.
+    r.d.set_drawn_kinds(|_| 1 << 2);
+    r.d.selected = None;
+    r.frame(0.0, 0.0);
+    assert_eq!(click(&mut r, 760.0, ha.1), None);
+    assert_eq!(click(&mut r, hb.0 - 20.0, ha.1 + 20.0), Some(id));
+}
+
+/// Selected, Delete (or Backspace) removes the drawing and its levels; undo brings both back.
+/// Dragging its body moves the whole drawing, as a built-in two-point drawing's does.
+#[test]
+fn a_selected_plugin_drawing_deletes_undoes_and_drags() {
+    let _s = serial();
+    let mut r = Rig::new();
+    let (id, ha, _) = placed_one(&mut r);
+    assert_eq!(click(&mut r, 760.0, ha.1), Some(id));
+    assert_eq!(r.d.key("delete", None), crate::chart_draw::Key::Handled);
+    r.frame(0.0, 0.0);
+    assert!(r.items().is_empty());
+    assert!(r.map().is_none(), "its levels go with it");
+    assert!(r.d.undo());
+    r.frame(0.0, 0.0);
+    assert_eq!(r.items().len(), 1);
+    assert_eq!(r.map().unwrap().levels.len(), 3, "and come back");
+    // Backspace too.
+    assert_eq!(click(&mut r, 760.0, ha.1), Some(id));
+    assert_eq!(r.d.key("backspace", None), crate::chart_draw::Key::Handled);
+    assert!(r.items().is_empty());
+    assert!(r.d.undo());
+    r.frame(0.0, 0.0);
+
+    // Drag the selected drawing by A's line: both points move by the same bars and ticks.
+    let before = r.items()[0].clone();
+    assert_eq!(click(&mut r, 760.0, ha.1), Some(id));
+    assert!(r.down(760.0, ha.1), "a selected drawing's body drags");
+    r.frame(700.0, ha.1 + 40.0);
+    assert!(r.up(700.0, ha.1 + 40.0));
+    r.frame(0.0, 0.0);
+    let after = r.items()[0].clone();
+    assert!(after.a.time < before.a.time && after.a.price < before.a.price);
+    assert_eq!(
+        after.b.time.0 - after.a.time.0,
+        before.b.time.0 - before.a.time.0
+    );
+    assert_eq!(
+        after.b.price.0 - after.a.price.0,
+        before.b.price.0 - before.a.price.0
+    );
+}
+
+/// Two drawings whose levels overlap: a click there picks the newer (drawn on top), as for
+/// built-in drawings.
+#[test]
+fn overlapping_plugin_drawings_pick_the_newer() {
+    let _s = serial();
+    let mut r = Rig::new();
+    let (first, ha, _) = placed_one(&mut r);
+    // A second drawing whose A is at the same price, a little later: the A lines overlap.
+    let (a, b) = (
+        r.anchor(150.0, 100.0).unwrap(),
+        r.anchor(350.0, 300.0).unwrap(),
+    );
+    r.d.place(pair(), a, b);
+    r.d.selected = None;
+    r.frame(0.0, 0.0);
+    let second = r.items()[1].id;
+    assert_ne!(first, second);
+    assert_eq!(click(&mut r, 760.0, ha.1), Some(second), "the newer wins");
+    // Where only the older one is drawn (its A line, before the newer's A): the older.
+    r.d.selected = None;
+    assert_eq!(click(&mut r, 115.0, ha.1), Some(first));
+}
+
+/// Inside a plugin drawing's box is a weak hit: a press-drag there pans the chart (the
+/// drawing never moves, selected or not, and isn't selected by the pan); only a click
+/// selects it.
+#[test]
+fn a_press_drag_inside_the_box_pans_and_never_moves_it() {
+    let _s = serial();
+    let mut r = Rig::new();
+    let (id, ha, hb) = placed_one(&mut r);
+    let before = r.items()[0].clone();
+    let inside = (hb.0 - 20.0, ha.1 + 20.0);
+    let drag = |r: &mut Rig| {
+        assert!(
+            !r.down(inside.0, inside.1),
+            "the chart takes the press (pans)"
+        );
+        r.frame(inside.0 - 80.0, inside.1 + 40.0);
+        r.up(inside.0 - 80.0, inside.1 + 40.0);
+        r.frame(0.0, 0.0);
+    };
+    drag(&mut r);
+    assert_eq!(r.d.selected, None, "a pan selects nothing");
+    assert_eq!(r.items()[0], before);
+    // Selected: a press-drag inside still pans, never a body drag.
+    assert_eq!(click(&mut r, inside.0, inside.1), Some(id));
+    drag(&mut r);
+    assert_eq!(r.items()[0], before, "the anchors are unchanged");
+    assert_eq!(r.d.selected, Some(id), "still selected");
+}
+
+/// A built-in drawing inside a newer plugin drawing's box is still picked by clicking it: any
+/// drawing's strong hit beats a weak one, whatever the order.
+#[test]
+fn an_older_trend_line_inside_a_newer_box_is_still_picked() {
+    let _s = serial();
+    let mut r = Rig::new();
+    let (t0, t1) = (
+        r.anchor(240.0, 120.0).unwrap(),
+        r.anchor(280.0, 140.0).unwrap(),
+    );
+    r.d.place(Tool::Trend, t0, t1);
+    let trend = r.items()[0].id;
+    let (a, b) = (
+        r.anchor(100.0, 100.0).unwrap(),
+        r.anchor(300.0, 250.0).unwrap(),
+    );
+    r.d.place(pair(), a, b);
+    let plugin = r.items()[1].id;
+    r.d.selected = None;
+    r.frame(0.0, 0.0);
+    let tr = r.d.drawn()[0];
+    let on_trend = ((tr.p0.0 + tr.p1.0) * 0.5, (tr.p0.1 + tr.p1.1) * 0.5);
+    assert_eq!(
+        click(&mut r, on_trend.0, on_trend.1),
+        Some(trend),
+        "the older trend"
+    );
+    r.d.selected = None;
+    // Elsewhere inside the box: the plugin drawing.
+    let p = r.d.drawn()[1];
+    let inside = (p.handles[1].0 - 20.0, p.handles[0].1 + 60.0);
+    assert_eq!(click(&mut r, inside.0, inside.1), Some(plugin));
+}
+
+/// The kinds the levels layer draws, as the drawings are told them: a bit per merged kind,
+/// hover-only kinds included; none with the tool's levels off, without a hidden kind's bit,
+/// and none before the layer has the tool at all.
+#[test]
+fn tool_kinds_are_the_drawn_kinds() {
+    let _s = serial();
+    let mut r = Rig::new();
+    placed_one(&mut r);
+    let layer = LevelsLayer::new(LevelsConfig::default());
+    assert_eq!(layer.tool_kinds(ID), 0, "no slot yet: nothing drawn");
+    let kinds = |config: LevelsConfig, r: &mut Rig| {
+        let mut layer = LevelsLayer::new(config);
+        r.layer_kinds(&mut layer);
+        layer.tool_kinds(ID)
+    };
+    // pair-a, pair-b (hover-only, off by default: latent, included), pair-zone.
+    assert_eq!(kinds(LevelsConfig::default(), &mut r), 0b111);
+    let mut c = LevelsConfig::default();
+    c.toggle_kind(ID, "pair-zone");
+    assert_eq!(kinds(c, &mut r), 0b011, "a hidden kind");
+    let mut c = LevelsConfig::default();
+    c.toggle_source(ID);
+    assert_eq!(kinds(c, &mut r), 0, "the tool's levels off");
+    // And through them, hit-testing: the box hidden is no box to click.
+    let (_, ha, hb) = {
+        let p = r.d.drawn()[0];
+        (p.id, p.handles[0], p.handles[1])
+    };
+    let mut c = LevelsConfig::default();
+    c.toggle_kind(ID, "pair-zone");
+    let mut layer = LevelsLayer::new(c);
+    r.layer_kinds(&mut layer);
+    assert_eq!(click(&mut r, hb.0 - 20.0, ha.1 + 20.0), None);
+}
+
+/// A level source's event inside a plugin drawing's box keeps its hover: the box is a weak
+/// hit, so the drawings name no drawing there for the layer to highlight instead.
+#[test]
+fn inside_the_box_a_level_sources_hover_is_kept() {
+    let _s = serial();
+    let mut r = Rig::new();
+    let (_, ha, hb) = placed_one(&mut r);
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    r.layer_kinds(&mut layer);
+    let inside = (hb.0 - 20.0, ha.1 + 20.0);
+    layer.set_hot_drawing(r.d.plugin_at(inside.0, inside.1));
+    layer.set_pointer(Some(inside));
+    // Nothing of the drawing claims the hover: what the layer finds there is its own
+    // `group_at` (here the drawing's box itself, a time-bounded zone, as before).
+    assert_eq!(
+        layer.hot_groups(),
+        layer
+            .group_at(inside.0, inside.1)
+            .map(|(s, g)| (s, g, g + 1))
+    );
+    // On A's line (strong): the drawing.
+    layer.set_hot_drawing(r.d.plugin_at(760.0, ha.1));
+    layer.set_pointer(Some((760.0, ha.1)));
+    assert_eq!(layer.hot_groups(), Some((0, 0, 1)));
+}
+
+/// The levels layer highlights a hovered plugin drawing's every group, found from its id.
+#[test]
+fn a_hovered_plugin_drawing_is_highlighted_in_the_levels_layer() {
+    let _s = serial();
+    let mut r = Rig::new();
+    placed_one(&mut r);
+    let (a, b) = (
+        r.anchor(150.0, 100.0).unwrap(),
+        r.anchor(350.0, 300.0).unwrap(),
+    );
+    r.d.place(pair(), a, b);
+    r.frame(0.0, 0.0);
+    let second = r.items()[1].id;
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    layer.set_tool_maps(r.d.tool_maps());
+    layer.snapshot(None);
+    layer.set_hot_drawing(Some((ID, second)));
+    layer.set_pointer(Some((10.0, 10.0)));
+    assert_eq!(
+        layer.hot_groups(),
+        Some((0, 1, 2)),
+        "the second drawing's group"
+    );
+    layer.set_hot_drawing(None);
+    layer.set_pointer(Some((10.0, 10.0)));
+    assert_eq!(layer.hot_groups(), None);
+    // Pointer away: nothing highlighted, whatever the drawings said.
+    layer.set_hot_drawing(Some((ID, second)));
+    layer.set_pointer(None);
+    assert_eq!(layer.hot_groups(), None);
 }
 
 /// On a real chart (GPUI's test platform, which `screenshot` builds): the pane's saved form
