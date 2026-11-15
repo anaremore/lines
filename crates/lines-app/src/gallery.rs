@@ -318,7 +318,8 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         ));
     }
     // A plugin's two-point drawing tool (decision 0020; the synthetic one): its button in the
-    // toolbar, its levels in the levels layer's style, the drawing selected (its two handles).
+    // toolbar, its levels in the levels layer's style, the drawing selected (its two handles)
+    // and the dashed connector between its points (always drawn: the drawing's spine).
     // The demo tool exists only with `demo-levels` (as the `levels-*` scenes above).
     #[cfg(feature = "demo-levels")]
     for (name, theme) in [
@@ -329,7 +330,7 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
             "--layout chart {theme} --size 1400x800 --price-zoom 0.45 --drawing-tools --demo-draw-tool"
         ));
         a.push("--plugin-drawing".into());
-        a.push("demo-span 2026-11-05T19:40:00Z@6002.00 2026-11-05T20:30:00Z@6016.00".into());
+        a.push("demo-span 2026-11-05T19:40:00Z@6002.50 2026-11-05T20:30:00Z@6007.50".into());
         v.push(s(name, false, end, a));
     }
     // Settings › Charts at the narrowest window: Bar period is a dropdown (one field), Hollow

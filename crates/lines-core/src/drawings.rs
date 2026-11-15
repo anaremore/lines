@@ -462,8 +462,9 @@ pub struct Projected {
     pub n_handles: u8,
     /// The anchors' prices (for axis tags): `a`, `b`.
     pub prices: [Price; 2],
-    /// A brush stroke's projected points: their range in the frame's point buffer
-    /// ([`project_points`]); empty for other tools.
+    /// A brush stroke's projected points ([`project_points`]), or a plugin drawing's levels
+    /// as drawn ([`project_levels`]): their range in the frame's point buffer; empty for
+    /// other tools.
     pub pts: (u32, u32),
 }
 
@@ -565,16 +566,15 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
             }
         }
         Tool::Plugin(_) => {
-            // Only its two points (handles, hit-testing); its levels are the levels layer's.
+            // Its two points (handles) and the connector between them; its levels are the
+            // levels layer's ([`project_levels`] places them for hit-testing). Never culled
+            // here: its levels run on to the right of its points, so the caller keeps it while
+            // the connector or any of its levels is on the plot.
             let (x0, x1) = (xa?, xb?);
             out.handles = [(x0, ya), (x1, yb)];
             out.n_handles = 2;
             out.p0 = (x0, ya);
             out.p1 = (x1, yb);
-            let (lo, hi) = (x0.min(x1), x0.max(x1));
-            if hi < 0.0 || lo > w || ya.max(yb) < 0.0 || ya.min(yb) > h {
-                return None;
-            }
         }
         Tool::Trend | Tool::Ray | Tool::Arrow => {
             let (x0, x1) = (xa?, xb?);
@@ -619,6 +619,57 @@ pub fn project_points(
         }
     }
     (start as u32, out.len() as u32)
+}
+
+/// A plugin drawing's levels `map` as the levels layer draws them, into `out` (pushed only
+/// within its capacity, so this never allocates): each level on the plot as two points, a
+/// line as its two ends `(x0, y), (x1, y)` (from its start bar, or the left edge, to its end
+/// bar, or the right edge: [`crate::levels::extent_x`]), a zone as its top-left and
+/// bottom-right corners (`top < bottom`). Kinds `shown(slug)` refuses aren't drawn and are
+/// skipped; so are VWAP-relative levels (drawn along the chart's VWAP, not a fixed price).
+/// Returns their range in `out`, for [`Projected::pts`].
+pub fn project_levels(
+    map: &crate::levels::LevelMap,
+    axis: &TimeAxis<'_>,
+    vp: &Viewport,
+    shown: impl Fn(&str) -> bool,
+    out: &mut Vec<(f32, f32)>,
+) -> (u32, u32) {
+    let start = out.len();
+    let h = vp.height as f32;
+    for l in &map.levels {
+        if out.len() + 2 > out.capacity() {
+            break;
+        }
+        if l.is_vwap_relative() || !map.kinds.get(usize::from(l.kind)).is_some_and(|k| shown(k)) {
+            continue;
+        }
+        let Some((lo, hi)) = l.span_at(None) else {
+            continue;
+        };
+        let (top, bottom) = (vp.price_to_y(hi) as f32, vp.price_to_y(lo) as f32);
+        if bottom < 0.0 || top > h {
+            continue;
+        }
+        let Some((x0, x1)) = crate::levels::extent_x(&axis.view, vp, l) else {
+            continue;
+        };
+        out.push((x0, top));
+        out.push((x1, bottom));
+    }
+    (start as u32, out.len() as u32)
+}
+
+/// Whether plot point `p` is on a plugin drawing's levels as [`project_levels`] placed them
+/// (`pts`): within `tol` of a line, or inside a zone (its edges within `tol`). No allocation.
+fn on_levels(pts: &[(f32, f32)], (x, y): (f32, f32), tol: f32) -> bool {
+    pts.as_chunks::<2>().0.iter().any(|&[a, b]| {
+        if (b.1 - a.1).abs() < f32::EPSILON {
+            segment_distance((x, y), a, b) <= tol
+        } else {
+            x >= a.0 - tol && x <= b.0 + tol && y >= a.1 - tol && y <= b.1 + tol
+        }
+    })
 }
 
 /// A freehand stroke as kept (plot px, at draw time): smoothed (each inner point averaged with
@@ -732,8 +783,9 @@ pub fn segment_distance(p: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
 }
 
 /// Whether (`x`, `y`) is on `d`: a handle within `handle_r` (only when `handles` is set, i.e.
-/// the drawing is selected) or the drawing within `tol` (zones, measures and notes: anywhere
-/// inside; a brush stroke on any of its segments, `pts` being the frame's point buffer). A
+/// the drawing is selected) or the drawing within `tol` (zones and measures on their edges,
+/// notes anywhere inside; a brush stroke on any of its segments, a plugin drawing on its
+/// points, its connector or its levels, `pts` being the frame's point buffer). A
 /// brush stroke's handles only mark it: a press on one moves the stroke ([`Hit::Body`]).
 pub fn hit(
     d: &Projected,
@@ -781,9 +833,18 @@ pub fn hit(
     let near = |(hx, hy): (f32, f32)| (x - hx).abs() <= handle_r && (y - hy).abs() <= handle_r;
     let on = match d.tool {
         Tool::Note => inside(d.p0, d.p1),
-        // Its points (nothing else of it is drawn here) and the segment between them.
+        // Its points, the connector between them and its levels as drawn (`pts`: lines
+        // within `tol`, zones anywhere inside).
         Tool::Plugin(_) => {
-            near(d.handles[0]) || near(d.handles[1]) || segment_distance(p, d.p0, d.p1) <= tol
+            near(d.handles[0])
+                || near(d.handles[1])
+                || segment_distance(p, d.p0, d.p1) <= tol
+                || on_levels(
+                    pts.get(d.pts.0 as usize..d.pts.1 as usize)
+                        .unwrap_or_default(),
+                    p,
+                    tol,
+                )
         }
         Tool::Rect | Tool::Measure => edges(d.p0, d.p1),
         _ => segment_distance(p, d.p0, d.p1) <= tol,

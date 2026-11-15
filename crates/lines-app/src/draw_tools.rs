@@ -45,6 +45,9 @@ struct Entry {
     /// Every drawing's levels in one map (`None`: no drawings of this tool on the chart).
     merged: Option<Arc<LevelMap>>,
     rev: u64,
+    /// The merged map's kinds the levels layer draws now (bit per kind index, hover-only ones
+    /// included): only those are hit-tested. All until the layer says otherwise.
+    drawn_kinds: u64,
 }
 
 /// A chart's plugin tools and their drawings' maps.
@@ -70,6 +73,7 @@ impl ToolMaps {
                     cache: Vec::new(),
                     merged: None,
                     rev: 0,
+                    drawn_kinds: u64::MAX,
                 })
                 .collect()
         };
@@ -115,6 +119,32 @@ impl ToolMaps {
             .find(|e| e.tool.id() == id)?
             .merged
             .as_ref()
+    }
+
+    /// Which of tool `id`'s merged kinds the levels layer draws (`kinds(id)`: a bit per kind
+    /// index; 0: none, its levels hidden), so hit-testing finds only what is drawn.
+    pub fn set_drawn_kinds(&mut self, kinds: impl Fn(&str) -> u64) {
+        for e in &mut self.entries {
+            e.drawn_kinds = kinds(e.tool.id());
+        }
+    }
+
+    /// What drawing `id` of tool `tool` drew (`None`: nothing, or not one of these tools'),
+    /// and whether its kind `slug` is drawn now. No allocation.
+    pub fn drawing_map(
+        &self,
+        tool: &str,
+        id: DrawingId,
+    ) -> Option<(&LevelMap, impl Fn(&str) -> bool + '_)> {
+        let e = self.entries.iter().find(|e| e.tool.id() == tool)?;
+        let map = e.cache.iter().find(|c| c.id == id)?.map.as_ref()?;
+        let shown = move |slug: &str| {
+            e.merged
+                .as_ref()
+                .and_then(|m| m.kind_index(slug))
+                .is_some_and(|k| k < 64 && e.drawn_kinds & (1u64 << k) != 0)
+        };
+        Some((map, shown))
     }
 
     /// This frame's plugin drawings, in drawing order: `(id, tool, a, b)` (a drag's drawing

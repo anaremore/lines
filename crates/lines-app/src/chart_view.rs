@@ -5033,9 +5033,12 @@ impl ChartView {
                 self.footprint.reset(); // hidden: no cells, no line gaps
             }
             // The pointer before the levels' columns: a hover-only level of the event under it
-            // is laid out (its label row) this frame.
+            // is laid out (its label row) this frame. A plugin drawing under it (any part, as
+            // a click would pick it) is the event highlighted.
+            let in_plot = self.hover.filter(|_| self.cross_in_sub.is_none());
             self.levels
-                .set_pointer(self.hover.filter(|_| self.cross_in_sub.is_none()));
+                .set_hot_drawing(in_plot.and_then(|(x, y)| self.drawings.plugin_at(x, y)));
+            self.levels.set_pointer(in_plot);
             prepare_studies(
                 self.visibility,
                 &mut self.profile,
@@ -5097,6 +5100,10 @@ impl ChartView {
             }
             self.drawings.set_pointer(self.hover);
             self.drawings.set_contract(d.contract);
+            // Plugin drawings are hit-tested on the levels drawn now (none with studies hidden).
+            let (draws, levels) = (self.visibility.draws_studies(), &self.levels);
+            self.drawings
+                .set_drawn_kinds(|id| if draws { levels.tool_kinds(id) } else { 0 });
             let tools_rev = self.drawings.tool_maps().revision();
             self.drawings.prepare(
                 &TimeAxis::new(view),
@@ -6264,9 +6271,12 @@ impl ChartView {
             );
             if studies {
                 self.profile.paint(plot, &self.vp, &t, window, cx);
-                // An event under the pointer (in the price plot) is highlighted.
+                // An event under the pointer (in the price plot) is highlighted: a plugin
+                // drawing as the drawings hit-test it on this frame's geometry.
+                let in_plot = self.hover.filter(|_| self.cross_in_sub.is_none());
                 self.levels
-                    .set_pointer(self.hover.filter(|_| self.cross_in_sub.is_none()));
+                    .set_hot_drawing(in_plot.and_then(|(x, y)| self.drawings.plugin_at(x, y)));
+                self.levels.set_pointer(in_plot);
                 // Another event than this frame's layout: laid out on the next (a refresh
                 // during this draw wouldn't bring one).
                 if self.levels.needs_layout() {
