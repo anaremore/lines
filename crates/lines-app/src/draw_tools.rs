@@ -37,6 +37,9 @@ struct Cached {
     a: Anchor,
     b: Anchor,
     map: Option<LevelMap>,
+    /// How many of `map`'s levels (from the first) the merged map took ([`merge`]: the rest
+    /// didn't fit its limits, so they aren't drawn, nor hit).
+    merged: usize,
 }
 
 struct Entry {
@@ -130,21 +133,23 @@ impl ToolMaps {
     }
 
     /// What drawing `id` of tool `tool` drew (`None`: nothing, or not one of these tools'),
+    /// how many of its levels (from the first) the merged map holds (the rest aren't drawn),
     /// and whether its kind `slug` is drawn now. No allocation.
     pub fn drawing_map(
         &self,
         tool: &str,
         id: DrawingId,
-    ) -> Option<(&LevelMap, impl Fn(&str) -> bool + '_)> {
+    ) -> Option<(&LevelMap, usize, impl Fn(&str) -> bool + '_)> {
         let e = self.entries.iter().find(|e| e.tool.id() == tool)?;
-        let map = e.cache.iter().find(|c| c.id == id)?.map.as_ref()?;
+        let c = e.cache.iter().find(|c| c.id == id)?;
+        let map = c.map.as_ref()?;
         let shown = move |slug: &str| {
             e.merged
                 .as_ref()
                 .and_then(|m| m.kind_index(slug))
                 .is_some_and(|k| k < 64 && e.drawn_kinds & (1u64 << k) != 0)
         };
-        Some((map, shown))
+        Some((map, c.merged, shown))
     }
 
     /// This frame's plugin drawings, in drawing order: `(id, tool, a, b)` (a drag's drawing
@@ -180,10 +185,16 @@ impl ToolMaps {
                     Some(i) => e.cache.swap_remove(i).map,
                     None => drawn(&*e.tool, ctx, a, b, tick),
                 };
-                cache.push(Cached { id: d, a, b, map });
+                cache.push(Cached {
+                    id: d,
+                    a,
+                    b,
+                    map,
+                    merged: 0,
+                });
             }
             e.cache = cache;
-            let merged = merge(&*e.tool, ctx, &e.cache, tick);
+            let merged = merge(&*e.tool, ctx, &mut e.cache, tick);
             if merged.as_ref() != e.merged.as_deref() {
                 e.merged = merged.map(Arc::new);
                 e.rev = next_rev();
@@ -263,7 +274,7 @@ fn checked(m: LevelMap, tick: i64) -> Result<LevelMap, lines_core::levels::Level
 fn merge(
     tool: &dyn DrawTool,
     ctx: &DrawToolContext,
-    parts: &[Cached],
+    parts: &mut [Cached],
     tick: i64,
 ) -> Option<LevelMap> {
     if parts.is_empty() {
@@ -278,7 +289,8 @@ fn merge(
         .build(tick)
         .ok()?;
     out.contract = ctx.contract;
-    for c in parts {
+    for c in parts.iter_mut() {
+        c.merged = 0;
         let Some(m) = &c.map else { continue };
         let group = |g: Option<u16>, out: &mut LevelMap| -> Option<u16> {
             let name = match g {
@@ -293,10 +305,12 @@ fn merge(
                 (out.groups.len() - 1) as u16
             })
         };
+        let mut taken = 0;
         for l in &m.levels {
             if out.levels.len() >= MAX_LEVELS {
                 break;
             }
+            taken += 1;
             let Some(slug) = m.kinds.get(usize::from(l.kind)) else {
                 continue;
             };
@@ -313,6 +327,7 @@ fn merge(
             l.group = group(l.group, &mut out);
             out.levels.push(l);
         }
+        c.merged = taken;
         for k in &m.markers {
             if out.markers.len() >= MAX_MARKERS {
                 break;

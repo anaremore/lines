@@ -874,7 +874,8 @@ fn drawings_do_not_allocate() {
                         p.pts = project_points(d, &axis, &vp, &mut pts);
                     }
                     if d.tool.is_plugin() {
-                        p.pts = project_levels(&levels, &axis, &vp, |k| k != "x", &mut pts);
+                        p.pts =
+                            project_levels(&levels, usize::MAX, &axis, &vp, |k| k != "x", &mut pts);
                     }
                     drawn.push(p);
                 }

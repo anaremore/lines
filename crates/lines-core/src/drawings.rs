@@ -627,9 +627,12 @@ pub fn project_points(
 /// bar, or the right edge: [`crate::levels::extent_x`]), a zone as its top-left and
 /// bottom-right corners (`top < bottom`). Kinds `shown(slug)` refuses aren't drawn and are
 /// skipped; so are VWAP-relative levels (drawn along the chart's VWAP, not a fixed price).
-/// Returns their range in `out`, for [`Projected::pts`].
+/// Only its first `limit` levels (those the levels layer's map holds), and at most
+/// [`crate::levels::MAX_LEVELS`] placed, as `levels::place` caps a slot. Returns their range
+/// in `out`, for [`Projected::pts`].
 pub fn project_levels(
     map: &crate::levels::LevelMap,
+    limit: usize,
     axis: &TimeAxis<'_>,
     vp: &Viewport,
     shown: impl Fn(&str) -> bool,
@@ -637,8 +640,10 @@ pub fn project_levels(
 ) -> (u32, u32) {
     let start = out.len();
     let h = vp.height as f32;
-    for l in &map.levels {
-        if out.len() + 2 > out.capacity() {
+    // As `levels::place`, at most a slot's worth of levels are drawn.
+    let mut placed = 0;
+    for l in map.levels.iter().take(limit) {
+        if out.len() + 2 > out.capacity() || placed == crate::levels::MAX_LEVELS {
             break;
         }
         if l.is_vwap_relative() || !map.kinds.get(usize::from(l.kind)).is_some_and(|k| shown(k)) {
@@ -651,6 +656,7 @@ pub fn project_levels(
         if bottom < 0.0 || top > h {
             continue;
         }
+        placed += 1;
         let Some((x0, x1)) = crate::levels::extent_x(&axis.view, vp, l) else {
             continue;
         };
@@ -660,16 +666,29 @@ pub fn project_levels(
     (start as u32, out.len() as u32)
 }
 
-/// Whether plot point `p` is on a plugin drawing's levels as [`project_levels`] placed them
-/// (`pts`): within `tol` of a line, or inside a zone (its edges within `tol`). No allocation.
-fn on_levels(pts: &[(f32, f32)], (x, y): (f32, f32), tol: f32) -> bool {
-    pts.as_chunks::<2>().0.iter().any(|&[a, b]| {
+/// Where plot point `p` is on a plugin drawing's levels as [`project_levels`] placed them
+/// (`pts`): [`Hit::Body`] within `tol` of a line or of a zone's edge, else [`Hit::Inside`]
+/// inside a zone (weak), else `None`. No allocation.
+fn on_levels(pts: &[(f32, f32)], p: (f32, f32), tol: f32) -> Option<Hit> {
+    let (x, y) = p;
+    let mut inside = false;
+    for &[a, b] in pts.as_chunks::<2>().0 {
         if (b.1 - a.1).abs() < f32::EPSILON {
-            segment_distance((x, y), a, b) <= tol
-        } else {
-            x >= a.0 - tol && x <= b.0 + tol && y >= a.1 - tol && y <= b.1 + tol
+            if segment_distance(p, a, b) <= tol {
+                return Some(Hit::Body);
+            }
+            continue;
         }
-    })
+        let (c, d) = ((a.0, b.1), (b.0, a.1));
+        if [(a, c), (c, b), (b, d), (d, a)]
+            .iter()
+            .any(|&(s, e)| segment_distance(p, s, e) <= tol)
+        {
+            return Some(Hit::Body);
+        }
+        inside |= x >= a.0 && x <= b.0 && y >= a.1 && y <= b.1;
+    }
+    inside.then_some(Hit::Inside)
 }
 
 /// A freehand stroke as kept (plot px, at draw time): smoothed (each inner point averaged with
@@ -767,6 +786,18 @@ pub enum Hit {
     Handle(usize),
     /// The drawing itself (drag to move).
     Body,
+    /// Only the inside of a plugin drawing's zone: a *weak* hit. A click there selects the
+    /// drawing, but it never drags it, never takes a right-click, the Shift ruler, the hover
+    /// cursor or a hover highlight, and any drawing's strong hit ([`Hit::Body`],
+    /// [`Hit::Handle`]) at the same point wins over it ([`pick`]).
+    Inside,
+}
+
+impl Hit {
+    /// A strong hit: a handle or the drawing's line, edge or body.
+    pub fn strong(self) -> bool {
+        self != Hit::Inside
+    }
 }
 
 /// Distance from `p` to the segment `a`–`b`.
@@ -833,18 +864,16 @@ pub fn hit(
     let near = |(hx, hy): (f32, f32)| (x - hx).abs() <= handle_r && (y - hy).abs() <= handle_r;
     let on = match d.tool {
         Tool::Note => inside(d.p0, d.p1),
-        // Its points, the connector between them and its levels as drawn (`pts`: lines
-        // within `tol`, zones anywhere inside).
+        // Its points, the connector between them and its levels as drawn (`pts`: lines and
+        // zone edges within `tol`); only inside a zone, a weak hit.
         Tool::Plugin(_) => {
-            near(d.handles[0])
-                || near(d.handles[1])
-                || segment_distance(p, d.p0, d.p1) <= tol
-                || on_levels(
-                    pts.get(d.pts.0 as usize..d.pts.1 as usize)
-                        .unwrap_or_default(),
-                    p,
-                    tol,
-                )
+            if near(d.handles[0]) || near(d.handles[1]) || segment_distance(p, d.p0, d.p1) <= tol {
+                return Some(Hit::Body);
+            }
+            let s = pts
+                .get(d.pts.0 as usize..d.pts.1 as usize)
+                .unwrap_or_default();
+            return on_levels(s, p, tol);
         }
         Tool::Rect | Tool::Measure => edges(d.p0, d.p1),
         _ => segment_distance(p, d.p0, d.p1) <= tol,
@@ -853,7 +882,8 @@ pub fn hit(
 }
 
 /// The top-most drawing under the pointer: the selected drawing's handles first, then the
-/// drawings from the last drawn (on top) back. Allocation-free.
+/// drawings from the last drawn (on top) back. A strong hit on any drawing beats every weak
+/// one ([`Hit::Inside`]); with none, the top-most weak hit. Allocation-free.
 pub fn pick(
     drawn: &[Projected],
     pts: &[(f32, f32)],
@@ -866,14 +896,19 @@ pub fn pick(
     if let Some(s) = selected
         && let Some(d) = drawn.iter().find(|d| d.id == s)
         && let Some(h) = hit(d, pts, x, y, tol, true, handle_r)
-        && (h != Hit::Body || d.tool == Tool::Brush)
+        && (matches!(h, Hit::Handle(_)) || d.tool == Tool::Brush)
     {
         return Some((s, h));
     }
-    drawn
-        .iter()
-        .rev()
-        .find_map(|d| hit(d, pts, x, y, tol, false, handle_r).map(|h| (d.id, h)))
+    let mut weak = None;
+    for d in drawn.iter().rev() {
+        match hit(d, pts, x, y, tol, false, handle_r) {
+            Some(h) if h.strong() => return Some((d.id, h)),
+            Some(h) if weak.is_none() => weak = Some((d.id, h)),
+            _ => {}
+        }
+    }
+    weak
 }
 
 // ---- measure ----------------------------------------------------------------------------

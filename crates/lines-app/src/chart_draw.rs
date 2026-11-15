@@ -103,6 +103,9 @@ pub struct ChartDrawings {
     drag: Option<Drag>,
     /// A drag's drawing this frame (committed on release as one undo step).
     dragged: Option<Drawing>,
+    /// A press inside a plugin drawing's zone only (a weak hit, `Hit::Inside`): the chart pans;
+    /// released without moving (a click), the drawing is selected. Where it was pressed.
+    weak_press: Option<(DrawingId, (f32, f32))>,
     /// The temporary measure (pinned with Enter).
     measure: Option<(Anchor, Anchor)>,
     /// A Shift+drag measure in progress: the measure tool and its first anchor are set for
@@ -162,6 +165,7 @@ impl ChartDrawings {
             selected: None,
             drag: None,
             dragged: None,
+            weak_press: None,
             measure: None,
             quick: false,
             quick_at: None,
@@ -284,6 +288,7 @@ impl ChartDrawings {
             self.selected = None;
             self.drag = None;
             self.dragged = None;
+            self.weak_press = None;
             self.confirm_clear = false;
             self.close_editor();
         }
@@ -296,7 +301,15 @@ impl ChartDrawings {
     }
 
     /// The drawing under plot-local (`x`, `y`), if any (top-most).
+    /// Strong hits only: inside a plugin drawing's zone (`Hit::Inside`) is no drawing here, so
+    /// a right-click there keeps the chart's price items and the Shift ruler starts there.
     pub fn hit_at(&self, x: f32, y: f32) -> Option<DrawingId> {
+        self.strong_at(x, y).map(|(id, _)| id)
+    }
+
+    /// The drawing strongly hit at plot-local (`x`, `y`) (top-most; a weak hit inside a plugin
+    /// drawing's zone doesn't count). `None` with drawings hidden.
+    fn strong_at(&self, x: f32, y: f32) -> Option<(DrawingId, Hit)> {
         if self.hidden {
             return None;
         }
@@ -309,7 +322,7 @@ impl ChartDrawings {
             HIT_TOL,
             HANDLE_R,
         )
-        .map(|(id, _)| id)
+        .filter(|(_, h)| h.strong())
     }
 
     /// A double click at plot-local (`x`, `y`): the drawing whose style editor it opens. Never
@@ -635,6 +648,7 @@ impl ChartDrawings {
             self.selected = None;
             self.drag = None;
             self.dragged = None;
+            self.weak_press = None;
         } else {
             return false;
         }
@@ -742,6 +756,13 @@ impl ChartDrawings {
             HIT_TOL,
             HANDLE_R,
         ) {
+            // Only inside a plugin drawing's zone (weak): the chart pans, never a drag; a click
+            // (released where it was pressed) selects it (`on_up`).
+            Some((id, Hit::Inside)) => {
+                self.measure = None;
+                self.weak_press = Some((id, (x, y)));
+                false
+            }
             // The selected drawing (a handle or its body) drags.
             Some((id, hit)) if Some(id) == self.selected => {
                 if let (Some(d), Some(from)) = (self.data.lock().get(id).cloned(), anchor) {
@@ -772,6 +793,15 @@ impl ChartDrawings {
 
     /// The press ended at plot-local (`x`, `y`). Returns whether it was the drawings'.
     pub fn on_up(&mut self, x: f32, y: f32, anchor: Option<Anchor>) -> bool {
+        if let Some((id, at)) = self.weak_press.take() {
+            // A click inside a plugin drawing's zone selects it; a pan from there doesn't.
+            let moved = (x - at.0).abs().max((y - at.1).abs()) > CLICK_SLOP;
+            if !moved && !self.hidden {
+                self.selected = Some(id);
+                return true;
+            }
+            return false;
+        }
         if let Some(st) = &mut self.stroke {
             // Where it was released, if on the plot (`prepare` drops points off it).
             if anchor.is_some() {
@@ -1012,16 +1042,8 @@ impl ChartDrawings {
             return None;
         }
         let (x, y) = self.pointer?;
-        pick(
-            &self.drawn,
-            &self.pts,
-            self.selected,
-            x,
-            y,
-            HIT_TOL,
-            HANDLE_R,
-        )
-        .map(|(_, h)| h)
+        // Inside a plugin drawing's zone the cursor stays the chart's.
+        self.strong_at(x, y).map(|(_, h)| h)
     }
 
     /// The plugin drawing under plot-local (`x`, `y`) (top-most, as a click would pick it):
@@ -1029,18 +1051,11 @@ impl ChartDrawings {
     /// any part of it (a level, a zone, the connector, a point) is under the pointer. Not in
     /// drawing mode or with drawings hidden. No allocation.
     pub fn plugin_at(&self, x: f32, y: f32) -> Option<(&'static str, DrawingId)> {
-        if self.hidden || self.tool.is_some() {
+        if self.tool.is_some() {
             return None;
         }
-        let (id, _) = pick(
-            &self.drawn,
-            &self.pts,
-            self.selected,
-            x,
-            y,
-            HIT_TOL,
-            HANDLE_R,
-        )?;
+        // Strong hits only: inside its zone, a level source's event keeps its highlight.
+        let (id, _) = self.strong_at(x, y)?;
         match self.drawn.iter().find(|d| d.id == id)?.tool {
             Tool::Plugin(t) => Some((t.id, id)),
             _ => None,
@@ -1162,7 +1177,7 @@ impl ChartDrawings {
         let level_pts = |d: &Drawing| match d.tool {
             Tool::Plugin(p) => tools
                 .drawing_map(p.id, d.id)
-                .map_or(0, |(m, _)| 2 * m.levels.len()),
+                .map_or(0, |(m, n, _)| 2 * n.min(m.levels.len())),
             _ => d.points.len(),
         };
         let buffer_pts: usize = set.items().iter().map(level_pts).sum();
@@ -1195,8 +1210,8 @@ impl ChartDrawings {
                 }
                 if let Tool::Plugin(t) = d.tool {
                     // Its levels as the levels layer draws them (the kinds it draws now).
-                    if let Some((map, shown)) = self.tools.drawing_map(t.id, d.id) {
-                        p.pts = project_levels(map, axis, vp, shown, &mut self.pts);
+                    if let Some((map, n, shown)) = self.tools.drawing_map(t.id, d.id) {
+                        p.pts = project_levels(map, n, axis, vp, shown, &mut self.pts);
                     }
                     // Kept while its connector or any of its levels is on the plot.
                     let (w, h) = (vp.width as f32, vp.height as f32);
@@ -1612,6 +1627,8 @@ impl MeasureDrag {
 fn dragged(drag: &Drag, at: Anchor, axis: &TimeAxis<'_>, tick: i64) -> Drawing {
     match drag.hit {
         Hit::Handle(i) => drag.original.with_handle(i, at),
+        // A weak hit never starts a drag (`on_down`).
+        Hit::Inside => drag.original.clone(),
         Hit::Body => {
             // Move by whole bars of this chart and whole ticks. Each anchor keeps its offset
             // inside its bar's bucket, so a 1-minute anchor moved on a 15-minute chart keeps

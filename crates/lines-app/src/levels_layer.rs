@@ -276,7 +276,7 @@ impl Hot {
         Hot {
             slot,
             lo: g,
-            hi: g + 1,
+            hi: g.saturating_add(1),
         }
     }
 
@@ -1202,15 +1202,16 @@ impl LevelsLayer {
 
     /// Which kinds of plugin tool `id`'s map are drawn this frame (a bit per kind index, the
     /// hover-only ones included: a highlight reveals them), after [`Self::place`]: none while
-    /// the tool's levels are hidden (levels off, the tool off in the Studies menu); all while
-    /// the layer has no slot for it yet (drawn at the next render). No allocation.
+    /// the tool's levels are hidden (levels off, the tool off in the Studies menu), and none
+    /// while the layer has no slot for it yet (nothing of it is drawn before the next render).
+    /// No allocation.
     pub fn tool_kinds(&self, id: &str) -> u64 {
         let Some(s) = self
             .slots
             .iter()
             .find(|s| matches!(&s.handle, Feed::Tool { id: t, .. } if *t == id))
         else {
-            return u64::MAX;
+            return 0;
         };
         if !self.config.source_shown(id) || s.status == LevelStatus::Missing {
             return 0;
