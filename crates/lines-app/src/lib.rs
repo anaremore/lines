@@ -167,6 +167,8 @@ pub struct Extensions {
     builtin: Vec<&'static str>,
     level_sources: Vec<Arc<dyn LevelSource>>,
     draw_tools: Vec<Arc<dyn DrawTool>>,
+    /// This build's edition for updates (decision 0031 §7); `None`: public.
+    edition: Option<&'static str>,
     brokers: Vec<Arc<dyn BrokerExtension>>,
     strategies: Vec<Arc<dyn lines_strategy::StrategyExtension>>,
 }
@@ -196,6 +198,14 @@ impl Extensions {
             ));
             self.builtin.push(DATABENTO);
         }
+        self
+    }
+
+    /// This build's edition (decision 0031 §7): a build with private extensions is its own
+    /// edition (e.g. `official`) and updates only within it. Only the public edition has an
+    /// update channel today, so another edition never checks for updates. Default: `public`.
+    pub fn with_edition(mut self, edition: &'static str) -> Self {
+        self.edition = Some(edition);
         self
     }
 
@@ -1888,6 +1898,17 @@ where
     T: Into<OsString> + Clone,
 {
     let ext = ext.with_builtin_sources();
+    // The edition first: the updater (started later) checks and installs only within it.
+    if let Some(e) = ext.edition {
+        anyhow::ensure!(
+            !e.is_empty()
+                && e.len() <= 32
+                && e.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "edition {e:?}: lowercase letters, digits and '-', at most 32"
+        );
+        update::manifest::set_edition(e);
+    }
     // --help/--version print and exit 0; usage errors print and exit 2, as before.
     let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
     if let Some(path) = &cli.econ_calendar {

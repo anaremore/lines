@@ -145,7 +145,7 @@ pub fn apply_update(exe: &Path, p: &Pending) -> Result<(), String> {
     let data = std::fs::read(staged).map_err(|e| format!("the update is gone: {e}"))?;
     let sha = std::fs::read_to_string(staged.with_extension("sha256")).unwrap_or_default();
     let sig = std::fs::read_to_string(staged.with_extension("minisig")).unwrap_or_default();
-    let expected = manifest::trusted_comment(v, manifest::target());
+    let expected = manifest::trusted_comment(v, manifest::edition(), manifest::target());
     if let Err(why) = verify::verify(&data, &sha, &sig, key(), &expected) {
         // Never offered again: the next start would find it staged.
         let _ = std::fs::remove_file(staged);
@@ -260,6 +260,17 @@ pub fn start(config: PathBuf, mode: UpdateMode, cx: &mut App) {
         tracing::info!("updates: this system doesn't update itself yet");
         return;
     }
+    // Decision 0031 §7: only the public edition has a channel. Another edition (an official
+    // build with private extensions) never checks, so it never offers the public build, which
+    // would drop its extensions; a public download staged before is refused at the swap too
+    // (its signed comment names the public edition).
+    if !manifest::self_updates(manifest::edition()) {
+        tracing::info!(
+            "updates: the {} edition has no update channel; it never checks",
+            manifest::edition()
+        );
+        return;
+    }
     // Downloads this version has passed are of no more use.
     install::clean_staged(&config.join("updates"), &current);
     std::thread::Builder::new()
@@ -359,8 +370,8 @@ fn check(config: &Path, mode: UpdateMode) -> Result<Status, String> {
     }
     let m = manifest::parse_manifest(&http_get(&manifest_url, Duration::from_secs(20))?)
         .map_err(|e| e.to_string())?;
-    let (v, file) =
-        manifest::pick(&m, v, current, manifest::target()).map_err(|e| e.to_string())?;
+    let (v, file) = manifest::pick(&m, v, current, manifest::target(), manifest::edition())
+        .map_err(|e| e.to_string())?;
     let data = http_get(&file.url, Duration::from_secs(30 * 60))?;
     Ok(stage(
         config,
@@ -387,7 +398,7 @@ pub fn stage(
     signature: &str,
     key: Option<&str>,
 ) -> Status {
-    let expected = manifest::trusted_comment(v, manifest::target());
+    let expected = manifest::trusted_comment(v, manifest::edition(), manifest::target());
     if let Err(why) = verify::verify(data, sha256, signature, key, &expected) {
         tracing::error!("updates: v{v} discarded: {why}");
         return Status::Rejected(v, why.to_string());
@@ -484,7 +495,7 @@ pub fn restart_to_update(cx: &mut App) -> Result<(), String> {
     let data = std::fs::read(&staged).map_err(|e| format!("the update is gone: {e}"))?;
     let sha = std::fs::read_to_string(staged.with_extension("sha256")).unwrap_or_default();
     let sig = std::fs::read_to_string(staged.with_extension("minisig")).unwrap_or_default();
-    let expected = manifest::trusted_comment(v, manifest::target());
+    let expected = manifest::trusted_comment(v, manifest::edition(), manifest::target());
     if let Err(why) = verify::verify(&data, &sha, &sig, key(), &expected) {
         let _ = std::fs::remove_file(&staged);
         if let Ok(mut st) = u.status.lock() {
@@ -571,9 +582,12 @@ mod tests {
         let v = Version(0, 3, 12);
         let exe = b"MZ new lines";
         // Signed for this release on this system (the tests run on every CI system).
-        let sig = k.sign_as(exe, &manifest::trusted_comment(v, manifest::target()));
+        let sig = k.sign_as(
+            exe,
+            &manifest::trusted_comment(v, manifest::edition(), manifest::target()),
+        );
         assert_eq!(
-            manifest::trusted_comment(v, "x86_64-pc-windows-msvc"),
+            manifest::trusted_comment(v, manifest::PUBLIC, "x86_64-pc-windows-msvc"),
             verify::tests::RELEASE
         );
         let sha = verify::sha256_hex(exe);
@@ -610,7 +624,8 @@ mod tests {
         let p = c.join("download.exe");
         std::fs::write(&p, data).unwrap();
         std::fs::write(p.with_extension("sha256"), verify::sha256_hex(data)).unwrap();
-        let comment = manifest::trusted_comment(Version(0, 3, 12), manifest::target());
+        let comment =
+            manifest::trusted_comment(Version(0, 3, 12), manifest::edition(), manifest::target());
         std::fs::write(p.with_extension("minisig"), k.sign_as(data, &comment)).unwrap();
         p
     }
