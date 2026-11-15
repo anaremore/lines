@@ -878,8 +878,9 @@ fn facts_now(cx: &App, wait: bool) -> Option<Facts> {
         .map(|w| w.env.look_flags.get())
         .unwrap_or_default();
     f.version = env!("CARGO_PKG_VERSION").to_owned();
-    f.can_update =
-        crate::update::verify::PUBLIC_KEY.is_some() && crate::update::manifest::supported();
+    f.can_update = crate::update::verify::PUBLIC_KEY.is_some()
+        && crate::update::manifest::supported()
+        && crate::update::manifest::self_updates(crate::update::manifest::edition());
     f.rollback = crate::persist::config_dir().and_then(|d| crate::update::rollback_target(&d));
     f.config_dir = crate::persist::config_dir().map_or_else(
         || "None (nothing is saved)".to_owned(),

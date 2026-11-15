@@ -265,6 +265,7 @@ pub fn start(config: PathBuf, mode: UpdateMode, cx: &mut App) {
     // would drop its extensions; a public download staged before is refused at the swap too
     // (its signed comment names the public edition).
     if !manifest::self_updates(manifest::edition()) {
+        install::clean_all_staged(&config.join("updates"));
         tracing::info!(
             "updates: the {} edition has no update channel; it never checks",
             manifest::edition()

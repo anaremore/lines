@@ -244,6 +244,20 @@ pub fn clean_staged(updates: &Path, current: &str) {
     }
 }
 
+/// Every staged download, whatever its version: an edition without an update channel keeps none
+/// (a public download staged before the edition was set must not wait there).
+pub fn clean_all_staged(updates: &Path) {
+    let Ok(rd) = std::fs::read_dir(updates) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if super::manifest::Version::parse(&name).is_some() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
 /// Failed starts after which the next launch offers the rollback (decision 0031 §4: two).
 pub const FAILED_STARTS: u32 = 2;
 
@@ -379,6 +393,21 @@ mod tests {
             "the old version (rolled back) isn't counted"
         );
         assert_eq!(on_start(None, "0.3.12"), (None, false));
+    }
+
+    #[test]
+    fn an_edition_without_a_channel_keeps_no_staged_download() {
+        let d = dir("clean-all");
+        for v in ["0.3.11", "0.3.26", "0.4.0"] {
+            std::fs::create_dir_all(d.join(v)).unwrap();
+            std::fs::write(d.join(v).join("lines.exe"), b"x").unwrap();
+        }
+        std::fs::write(d.join("notes.txt"), b"keep").unwrap();
+        clean_all_staged(&d);
+        for v in ["0.3.11", "0.3.26", "0.4.0"] {
+            assert!(!d.join(v).exists(), "{v}");
+        }
+        assert!(d.join("notes.txt").exists(), "only version folders go");
     }
 
     #[test]

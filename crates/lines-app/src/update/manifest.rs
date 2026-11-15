@@ -19,8 +19,15 @@ static EDITION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
 
 /// Set this build's edition, once, before the updater starts. A second call is ignored (tests
 /// and a second `run` in one process keep the first).
-pub fn set_edition(edition: &'static str) {
-    let _ = EDITION.set(edition);
+pub fn set_edition(e: &'static str) {
+    if let Err(other) = EDITION.set(e)
+        && other != edition()
+    {
+        tracing::warn!(
+            "updates: edition {other:?} ignored, this run is already {:?}",
+            edition()
+        );
+    }
 }
 
 /// This build's edition: `public` unless the caller set another.
