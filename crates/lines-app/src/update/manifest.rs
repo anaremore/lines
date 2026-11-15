@@ -8,8 +8,39 @@
 
 use serde::Deserialize;
 
-/// The edition this build updates within (decision 0031 §7): public builds update public.
-pub const EDITION: &str = "public";
+/// The public edition: this repository's builds, and the only edition with an update channel
+/// (the release feed below is the public repository's).
+pub const PUBLIC: &str = "public";
+
+/// This build's edition (decision 0031 §7: each edition updates only within its edition). The
+/// public binary is `public`; a build of the app with private extensions sets its own
+/// (`Extensions::with_edition`) before the updater starts.
+static EDITION: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// Set this build's edition, once, before the updater starts. A second call is ignored (tests
+/// and a second `run` in one process keep the first).
+pub fn set_edition(e: &'static str) {
+    if let Err(other) = EDITION.set(e)
+        && other != edition()
+    {
+        tracing::warn!(
+            "updates: edition {other:?} ignored, this run is already {:?}",
+            edition()
+        );
+    }
+}
+
+/// This build's edition: `public` unless the caller set another.
+pub fn edition() -> &'static str {
+    EDITION.get().copied().unwrap_or(PUBLIC)
+}
+
+/// Whether builds of `edition` update themselves: only the public edition has a release feed.
+/// Any other edition never checks, never offers an update and never installs one, until it has
+/// a channel of its own.
+pub fn self_updates(edition: &str) -> bool {
+    edition == PUBLIC
+}
 /// The channel this build follows: every release is a pre-release for now.
 pub const CHANNEL: &str = "pre-release";
 /// The manifest's asset name on a release.
@@ -34,9 +65,9 @@ pub fn supported() -> bool {
 /// What a release's minisign signature must say in its trusted (signed) comment: the file is
 /// this version, edition, channel and target. The manifest itself isn't signed, so this is
 /// what ties a signed file to the release offering it (no older or other-edition build can be
-/// passed off as a newer one).
-pub fn trusted_comment(v: Version, target: &str) -> String {
-    format!("lines {v} {EDITION} {CHANNEL} {target}")
+/// passed off as a newer one). `edition`: this build's ([`edition`]).
+pub fn trusted_comment(v: Version, edition: &str, target: &str) -> String {
+    format!("lines {v} {edition} {CHANNEL} {target}")
 }
 
 /// A version as `MAJOR.MINOR.PATCH` (a leading `v` allowed; pre-release suffixes refused, as
@@ -140,16 +171,18 @@ impl std::fmt::Display for Refused {
     }
 }
 
-/// The file this build should download from `manifest`, which the feed listed as `expected`.
+/// The file this build (of `edition`) should download from `manifest`, which the feed listed as
+/// `expected`.
 pub fn pick(
     manifest: &Manifest,
     expected: Version,
     current: Version,
     target: &str,
+    edition: &str,
 ) -> Result<(Version, ManifestFile), Refused> {
     let v = Version::parse(&manifest.version)
         .ok_or_else(|| Refused::Malformed(format!("version {:?}", manifest.version)))?;
-    if manifest.edition != EDITION {
+    if manifest.edition != edition {
         return Err(Refused::NotOurs("edition".into()));
     }
     if manifest.channel != CHANNEL {
@@ -201,7 +234,7 @@ mod tests {
         Manifest {
             version: version.into(),
             channel: CHANNEL.into(),
-            edition: EDITION.into(),
+            edition: PUBLIC.into(),
             files: vec![ManifestFile {
                 target: T.into(),
                 url: "https://example.test/lines.exe".into(),
@@ -253,25 +286,38 @@ mod tests {
     fn a_manifest_must_be_ours_newer_and_have_our_file() {
         let cur = Version(0, 3, 11);
         let want = Version(0, 3, 12);
-        let (v, f) = pick(&manifest("0.3.12"), want, cur, T).unwrap();
+        let (v, f) = pick(&manifest("0.3.12"), want, cur, T, PUBLIC).unwrap();
         assert_eq!((v, f.target.as_str()), (want, T));
         assert_eq!(
-            pick(&manifest("0.3.11"), want, cur, T).unwrap_err(),
+            pick(&manifest("0.3.11"), want, cur, T, PUBLIC).unwrap_err(),
             Refused::NotNewer
         );
         assert_eq!(
-            pick(&manifest("0.3.13"), want, cur, T).unwrap_err(),
+            pick(&manifest("0.3.13"), want, cur, T, PUBLIC).unwrap_err(),
             Refused::NotNewer,
             "not the version the feed listed"
         );
         let mut m = manifest("0.3.12");
         m.edition = "official".into();
-        assert!(matches!(pick(&m, want, cur, T), Err(Refused::NotOurs(_))));
+        assert!(matches!(
+            pick(&m, want, cur, T, PUBLIC),
+            Err(Refused::NotOurs(_))
+        ));
         let mut m = manifest("0.3.12");
         m.channel = "stable".into();
-        assert!(matches!(pick(&m, want, cur, T), Err(Refused::NotOurs(_))));
+        assert!(matches!(
+            pick(&m, want, cur, T, PUBLIC),
+            Err(Refused::NotOurs(_))
+        ));
         assert_eq!(
-            pick(&manifest("0.3.12"), want, cur, "aarch64-apple-darwin").unwrap_err(),
+            pick(
+                &manifest("0.3.12"),
+                want,
+                cur,
+                "aarch64-apple-darwin",
+                PUBLIC
+            )
+            .unwrap_err(),
             Refused::NoFileForTarget
         );
         assert!(matches!(parse_manifest(b"{"), Err(Refused::Malformed(_))));
@@ -283,5 +329,36 @@ mod tests {
             "assets":[{"name":"update.json","browser_download_url":"https://x/update.json","size":3}]}]"#;
         let f = parse_feed(json).unwrap();
         assert_eq!(f[0].assets[0].name, "update.json");
+    }
+
+    /// Decision 0031 §7: an official build (or any non-public edition) refuses the public
+    /// edition's manifests, and a public build refuses another edition's.
+    #[test]
+    fn each_edition_updates_only_within_itself() {
+        let m = manifest("0.3.26");
+        let (cur, v) = (Version(0, 3, 25), Version(0, 3, 26));
+        assert!(pick(&m, v, cur, T, PUBLIC).is_ok());
+        assert_eq!(
+            pick(&m, v, cur, T, "official").unwrap_err(),
+            Refused::NotOurs("edition".into())
+        );
+        let mut o = manifest("0.3.26");
+        o.edition = "official".into();
+        assert_eq!(
+            pick(&o, v, cur, T, PUBLIC).unwrap_err(),
+            Refused::NotOurs("edition".into())
+        );
+        assert!(pick(&o, v, cur, T, "official").is_ok());
+        // Only the public edition checks at all (the feed is the public repository's).
+        assert!(self_updates(PUBLIC));
+        assert!(!self_updates("official"));
+        // A signature over a public file never verifies as an official one.
+        assert_ne!(
+            trusted_comment(v, PUBLIC, T),
+            trusted_comment(v, "official", T)
+        );
+        assert!(trusted_comment(v, "official", T).contains(" official "));
+        // Unset, the edition is public.
+        assert_eq!(edition(), PUBLIC);
     }
 }

@@ -167,9 +167,14 @@ pub struct Extensions {
     builtin: Vec<&'static str>,
     level_sources: Vec<Arc<dyn LevelSource>>,
     draw_tools: Vec<Arc<dyn DrawTool>>,
+    /// This build's edition for updates (decision 0031 §7); `None`: public.
+    edition: Option<&'static str>,
     brokers: Vec<Arc<dyn BrokerExtension>>,
     strategies: Vec<Arc<dyn lines_strategy::StrategyExtension>>,
 }
+
+/// The edition of a build with extensions that didn't name one (fails closed: no updates).
+pub const EXTENDED: &str = "extended";
 
 impl Extensions {
     pub fn new() -> Self {
@@ -197,6 +202,31 @@ impl Extensions {
             self.builtin.push(DATABENTO);
         }
         self
+    }
+
+    /// This build's edition (decision 0031 §7): a build with private extensions is its own
+    /// edition (e.g. `official`) and updates only within it. Only the public edition has an
+    /// update channel today, so another edition never checks for updates. Default: `public`
+    /// with no extensions; with any (a source beyond the built-ins, a broker, a strategy, a
+    /// level source or a drawing tool) and no edition given, [`EXTENDED`], which never updates:
+    /// installing the public build would drop them.
+    pub fn with_edition(mut self, edition: &'static str) -> Self {
+        self.edition = Some(edition);
+        self
+    }
+
+    /// The edition [`run`] uses: the one given, else [`EXTENDED`] for a build with extensions,
+    /// else `None` (public).
+    pub fn edition(&self) -> Option<&'static str> {
+        let extended = self
+            .sources
+            .iter()
+            .any(|s| !self.builtin.contains(&s.name()))
+            || !self.brokers.is_empty()
+            || !self.strategies.is_empty()
+            || !self.level_sources.is_empty()
+            || !self.draw_tools.is_empty();
+        self.edition.or(extended.then_some(EXTENDED))
     }
 
     /// Add an external level source (decision 0022): its levels show on the charts of the
@@ -1888,6 +1918,17 @@ where
     T: Into<OsString> + Clone,
 {
     let ext = ext.with_builtin_sources();
+    // The edition first: the updater (started later) checks and installs only within it.
+    if let Some(e) = ext.edition() {
+        anyhow::ensure!(
+            !e.is_empty()
+                && e.len() <= 32
+                && e.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+            "edition {e:?}: lowercase letters, digits and '-', at most 32"
+        );
+        update::manifest::set_edition(e);
+    }
     // --help/--version print and exit 0; usage errors print and exit 2, as before.
     let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
     if let Some(path) = &cli.econ_calendar {
@@ -2913,5 +2954,51 @@ mod tests {
         ));
         assert_eq!(cli.cqg_url, lines_feed::cqg::DEMO_URL);
         assert!(help().contains("--cqg-url"));
+    }
+}
+
+#[cfg(test)]
+mod edition_tests {
+    use super::*;
+    use lines_core::Product;
+    use lines_core::drawings::Anchor;
+    use lines_core::levels::{LevelMap, LevelType};
+
+    struct Tool;
+    impl DrawTool for Tool {
+        fn id(&self) -> &'static str {
+            "edition-test"
+        }
+        fn label(&self) -> &'static str {
+            "Edition test"
+        }
+        fn icon(&self) -> &'static str {
+            "Et"
+        }
+        fn serves(&self, _: &Product) -> bool {
+            false
+        }
+        fn types(&self) -> &'static [LevelType] {
+            &[]
+        }
+        fn draw(&self, _: &DrawToolContext, _: Anchor, _: Anchor) -> Result<LevelMap, String> {
+            Err("never".into())
+        }
+    }
+
+    /// Decision 0031 §7: a build updates only within its edition. No extensions: public (no
+    /// edition set). With any extension and no edition: `extended`, which never updates (it
+    /// fails closed: installing the public build would drop the extension). Named: that one.
+    #[test]
+    fn a_build_with_extensions_is_never_public_by_default() {
+        assert_eq!(Extensions::new().edition(), None);
+        assert_eq!(Extensions::new().with_builtin_sources().edition(), None);
+        let ext = Extensions::new().with_draw_tool(Arc::new(Tool));
+        assert_eq!(ext.edition(), Some(EXTENDED));
+        assert!(!update::manifest::self_updates(EXTENDED));
+        let ext = Extensions::new()
+            .with_draw_tool(Arc::new(Tool))
+            .with_edition("official");
+        assert_eq!(ext.edition(), Some("official"));
     }
 }
