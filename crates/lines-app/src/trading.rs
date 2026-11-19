@@ -1245,7 +1245,7 @@ fn rebuild_due(pending: bool, asked: bool, last: Option<Instant>, now: Instant) 
 
 /// What the account chip shows of a venue's status: connected, detail, and how stale (in
 /// 5 s steps, 0 while fresh). The watcher repaints when it changes.
-fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64)> {
+fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64, Option<String>)> {
     let s = s.as_ref()?;
     let silent = s
         .last_message
@@ -1255,7 +1255,7 @@ fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64)> {
     } else {
         0
     };
-    Some((s.connected, s.detail.clone(), stale))
+    Some((s.connected, s.detail.clone(), stale, s.warning.clone()))
 }
 
 /// The UI's view of a venue's accounts.

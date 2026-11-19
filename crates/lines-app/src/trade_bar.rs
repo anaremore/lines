@@ -4038,12 +4038,18 @@ pub fn dom_bar<V: TradePane>(
                 t,
             )),
             // The venue changes Lines' orders (a setting there): said here, where it's seen.
-            (None, None, None) if d.venue_warning.is_some() => status.child(lock_strip(
-                d.venue_warning.as_deref().expect("checked"),
-                "",
-                narrow,
-                t,
-            )),
+            // (A news blackout's strip, which locks entries, comes first.)
+            (None, None, None)
+                if d.venue_warning.is_some()
+                    && !d.news.as_ref().is_some_and(|(warns, _)| *warns) =>
+            {
+                status.child(lock_strip(
+                    d.venue_warning.as_deref().expect("checked"),
+                    "",
+                    narrow,
+                    t,
+                ))
+            }
             // The calendar: a blackout (or a calendar that can't answer) as a strip; a
             // release coming as a quiet line, unless the panel needs the line for why
             // orders are denied.
