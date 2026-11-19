@@ -1466,6 +1466,9 @@ impl Trading {
             );
         let clock = setup.clock;
         let guards_dir = setup.venue_dir.clone();
+        // The saved groups, in the cache before any pane is restored (a pane saved on a group
+        // finds it; Settings › Groups lists them), not only once the first events arrive.
+        let groups_at_start = core.groups().to_vec();
         let service = TradingService::start_observed(
             core,
             setup.file.map(|p| (p, paper)),
@@ -1479,6 +1482,7 @@ impl Trading {
         };
         let handle = service.handle();
         let cache = Arc::new(TradeCache::new(&accounts));
+        cache.read().groups = groups_at_start;
         let (notes, notes_rx) = mpsc::channel();
         let (barrier, barrier_rx) = mpsc::channel();
         let bridge = FeedBridge::new(registry.clone(), base.clone());
@@ -3200,6 +3204,40 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Saved groups are in the cache as soon as trading starts again (a pane restored on a
+    /// group finds it; Settings › Groups lists them), before any event arrives.
+    #[test]
+    fn saved_groups_are_in_the_cache_at_start() {
+        let dir = lines_core::scratch::Scratch::new("trading-groups-restart");
+        let file = dir.path().join("paper.json");
+        {
+            let mut setup = paper_setup(vec![
+                AccountConfig::paper("a", 50_000),
+                AccountConfig::paper("b", 50_000),
+            ]);
+            setup.file = Some(file.clone());
+            let t = trading_with(setup);
+            t.submit(
+                Source::Test,
+                Instant::now(),
+                TradeCommand::CreateGroup {
+                    name: "Evals".into(),
+                    members: vec![AccountId::new("a"), AccountId::new("b")],
+                },
+            );
+            t.settle();
+        }
+        let mut setup = paper_setup(Vec::new());
+        setup.file = Some(file);
+        let t = trading_with(setup);
+        let groups = t.cache.read().groups().to_vec();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "Evals");
+        // And again from the rebuild's events (a subscriber that missed them).
+        t.settle();
+        assert_eq!(t.cache.read().groups().len(), 1);
     }
 
     /// A paper account added or removed by command: the app's list follows (after the other
