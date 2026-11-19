@@ -1025,8 +1025,10 @@ impl JournalView {
     /// Show a trade (a click on its chart marker): the trades list, that trade selected and
     /// scrolled into view once its row is there.
     pub fn select_trade(&mut self, id: &str, cx: &mut Context<Self>) {
-        // A trade the filter hides: show every account, so the trade asked for is there.
-        let hidden = self.keep.as_ref().is_some_and(|keep| {
+        // A trade the filter hides: show every account, so the trade asked for is there. The
+        // filter's accounts as they are now (a pane not drawn yet hasn't read them).
+        let keep = self.keep_of(cx);
+        let hidden = keep.as_ref().is_some_and(|keep| {
             self.journal
                 .as_ref()
                 .and_then(|j| j.snapshot())
@@ -1148,16 +1150,17 @@ impl JournalView {
             return false;
         };
         let mode = self.mode;
-        // New trades go on top: while scrolled, keep the same rows in view (nothing the
-        // trader aims at shifts under the pointer, docs/design.md §7).
-        let added = snap.trades.len().saturating_sub(self.rows.len());
-        if self.scroll > 0 && self.built.is_some() {
-            self.scroll += added;
-        }
         let names = &self.names;
         let keep = &self.keep;
         let kept = |a: &str| keep.as_ref().is_none_or(|k| k.contains(a));
         let trades: Vec<&Trade> = snap.trades.iter().filter(|t| kept(&t.account.0)).collect();
+        // New trades go on top: while scrolled, keep the same rows in view (nothing the
+        // trader aims at shifts under the pointer, docs/design.md §7). Counted among the trades
+        // shown: another account's trade, hidden by the filter, moves nothing.
+        let added = trades.len().saturating_sub(self.rows.len());
+        if self.scroll > 0 && self.built.is_some() {
+            self.scroll += added;
+        }
         let open = snap.open_accounts.iter().filter(|a| kept(&a.0)).count();
         self.rows = trades
             .iter()

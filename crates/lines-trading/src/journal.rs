@@ -294,6 +294,10 @@ impl Open {
         if !self.venue {
             return;
         }
+        // A late print from long before the entry (a backfill) covers nothing.
+        if !fill && at.0 < self.trade.entry_time.0 - FEED_GAP_MS {
+            return;
+        }
         let from = self.last_print.unwrap_or(self.trade.entry_time);
         if at.0 - from.0 > FEED_GAP_MS {
             self.trade.excursion_unavailable = true;
@@ -557,10 +561,18 @@ impl Journal {
     pub fn on_market(&mut self, contract: ContractKey, inputs: &[MarketInput]) {
         if !self.open.keys().any(|(_, k)| *k == contract) {
             // Only the latest print's time, for a broker trade opening next.
+            // An option quote with no usable price is no print (as in the loop below).
             if let Some(at) = inputs.iter().rev().find_map(|i| match *i {
-                MarketInput::Trade { time, .. } | MarketInput::OptionQuote { time, .. } => {
-                    Some(time)
-                }
+                MarketInput::Trade { time, .. } => Some(time),
+                MarketInput::OptionQuote {
+                    bid,
+                    ask,
+                    last,
+                    time,
+                } => match (crate::market::quote_sides(bid, ask), last) {
+                    ((Some(_), Some(_)), _) | (_, Some(_)) => Some(time),
+                    _ => None,
+                },
                 _ => None,
             }) {
                 let e = self.feed_at.entry(contract).or_insert(at);
@@ -594,6 +606,11 @@ impl Journal {
             }
             for ((a, k), o) in self.open.iter_mut() {
                 if *k == contract && !unmarked.contains(a) {
+                    // A broker trade takes no price stamped long before its entry (a late
+                    // backfill): it was never the trade's market.
+                    if o.venue && at.is_some_and(|t| t.0 < o.trade.entry_time.0 - FEED_GAP_MS) {
+                        continue;
+                    }
                     o.saw(p);
                     if let Some(at) = at {
                         o.covered_to(at, false);
@@ -741,7 +758,8 @@ impl Journal {
                 // Split: the part that closes the old position, and the rest opens the next.
                 let close_qty = before.abs();
                 let open_qty = f.qty.0 - close_qty;
-                let close_fee = Money(fee.0 * close_qty as i128 / f.qty.0 as i128);
+                // Pro rata, the remainder to the closing side (the opening share rounds down).
+                let close_fee = fee - Money(fee.0 * open_qty as i128 / f.qty.0 as i128);
                 let closing = TradeFill {
                     qty: Qty(close_qty),
                     fee: close_fee,

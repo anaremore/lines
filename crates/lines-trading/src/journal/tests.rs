@@ -1303,3 +1303,44 @@ fn consistency_progress_from_closed_trades() {
     assert_eq!(consistency(&losing, 0), None);
     assert_eq!(consistency(&[], 30).unwrap().best_day, None);
 }
+
+/// A reversal's fee goes pro rata with the remainder on the closing side: 100 units over 3,
+/// closing 1, is 34 closing and 66 opening.
+#[test]
+fn a_reversal_fee_remainder_goes_to_the_closing_side() {
+    let mut j = Journal::new();
+    let mut rev = fill("v2", 2, Side::Sell, 6001.00, 3, 0.0, 10);
+    if let Event::Fill(f) = &mut rev {
+        f.fee = Money(100);
+    }
+    let closed = feed(&mut j, &[fill("v1", 1, Side::Buy, 6000.00, 1, 0.0, 0), rev]);
+    let open: Vec<&Trade> = j.open_trades().collect();
+    assert_eq!(closed[0].fees, Money(34));
+    assert_eq!(open[0].fees, Money(66));
+}
+
+/// A late backfill of prints stamped long before a broker trade's entry neither covers it nor
+/// moves its excursion.
+#[test]
+fn a_backfill_from_before_the_entry_covers_nothing() {
+    let mut j = venue_journal(true);
+    feed(&mut j, &[vfill("b1", Side::Buy, 6000.00, 1, 600)]);
+    j.on_market(es(), &[print(5990.00, 0)]);
+    let b = feed(&mut j, &[vfill("b2", Side::Sell, 6001.00, 1, 690)]);
+    assert!(b[0].excursion_unavailable);
+    assert_eq!(b[0].low, px(6000.00), "the old price never counts");
+    // An option-less empty quote is no print either (the early path, nothing open).
+    let mut k = venue_journal(true);
+    k.on_market(
+        es(),
+        &[MarketInput::OptionQuote {
+            bid: None,
+            ask: None,
+            last: None,
+            time: at(0),
+        }],
+    );
+    feed(&mut k, &[vfill("q1", Side::Buy, 6000.00, 1, 1)]);
+    let q = feed(&mut k, &[vfill("q2", Side::Sell, 6001.00, 1, 20)]);
+    assert!(q[0].excursion_unavailable);
+}

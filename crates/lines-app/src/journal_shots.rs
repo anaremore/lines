@@ -349,6 +349,10 @@ fn pnl_text(t: &Trade, product: Option<&Product>, mode: PnlDisplay) -> Option<St
         .map(crate::journal_view::per_contract_text);
     let mut money = String::new();
     let _ = pnl::write_money(&mut money, t.net());
+    // Fees from the product fee table (the broker reported none): said, as in the pane.
+    if t.fees_estimated() {
+        money.push_str(" est.");
+    }
     match (mode.money(), mode.ticks(), ticks) {
         (true, true, Some(tk)) => Some(format!("net {money}  ({tk})")),
         (true, _, _) => Some(format!("net {money}")),
