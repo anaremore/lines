@@ -5003,6 +5003,9 @@ pub fn close_account_menu<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
 }
 
 /// The account list, while the selector is open: under the account chip (`dropdown`).
+/// Rows the account list shows before it scrolls.
+const MENU_ROWS: f32 = 15.0;
+
 fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<AnyElement> {
     if !v.trade_ref().account_menu {
         return None;
@@ -5041,59 +5044,114 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
         .border_color(t.accent)
         .rounded_sm()
         .text_size(crate::zoom::ui(12.0));
-    for (i, a) in trading.accounts().iter().enumerate() {
-        let id = a.id.clone();
-        let on = current.as_ref() == Some(&a.id);
-        let detail = match (&a.read_only, &a.rules) {
-            (Some(why), _) => format!("read-only: {why}"),
-            (None, Some(r)) => format!("rules: {} (approximation)", r.name),
-            (None, None) => "no prop rules".into(),
-        };
-        list = list.child(
+    // Sections, one line per account (`account_menu`); past ~15 rows the rows scroll, the
+    // list's size fixed (it floats over the pane, never grows it).
+    let accounts = trading.accounts();
+    let sections = crate::account_menu::sections(&accounts, |v| trading.venue_short(v));
+    let row_h = crate::zoom::ui(22.0);
+    let mut rows = div()
+        .id("account-rows")
+        .flex()
+        .flex_col()
+        .max_h(row_h * MENU_ROWS)
+        .overflow_y_scroll();
+    for (k, sec) in sections.iter().enumerate() {
+        rows = rows.child(
             div()
-                .id(("acct", i as u64))
                 .px_2()
-                .py_1()
+                .pt(if k == 0 {
+                    crate::zoom::ui(2.0)
+                } else {
+                    crate::zoom::ui(6.0)
+                })
+                .pb(crate::zoom::ui(2.0))
                 .flex()
-                .flex_col()
-                .cursor_pointer()
-                .hover(move |s| s.bg(lit))
+                .flex_row()
+                .gap_2()
+                .text_size(crate::zoom::ui(11.0))
+                .text_color(t.text_dim)
                 .child(
                     div()
-                        .flex()
-                        .flex_row()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(t.text_main)
-                                .font_weight(if on {
-                                    FontWeight::BOLD
-                                } else {
-                                    FontWeight::NORMAL
-                                })
-                                .child(if on {
-                                    format!("✓ {}", a.name)
-                                } else {
-                                    a.name.clone()
-                                }),
-                        )
-                        .child(badge(a.badge, t)),
+                        .flex_none()
+                        .font_weight(FontWeight::BOLD)
+                        .child(sec.title.clone()),
                 )
-                .child(
-                    div()
-                        .text_color(t.text_dim)
-                        .text_size(crate::zoom::ui(11.0))
-                        .child(detail),
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |v: &mut V, _, _, cx| {
-                        cx.stop_propagation();
-                        set_account(v, Some(id.clone()), cx);
-                    }),
+                .children(
+                    sec.note
+                        .map(|n| div().flex_1().min_w_0().truncate().text_right().child(n)),
                 ),
         );
+        for r in &sec.rows {
+            let Some(a) = accounts.get(r.index) else {
+                continue;
+            };
+            let id = a.id.clone();
+            let on = current.as_ref() == Some(&a.id);
+            let text = if r.read_only { t.text_dim } else { t.text_main };
+            let chip = if r.read_only && a.badge == "LIVE" {
+                // Read-only live: an outlined chip in the row's dim words.
+                div()
+                    .flex_shrink_0()
+                    .px_1()
+                    .rounded_sm()
+                    .font_weight(FontWeight::BOLD)
+                    .border_1()
+                    .border_color(t.text_dim)
+                    .text_color(t.text_dim)
+                    .child(a.badge)
+            } else {
+                badge(a.badge, t)
+            };
+            rows = rows.child(
+                div()
+                    .id(("acct", r.index as u64))
+                    .h(row_h)
+                    .flex_none()
+                    .px_2()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .whitespace_nowrap()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(lit))
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_color(text)
+                            .font_weight(if on {
+                                FontWeight::BOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
+                            .child(if on {
+                                format!("✓ {}", r.name)
+                            } else {
+                                r.name.clone()
+                            }),
+                    )
+                    .child(chip)
+                    .children(r.detail.clone().map(|d| {
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_right()
+                            .text_color(t.text_dim)
+                            .text_size(crate::zoom::ui(11.0))
+                            .child(d)
+                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |v: &mut V, _, _, cx| {
+                            cx.stop_propagation();
+                            set_account(v, Some(id.clone()), cx);
+                        }),
+                    ),
+            );
+        }
     }
+    list = list.child(rows);
     // The current account, when paper: reset it (a second press confirms; `paper_reset`).
     if let Some(info) = current.as_ref().and_then(|a| trading.account(a))
         && info.paper

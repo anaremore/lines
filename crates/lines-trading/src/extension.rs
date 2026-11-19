@@ -71,6 +71,11 @@ pub trait BrokerExtension: Send + Sync {
     fn name(&self) -> &str;
     /// Shown on the Connections screen.
     fn label(&self) -> &str;
+    /// A short name for where space is tight: the account list's section headers ("Sierra ·
+    /// Sim"). Account labels starting with it followed by a space show without it there.
+    fn short_label(&self) -> &str {
+        self.label()
+    }
     fn capabilities(&self) -> BrokerCaps;
     fn accounts(&self) -> Arc<dyn AccountSource>;
     /// A broker for the trading core. Called once per trading session.

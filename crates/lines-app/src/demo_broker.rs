@@ -33,24 +33,44 @@ fn caps() -> BrokerCaps {
     }
 }
 
-struct Accounts;
+/// `extra`: more read-only live accounts (`--demo-accounts`), with the Sim account tradable
+/// (the account list's sections and scrolling).
+struct Accounts {
+    extra: usize,
+}
+
+/// The id of the `n`th extra account (from 1).
+fn extra_id(n: usize) -> String {
+    format!("demo-live-{n:02}")
+}
 
 impl AccountSource for Accounts {
     fn accounts(&self) -> Vec<ExtensionAccount> {
-        vec![
+        let mut out = vec![
             ExtensionAccount {
                 id: AccountId::new(SIM),
                 label: "Demo Sim".into(),
                 kind: AccountKind::Simulated,
-                tradable: Err("Sim: order entry not enabled yet".into()),
+                tradable: if self.extra > 0 {
+                    Ok(())
+                } else {
+                    Err("Sim order entry off".into())
+                },
             },
             ExtensionAccount {
                 id: AccountId::new(LIVE),
                 label: "Demo live".into(),
                 kind: AccountKind::Live,
-                tradable: Err("observe mode".into()),
+                tradable: Err("live trading off".into()),
             },
-        ]
+        ];
+        out.extend((1..=self.extra).map(|n| ExtensionAccount {
+            id: AccountId::new(&extra_id(n)),
+            label: format!("Demo ******{n:02}"),
+            kind: AccountKind::Live,
+            tradable: Err("live trading off".into()),
+        }));
+        out
     }
     fn revision(&self) -> u64 {
         1
@@ -90,6 +110,7 @@ impl Broker for DemoBroker {
 }
 
 struct Demo {
+    extra: usize,
     contract: ContractKey,
     last: Price,
     tick: i64,
@@ -103,11 +124,14 @@ impl BrokerExtension for Demo {
     fn label(&self) -> &str {
         "Demo broker"
     }
+    fn short_label(&self) -> &str {
+        "Demo"
+    }
     fn capabilities(&self) -> BrokerCaps {
         caps()
     }
     fn accounts(&self) -> Arc<dyn AccountSource> {
-        Arc::new(Accounts)
+        Arc::new(Accounts { extra: self.extra })
     }
     /// A local venue's settings, as an observe-only broker describes them (Settings ›
     /// Connections evidence).
@@ -178,20 +202,31 @@ impl BrokerExtension for Demo {
                         positions: Vec::new(),
                         orders: Vec::new(),
                     },
-                ],
+                ]
+                .into_iter()
+                .chain((1..=self.extra).map(|n| BrokerAccount {
+                    id: AccountId::new(&extra_id(n)),
+                    balance: Money::whole(25_000),
+                    positions: Vec::new(),
+                    orders: Vec::new(),
+                }))
+                .collect(),
             },
         }))
     }
 }
 
-/// The demo venue on `contract`, its position and order placed around `last`.
+/// The demo venue on `contract`, its position and order placed around `last`; `extra` more
+/// read-only live accounts (`--demo-accounts`).
 pub fn extension(
     contract: ContractKey,
     last: Price,
     tick: i64,
     at: UtcMillis,
+    extra: usize,
 ) -> Arc<dyn BrokerExtension> {
     Arc::new(Demo {
+        extra,
         contract,
         last,
         tick,
