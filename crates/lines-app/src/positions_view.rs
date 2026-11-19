@@ -515,7 +515,7 @@ impl PositionsView {
             .iter()
             .filter(|r| self.off_reason(r).is_none())
             .count();
-        let badge = model::header_badge(&self.accounts, self.filter.as_ref());
+        let badge = model::header_badge(&self.accounts, &self.rows, self.filter.as_ref());
         div()
             .flex()
             .flex_row()

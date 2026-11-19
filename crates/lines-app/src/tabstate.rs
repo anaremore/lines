@@ -331,13 +331,12 @@ pub fn kept_after(keep: usize, closed: &[usize]) -> usize {
 }
 
 /// A tab's title without a name of its own (Rename tab): the symbols of its market panes
-/// (chart, DOM, time & sales, option chain), each once, in layout order. A tab with no market
-/// pane is named after its other panes ("Journal", "Positions", "Strategies"): a journal opened
-/// in its own tab never reads as the feed it happens to follow. `panes`: each leaf's kind and
+/// (`PaneKind::is_market`), each once, in layout order. A tab with no market pane is named
+/// after its other panes ("Journal", "Positions", "Calendar"): a pane that isn't one market's
+/// never names its tab after the feed it happens to follow. `panes`: each leaf's kind and
 /// symbol (empty: not known yet).
 pub fn auto_title(panes: &[(crate::layout::PaneKind, String)]) -> String {
-    use crate::layout::PaneKind as K;
-    let market = |k: K| matches!(k, K::Chart | K::Dom | K::Tape | K::Chain);
+    let market = |k: crate::layout::PaneKind| k.is_market();
     let mut seen: Vec<String> = Vec::new();
     let any_market = panes.iter().any(|(k, _)| market(*k));
     for (k, sym) in panes {
@@ -522,6 +521,41 @@ mod tests {
         );
         assert_eq!(auto_title(&[p(K::Chart, "")]), "empty");
         assert_eq!(auto_title(&[]), "empty");
+    }
+
+    /// Every pane kind, alone in a tab: a market pane names it by its symbol, every other kind
+    /// by its own name (never the symbol of the feed it follows). `PaneKind::ALL` holds every
+    /// kind: the exhaustive match below fails to compile on a new one until it is listed.
+    #[test]
+    fn every_pane_kind_alone_names_its_tab() {
+        use crate::layout::PaneKind as K;
+        for k in K::ALL {
+            let listed = match k {
+                K::Chart
+                | K::Dom
+                | K::Tape
+                | K::Journal
+                | K::Strategies
+                | K::Chain
+                | K::Positions
+                | K::Calendar => K::ALL.contains(&k),
+            };
+            assert!(listed);
+            let title = auto_title(&[(k, "ES".to_owned())]);
+            if k.is_market() {
+                assert_eq!(title, "ES", "{k:?}");
+            } else {
+                assert_eq!(title, k.label(), "{k:?}");
+            }
+        }
+        // ALL has each kind once (a duplicate would hide a missing one).
+        let seen: std::collections::HashSet<K> = K::ALL.into_iter().collect();
+        assert_eq!(seen.len(), K::ALL.len());
+        // Non-market kinds together, beside no market pane: each named.
+        assert_eq!(
+            auto_title(&[(K::Positions, "ES".into()), (K::Calendar, "ES".into())]),
+            "Positions · Calendar"
+        );
     }
 
     use super::*;

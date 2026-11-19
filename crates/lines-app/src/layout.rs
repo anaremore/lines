@@ -31,6 +31,30 @@ pub enum PaneKind {
 }
 
 impl PaneKind {
+    /// Every kind (a test checks each is here: `is_market`'s match lists them all).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const ALL: [PaneKind; 8] = [
+        PaneKind::Chart,
+        PaneKind::Dom,
+        PaneKind::Tape,
+        PaneKind::Journal,
+        PaneKind::Strategies,
+        PaneKind::Chain,
+        PaneKind::Positions,
+        PaneKind::Calendar,
+    ];
+
+    /// A pane that shows one market (a tab is named after its symbol). Exhaustive on
+    /// purpose: a new kind doesn't compile until it says which it is.
+    pub fn is_market(self) -> bool {
+        match self {
+            PaneKind::Chart | PaneKind::Dom | PaneKind::Tape | PaneKind::Chain => true,
+            PaneKind::Journal | PaneKind::Strategies | PaneKind::Positions | PaneKind::Calendar => {
+                false
+            }
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             PaneKind::Chart => "Chart",
