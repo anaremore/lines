@@ -12,6 +12,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
+pub use lines_feed::extension::{Field, FieldKind};
+
 use crate::broker::{Broker, BrokerCaps};
 use crate::types::AccountId;
 
@@ -73,6 +75,28 @@ pub trait BrokerExtension: Send + Sync {
     fn accounts(&self) -> Arc<dyn AccountSource>;
     /// A broker for the trading core. Called once per trading session.
     fn open(&self) -> Result<Box<dyn Broker>>;
+    /// The settings Settings › Connections shows for this broker (decision 0030 §3), kept as a
+    /// source's are (plain values in `settings.json`, secrets in the OS keychain) under the
+    /// broker's name; read them in [`BrokerExtension::open`] with
+    /// [`lines_feed::extension::field_setting`].
+    fn fields(&self) -> Vec<Field> {
+        Vec::new()
+    }
+    /// What Lines can do through this broker, in a few words ("Observe only: order entry
+    /// disabled"). Cheap: no I/O (called while drawing Settings).
+    fn plan(&self) -> Option<String> {
+        None
+    }
+    /// Off until switched on in Settings › Connections (it applies at the next start): the
+    /// broker isn't opened, and connects to nothing, until then. `false`: on unless switched
+    /// off.
+    ///
+    /// The app may call [`BrokerExtension::accounts`] (and the source's methods) on a broker
+    /// that is switched off (startup logs, the Connections card): they must do no I/O and
+    /// connect to nothing before [`BrokerExtension::open`].
+    fn opt_in(&self) -> bool {
+        false
+    }
 }
 
 /// Check a set of broker extensions: well-formed, unique names, none reserved.

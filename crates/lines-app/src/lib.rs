@@ -277,6 +277,17 @@ impl Extensions {
     /// Check the registrations (broker and strategy names) before anything runs.
     pub fn validate(&self) -> Result<()> {
         lines_trading::extension::validate(&self.brokers)?;
+        // Settings › Connections keeps a broker's settings and switch under its name, beside
+        // the sources': the names can't be shared.
+        for b in &self.brokers {
+            let name = b.name();
+            if lines_feed::extension::RESERVED_NAMES.contains(&name)
+                || name == DATABENTO
+                || self.sources.iter().any(|s| s.name() == name)
+            {
+                anyhow::bail!("broker extension name {name:?} is taken by a data source");
+            }
+        }
         lines_strategy::extension::validate(&self.strategies)
     }
 }
@@ -2484,8 +2495,10 @@ where
             Err(e) => reports.push(format!("settings: prop rules for {account}: {e}")),
         }
     }
-    // Broker extensions (decision 0020): each runs beside the paper core.
-    setup.brokers = ext.brokers().to_vec();
+    // Broker extensions (decision 0020): each switched on runs beside the paper core (an
+    // opt-in one only once switched on in Settings › Connections).
+    setup.brokers = connections::brokers_on(ext.brokers(), &settings.settings.sources);
+    connections::set_brokers(ext.brokers(), &setup.brokers);
     let trading = trading::Trading::start(setup, registry.clone(), config.clone());
     if let Some(r) = &replay {
         trading.handle().follow_replay(r.control.clone());

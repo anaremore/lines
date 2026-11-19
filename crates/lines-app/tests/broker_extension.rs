@@ -85,6 +85,24 @@ fn bad_broker_registrations_stop_the_run() {
     assert!(run(dup).is_err());
 }
 
+/// A broker's settings and switch live under its name beside the sources' (Settings ›
+/// Connections): a source's name can't be taken.
+#[test]
+fn a_broker_cant_take_a_sources_name() {
+    for name in ["coinbase", "kraken", "databento", "mock", "replay"] {
+        let e = Extensions::new()
+            .with_broker(Arc::new(DummyBroker(name)))
+            .validate();
+        assert!(e.is_err(), "{name}");
+    }
+    assert!(
+        Extensions::new()
+            .with_broker(Arc::new(DummyBroker("local-venue")))
+            .validate()
+            .is_ok()
+    );
+}
+
 #[test]
 fn the_public_binary_registers_no_brokers() {
     assert!(Extensions::new().brokers().is_empty());

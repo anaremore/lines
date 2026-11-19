@@ -85,6 +85,12 @@ pub fn set_settings_store(s: Arc<dyn SettingsStore>) {
 pub fn setting(source: &str, key: &str) -> Option<String> {
     let ext = by_name(source)?;
     let field = ext.fields().into_iter().find(|f| f.key == key)?;
+    field_setting(source, &field)
+}
+
+/// A field's value for its owner (a source, or a broker extension, which describes fields the
+/// same way): its environment variable when set, else the stored value. Empty reads as unset.
+pub fn field_setting(owner: &str, field: &Field) -> Option<String> {
     if let Some(v) = field
         .env
         .and_then(|e| std::env::var(e).ok())
@@ -93,7 +99,7 @@ pub fn setting(source: &str, key: &str) -> Option<String> {
         return Some(v);
     }
     let s = store().read().clone()?;
-    s.get(source, &field).filter(|v| !v.is_empty())
+    s.get(owner, field).filter(|v| !v.is_empty())
 }
 
 /// Names the built-in sources use on the command line; an extension can't take them.

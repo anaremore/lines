@@ -537,9 +537,24 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                 .child(format!("Keychain: {err}")),
         );
     }
+    let mut brokers_heading = false;
     for row in conn::rows() {
         let name = row.name.clone();
-        let on = prefs.get(&name).is_none_or(crate::sources::SourcePrefs::on);
+        if row.broker.is_some() && !brokers_heading {
+            // Brokers after the sources, under their own heading: not a data source.
+            brokers_heading = true;
+            out = out.child(
+                div()
+                    .mt_2()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(t.text_main)
+                    .child("Brokers"),
+            );
+        }
+        let on = match &row.broker {
+            Some(b) => conn::broker_on(&prefs, &name, b.opt_in),
+            None => prefs.get(&name).is_none_or(crate::sources::SourcePrefs::on),
+        };
         let entry = env.as_ref().and_then(|e| e.sources.get(&name));
         let feeds: Vec<FeedStatus> = entry
             .map(|e| {
@@ -574,7 +589,11 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
         // A login refused this run stays shown after its panes moved to another source (their
         // stores, and so its status, are gone).
         let feeds = conn::with_refusal(feeds, env.as_ref().and_then(|e| e.sources.refusal(&name)));
-        let state = conn::state(on, entry.is_some(), needs, &feeds);
+        let state = match &row.broker {
+            // A broker's state is its venue's (it has no feeds).
+            Some(_) => conn::broker_state(&name, on),
+            None => conn::state(on, entry.is_some(), needs, &feeds),
+        };
         let checking = !row.fields.is_empty() && page.loaded.is_none();
         let dot = match state.tone() {
             Tone::Good => div().size(crate::zoom::ui(8.0)).rounded_full().bg(t.accent),
@@ -623,7 +642,10 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                             .flex_none()
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(t.text_main)
-                            .child(crate::sources::source_label(&name)),
+                            .child(match &row.broker {
+                                Some(b) => b.label.clone(),
+                                None => crate::sources::source_label(&name),
+                            }),
                     )
                     .child(
                         div()
@@ -792,6 +814,11 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                 }
             };
             card = card.child(line(f.label, content, t));
+        }
+        if row.broker.is_some() {
+            // A broker's state line is its connection, live: no Test.
+            out = out.child(card);
+            continue;
         }
         let testing = page.test.as_ref().is_some_and(|x| x.source == name);
         let mut test_row = div().flex().flex_row().items_center().gap_2();

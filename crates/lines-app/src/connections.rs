@@ -8,15 +8,127 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use lines_feed::extension::{self, Field, FieldKind, SettingsStore};
 use lines_feed::store::FeedStatus;
+use lines_trading::extension::BrokerExtension;
 
-/// One source on the page.
+use crate::sources::SourcePrefs;
+
+/// One source or broker on the page.
 #[derive(Clone, Debug)]
 pub struct Row {
-    /// Its `--source` name (`coinbase`, an extension's).
+    /// Its `--source` name (`coinbase`, an extension's), or a broker extension's name.
     pub name: String,
     pub fields: Vec<Field>,
     /// What its plan allows, in a few words.
     pub plan: String,
+    /// A broker extension (decision 0020): its own label, state from its venue, no Test.
+    pub broker: Option<BrokerRow>,
+}
+
+/// What a broker's card needs beyond a source's.
+#[derive(Clone, Debug)]
+pub struct BrokerRow {
+    pub label: String,
+    /// Off until switched on (`BrokerExtension::opt_in`).
+    pub opt_in: bool,
+}
+
+/// The run's broker extensions (registered at startup), and which of them it opened.
+#[derive(Default)]
+struct Brokers {
+    all: Vec<Arc<dyn BrokerExtension>>,
+    started: Vec<String>,
+}
+
+fn brokers() -> &'static RwLock<Brokers> {
+    static B: OnceLock<RwLock<Brokers>> = OnceLock::new();
+    B.get_or_init(Default::default)
+}
+
+/// The broker extensions the page lists, and those this run opened.
+pub fn set_brokers(all: &[Arc<dyn BrokerExtension>], started: &[Arc<dyn BrokerExtension>]) {
+    *brokers().write().unwrap_or_else(|e| e.into_inner()) = Brokers {
+        all: all.to_vec(),
+        started: started.iter().map(|b| b.name().to_owned()).collect(),
+    };
+}
+
+/// Whether a broker is switched on: an opt-in one only when switched on, any other unless
+/// switched off.
+pub fn broker_on(prefs: &BTreeMap<String, SourcePrefs>, name: &str, opt_in: bool) -> bool {
+    match prefs.get(name).and_then(|p| p.enabled) {
+        Some(on) => on,
+        None => !opt_in,
+    }
+}
+
+/// Switch a source or broker on or off in the saved preferences: the default state saves as
+/// nothing (on, or off for an opt-in broker), the other as an explicit choice.
+pub fn switch(prefs: &mut BTreeMap<String, SourcePrefs>, name: String, on: bool, opt_in: bool) {
+    if on != opt_in {
+        prefs.remove(&name);
+    } else {
+        prefs.insert(name, SourcePrefs { enabled: Some(on) });
+    }
+}
+
+/// The brokers a run opens: those switched on.
+pub fn brokers_on(
+    all: &[Arc<dyn BrokerExtension>],
+    prefs: &BTreeMap<String, SourcePrefs>,
+) -> Vec<Arc<dyn BrokerExtension>> {
+    all.iter()
+        .filter(|b| broker_on(prefs, b.name(), b.opt_in()))
+        .cloned()
+        .collect()
+}
+
+/// A registered broker extension that is off until switched on.
+pub fn broker_opt_in(name: &str) -> bool {
+    brokers()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .all
+        .iter()
+        .any(|b| b.name() == name && b.opt_in())
+}
+
+/// A broker's state: off, on at the next start, or its venue's own words while this run has
+/// it open. Cheap (the venue's status is a snapshot, no I/O).
+pub fn broker_state(name: &str, on: bool) -> State {
+    let b = brokers().read().unwrap_or_else(|e| e.into_inner());
+    let in_run = b.started.iter().any(|n| n == name);
+    if !on {
+        return State::Off { running: in_run };
+    }
+    if !in_run {
+        return State::NextStart;
+    }
+    let status = b
+        .all
+        .iter()
+        .find(|x| x.name() == name)
+        .and_then(|x| x.accounts().status());
+    match status {
+        Some(v) => State::Venue {
+            detail: v.detail,
+            connected: v.connected,
+        },
+        None => State::Venue {
+            detail: "started".to_owned(),
+            connected: true,
+        },
+    }
+}
+
+/// A registered broker's fields (for the keychain's entry names).
+fn broker_fields(name: &str) -> Option<Vec<Field>> {
+    brokers()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .all
+        .iter()
+        .find(|b| b.name() == name)
+        .map(|b| b.fields())
 }
 
 /// The public sources, in the order a run without `--source` prefers them.
@@ -32,6 +144,7 @@ pub fn rows() -> Vec<Row> {
         plan: e
             .plan()
             .unwrap_or_else(|| "Not reported by the connector".to_owned()),
+        broker: None,
     };
     // The caller's own extensions, Coinbase, Kraken, then the built-in Databento: the order a
     // run prefers them in.
@@ -44,8 +157,24 @@ pub fn rows() -> Vec<Row> {
         name: (*n).to_owned(),
         fields: Vec::new(),
         plan: "Public data, no account: trades, top of book and depth".to_owned(),
+        broker: None,
     }));
     out.extend(ext.iter().filter(|e| e.name() == crate::DATABENTO).map(row));
+    // Brokers after the data sources.
+    let b = brokers().read().unwrap_or_else(|e| e.into_inner());
+    out.extend(b.all.iter().map(|e| {
+        Row {
+            name: e.name().to_owned(),
+            fields: e.fields(),
+            plan: e
+                .plan()
+                .unwrap_or_else(|| "Not reported by the connector".to_owned()),
+            broker: Some(BrokerRow {
+                label: e.label().to_owned(),
+                opt_in: e.opt_in(),
+            }),
+        }
+    }));
     out
 }
 
@@ -77,6 +206,11 @@ pub enum State {
     Retrying(String),
     /// Its feeds were stopped.
     Stopped,
+    /// A broker this run opened, in its venue's words ("connected", "disconnected: ...").
+    Venue {
+        detail: String,
+        connected: bool,
+    },
 }
 
 /// How a state reads at a glance (paired with its words).
@@ -109,6 +243,13 @@ impl State {
             State::Refused(why) => format!("Refused: {why}"),
             State::Retrying(why) => format!("Reconnecting: {why}"),
             State::Stopped => "Stopped".to_owned(),
+            State::Venue { detail, .. } => {
+                let mut c = detail.chars();
+                match c.next() {
+                    Some(first) => first.to_uppercase().chain(c).collect(),
+                    None => String::new(),
+                }
+            }
         }
     }
 
@@ -116,7 +257,13 @@ impl State {
         match self {
             State::Off { .. } | State::NextStart | State::Idle | State::Stopped => Tone::Quiet,
             State::Connecting => Tone::Busy,
-            State::Connected { .. } => Tone::Good,
+            State::Connected { .. }
+            | State::Venue {
+                connected: true, ..
+            } => Tone::Good,
+            State::Venue {
+                connected: false, ..
+            } => Tone::Busy,
             State::NotSetUp { .. } | State::Refused(_) | State::Retrying(_) => Tone::Bad,
         }
     }
@@ -221,11 +368,11 @@ pub fn memory_keychain() -> bool {
 
 /// The keychain entry a registered source's field names for itself (`Field::keychain`).
 fn own_entry(source: &str, key: &str) -> Option<&'static str> {
-    extension::by_name(source)?
-        .fields()
-        .into_iter()
-        .find(|f| f.key == key)?
-        .keychain
+    let fields = match extension::by_name(source) {
+        Some(e) => e.fields(),
+        None => broker_fields(source)?,
+    };
+    fields.into_iter().find(|f| f.key == key)?.keychain
 }
 
 fn account(source: &str, key: &str) -> String {
@@ -401,7 +548,7 @@ pub fn not_set_up(source: &str) -> Option<&'static str> {
 pub fn needs(source: &str, fields: &[Field]) -> Option<&'static str> {
     fields
         .iter()
-        .find(|f| f.required && extension::setting(source, f.key).is_none())
+        .find(|f| f.required && extension::field_setting(source, f).is_none())
         .map(|f| f.label)
 }
 
@@ -573,6 +720,127 @@ mod tests {
         );
     }
 
+    struct Venue {
+        name: &'static str,
+        opt_in: bool,
+    }
+
+    impl lines_trading::extension::AccountSource for Venue {
+        fn accounts(&self) -> Vec<lines_trading::extension::ExtensionAccount> {
+            Vec::new()
+        }
+        fn revision(&self) -> u64 {
+            0
+        }
+        fn status(&self) -> Option<lines_trading::extension::VenueStatus> {
+            Some(lines_trading::extension::VenueStatus {
+                connected: false,
+                detail: "disconnected: connection refused".into(),
+                last_message: None,
+            })
+        }
+    }
+
+    impl BrokerExtension for Venue {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn label(&self) -> &str {
+            "Local venue"
+        }
+        fn capabilities(&self) -> lines_trading::BrokerCaps {
+            lines_trading::BrokerCaps {
+                market_orders: false,
+                stop_orders: false,
+                modify: false,
+                server_brackets: false,
+                oco: false,
+                fractional_qty: false,
+                external_fills: true,
+            }
+        }
+        fn accounts(&self) -> Arc<dyn lines_trading::extension::AccountSource> {
+            Arc::new(Venue {
+                name: self.name,
+                opt_in: self.opt_in,
+            })
+        }
+        fn open(&self) -> anyhow::Result<Box<dyn lines_trading::Broker>> {
+            anyhow::bail!("never opened here")
+        }
+        fn plan(&self) -> Option<String> {
+            Some("Observe only: order entry disabled".into())
+        }
+        fn opt_in(&self) -> bool {
+            self.opt_in
+        }
+    }
+
+    /// An opt-in broker is off (never opened) until switched on, and switching it off again
+    /// saves nothing; any other broker is on unless switched off.
+    #[test]
+    fn an_opt_in_broker_is_off_until_switched_on() {
+        let opt: Arc<dyn BrokerExtension> = Arc::new(Venue {
+            name: "venue-a",
+            opt_in: true,
+        });
+        let plain: Arc<dyn BrokerExtension> = Arc::new(Venue {
+            name: "venue-b",
+            opt_in: false,
+        });
+        let all = [opt.clone(), plain.clone()];
+        let names = |v: Vec<Arc<dyn BrokerExtension>>| {
+            v.iter().map(|b| b.name().to_owned()).collect::<Vec<_>>()
+        };
+        let mut prefs = BTreeMap::new();
+        assert_eq!(names(brokers_on(&all, &prefs)), ["venue-b"]);
+        switch(&mut prefs, "venue-a".into(), true, true);
+        assert_eq!(prefs["venue-a"].enabled, Some(true));
+        assert_eq!(names(brokers_on(&all, &prefs)), ["venue-a", "venue-b"]);
+        switch(&mut prefs, "venue-b".into(), false, false);
+        assert_eq!(names(brokers_on(&all, &prefs)), ["venue-a"]);
+        switch(&mut prefs, "venue-a".into(), false, true);
+        switch(&mut prefs, "venue-b".into(), true, false);
+        assert!(prefs.is_empty(), "the default states save nothing");
+        // A source switched off still saves as before.
+        switch(&mut prefs, "coinbase".into(), false, false);
+        assert_eq!(prefs["coinbase"].enabled, Some(false));
+    }
+
+    /// A broker's card: off, on at the next start, then its venue's own words (no feeds).
+    #[test]
+    fn a_brokers_state_is_its_switch_then_its_venue() {
+        let opt: Arc<dyn BrokerExtension> = Arc::new(Venue {
+            name: "venue-c",
+            opt_in: true,
+        });
+        set_brokers(std::slice::from_ref(&opt), &[]);
+        assert!(broker_opt_in("venue-c"));
+        assert!(!broker_opt_in("coinbase"));
+        assert_eq!(
+            broker_state("venue-c", false),
+            State::Off { running: false }
+        );
+        assert_eq!(broker_state("venue-c", true), State::NextStart);
+        let row = rows().into_iter().find(|r| r.name == "venue-c").unwrap();
+        assert_eq!(row.plan, "Observe only: order entry disabled");
+        assert_eq!(
+            row.broker.as_ref().map(|b| b.label.as_str()),
+            Some("Local venue")
+        );
+        assert_eq!(
+            rows().last().map(|r| r.name.as_str()),
+            Some("venue-c"),
+            "after the sources"
+        );
+        set_brokers(std::slice::from_ref(&opt), std::slice::from_ref(&opt));
+        let s = broker_state("venue-c", true);
+        assert_eq!(s.text(), "Disconnected: connection refused");
+        assert_eq!(s.tone(), Tone::Busy);
+        assert_eq!(broker_state("venue-c", false), State::Off { running: true });
+        set_brokers(&[], &[]);
+    }
+
     #[test]
     fn a_secret_shows_only_its_last_4_characters() {
         assert_eq!(masked("db-AbCdEfGh1234"), "••••1234");
@@ -620,7 +888,12 @@ mod tests {
             Some("XNAS.ITCH")
         );
         // Coinbase and Kraken are always listed, after any extension.
-        let names: Vec<String> = rows().into_iter().map(|r| r.name).collect();
+        // (Brokers, which another test registers, come after them.)
+        let names: Vec<String> = rows()
+            .into_iter()
+            .filter(|r| r.broker.is_none())
+            .map(|r| r.name)
+            .collect();
         assert!(names.ends_with(&["coinbase".to_owned(), "kraken".to_owned()]));
     }
 }
