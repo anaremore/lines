@@ -3466,6 +3466,112 @@ mod tests {
         );
     }
 
+    /// A stack of a group's orders dragged (`trade_bar::move_stack`'s commands): one modify per
+    /// member order, all from one input instant; each member's own answer, so a refused one
+    /// keeps its price while the other moves, and each ghost resolves on its own order.
+    #[test]
+    fn a_stack_moves_each_member_order_and_a_refusal_keeps_its_price() {
+        use crate::dom_trade::{Ghost, GhostOutcome, ghost_outcome};
+        let t = trading(vec![
+            AccountConfig::paper("a", 50_000),
+            AccountConfig::paper("b", 50_000),
+        ]);
+        let members = vec![AccountId::new("a"), AccountId::new("b")];
+        t.submit(
+            Source::Test,
+            Instant::now(),
+            TradeCommand::CreateGroup {
+                name: "Evals".into(),
+                members: members.clone(),
+            },
+        );
+        let open = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap();
+        t.handle().advance_to(open);
+        t.handle().market(
+            es(),
+            vec![
+                MarketInput::BookClear,
+                MarketInput::Book {
+                    side: lines_core::Side::Bid,
+                    price: px(5999.75),
+                    qty: Qty(50),
+                },
+                MarketInput::Book {
+                    side: lines_core::Side::Ask,
+                    price: px(6000.0),
+                    qty: Qty(50),
+                },
+            ],
+        );
+        t.settle();
+        t.submit(
+            Source::Dom,
+            Instant::now(),
+            TradeCommand::GroupPlace {
+                group: "Evals".into(),
+                order: lines_trading::GroupOrder::Order(lines_trading::OrderSpec {
+                    account: AccountId::new("a"),
+                    contract: es(),
+                    side: lines_trading::Side::Buy,
+                    qty: Qty(1),
+                    kind: OrderKind::Limit { price: px(5990.0) },
+                }),
+                members: members.clone(),
+            },
+        );
+        t.handle().advance_to(UtcMillis(open.0 + 1_000));
+        t.settle();
+        let stack: Vec<lines_trading::Order> = t
+            .cache
+            .read()
+            .open_orders_in(&members, es())
+            .cloned()
+            .collect();
+        assert_eq!(stack.len(), 2, "the stack: one order per member");
+        // b's order ends before the drag lands (canceled meanwhile): its modify is refused,
+        // a's goes.
+        let b_order = stack.iter().find(|o| o.account == members[1]).unwrap().id;
+        t.submit(
+            Source::Test,
+            Instant::now(),
+            TradeCommand::CancelOrder {
+                account: members[1].clone(),
+                order: b_order,
+            },
+        );
+        t.handle().advance_to(UtcMillis(open.0 + 2_000));
+        t.settle();
+        let cmds = crate::trade_bar::stack_commands(
+            stack.iter().map(|o| (o.clone(), [None; 2])).collect(),
+            px(5995.0),
+            false,
+        );
+        assert_eq!(cmds.len(), 2);
+        let issued = Instant::now();
+        let ghosts: Vec<Ghost> = cmds
+            .into_iter()
+            .map(|(o, _, c)| Ghost {
+                order: o.id,
+                price: px(5995.0),
+                command: t.submit(Source::Chart, issued, c),
+                qty: None,
+                leg: None,
+            })
+            .collect();
+        t.handle().advance_to(UtcMillis(open.0 + 3_000));
+        t.settle();
+        let s = t.cache.read();
+        let outcome = |g: &Ghost| ghost_outcome(g, s.order(g.order), s.result(g.command));
+        let a = ghosts.iter().find(|g| g.order != b_order).unwrap();
+        let b = ghosts.iter().find(|g| g.order == b_order).unwrap();
+        assert_eq!(outcome(a), GhostOutcome::Acked, "a moved");
+        assert!(
+            matches!(outcome(b), GhostOutcome::Rejected(_)),
+            "b kept its price"
+        );
+        assert!(matches!(s.result(b.command), Some(Err(_))));
+    }
+
     /// A group order through the app: one order per member, the per-member results kept for
     /// the pane that sent it, the members' position summed over the group.
     #[test]

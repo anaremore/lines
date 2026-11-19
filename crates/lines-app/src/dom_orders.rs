@@ -57,6 +57,9 @@ pub struct DragOrder {
     /// unfilled entry's, with the setting on): previewed at their price shifted by the move.
     pub from: Price,
     pub legs: [Option<(OrderId, Price)>; 2],
+    /// A stack's drag (a group's orders at one price, moved as one): how many orders move,
+    /// `order` among them (their ids are the pane's `drag_stack`). 1: one order.
+    pub count: usize,
 }
 
 impl DragOrder {
@@ -67,6 +70,7 @@ impl DragOrder {
             to: at,
             from: at,
             legs,
+            count: 1,
         }
     }
 
@@ -94,6 +98,37 @@ impl DragOrder {
             to,
             ..DragOrder::new(o.id, from, legs)
         })
+    }
+
+    /// Screenshot fixture on a pane trading a group: the fixture's drag widened to its stack,
+    /// every order of `view` of the same kind at its price (the drag a press on that stack
+    /// starts). Its order ids.
+    pub fn widen_to_stack(
+        &mut self,
+        s: &crate::trading::TradeState,
+        view: &[AccountId],
+        contract: ContractKey,
+    ) -> Vec<OrderId> {
+        let Some(lead) = s.order(self.order).and_then(order_mark) else {
+            return Vec::new();
+        };
+        let key = group_key(&lead);
+        let ids: Vec<OrderId> = s
+            .open_orders_in(view, contract)
+            .filter_map(order_mark)
+            .filter(|m| m.price == lead.price && group_key(m) == key)
+            .map(|m| m.id)
+            .collect();
+        if ids.len() > 1 {
+            self.count = ids.len();
+            self.legs = [None; 2];
+        }
+        ids
+    }
+
+    /// Whether a release moves anything: the pointer left the order's row.
+    pub fn moved(&self) -> bool {
+        self.to != self.from
     }
 
     /// Where the order and its legs are drawn while dragged: each order and its new price.
@@ -197,6 +232,8 @@ pub struct OrdersLayer {
     /// Drags waiting for the broker, drawn at their new price.
     pub ghosts: Vec<Ghost>,
     pub drag: Option<DragOrder>,
+    /// A stack's drag: every order moving (`drag.order` among them; empty for one order).
+    pub drag_stack: Vec<OrderId>,
 }
 
 impl Default for OrdersLayer {
@@ -210,6 +247,7 @@ impl Default for OrdersLayer {
             position: None,
             ghosts: Vec::with_capacity(8),
             drag: None,
+            drag_stack: Vec::new(),
         }
     }
 }
@@ -315,6 +353,24 @@ impl OrdersLayer {
         let row = row_of(price.0, units);
         let (slots, n, _) = row_marks(&self.marks, |m| row_of(m.price.0, units) == row);
         resize_zone(&slots, n, x, cell_w)
+    }
+
+    /// The orders of the mark for several at a press (`MarkPress::Many`), for a stack's drag:
+    /// every order of that kind on the row.
+    pub fn stack_at(&self, price: Price, units: i64, x: f32, cell_w: f32) -> Vec<OrderId> {
+        let row = row_of(price.0, units);
+        let (slots, n, _) = row_marks(&self.marks, |m| row_of(m.price.0, units) == row);
+        if n == 0 {
+            return Vec::new();
+        }
+        let w = ((cell_w - 2.0) / n as f32).max(1.0);
+        let k = (((x - 1.0) / w).floor().max(0.0) as usize).min(n - 1);
+        let key = group_key(&slots[k].0);
+        self.marks
+            .iter()
+            .filter(|m| row_of(m.price.0, units) == row && group_key(m) == key)
+            .map(|m| m.id)
+            .collect()
     }
 
     /// The newest mark that stands for one order (`--order-controls`).
@@ -547,6 +603,19 @@ impl OrdersLayer {
                 .map(|g| (g.order, g.price))
                 .chain(self.drag.iter().flat_map(|d| d.previews()))
                 .find(|(_, p)| row_of(p.0, units) == row);
+            // A stack moving (dragged, or its moves awaiting the broker): its count on the
+            // label, `T 1 ×2` (moving legs aren't counted: they have their own rows).
+            let ghost_count = self
+                .ghosts
+                .iter()
+                .filter(|g| g.qty.is_none() && g.leg.is_none() && row_of(g.price.0, units) == row)
+                .count()
+                + self
+                    .drag
+                    .iter()
+                    .filter(|d| row_of(d.to.0, units) == row)
+                    .map(|d| d.count)
+                    .sum::<usize>();
             if let Some((id, _)) = ghost_here {
                 let mark = self.marks.iter().find(|m| m.id == id);
                 let c = mark.map_or(t.accent, |m| mark_colour(t, m));
@@ -559,6 +628,9 @@ impl OrdersLayer {
                 {
                     buf.clear();
                     let _ = mark_text(m, &mut buf);
+                    if ghost_count > 1 {
+                        let _ = write!(buf, " ×{ghost_count}");
+                    }
                     glyphs.paint_right(
                         buf.as_str(),
                         ox + ow - 7.0,
@@ -813,6 +885,46 @@ fn outline(window: &mut Window, b: Bounds<Pixels>, c: Hsla, hair: f32, dashed: b
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A press on a DOM mark for several orders finds every order of that kind on the row
+    /// (the stack a group pane drags), never another kind's.
+    #[test]
+    fn a_stack_press_finds_every_order_of_its_kind() {
+        let mut l = OrdersLayer::default();
+        let t = |id, stop| OrderMark {
+            id: OrderId(id),
+            side: Side::Sell,
+            price: Price(100),
+            style: MarkStyle::Working,
+            qty: lines_core::Qty(1),
+            filled: lines_core::Qty(0),
+            stop,
+            role: if stop {
+                lines_trading::order::Role::StopLoss
+            } else {
+                lines_trading::order::Role::TakeProfit
+            },
+            exit: true,
+        };
+        l.marks = vec![t(1, false), t(2, false), t(3, true), t(4, true)];
+        // Two slots: targets on the left half, stops on the right.
+        assert_eq!(
+            l.stack_at(Price(100), 1, 10.0, 100.0),
+            vec![OrderId(1), OrderId(2)]
+        );
+        assert_eq!(
+            l.stack_at(Price(100), 1, 90.0, 100.0),
+            vec![OrderId(3), OrderId(4)]
+        );
+        assert!(l.stack_at(Price(125), 1, 10.0, 100.0).is_empty());
+        // A drag of the stack counts all of them.
+        let d = DragOrder {
+            count: 2,
+            ..DragOrder::new(OrderId(1), Price(100), [None; 2])
+        };
+        assert!(!d.moved());
+        assert_eq!(d.previews().count(), 1, "one line, labelled ×2");
+    }
 
     fn mark(id: u64, side: Side, qty: i64, stop: bool, exit: bool, style: MarkStyle) -> OrderMark {
         OrderMark {

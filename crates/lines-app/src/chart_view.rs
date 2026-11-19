@@ -2349,6 +2349,8 @@ impl ChartView {
             && k.key == "escape"
         {
             self.ct.drag = None;
+            self.ct.drag_stack.clear();
+            self.ct.stack_tag = None;
             self.ct.adding = None;
             self.ct.pos_drag = false;
             self.ct.add_from = None;
@@ -3990,6 +3992,8 @@ impl ChartView {
         if self.ct.drag.is_some() || self.ct.adding.is_some() || self.ct.pos_drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.ct.drag = None;
+                self.ct.drag_stack.clear();
+                self.ct.stack_tag = None;
                 self.ct.adding = None;
                 self.ct.pos_drag = false;
             } else {
@@ -4145,6 +4149,28 @@ impl ChartView {
             return;
         }
         if let Some(d) = self.ct.drag.take() {
+            let stack = std::mem::take(&mut self.ct.drag_stack);
+            let tag = self.ct.stack_tag.take();
+            if d.count > 1 {
+                if !d.moved() {
+                    // A press that never moved: the stack's list, as before.
+                    if let Some((id, bottom)) = tag {
+                        self.open_order_group(id, bottom, cx);
+                    }
+                } else if self.plot.contains(&ev.position) {
+                    let ghosts = crate::trade_bar::move_stack(
+                        self,
+                        &stack,
+                        d.to,
+                        lines_trading::Source::Chart,
+                        std::time::Instant::now(),
+                        cx,
+                    );
+                    self.ct.ghosts.extend(ghosts);
+                }
+                cx.notify();
+                return;
+            }
             // Released over the plot: move there. Outside it (another pane, the axes): abort.
             if self.plot.contains(&ev.position) {
                 self.drop_order(d, cx);
@@ -4318,7 +4344,33 @@ impl ChartView {
                     .iter()
                     .find(|b| b.id == id)
                     .map_or(y as f32 + tag_h_now(), |b| b.top + b.h);
-                self.open_order_group(id, bottom, cx);
+                // On a pane trading a group, the body of a stack of its orders at one price
+                // drags them all (`trade_bar::stack_drag`); a press that never moves lists them.
+                let stack = matches!(h, TagHit::Body(_))
+                    .then(|| self.stack_for_drag(id, cx))
+                    .flatten();
+                match stack {
+                    Some(Ok(orders)) => {
+                        let tick = self.instrument.price.tick;
+                        let at = lines_core::geometry::snap_price(&self.vp, y, tick);
+                        let from = orders.1;
+                        self.ct.grab = at.map_or(0, |p| from.0 - p.0);
+                        self.ct.drag = Some(crate::dom_orders::DragOrder {
+                            count: orders.0.len(),
+                            ..crate::dom_orders::DragOrder::new(orders.0[0], from, [None; 2])
+                        });
+                        self.ct.drag_stack = orders.0;
+                        self.ct.stack_tag = Some((id, bottom));
+                    }
+                    Some(Err(why)) => {
+                        self.open_order_group(id, bottom, cx);
+                        // Why it can't move as one, in its list's title.
+                        if let Some(m) = &mut self.ct.group_menu {
+                            m.title = format!("{} · {why}", m.title);
+                        }
+                    }
+                    None => self.open_order_group(id, bottom, cx),
+                }
             }
             // Moving and cancelling need no arming, as on the DOM.
             TagHit::Body(id) => {
@@ -4439,6 +4491,39 @@ impl ChartView {
                     order: lines_trading::OrderId(id),
                 },
             );
+        }
+    }
+
+    /// A group tag's orders for a stack drag (`trade_bar::stack_drag`): `None` on a pane
+    /// trading one account (the tag lists its orders, as before); `Some(Err)` with why the
+    /// stack can't move as one; else its order ids and their price.
+    fn stack_for_drag(
+        &self,
+        id: u64,
+        cx: &App,
+    ) -> Option<Result<(Vec<lines_trading::OrderId>, Price), &'static str>> {
+        let g = self.ct.group_of(id).copied()?;
+        // A tag of several kinds (a short plot): an entry never moves with exits.
+        if self.trade.group.is_some() && g.key == lines_core::geometry::order_tags::MIXED_KEY {
+            return Some(Err(crate::trade_bar::STACK_KINDS));
+        }
+        let t = crate::trading::Trading::try_global(cx)?;
+        let orders: Vec<lines_trading::Order> = {
+            let c = t.cache.read();
+            self.ct
+                .members(&g)
+                .iter()
+                .filter_map(|o| c.order(lines_trading::OrderId(o.id)).cloned())
+                .collect()
+        };
+        let refs: Vec<&lines_trading::Order> = orders.iter().collect();
+        match crate::trade_bar::stack_drag(&self.trade, &refs) {
+            Ok(false) => None,
+            Err(why) => Some(Err(why)),
+            Ok(true) => {
+                let at = crate::dom_trade::order_price(&orders[0])?;
+                Some(Ok((orders.iter().map(|o| o.id).collect(), at)))
+            }
         }
     }
 
@@ -5351,6 +5436,12 @@ impl ChartView {
                     Price(units),
                     with_legs,
                 );
+                // On a group: the stack it stands in (`trade_bar::stack_drag`).
+                if self.trade.group.is_some()
+                    && let Some(d) = self.ct.drag.as_mut()
+                {
+                    self.ct.drag_stack = d.widen_to_stack(&s, self.trade.view(), contract);
+                }
             }
         }
         // Screenshot fixtures: an order staged as the menu's "…with bracket" would (once the
@@ -5737,6 +5828,54 @@ impl ChartView {
                 let c = self.ct.mark(id.0).map_or(t.accent, |m| self.mark_colour(m));
                 dashed(window, y, c, (6.0 * s).round());
             }
+        }
+        // A stack moving (dragged, or its moves awaiting the broker): "×N" on its line, at
+        // the plot's left, so the count shows until every order reports its price.
+        let mut counts = [(Price(0), 0usize, lines_trading::OrderId(0)); 4];
+        let mut nc = 0;
+        if let Some(d) = drag.filter(|d| d.count > 1) {
+            counts[0] = (d.to, d.count, d.order);
+            nc = 1;
+        }
+        for g in self
+            .ct
+            .ghosts
+            .iter()
+            .filter(|g| g.qty.is_none() && g.leg.is_none())
+        {
+            if let Some(c) = counts[..nc].iter_mut().find(|c| c.0 == g.price) {
+                c.1 += 1;
+            } else if nc < counts.len() {
+                counts[nc] = (g.price, 1, g.order);
+                nc += 1;
+            }
+        }
+        for &(p, n, id) in &counts[..nc] {
+            let y = self.vp.price_to_y(p.0 as f64) as f32;
+            if n < 2 || !(0.0..=ph).contains(&y) {
+                continue;
+            }
+            let c = self.ct.mark(id.0).map_or(t.accent, |m| self.mark_colour(m));
+            let mut text = FixedStr::<16>::new();
+            let _ = std::fmt::Write::write_fmt(&mut text, format_args!("×{n}"));
+            let w = self
+                .pos_glyphs
+                .width(text.as_str(), t.text_main, true, window)
+                + 12.0 * s;
+            let top = (y - order_tag_h * 0.5).clamp(0.0, (ph - order_tag_h).max(0.0));
+            let left = 4.0 * s;
+            window.paint_quad(fill(rect(left, top, w, order_tag_h), t.label_bg));
+            self.outline(rect(left, top, w, order_tag_h), c, hair, window);
+            self.pos_glyphs.paint(
+                text.as_str(),
+                ox + left + 6.0 * s,
+                oy + top,
+                order_tag_h,
+                t.text_main,
+                true,
+                window,
+                cx,
+            );
         }
         // The exit being added: dashed in its role's colour, with its tag-to-be.
         if let (Some(a), Some((qty, _))) = (self.ct.adding, self.ct.position) {
