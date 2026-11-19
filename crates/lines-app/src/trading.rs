@@ -1597,6 +1597,8 @@ impl Trading {
             (a, b) => a.or(b),
         };
         let handle = service.handle();
+        // A refreshed calendar reaches this core too.
+        crate::econ_ui::follow(handle.clone());
         let cache = Arc::new(TradeCache::new(&accounts));
         cache.read().groups = groups_at_start;
         let (notes, notes_rx) = mpsc::channel();
@@ -1689,6 +1691,7 @@ impl Trading {
                 }
             };
             let vh = service.handle();
+            crate::econ_ui::follow(vh.clone());
             let (vnotes, vnotes_rx) = mpsc::channel();
             let (vbarrier, vbarrier_rx) = mpsc::channel();
             spawn_pump(

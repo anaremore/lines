@@ -246,3 +246,101 @@ fn coverage_is_missing_outside_and_stale_when_old() {
         }
     );
 }
+
+/// The cache format: a schedule written out parses back to the same schedule.
+#[test]
+fn to_text_round_trips() {
+    let s = EconSchedule::parse(SAMPLE).unwrap();
+    assert_eq!(EconSchedule::parse(&s.to_text()).unwrap(), s);
+}
+
+/// A refresh: fetched dates from today on are added (a date both list keeps its line, a new
+/// one gets the usual time, unverified); every old line stays, even one the source no longer
+/// lists; the version moves only when every release answered.
+#[test]
+fn a_refresh_takes_official_dates_from_today_on() {
+    let s = EconSchedule::parse(
+        "format 1
+version 2026-11-01
+zone America/New_York
+release cpi
+name CPI
+agency BLS
+importance high
+affects ES
+coverage 2026-10-01 2026-12-31 verified
+source https://www.bls.gov/schedule/news_release/cpi.htm
+2026-10-14 08:30 verified September 2026
+2026-11-10 08:30 verified October 2026
+2026-12-10 08:30 verified November 2026
+release fomc
+name FOMC
+agency Federal Reserve
+importance high
+affects ES
+coverage 2026-10-01 2026-12-31 unverified
+source https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
+2026-12-16 14:00 unverified December meeting
+",
+    )
+    .unwrap();
+    let today = d(2026, 11, 5);
+    // CPI: November kept, December moved to the 11th, January new; an old date is ignored.
+    let fetched = vec![(
+        "cpi".to_owned(),
+        vec![
+            d(2026, 10, 14),
+            d(2026, 11, 10),
+            d(2026, 12, 11),
+            d(2027, 1, 13),
+        ],
+    )];
+    let src = |k: &str| Some(format!("https://fred.stlouisfed.org/release?rid={k}"));
+    let r = s.refreshed(&fetched, &src, today, false).unwrap();
+    let cpi: Vec<_> = r
+        .events
+        .iter()
+        .filter(|e| r.release(e).key == "cpi")
+        .map(|e| (r.local(e.at), e.label.as_str(), e.verified))
+        .collect();
+    let at = |y, m, day, h| (d(y, m, day), LocalTime::hm(h, 30));
+    assert_eq!(
+        cpi,
+        [
+            (at(2026, 10, 14, 8), "September 2026", true),
+            (at(2026, 11, 10, 8), "October 2026", true),
+            (at(2026, 12, 10, 8), "November 2026", true),
+            (at(2026, 12, 11, 8), "December 2026 release", false),
+            (at(2027, 1, 13, 8), "January 2027 release", false),
+        ]
+    );
+    let rel = &r.releases[0];
+    assert_eq!(rel.coverage, (d(2026, 10, 1), d(2027, 1, 13)));
+    assert!(!rel.coverage_verified);
+    assert_eq!(rel.sources.len(), 2);
+    // FOMC wasn't answered: unchanged, and so the version isn't moved.
+    assert_eq!(r.releases[1], s.releases[1]);
+    assert_eq!(r.version, d(2026, 11, 1));
+    // Every release answered: the version is today's.
+    let all = vec![
+        fetched[0].clone(),
+        ("fomc".to_owned(), vec![d(2026, 12, 16)]),
+    ];
+    let r = s.refreshed(&all, &src, today, true).unwrap();
+    assert_eq!(r.version, today);
+    let fomc = r
+        .events
+        .iter()
+        .find(|e| r.release(e).key == "fomc")
+        .unwrap();
+    assert_eq!(r.local_time(fomc), LocalTime::hm(14, 0));
+    assert_eq!(fomc.label, "December meeting");
+    // A far date after a long gap extends nothing: the months between stay uncovered.
+    let far = vec![(
+        "cpi".to_owned(),
+        vec![d(2026, 12, 10), d(2027, 1, 13), d(2027, 7, 30)],
+    )];
+    let r = s.refreshed(&far, &src, today, false).unwrap();
+    assert_eq!(r.releases[0].coverage.1, d(2027, 1, 13));
+    assert!(r.events.iter().all(|e| r.local_date(e.at) < d(2027, 7, 1)));
+}

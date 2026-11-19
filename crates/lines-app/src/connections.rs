@@ -22,6 +22,9 @@ pub struct Row {
     pub plan: String,
     /// A broker extension (decision 0020): its own label, state from its venue, no Test.
     pub broker: Option<BrokerRow>,
+    /// The economic calendar's refresh (roadmap 8b, `crate::econ_refresh`): not a data
+    /// source; no switch, its state is the refresh's, Refresh now in place of Test.
+    pub calendar: bool,
 }
 
 /// What a broker's card needs beyond a source's.
@@ -145,6 +148,7 @@ pub fn rows() -> Vec<Row> {
             .plan()
             .unwrap_or_else(|| "Not reported by the connector".to_owned()),
         broker: None,
+        calendar: false,
     };
     // The caller's own extensions, Coinbase, Kraken, then the built-in Databento: the order a
     // run prefers them in.
@@ -158,6 +162,7 @@ pub fn rows() -> Vec<Row> {
         fields: Vec::new(),
         plan: "Public data, no account: trades, top of book and depth".to_owned(),
         broker: None,
+        calendar: false,
     }));
     out.extend(ext.iter().filter(|e| e.name() == crate::DATABENTO).map(row));
     // Brokers after the data sources.
@@ -173,9 +178,30 @@ pub fn rows() -> Vec<Row> {
                 label: e.label().to_owned(),
                 opt_in: e.opt_in(),
             }),
+            calendar: false,
         }
     }));
+    out.push(calendar_row());
     out
+}
+
+/// The economic calendar's card: FRED's release dates, with the user's own API key.
+pub fn calendar_row() -> Row {
+    Row {
+        name: crate::econ_refresh::NAME.to_owned(),
+        fields: vec![Field {
+            key: crate::econ_refresh::KEY,
+            label: "API key",
+            kind: FieldKind::Secret,
+            required: false,
+            env: Some(crate::econ_refresh::ENV),
+            keychain: None,
+        }],
+        plan: "Official release dates (BLS, BEA, FOMC) from FRED, St. Louis Fed; free key"
+            .to_owned(),
+        broker: None,
+        calendar: true,
+    }
 }
 
 /// A source's state, as the page states it (a word, never color alone).
@@ -828,11 +854,14 @@ mod tests {
             row.broker.as_ref().map(|b| b.label.as_str()),
             Some("Local venue")
         );
+        // After the sources; only the calendar's card follows the brokers.
+        let all = rows();
         assert_eq!(
-            rows().last().map(|r| r.name.as_str()),
+            all.iter().rev().nth(1).map(|r| r.name.as_str()),
             Some("venue-c"),
             "after the sources"
         );
+        assert!(all.last().is_some_and(|r| r.calendar && r.name == "fred"));
         set_brokers(std::slice::from_ref(&opt), std::slice::from_ref(&opt));
         let s = broker_state("venue-c", true);
         assert_eq!(s.text(), "Disconnected: connection refused");
@@ -891,7 +920,7 @@ mod tests {
         // (Brokers, which another test registers, come after them.)
         let names: Vec<String> = rows()
             .into_iter()
-            .filter(|r| r.broker.is_none())
+            .filter(|r| r.broker.is_none() && !r.calendar)
             .map(|r| r.name)
             .collect();
         assert!(names.ends_with(&["coinbase".to_owned(), "kraken".to_owned()]));

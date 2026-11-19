@@ -595,6 +595,31 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         "guard trades 1; buy 1 mkt; ack; sell 1 mkt; ack; buy 1 mkt; ack",
         "",
     ));
+    // The palette's lists (roadmap 8b): every account's guardrails with a lockout in force,
+    // and the economic calendar's state and upcoming releases; dark and light.
+    const GUARDS: &str = "guard trades 1; guard loss 500; buy 1 mkt; ack; sell 1 mkt; ack";
+    v.push(paper(
+        "list-guardrails",
+        true,
+        GUARDS,
+        "--prompt guardrails",
+    ));
+    let mut g = args("--layout trading --size 1600x900 --theme light --prompt guardrails");
+    g.push("--paper".into());
+    g.push(GUARDS.into());
+    v.push(s("list-guardrails-light", false, end, g));
+    v.push(s(
+        "list-calendar",
+        true,
+        end,
+        args("--layout chart --size 1400x800 --theme dark --prompt calendar"),
+    ));
+    v.push(s(
+        "list-calendar-light-cb",
+        false,
+        end,
+        args("--layout chart --size 1400x800 --theme light --palette cb --prompt calendar"),
+    ));
     v.push(paper(
         "position-pnl-off",
         false,

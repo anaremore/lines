@@ -44,6 +44,8 @@ struct Rig {
     core: TradingCore,
     t: i64,
     events: Vec<Event>,
+    /// The account the rig's orders go to (`paper-1` unless a test says otherwise).
+    account: AccountId,
 }
 
 impl Rig {
@@ -58,6 +60,7 @@ impl Rig {
             // Tuesday 2026-11-10 15:00 UTC: CME open, trade date 2026-11-10.
             t: UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap().0,
             events: Vec::new(),
+            account: acct(),
         };
         r.cmd(Command::SetGuardrails {
             account: acct(),
@@ -92,7 +95,7 @@ impl Rig {
 
     fn order(&mut self, side: Side, qty: i64, kind: OrderKind) -> Result<Vec<OrderId>, Reject> {
         self.cmd(Command::PlaceOrder(OrderSpec {
-            account: acct(),
+            account: self.account.clone(),
             contract: es(),
             side,
             qty: Qty(qty),
@@ -448,6 +451,7 @@ fn a_lockout_survives_a_restart_and_settings_cannot_clear_it() {
         core,
         t: t + MIN,
         events: Vec::new(),
+        account: acct(),
     };
     r.book();
     r.cmd(Command::SetGuardrails {
@@ -627,6 +631,7 @@ fn venue_rig(
         core,
         t,
         events: Vec::new(),
+        account: acct(),
     };
     r.collect();
     r.book();
@@ -691,4 +696,155 @@ fn a_venue_account_not_listed_yet_is_not_locked_by_its_saved_day() {
         "{:?}",
         r.events
     );
+}
+
+/// A venue's simulation account as an extension broker serves it (a Sierra Sim account
+/// through `lines-connectors`): not Lines' paper broker, and not `simulated()` (a venue's own
+/// Sim keeps the default). Orders fill through a paper broker underneath so the test has
+/// fills; the core sees only another broker.
+struct VenueSim(PaperBroker);
+
+impl lines_trading::Broker for VenueSim {
+    fn name(&self) -> &str {
+        "dummy-venue"
+    }
+    fn capabilities(&self) -> lines_trading::BrokerCaps {
+        self.0.capabilities()
+    }
+    fn request(&mut self, now: UtcMillis, req: lines_trading::BrokerRequest) {
+        self.0.request(now, req)
+    }
+    fn market(&mut self, now: UtcMillis, contract: ContractKey, input: &MarketInput) {
+        self.0.market(now, contract, input)
+    }
+    fn poll(&mut self, now: UtcMillis, out: &mut Vec<lines_trading::BrokerEvent>) {
+        self.0.poll(now, out)
+    }
+    fn next_wake(&self) -> Option<UtcMillis> {
+        self.0.next_wake()
+    }
+    fn snapshot(&self) -> lines_trading::BrokerSnapshot {
+        self.0.snapshot()
+    }
+}
+
+/// Guardrails apply to every account Lines sends orders for, whatever the broker: a venue's
+/// Sim account joining as the app's venue cores add them (`set_join_guardrails`, then
+/// `add_accounts`) gets the trader's settings by its name, its entries are refused by a
+/// lockout and by a news blackout, and its exits (a reducing order, a cancel, Cancel All,
+/// Flatten) never are.
+#[test]
+fn guardrails_apply_to_a_venue_sim_account_and_never_block_its_exits() {
+    let id = AccountId::new("dummy-sim-1");
+    let cfg = AccountConfig {
+        name: "Dummy Sim".to_owned(),
+        ..AccountConfig::paper("dummy-sim-1", 50_000)
+    };
+    let mut b = PaperBroker::new(paper());
+    b.open_account(id.clone(), Money::whole(50_000));
+    let broker = VenueSim(b);
+    assert!(!lines_trading::Broker::simulated(&broker), "a venue's Sim");
+    let mut core = TradingCore::new(Box::new(broker));
+    // CPI at 2026-11-10 08:30 ET (13:30 UTC), on ES.
+    core.set_econ_schedule(Some(std::sync::Arc::new(
+        lines_core::econ::EconSchedule::parse(
+            "format 1
+version 2026-11-07
+zone America/New_York
+release cpi
+name CPI
+agency BLS
+importance high
+affects ES
+coverage 2026-11-01 2026-12-31 verified
+source https://www.bls.gov/schedule/news_release/cpi.htm
+2026-11-10 08:30 verified October 2026
+",
+        )
+        .unwrap(),
+    )));
+    // Settings key guardrails by the account's name.
+    core.set_join_guardrails(
+        [(
+            "Dummy Sim".to_owned(),
+            Guardrails {
+                max_daily_loss: Some(200),
+                news: Some(lines_trading::news::NewsBlackout::new(
+                    lines_trading::news::NewsAction::Block,
+                )),
+                ..Default::default()
+            },
+        )]
+        .into(),
+        Default::default(),
+    );
+    // Two minutes before CPI: inside the blackout.
+    let t = UtcMillis::parse_iso("2026-11-10T13:28:30Z").unwrap().0;
+    core.add_accounts(UtcMillis(t), vec![cfg]);
+    let mut r = Rig {
+        core,
+        t,
+        events: Vec::new(),
+        account: id.clone(),
+    };
+    r.collect();
+    r.book();
+    assert_eq!(
+        r.core.guardrails(&id).map(|g| g.active.max_daily_loss),
+        Some(Some(200)),
+        "the settings reached the venue account"
+    );
+    let m = r.denied(Side::Buy, 1);
+    assert!(m.starts_with("News blackout: CPI, October 2026"), "{m}");
+    // After the window: an entry goes out; a loss locks the account.
+    r.wait(5 * MIN);
+    r.market_fill(Side::Buy, 3);
+    let add = r
+        .order(Side::Buy, 1, OrderKind::Limit { price: px(5980.00) })
+        .unwrap()[0];
+    r.wait(LAT);
+    r.book_at(5998.00, 5998.25);
+    assert_eq!(r.core.guard_state(&id), GuardState::Locked);
+    let m = r.denied(Side::Buy, 1);
+    assert_eq!(
+        m,
+        "Locked: daily loss limit of 200 reached, until the next trade date"
+    );
+    // Exits pass: a reducing order, a cancel, Cancel All, Flatten.
+    r.order(Side::Sell, 1, OrderKind::Limit { price: px(6012.00) })
+        .expect("reducing");
+    r.cmd(Command::CancelOrder {
+        account: id.clone(),
+        order: add,
+    })
+    .expect("cancel");
+    r.wait(LAT);
+    r.cmd(Command::CancelAll {
+        account: id.clone(),
+        contract: None,
+    })
+    .expect("cancel all");
+    r.wait(LAT);
+    r.cmd(Command::Flatten {
+        account: id.clone(),
+        contract: None,
+    })
+    .expect("flatten");
+    r.wait(LAT);
+    assert_eq!(r.core.position(&id, es()), 0);
+    assert_eq!(
+        r.core.guard_state(&id),
+        GuardState::Locked,
+        "nothing clears it early"
+    );
+    // Loosening waits for the next trade date, on a venue account as on paper.
+    r.cmd(Command::SetGuardrails {
+        account: id.clone(),
+        guardrails: Guardrails::default(),
+    })
+    .unwrap();
+    let g = r.core.guardrails(&id).unwrap();
+    assert_eq!(g.active.max_daily_loss, Some(200));
+    assert_eq!(g.pending, Some(Guardrails::default()));
+    assert_eq!(r.core.guard_state(&id), GuardState::Locked);
 }

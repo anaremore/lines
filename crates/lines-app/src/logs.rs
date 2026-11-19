@@ -223,6 +223,10 @@ pub fn init(files: Option<LogConfig>) -> Option<PathBuf> {
     let filter = || {
         tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "info,naga=warn,wgpu=warn".into())
+            // HTTP requests carry API keys in their URLs (FRED's): never logged, whatever
+            // the level asked for.
+            .add_directive("ureq=warn".parse().expect("valid directive"))
+            .add_directive("ureq_proto=warn".parse().expect("valid directive"))
     };
     let file = files.and_then(|cfg| match Rotator::open(cfg.clone()) {
         Ok(r) => Some((cfg, r)),

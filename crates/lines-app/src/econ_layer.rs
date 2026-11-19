@@ -74,6 +74,12 @@ pub fn marks_in<'a>(
 impl ChartLayer for EconLayer {
     fn prepare(&mut self, data: &ChartData, bars: BarsView<'_>, vp: &Viewport) {
         self.marks.clear();
+        // A refresh replaced the calendar: its releases may be numbered anew.
+        let now = crate::econ_ui::schedule();
+        if !Arc::ptr_eq(&now, &self.schedule) {
+            self.schedule = now;
+            self.shaped.clear();
+        }
         let r = vp.visible_range(bars.len());
         if r.is_empty() {
             return;

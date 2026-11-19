@@ -35,6 +35,7 @@ mod drop_list;
 mod drop_view;
 mod dropdown;
 mod econ_layer;
+mod econ_refresh;
 mod econ_ui;
 mod eyedropper;
 mod feeds;
@@ -61,6 +62,7 @@ mod notice;
 mod option_estimate;
 mod order_group_view;
 mod order_resize;
+mod palette_lists;
 mod palette_rank;
 mod pane;
 mod pane_columns;
@@ -1995,6 +1997,11 @@ where
     for n in &data_notices {
         tracing::warn!("{n}");
     }
+    // The economic calendar refreshed last run (roadmap 8b), before any trading core starts
+    // reading the calendar. The interactive app only: other runs keep the bundled one.
+    if interactive && cli.econ_calendar.is_none() {
+        econ_refresh::load_cache();
+    }
     for e in &ext.sources {
         lines_feed::extension::register(e.clone())?;
     }
@@ -2548,6 +2555,7 @@ where
 
     let drawings = drawings_store::Drawings::new(dir.clone(), Some(writer.clone()));
     let no_update_check = cli.no_update_check;
+    let refresh_calendar = interactive && cli.econ_calendar.is_none();
     // The UI font: `--ui-font` for this run, else Settings › Appearance (applied once the
     // text system can list the installed fonts).
     let ui_font_flag = cli.ui_font.clone();
@@ -2614,6 +2622,10 @@ where
             if !no_update_check && let Some(dir) = persist::config_dir() {
                 let mode = picker_view::settings(cx).updates;
                 update::start(dir, mode, cx);
+            }
+            // The calendar refresh: with a FRED API key, on start and every 12 hours.
+            if refresh_calendar {
+                econ_refresh::start();
             }
             cx.activate(true);
         });
