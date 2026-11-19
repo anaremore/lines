@@ -620,13 +620,12 @@ coverage {} {} {}
     /// This schedule with official release dates fetched from `source` (a refresh, roadmap
     /// 8b), as of the local date `today`:
     ///
-    /// - For a release with dates, its events from `today` through the last fetched date are
-    ///   the fetched ones: a date the schedule had and the source no longer lists is gone
-    ///   (rescheduled), a date both list keeps the schedule's line (its time, label and
-    ///   status), and a new date gets the release's usual local time (the most common among
-    ///   its events), `unverified`, labelled by its month. Events before `today` and after
-    ///   the last fetched date stay. Coverage runs through the later of the old end and the
-    ///   last fetched date, `unverified` when a new date came in.
+    /// - For a release with dates from `today` on (up to the first gap longer than
+    ///   [`MAX_GAP_DAYS`]), each date the schedule lacks is added with the release's usual
+    ///   local time (the most common among its events), `unverified`, labelled by its month.
+    ///   Every line the schedule had stays, listed or not (never fewer windows). Coverage
+    ///   runs through the later of the old end and the last date kept, `unverified` when a
+    ///   new date came in.
     /// - A release the source didn't answer for (absent from `fetched`, or only past dates)
     ///   stays as it was.
     /// - The version becomes `today` only when every release was answered (`complete`):
@@ -654,20 +653,28 @@ coverage {} {} {}
                 .unwrap_or_default();
             dates.sort();
             dates.dedup();
+            // A list is complete only up to its first long gap: past one, later dates
+            // (an announced annual update months out) say nothing about the months between.
+            let mut prev = today;
+            dates.retain(|d| {
+                let keep = d.days() - prev.days() <= MAX_GAP_DAYS;
+                if keep {
+                    prev = *d;
+                }
+                keep
+            });
             let (Some(&first), Some(&last)) = (dates.first(), dates.last()) else {
                 events.extend(old.iter().map(|(_, e)| (*e).clone()));
                 continue;
             };
             let time = usual_time(old.iter().map(|(_, e)| self.local_time(e)));
             let mut added = false;
-            for (d, e) in &old {
-                if *d < today || *d > last {
-                    events.push((*e).clone());
-                }
-            }
+            // Every line the schedule had stays: a date the source doesn't list costs at most
+            // an extra window, while dropping one could leave a real release unguarded.
+            events.extend(old.iter().map(|(_, e)| (*e).clone()));
             for d in dates {
                 match old.iter().find(|(od, _)| *od == d) {
-                    Some((_, e)) => events.push((*e).clone()),
+                    Some(_) => {}
                     None => {
                         let Some(at) = exact_instant(&self.tz, d, time) else {
                             return err(0, format!("{} on {d} {time}: not exactly once", r.key));
@@ -703,6 +710,10 @@ coverage {} {} {}
         EconSchedule::parse(&out.to_text())
     }
 }
+
+/// The longest gap between consecutive fetched dates of a release that still counts as one
+/// complete list (quarterly releases are about 90 days apart).
+pub const MAX_GAP_DAYS: i64 = 100;
 
 const MONTHS: [&str; 12] = [
     "January",

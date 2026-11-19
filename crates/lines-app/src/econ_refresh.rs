@@ -7,8 +7,9 @@
 //! - A failed refresh keeps the calendar in use and says so; it is tried again after
 //!   [`RETRY`]. It never blocks trading: the news blackout reads whatever calendar is in use,
 //!   and a stale one refuses entries under block or flatten as before (never taken as clear).
-//! - The cache is used at start only when it is at least as new as the bundled calendar and
-//!   has the same releases (a newer build's calendar wins over an older cache).
+//! - Each refresh merges onto the build's own calendar, never onto an earlier refresh, and
+//!   the cache records which build's calendar that was (`# base <hash>`): a build whose
+//!   calendar changed (a corrected time, a new product) never uses an older build's cache.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -36,12 +37,19 @@ fn cache_path() -> Option<PathBuf> {
     crate::data_dir::root().map(|d| d.join(FILE))
 }
 
-/// The cache, if it may stand in for `bundled`: it parses, is at least as new, and has the
-/// same releases.
-pub fn usable_cache(text: &str, bundled: &EconSchedule) -> Option<EconSchedule> {
+/// The cache's first line: the build calendar it was merged onto.
+fn base_line(hash: u64) -> String {
+    format!("# base {hash:016x}")
+}
+
+/// The cache, if it may stand in for `bundled`: built on this build's calendar (`hash`),
+/// parses, and is at least as new.
+pub fn usable_cache(text: &str, bundled: &EconSchedule, hash: u64) -> Option<EconSchedule> {
+    if text.lines().next() != Some(base_line(hash).as_str()) {
+        return None;
+    }
     let s = EconSchedule::parse(text).ok()?;
-    let keys = |s: &EconSchedule| s.releases.iter().map(|r| r.key.clone()).collect::<Vec<_>>();
-    (s.version >= bundled.version && keys(&s) == keys(bundled)).then_some(s)
+    (s.version >= bundled.version).then_some(s)
 }
 
 /// At start, before any trading core: the cached calendar, if usable.
@@ -52,12 +60,18 @@ pub fn load_cache() {
     let Ok(text) = std::fs::read_to_string(&path) else {
         return;
     };
-    match usable_cache(&text, &lines_feed::econ::bundled()) {
+    match usable_cache(
+        &text,
+        &lines_feed::econ::bundled(),
+        lines_feed::econ::bundled_hash(),
+    ) {
         Some(s) => {
             tracing::info!("economic calendar: using the cached one of {}", s.version);
             econ_ui::replace(Arc::new(s));
         }
-        None => tracing::info!("economic calendar: the cache is older or unreadable; bundled"),
+        None => tracing::info!(
+            "economic calendar: the cache is from another build, older or unreadable; bundled"
+        ),
     }
 }
 
@@ -66,7 +80,12 @@ fn write_cache(path: &Path, s: &EconSchedule) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let tmp = path.with_extension("txt.tmp");
-    std::fs::write(&tmp, s.to_text())?;
+    let text = format!(
+        "{}\n{}",
+        base_line(lines_feed::econ::bundled_hash()),
+        s.to_text()
+    );
+    std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)
 }
 
@@ -114,7 +133,7 @@ pub fn refresh_once(
     if got.dates.is_empty() {
         return Err(got.problem.unwrap_or_else(|| "no dates".to_owned()));
     }
-    let complete = got.complete(base);
+    let complete = got.complete(base, today);
     let s = base
         .refreshed(&got.dates, &fred::source_page, today, complete)
         .map_err(|e| e.to_string())?;
@@ -149,7 +168,8 @@ pub fn start() {
                     r.running = true;
                     r.problem = None;
                 });
-                let base = econ_ui::schedule();
+                // Always onto the build's calendar: its corrections are never lost.
+                let base = lines_feed::econ::bundled();
                 let now = lines_feed::now_utc();
                 let wait = match refresh_once(&base, &key, now) {
                     Ok((s, partly)) => {
@@ -190,19 +210,22 @@ pub fn start() {
 mod tests {
     use super::*;
 
-    /// A cache stands in for the bundled calendar only when at least as new and with the
-    /// same releases.
+    /// A cache stands in for the bundled calendar only when built on this build's calendar
+    /// and at least as new.
     #[test]
-    fn the_cache_is_used_only_when_current() {
+    fn the_cache_is_used_only_when_built_on_this_calendar() {
         let b = lines_feed::econ::bundled();
+        let h = lines_feed::econ::bundled_hash();
+        let cache = |body: &str, hash: u64| format!("{}\n{body}", base_line(hash));
         let same = b.to_text();
-        assert!(usable_cache(&same, &b).is_some());
+        assert!(usable_cache(&cache(&same, h), &b, h).is_some());
+        assert!(
+            usable_cache(&cache(&same, h ^ 1), &b, h).is_none(),
+            "another build's calendar"
+        );
+        assert!(usable_cache(&same, &b, h).is_none(), "no base line");
         let older = same.replacen(&format!("version {}", b.version), "version 2026-01-01", 1);
-        assert!(usable_cache(&older, &b).is_none(), "older than the build's");
-        let newer = same.replacen(&format!("version {}", b.version), "version 2099-01-01", 1);
-        assert!(usable_cache(&newer, &b).is_some());
-        let fewer = newer[..newer.find("\nrelease fomc").unwrap()].to_owned();
-        assert!(usable_cache(&fewer, &b).is_none(), "releases differ");
-        assert!(usable_cache("junk", &b).is_none());
+        assert!(usable_cache(&cache(&older, h), &b, h).is_none(), "older");
+        assert!(usable_cache(&cache("junk", h), &b, h).is_none());
     }
 }

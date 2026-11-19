@@ -10,6 +10,14 @@ use lines_core::econ::EconSchedule;
 /// The shipped schedule's text.
 pub const BUNDLED: &str = include_str!("../data/econ-calendar.txt");
 
+/// A fingerprint of the shipped schedule's text (FNV-1a): a cached refresh records the one it
+/// was built on, so a build with a changed calendar never reads an older build's cache.
+pub fn bundled_hash() -> u64 {
+    BUNDLED.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 /// The shipped schedule, parsed once. Validated by this module's tests (every symbol it names
 /// is a catalog product); failing here is a build defect.
 pub fn bundled() -> Arc<EconSchedule> {
@@ -53,10 +61,12 @@ pub mod fred {
         release_id(key).map(|id| format!("https://fred.stlouisfed.org/release?rid={id}"))
     }
 
-    /// The request for one release's dates from `from` on, future scheduled dates included.
+    /// The request for one release's dates, future scheduled dates included, newest first (a
+    /// release with more than the limit's dates since it began still gives its newest).
     pub fn url(release: u32, api_key: &str, from: CivilDate) -> String {
         format!(
-            "{API}?release_id={release}&api_key={api_key}&file_type=json             &include_release_dates_with_no_data=true&realtime_start={from}&sort_order=asc&limit=1000"
+            "{API}?release_id={release}&api_key={api_key}&file_type=json\
+             &include_release_dates_with_no_data=true&realtime_start={from}&sort_order=desc&limit=1000"
         )
     }
 
@@ -100,13 +110,15 @@ pub mod fred {
     }
 
     impl Fetched {
-        /// Every release answered.
-        pub fn complete(&self, schedule: &EconSchedule) -> bool {
+        /// Every release answered with a date from `today` on (a release with only past
+        /// dates said nothing about what is ahead).
+        pub fn complete(&self, schedule: &EconSchedule, today: CivilDate) -> bool {
             self.problem.is_none()
-                && schedule
-                    .releases
-                    .iter()
-                    .all(|r| self.dates.iter().any(|(k, _)| *k == r.key))
+                && schedule.releases.iter().all(|r| {
+                    self.dates
+                        .iter()
+                        .any(|(k, d)| *k == r.key && d.iter().any(|d| *d >= today))
+                })
         }
     }
 
@@ -193,6 +205,27 @@ pub mod fred {
             assert!(parse(r#"{"release_dates":[{"date":"soon"}]}"#).is_err());
         }
 
+        /// A release whose answer has only past dates leaves the refresh incomplete, so the
+        /// calendar's version (and so its staleness) doesn't move.
+        #[test]
+        fn only_future_dates_count_as_an_answer() {
+            let s = crate::econ::bundled();
+            let today = CivilDate::new(2026, 11, 19).unwrap();
+            let past = CivilDate::new(2026, 1, 1).unwrap();
+            let next = CivilDate::new(2026, 12, 10).unwrap();
+            let mut f = Fetched {
+                dates: s
+                    .releases
+                    .iter()
+                    .map(|r| (r.key.clone(), vec![next]))
+                    .collect(),
+                problem: None,
+            };
+            assert!(f.complete(&s, today));
+            f.dates[0].1 = vec![past];
+            assert!(!f.complete(&s, today));
+        }
+
         #[test]
         fn the_request_asks_for_future_dates() {
             let u = url(10, "k", CivilDate::new(2026, 11, 19).unwrap());
@@ -203,6 +236,8 @@ pub mod fred {
             );
             assert!(u.contains("&realtime_start=2026-11-19"), "{u}");
             assert!(u.contains("&file_type=json"), "{u}");
+            assert!(u.contains("&sort_order=desc"), "newest first: {u}");
+            assert!(!u.contains(char::is_whitespace), "{u}");
         }
     }
 }

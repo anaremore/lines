@@ -837,4 +837,14 @@ source https://www.bls.gov/schedule/news_release/cpi.htm
         GuardState::Locked,
         "nothing clears it early"
     );
+    // Loosening waits for the next trade date, on a venue account as on paper.
+    r.cmd(Command::SetGuardrails {
+        account: id.clone(),
+        guardrails: Guardrails::default(),
+    })
+    .unwrap();
+    let g = r.core.guardrails(&id).unwrap();
+    assert_eq!(g.active.max_daily_loss, Some(200));
+    assert_eq!(g.pending, Some(Guardrails::default()));
+    assert_eq!(r.core.guard_state(&id), GuardState::Locked);
 }

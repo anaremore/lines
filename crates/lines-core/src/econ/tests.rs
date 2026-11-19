@@ -254,9 +254,9 @@ fn to_text_round_trips() {
     assert_eq!(EconSchedule::parse(&s.to_text()).unwrap(), s);
 }
 
-/// A refresh: from today on the fetched dates rule (a moved date goes, a kept one keeps its
-/// line, a new one gets the usual time, unverified); the past stays; the version moves only
-/// when every release answered.
+/// A refresh: fetched dates from today on are added (a date both list keeps its line, a new
+/// one gets the usual time, unverified); every old line stays, even one the source no longer
+/// lists; the version moves only when every release answered.
 #[test]
 fn a_refresh_takes_official_dates_from_today_on() {
     let s = EconSchedule::parse(
@@ -309,6 +309,7 @@ source https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
         [
             (at(2026, 10, 14, 8), "September 2026", true),
             (at(2026, 11, 10, 8), "October 2026", true),
+            (at(2026, 12, 10, 8), "November 2026", true),
             (at(2026, 12, 11, 8), "December 2026 release", false),
             (at(2027, 1, 13, 8), "January 2027 release", false),
         ]
@@ -334,4 +335,12 @@ source https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
         .unwrap();
     assert_eq!(r.local_time(fomc), LocalTime::hm(14, 0));
     assert_eq!(fomc.label, "December meeting");
+    // A far date after a long gap extends nothing: the months between stay uncovered.
+    let far = vec![(
+        "cpi".to_owned(),
+        vec![d(2026, 12, 10), d(2027, 1, 13), d(2027, 7, 30)],
+    )];
+    let r = s.refreshed(&far, &src, today, false).unwrap();
+    assert_eq!(r.releases[0].coverage.1, d(2027, 1, 13));
+    assert!(r.events.iter().all(|e| r.local_date(e.at) < d(2027, 7, 1)));
 }

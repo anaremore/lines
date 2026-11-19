@@ -115,12 +115,12 @@ pub fn refresh_text(
         (format!("{of} · refreshing…"), stale)
     } else if let Some(p) = &r.problem {
         (format!("{of} · refresh failed: {p}"), true)
-    } else if let Some(t) = r.updated {
-        (format!("{of} · updated {}", fmt(t)), stale)
     } else if r.not_this_run {
         (format!("{of} · not refreshed in this run"), stale)
     } else if r.no_key {
         (format!("{of} · no refresh: FRED API key not set up"), stale)
+    } else if let Some(t) = r.updated {
+        (format!("{of} · updated {}", fmt(t)), stale)
     } else {
         (of, stale)
     };
