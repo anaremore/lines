@@ -51,8 +51,10 @@ fn pad() -> f32 {
 struct Built {
     schedule: usize,
     epoch: u64,
-    trading: u64,
     account: Option<AccountId>,
+    /// The rule in force and the account's name, as read.
+    rule: Option<lines_trading::news::NewsBlackout>,
+    name: Option<String>,
     range: Range,
     minute: i64,
     zone: u64,
@@ -112,17 +114,21 @@ impl Pane for EconView {
         &mut self.seen_revision
     }
 
-    /// The calendar's and its refresh's epoch, the trading cache's (an account's rule), the
-    /// display zone's, and the minute (a release passes, a window opens): atomics only.
+    /// The calendar's and its refresh's epoch, the trading cache's (an account's rule may have
+    /// changed: the rows rebuild only if it did), the display zone's, and the minute on the
+    /// pane's clock (a release passes, a window opens): atomics only, never the feed's.
     fn revision(&self) -> u64 {
-        let minute = (lines_feed::now_utc().0 / 60_000) as u64;
+        let clock = self
+            .store
+            .market_clock()
+            .unwrap_or_else(lines_feed::now_utc);
+        let minute = (clock.0 / 60_000) as u64;
         let trading = self.cache.as_ref().map_or(0, |c| c.any_revision());
         crate::econ_ui::epoch()
             .wrapping_mul(1_000_003)
             .wrapping_add(trading.wrapping_mul(7_919))
             .wrapping_add(lines_core::display_tz::epoch() << 40)
             .wrapping_add(minute)
-            .wrapping_add(self.store.revision() & 0xff)
     }
 
     fn set_feed(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
@@ -204,7 +210,9 @@ impl EconView {
             .unwrap_or_else(lines_feed::now_utc)
     }
 
-    /// Rebuild the rows and header words if anything they read moved.
+    /// Rebuild the rows and header words if anything they read moved. The trading cache busy
+    /// this instant: nothing is rebuilt (never "no blackout" for want of a read), and the next
+    /// poll tries again.
     fn rebuild(&mut self, cx: &App) {
         let now = self.now(cx);
         let schedule = crate::econ_ui::schedule();
@@ -212,11 +220,27 @@ impl EconView {
         let account = crate::econ_ui::focused_account()
             .filter(|a| trading.is_some_and(|t| t.account(a).is_some()))
             .or_else(|| trading.and_then(Trading::default_account));
+        let rule = match (account.as_ref(), trading) {
+            (Some(a), Some(t)) => match t.cache.try_read() {
+                Some(state) => state
+                    .account(a)
+                    .and_then(|v| crate::econ_ui::rule_of(&v.limits)),
+                None => {
+                    self.seen_revision = u64::MAX;
+                    return;
+                }
+            },
+            _ => None,
+        };
+        let name = account
+            .as_ref()
+            .and_then(|a| trading.and_then(|t| t.account(a)).map(|i| i.name));
         let key = Built {
             schedule: Arc::as_ptr(&schedule) as usize,
             epoch: crate::econ_ui::epoch(),
-            trading: trading.map_or(0, |t| t.cache.any_revision()),
             account: account.clone(),
+            rule,
+            name: name.clone(),
             range: self.range,
             minute: now.0.div_euclid(60_000),
             zone: lines_core::display_tz::epoch(),
@@ -224,13 +248,6 @@ impl EconView {
         if self.built.as_ref() == Some(&key) {
             return;
         }
-        let rule = account.as_ref().and_then(|a| {
-            let state = trading?.cache.try_read()?;
-            crate::econ_ui::rule_of(&state.account(a)?.limits)
-        });
-        let name = account
-            .as_ref()
-            .and_then(|a| trading.and_then(|t| t.account(a)).map(|i| i.name));
         let z = lines_core::display_tz::current();
         self.rows = econ_table::rows(
             &schedule,
@@ -240,7 +257,13 @@ impl EconView {
             self.range,
             &z,
         );
-        self.fresh = econ_table::freshness(&crate::econ_ui::refresh(), &schedule, now, &z);
+        self.fresh = econ_table::freshness(
+            &crate::econ_ui::refresh(),
+            &schedule,
+            !Arc::ptr_eq(&schedule, &crate::econ_ui::base()),
+            now,
+            &z,
+        );
         self.rule = econ_table::rule_text(rule.as_ref(), name.as_deref());
         self.scroll = self.scroll.min(self.rows.len().saturating_sub(1));
         self.built = Some(key);
@@ -495,7 +518,8 @@ impl EconView {
                             .children(pane::link_chip(self.common.link, &t))
                             .child(
                                 div()
-                                    .flex_shrink_0()
+                                    .min_w_0()
+                                    .truncate()
                                     .text_color(t.text_main)
                                     .child("Economic calendar"),
                             )
@@ -526,8 +550,8 @@ impl EconView {
                     )
                     .child(
                         div()
-                            .min_w_0()
-                            .flex_shrink_0()
+                            .min_w(crate::zoom::ui(96.0))
+                            .flex_shrink(1.0)
                             .truncate()
                             .text_color(t.text_main)
                             .child(self.rule.clone()),

@@ -508,6 +508,9 @@ mod tests {
         use crate::layout::PaneKind as K;
         let p = |k, s: &str| (k, s.to_owned());
         assert_eq!(auto_title(&[p(K::Journal, "ES")]), "Journal");
+        // The economic calendar on its own, and beside a chart.
+        assert_eq!(auto_title(&[p(K::Calendar, "ES")]), "Calendar");
+        assert_eq!(auto_title(&[p(K::Chart, "ES"), p(K::Calendar, "ES")]), "ES");
         assert_eq!(
             auto_title(&[p(K::Journal, "ES"), p(K::Positions, "ES")]),
             "Journal · Positions"

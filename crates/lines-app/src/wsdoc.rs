@@ -2027,7 +2027,8 @@ mod tests {
         assert_eq!(leaves[1].kind, PaneKind::Strategies);
     }
 
-    /// Version 8: the `positions` pane kind, pinned; a version 7 file reads unchanged.
+    /// Version 10: the `calendar` pane kind and its view state, pinned; an unknown range reads
+    /// as the default; a version 9 file reads unchanged.
     #[test]
     fn a_version_10_file_with_a_calendar_pane_reads() {
         let v10 = br#"{
@@ -2085,6 +2086,7 @@ mod tests {
         ));
     }
 
+    /// Version 8: the `positions` pane kind, pinned; a version 7 file reads unchanged.
     #[test]
     fn a_version_8_file_with_a_positions_pane_reads() {
         let v8 = br#"{

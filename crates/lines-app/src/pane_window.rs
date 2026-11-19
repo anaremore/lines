@@ -471,6 +471,20 @@ impl Render for PaneWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window.set_rem_size(crate::zoom::rem());
         let t = self.theme;
+        // The active window's DOM or chart is the calendar pane's account (as focus is in a
+        // main window).
+        if window.is_window_active() {
+            use crate::trade_bar::TradePane as _;
+            match &self.handle {
+                PaneHandle::Dom(e) => {
+                    crate::econ_ui::set_focused_account(e.read(cx).trade_ref().account.clone())
+                }
+                PaneHandle::Chart(e) => {
+                    crate::econ_ui::set_focused_account(e.read(cx).trade_ref().account.clone())
+                }
+                _ => {}
+            }
+        }
         // Controls only while the pointer is over this window (no permanent chrome).
         let controls = window.is_window_hovered().then(|| {
             let kind = self.handle.kind();

@@ -38,12 +38,18 @@ impl Range {
         *self == Range::default()
     }
 
-    /// `[from, to)` around `now` in the display zone (the zone's offset at `now`: a DST change
-    /// inside the range moves its far edge by the hour).
+    /// `[from, to)` around `now` in the display zone, each edge at that day's local midnight
+    /// (a DST change inside the range moves neither edge).
     pub fn period(self, now: UtcMillis, z: &DisplayTz) -> (UtcMillis, UtcMillis) {
         let local = z.local(now).0;
         let day = local.div_euclid(DAY);
-        let start = |d: i64| UtcMillis(now.0 - (local - d * DAY));
+        // Local midnight of day `d` in UTC: the offset at the instant itself (found from a
+        // first guess at today's offset; a midnight inside a DST gap lands an hour off).
+        let start = |d: i64| {
+            let wall = d * DAY;
+            let guess = UtcMillis(wall - z.offset_ms(now));
+            UtcMillis(wall - z.offset_ms(guess))
+        };
         match self {
             Range::Today => (start(day), start(day + 1)),
             Range::Week => {
@@ -147,7 +153,7 @@ pub fn rows(
                 RowState::Later
             };
             if inside && e.at >= now {
-                // The release inside its window now is the next one too.
+                // Inside its window before the release: it is the next release too.
                 next_seen = true;
             }
             let window_text = match window {
@@ -204,6 +210,7 @@ pub fn rule_text(rule: Option<&NewsBlackout>, account: Option<&str>) -> String {
 pub fn freshness(
     r: &crate::econ_ui::Refresh,
     s: &EconSchedule,
+    refreshed: bool,
     now: UtcMillis,
     z: &DisplayTz,
 ) -> (String, bool) {
@@ -233,7 +240,13 @@ pub fn freshness(
     } else {
         ""
     };
-    (format!("Bundled calendar of {}{why}{st}", s.version), stale)
+    // A refresh from an earlier run (the cache), not refreshed in this one.
+    let what = if refreshed {
+        "FRED calendar of"
+    } else {
+        "Bundled calendar of"
+    };
+    (format!("{what} {}{why}{st}", s.version), stale)
 }
 
 #[cfg(test)]
@@ -302,9 +315,16 @@ source https://www.bea.gov/
             Range::Week.period(now, &z),
             (at("2026-11-09T06:00:00Z"), at("2026-11-16T06:00:00Z"))
         );
+        // November starts in daylight time (CDT, UTC−5): its first edge is 05:00 UTC.
         assert_eq!(
             Range::Month.period(now, &z),
-            (at("2026-11-01T06:00:00Z"), at("2026-12-01T06:00:00Z"))
+            (at("2026-11-01T05:00:00Z"), at("2026-12-01T06:00:00Z"))
+        );
+        // March: starts in standard time, ends in daylight time.
+        let march = at("2027-03-20T16:00:00Z");
+        assert_eq!(
+            Range::Month.period(march, &z),
+            (at("2027-03-01T06:00:00Z"), at("2027-04-01T05:00:00Z"))
         );
     }
 
@@ -339,6 +359,14 @@ source https://www.bea.gov/
         assert_eq!(
             r.iter().map(|r| r.state).collect::<Vec<_>>(),
             [RowState::Past, RowState::Next, RowState::Later]
+        );
+        // Just after CPI, still inside its after-window: CPI is inside (warn outline) and PPI
+        // is the next release (accent outline): both are marked.
+        let just_after = at("2026-11-12T13:31:00Z");
+        let r = rows(&s, &s, Some(&rule), just_after, Range::Month, &z);
+        assert_eq!(
+            r.iter().map(|r| r.state).collect::<Vec<_>>(),
+            [RowState::Inside, RowState::Next, RowState::Later]
         );
         // Today only: CPI alone.
         assert_eq!(rows(&s, &s, None, later, Range::Today, &z).len(), 1);
@@ -401,7 +429,7 @@ source https://www.bea.gov/
         let s = sched();
         let z = chicago();
         let now = at("2026-11-12T20:40:00Z");
-        let f = |r: Refresh| freshness(&r, &s, now, &z);
+        let f = |r: Refresh| freshness(&r, &s, false, now, &z);
         assert_eq!(
             f(Refresh {
                 updated: Some(at("2026-11-12T20:33:00Z")),
@@ -440,12 +468,28 @@ source https://www.bea.gov/
             .0,
             "Bundled calendar of 2026-11-07"
         );
+        // A cached refresh from an earlier run, no key now.
+        assert_eq!(
+            freshness(
+                &Refresh {
+                    no_key: true,
+                    ..Default::default()
+                },
+                &s,
+                true,
+                now,
+                &z
+            )
+            .0,
+            "FRED calendar of 2026-11-07 · no FRED key"
+        );
         let stale = freshness(
             &Refresh {
                 not_this_run: true,
                 ..Default::default()
             },
             &s,
+            false,
             at("2027-03-01T15:00:00Z"),
             &z,
         );
