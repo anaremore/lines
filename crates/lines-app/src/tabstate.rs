@@ -132,6 +132,7 @@ pub fn toggle_kind<Id: Copy + Eq + Hash>(
             PaneKind::Strategies => "no strategy panel goes with this pane",
             PaneKind::Chain => "no option chain goes with this pane",
             PaneKind::Positions => "no positions pane goes with this pane",
+            PaneKind::Calendar => "no economic calendar goes with this pane",
         });
     }
     let any_shown = candidates.iter().any(|id| leaves[id].state.is_shown());
@@ -507,6 +508,9 @@ mod tests {
         use crate::layout::PaneKind as K;
         let p = |k, s: &str| (k, s.to_owned());
         assert_eq!(auto_title(&[p(K::Journal, "ES")]), "Journal");
+        // The economic calendar on its own, and beside a chart.
+        assert_eq!(auto_title(&[p(K::Calendar, "ES")]), "Calendar");
+        assert_eq!(auto_title(&[p(K::Chart, "ES"), p(K::Calendar, "ES")]), "ES");
         assert_eq!(
             auto_title(&[p(K::Journal, "ES"), p(K::Positions, "ES")]),
             "Journal · Positions"

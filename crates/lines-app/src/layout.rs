@@ -26,6 +26,8 @@ pub enum PaneKind {
     Chain,
     /// Every open position on every account (workspace format 8).
     Positions,
+    /// The economic calendar (roadmap 8b; workspace format 10).
+    Calendar,
 }
 
 impl PaneKind {
@@ -38,6 +40,7 @@ impl PaneKind {
             PaneKind::Strategies => "Strategies",
             PaneKind::Chain => "Option chain",
             PaneKind::Positions => "Positions",
+            PaneKind::Calendar => "Calendar",
         }
     }
 }

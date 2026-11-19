@@ -1017,6 +1017,18 @@ mod tests {
             ("settings group header", t.text_dim, "settings window", t.bg),
             ("settings description", t.text_dim, "selected line", t.panel),
             ("settings Off value", t.text_dim, "selected line", t.panel),
+            // The economic calendar pane (`econ_view`): rows on `bg` (past rows and the
+            // source in `text_dim`), its header on `panel`; the next row and one inside its
+            // window are outlined (no fill), and say "now" in words.
+            ("calendar row", t.text_main, "calendar table", t.bg),
+            ("calendar past row", t.text_dim, "calendar table", t.bg),
+            ("calendar header", t.text_main, "calendar header", t.panel),
+            (
+                "calendar range, freshness",
+                t.text_dim,
+                "calendar header",
+                t.panel,
+            ),
             // A choice's selected option: `bg` text (bold) on the accent fill.
             ("settings selected option", t.bg, "accent fill", t.accent),
         ]

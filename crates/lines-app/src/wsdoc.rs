@@ -5,7 +5,7 @@
 //! source's default) and its view state. The market data *source* is not part of a workspace:
 //! it belongs to the run (`--source`), so one workspace works on mock, replay or live data.
 //!
-//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 8).
+//! File format: JSON, versioned through [`crate::versioned`] (`FORMAT`, currently version 10).
 //! Version 2 adds each pane's `state` (shown, hidden, hidden by "chart only", detached) and a
 //! detached pane's `window` placement; version 1 files migrate (every pane shown). Version 3
 //! adds the `journal` pane kind (roadmap 8c); version 2 files read unchanged, and an older
@@ -14,7 +14,9 @@
 //! equity or a listed option; every version 4 file reads unchanged, and an older build
 //! reports a version 5 file as newer instead of misreading an option. Version 6 adds the `chain`
 //! pane kind (an underlying's option chain). Version 7 (decision 0029) adds the chain pane's
-//! option chart mode (`chain_chart`). Version 8 adds the `positions` pane kind.
+//! option chart mode (`chain_chart`). Version 8 adds the `positions` pane kind. Version 9 makes
+//! studies per symbol. Version 10 adds the `calendar` pane kind (the economic calendar) and its
+//! optional view state (`calendar`).
 //! Product ids are the catalog's permanent ids; `symbol` is written beside them for people
 //! reading the file and ignored on load. A pane whose product this build doesn't know is kept
 //! as written and shown as unavailable, never dropped.
@@ -109,6 +111,12 @@ fn v7_to_v8(v: serde_json::Value) -> Result<serde_json::Value, String> {
     Ok(v)
 }
 
+/// Version 10 added the `calendar` pane kind: every version 9 file is a valid version 10 file
+/// (an older build reports a file with a calendar pane as newer instead of failing on it).
+fn v9_to_v10(v: serde_json::Value) -> Result<serde_json::Value, String> {
+    Ok(v)
+}
+
 /// Version 9 made studies per symbol (decision 0039): a chart pane's studies are its
 /// product's, kept in the app's settings, unless the chart has separate studies. Every chart
 /// pane of an older file is marked as carrying its own (`legacy_studies`); after loading,
@@ -130,11 +138,12 @@ const MIGRATIONS: &[Migration] = &[
     v6_to_v7,
     v7_to_v8,
     v8_to_v9,
+    v9_to_v10,
 ];
 
 pub const FORMAT: Format = Format {
     what: "workspace",
-    current: 9,
+    current: 10,
     migrations: MIGRATIONS,
 };
 
@@ -231,6 +240,9 @@ pub struct PaneDoc {
     /// A journal pane's view (version 3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub journal: Option<JournalState>,
+    /// An economic calendar pane's view (version 10). Optional: none is the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calendar: Option<CalendarState>,
     /// Shown, hidden, hidden by its chart's "chart only", or detached (version 2).
     #[serde(default)]
     pub state: PaneState,
@@ -254,6 +266,7 @@ impl PaneDoc {
             dom: None,
             tape: None,
             journal: None,
+            calendar: None,
             chain_chart: false,
             state: PaneState::Shown,
             window: None,
@@ -560,6 +573,28 @@ pub struct DomState {
     /// The price trail (optional: written only when on or at a non-default half-life).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trail: Option<crate::dom_trail::TrailDoc>,
+}
+
+/// An economic calendar pane's view (roadmap 8b).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CalendarState {
+    /// Today, the week or the month. Optional; a value this build doesn't know reads as the
+    /// default.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::econ_table::Range::is_default",
+        deserialize_with = "lenient_range"
+    )]
+    pub range: crate::econ_table::Range,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub columns: BTreeMap<crate::pane_columns::CalCol, ColumnDoc>,
+}
+
+fn lenient_range<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<crate::econ_table::Range, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
 }
 
 /// A journal pane's view (roadmap 8c).
@@ -1414,7 +1449,7 @@ mod tests {
             }
         );
         let text = String::from_utf8(bytes).unwrap();
-        assert!(text.contains(r#""version": 9"#), "{text}");
+        assert!(text.contains(r#""version": 10"#), "{text}");
         assert!(text.contains(r#""symbol": "NQ""#), "{text}");
     }
 
@@ -1992,6 +2027,65 @@ mod tests {
         assert_eq!(leaves[1].kind, PaneKind::Strategies);
     }
 
+    /// Version 10: the `calendar` pane kind and its view state, pinned; an unknown range reads
+    /// as the default; a version 9 file reads unchanged.
+    #[test]
+    fn a_version_10_file_with_a_calendar_pane_reads() {
+        let v10 = br#"{
+          "version": 10,
+          "name": "calendar",
+          "windows": [{
+            "tabs": [{
+              "focused": 0,
+              "layout": {"split": {"axis": "row", "ratio": 0.6,
+                "first": {"pane": {"kind": "chart", "link": 0, "state": "shown"}},
+                "second": {"pane": {"kind": "calendar", "link": null, "state": "shown",
+                  "calendar": {"range": "month", "columns": {"source": {"shown": false}}}}}}}
+            }]
+          }]
+        }"#;
+        let Decoded::Ok {
+            value,
+            migrated_from: None,
+        } = decode::<WorkspaceDoc>(&FORMAT, v10)
+        else {
+            panic!("v10 no longer reads")
+        };
+        let leaves = value.windows[0].tabs[0].layout.leaves();
+        assert_eq!(leaves[1].kind, PaneKind::Calendar);
+        let c = leaves[1].calendar.as_ref().unwrap();
+        assert_eq!(c.range, crate::econ_table::Range::Month);
+        assert_eq!(
+            c.columns[&crate::pane_columns::CalCol::Source].shown,
+            Some(false)
+        );
+        // A range this build doesn't know reads as the default.
+        let odd = String::from_utf8(v10.to_vec())
+            .unwrap()
+            .replace(r#""month""#, r#""quarter""#);
+        let Decoded::Ok { value, .. } = decode::<WorkspaceDoc>(&FORMAT, odd.as_bytes()) else {
+            panic!("an unknown range fails the file")
+        };
+        assert_eq!(
+            value.windows[0].tabs[0].layout.leaves()[1]
+                .calendar
+                .as_ref()
+                .unwrap()
+                .range,
+            crate::econ_table::Range::Week
+        );
+        // A version 9 file reads unchanged.
+        let v9 = br#"{"version": 9, "name": "a", "windows": [{"tabs": [{"focused": 0,
+            "layout": {"pane": {"kind": "dom", "link": 0, "state": "shown"}}}]}]}"#;
+        assert!(matches!(
+            decode::<WorkspaceDoc>(&FORMAT, v9),
+            Decoded::Ok {
+                migrated_from: Some(9),
+                ..
+            }
+        ));
+    }
+
     /// Version 8: the `positions` pane kind, pinned; a version 7 file reads unchanged.
     #[test]
     fn a_version_8_file_with_a_positions_pane_reads() {
@@ -2131,7 +2225,7 @@ mod tests {
             Target::Contract(ContractKey::spot(catalog::BTC_USD))
         );
         let text = String::from_utf8(encode(&FORMAT, &value).unwrap()).unwrap();
-        assert!(text.contains(r#""version": 9"#), "{text}");
+        assert!(text.contains(r#""version": 10"#), "{text}");
         assert!(
             text.contains(r#""monthly""#),
             "the futures shape is unchanged"
@@ -2171,8 +2265,8 @@ mod tests {
             Decoded::Corrupt { .. }
         ));
         assert_eq!(
-            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 10, "windows": 7}"#),
-            Decoded::Newer { found: 10 }
+            decode::<WorkspaceDoc>(&FORMAT, br#"{"version": 11, "windows": 7}"#),
+            Decoded::Newer { found: 11 }
         );
     }
 

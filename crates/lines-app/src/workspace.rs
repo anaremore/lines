@@ -276,6 +276,7 @@ pub enum PaneHandle {
     Strategies(Entity<StrategyView>),
     Chain(Entity<ChainView>),
     Positions(Entity<crate::positions_view::PositionsView>),
+    Calendar(Entity<crate::econ_view::EconView>),
 }
 
 macro_rules! each {
@@ -288,6 +289,7 @@ macro_rules! each {
             PaneHandle::Strategies($e) => $body,
             PaneHandle::Chain($e) => $body,
             PaneHandle::Positions($e) => $body,
+            PaneHandle::Calendar($e) => $body,
         }
     };
 }
@@ -317,6 +319,7 @@ impl PaneHandle {
             PaneHandle::Strategies(_) => PaneKind::Strategies,
             PaneHandle::Chain(_) => PaneKind::Chain,
             PaneHandle::Positions(_) => PaneKind::Positions,
+            PaneHandle::Calendar(_) => PaneKind::Calendar,
         }
     }
 
@@ -414,11 +417,12 @@ impl PaneHandle {
             PaneHandle::Dom(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Tape(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Journal(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
+            PaneHandle::Calendar(e) => e.update(cx, |v, cx| v.column_command(c, cx)),
             PaneHandle::Chart(_)
             | PaneHandle::Strategies(_)
             | PaneHandle::Chain(_)
             | PaneHandle::Positions(_) => {
-                Err("columns belong to a DOM, time & sales or the journal")
+                Err("columns belong to a DOM, time & sales, the journal or the calendar")
             }
         }
     }
@@ -429,6 +433,7 @@ impl PaneHandle {
             PaneHandle::Dom(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Tape(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Journal(e) => Some(e.read(cx).columns().clone()),
+            PaneHandle::Calendar(e) => Some(e.read(cx).columns().clone()),
             PaneHandle::Chart(_)
             | PaneHandle::Strategies(_)
             | PaneHandle::Chain(_)
@@ -723,6 +728,13 @@ fn make_pane(doc: &PaneDoc, cx: &mut App) -> PaneHandle {
         PaneKind::Positions => PaneHandle::Positions(
             cx.new(|cx| crate::positions_view::PositionsView::new(feed, theme, cx)),
         ),
+        PaneKind::Calendar => PaneHandle::Calendar(cx.new(|cx| {
+            let mut v = crate::econ_view::EconView::new(feed, theme, cx);
+            if let Some(s) = &doc.calendar {
+                v.restore(s);
+            }
+            v
+        })),
         PaneKind::Strategies => {
             let frozen = env.frozen;
             PaneHandle::Strategies(cx.new(|cx| StrategyView::new(feed, theme, frozen, cx)))
@@ -795,14 +807,12 @@ enum Prompt {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ListKind {
     Guardrails,
-    Calendar,
 }
 
 impl ListKind {
     fn title(self) -> &'static str {
         match self {
             ListKind::Guardrails => "Guardrails",
-            ListKind::Calendar => "Economic calendar",
         }
     }
 }
@@ -815,12 +825,6 @@ fn list_items(
 ) -> Vec<crate::palette_lists::Item> {
     use crate::palette_lists as pl;
     match kind {
-        ListKind::Calendar => pl::calendar_items(
-            &crate::econ_ui::schedule(),
-            &crate::econ_ui::refresh(),
-            now,
-            &lines_core::display_tz::current(),
-        ),
         ListKind::Guardrails => {
             let Some(t) = crate::trading::Trading::try_global(cx) else {
                 return pl::guardrail_items(&[]);
@@ -1180,6 +1184,14 @@ impl WindowView {
                     feed_changed(this, ev, cx)
                 })]
             }
+            PaneHandle::Calendar(e) => vec![
+                cx.subscribe(e, move |this, _, ev: &FeedChanged, cx| {
+                    feed_changed(this, ev, cx)
+                }),
+                cx.subscribe(e, move |this, _, ev: &ColumnMenu, cx| {
+                    this.open_column_menu(id, ev.0, cx)
+                }),
+            ],
         }
     }
 
@@ -1465,6 +1477,17 @@ impl WindowView {
         }
         if let Some(h) = self.tab().handle(id).cloned() {
             h.focus(window, cx);
+            match &h {
+                PaneHandle::Dom(e) => {
+                    use crate::trade_bar::TradePane as _;
+                    crate::econ_ui::set_focused_account(e.read(cx).trade_ref().account.clone())
+                }
+                PaneHandle::Chart(e) => {
+                    use crate::trade_bar::TradePane as _;
+                    crate::econ_ui::set_focused_account(e.read(cx).trade_ref().account.clone())
+                }
+                _ => {}
+            }
             if h.kind() == PaneKind::Chart {
                 cx.global_mut::<Workspace>().last_chart = Some(id);
             }
@@ -1752,12 +1775,7 @@ impl WindowView {
                     selected: 0,
                 });
             }
-            Command::EconCalendar => {
-                self.prompt = Some(Prompt::List {
-                    kind: ListKind::Calendar,
-                    selected: 0,
-                });
-            }
+            Command::EconCalendar => self.open_panel(PaneKind::Calendar, window, cx),
             Command::NextTab => {
                 let i = (self.active + 1) % self.tabs.len();
                 self.activate_tab(i, window, cx);
@@ -2138,6 +2156,9 @@ impl WindowView {
                             "the option chain is popped out: it is in its own window"
                         }
                         PaneKind::Positions => "positions are popped out: in their own window",
+                        PaneKind::Calendar => {
+                            "the economic calendar is popped out: it is in its own window"
+                        }
                         _ => "the strategy panel is popped out: it is in its own window",
                     },
                     cx,
@@ -2984,13 +3005,6 @@ impl WindowView {
                         self.prompt = None;
                         crate::settings_view::open_account(&id, cx);
                     }
-                    Some(Open::Connections) => {
-                        self.prompt = None;
-                        crate::settings_view::open_section(
-                            crate::settings_schema::Section::Connections,
-                            cx,
-                        );
-                    }
                     None => {}
                 }
             }
@@ -3773,6 +3787,7 @@ impl WindowView {
                         PaneKind::Strategies => "Strategy panel",
                         PaneKind::Chain => "Option chain",
                         PaneKind::Positions => "Positions",
+                        PaneKind::Calendar => "Calendar",
                     };
                     if !kinds.contains(&l) {
                         kinds.push(l);
@@ -4710,51 +4725,6 @@ impl WindowView {
                             }
                             col
                         }
-                        Item::Calendar { text, bad } => {
-                            div().flex_1().min_w_0().child(line(text.clone(), *bad))
-                        }
-                        Item::Release {
-                            when,
-                            importance,
-                            title,
-                            agency,
-                        } => div()
-                            .flex()
-                            .flex_row()
-                            .flex_1()
-                            .min_w_0()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .w(crate::zoom::ui(118.0))
-                                    .flex_none()
-                                    .text_color(t.text_main)
-                                    .child(when.clone()),
-                            )
-                            .child(
-                                div()
-                                    .w(crate::zoom::ui(52.0))
-                                    .flex_none()
-                                    .text_color(t.text_main)
-                                    .when(*importance == "high", |d| {
-                                        d.font_weight(gpui::FontWeight::BOLD)
-                                    })
-                                    .child(*importance),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(t.text_main)
-                                    .child(title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(t.text_dim)
-                                    .child(agency.clone()),
-                            ),
                         Item::Empty(text) => div().child(line(text.clone(), false)),
                     };
                     list = list.child(row("list-row", i, sel, cx).child(body));

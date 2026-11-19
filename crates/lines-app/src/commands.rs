@@ -891,6 +891,7 @@ pub fn label(c: Command) -> String {
         Command::Toggle(PaneKind::Strategies) => "Hide/show strategies".into(),
         Command::Toggle(PaneKind::Chain) => "Hide/show option chain".into(),
         Command::Toggle(PaneKind::Positions) => "Hide/show positions".into(),
+        Command::Toggle(PaneKind::Calendar) => "Hide/show economic calendar".into(),
         Command::ChartOnly => "Chart only (hide/restore linked DOM and T&S)".into(),
         Command::ShowHidden => "Show hidden panes".into(),
         Command::PopOut => "Pop out pane into its own window".into(),
@@ -1123,6 +1124,7 @@ pub fn palette() -> Vec<Command> {
             PaneKind::Strategies,
             PaneKind::Chain,
             PaneKind::Positions,
+            PaneKind::Calendar,
         ]
         .map(Command::SetKind),
     );
@@ -1199,6 +1201,10 @@ pub fn palette() -> Vec<Command> {
             .into_iter()
             .chain(TapeCol::ALL.map(|c| Command::Columns(ColumnCmd::Toggle(Column::Tape(c)))))
             .chain(JournalCol::ALL.map(|c| Command::Columns(ColumnCmd::Toggle(Column::Journal(c)))))
+            .chain(
+                crate::pane_columns::CalCol::ALL
+                    .map(|c| Command::Columns(ColumnCmd::Toggle(Column::Calendar(c)))),
+            )
             .chain([
                 Command::Columns(ColumnCmd::AutoFitAll),
                 Command::Columns(ColumnCmd::Reset),

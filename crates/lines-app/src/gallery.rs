@@ -598,8 +598,8 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
         "guard trades 1; buy 1 mkt; ack; sell 1 mkt; ack; buy 1 mkt; ack",
         "",
     ));
-    // The palette's lists (roadmap 8b): every account's guardrails with a lockout in force,
-    // and the economic calendar's state and upcoming releases; dark and light.
+    // The palette's guardrails list (roadmap 8b): every account's guardrails with a lockout
+    // in force; dark and light.
     const GUARDS: &str = "guard trades 1; guard loss 500; buy 1 mkt; ack; sell 1 mkt; ack";
     v.push(paper(
         "list-guardrails",
@@ -611,17 +611,56 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     g.push("--paper".into());
     g.push(GUARDS.into());
     v.push(s("list-guardrails-light", false, end, g));
-    v.push(s(
-        "list-calendar",
+    // The economic calendar pane (roadmap 8b) beside a chart, on a synthetic calendar
+    // (`econ-synthetic.txt`): past releases dimmed; under a block rule the 17:00 ET release is
+    // inside its window ("now"); without one it is the next release (outlined). Dark and light.
+    let cal = |name, quick, theme: &str, script: &str| {
+        let mut a = vec![
+            "--workspace".into(),
+            ws("calendar.json"),
+            "--size".into(),
+            "1400x800".into(),
+            "--econ-calendar".into(),
+            ws("econ-synthetic.txt"),
+        ];
+        a.extend(args(theme));
+        a.push("--paper".into());
+        a.push(script.into());
+        s(name, quick, end, a)
+    };
+    v.push(cal(
+        "calendar-pane",
         true,
-        end,
-        args("--layout chart --size 1400x800 --theme dark --prompt calendar"),
+        "--theme dark",
+        "guard news block",
     ));
+    v.push(cal(
+        "calendar-pane-light",
+        false,
+        "--theme light",
+        "guard trades 50",
+    ));
+    v.push(cal(
+        "calendar-pane-light-cb",
+        false,
+        "--theme light --palette cb",
+        "guard news block",
+    ));
+    // On its own in a tab ("Calendar"), a month, narrow.
     v.push(s(
-        "list-calendar-light-cb",
+        "calendar-tab-narrow",
         false,
         end,
-        args("--layout chart --size 1400x800 --theme light --palette cb --prompt calendar"),
+        vec![
+            "--workspace".into(),
+            ws("calendar-tab.json"),
+            "--size".into(),
+            "520x600".into(),
+            "--econ-calendar".into(),
+            ws("econ-synthetic.txt"),
+            "--theme".into(),
+            "dark".into(),
+        ],
     ));
     v.push(paper(
         "position-pnl-off",
@@ -1763,7 +1802,15 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         pane("journal", "")
     );
     std::fs::write(dir.join("journal-tab.json"), journal_tab).context("journal-tab.json")?;
+    let calendar = format!(
+        r#"{{ "split": {{ "axis": "row", "ratio": 0.45, "first": {}, "second": {{ "pane": {{ "kind": "calendar", "link": null, "state": "shown" }} }} }} }}"#,
+        pane("chart", "")
+    );
+    let calendar_tab = r#"{ "pane": { "kind": "calendar", "link": null, "state": "shown", "calendar": { "range": "month" } } }"#.to_owned();
+    std::fs::write(dir.join("econ-synthetic.txt"), ECON_SYNTHETIC).context("econ-synthetic.txt")?;
     for (f, layout) in [
+        ("calendar.json", calendar),
+        ("calendar-tab.json", calendar_tab),
         ("chart-over-dom.json", chart_over_dom),
         ("popout.json", popout),
         ("footprint.json", footprint),
@@ -1778,6 +1825,57 @@ fn write_workspaces(dir: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// A synthetic economic calendar for the calendar pane's scenes (the replay ends Thursday
+/// 2026-11-05 21:59 UTC, 15:59 Chicago): releases before it, one at 17:00 ET (inside a ±2 min
+/// window then), and later ones. Made up; not a real schedule.
+const ECON_SYNTHETIC: &str = "format 1
+version 2026-11-01
+zone America/New_York
+release cons
+name Construction spending
+agency Census
+importance medium
+affects ES
+coverage 2026-11-01 2026-11-30 verified
+source https://example.invalid/synthetic
+2026-11-02 10:00 verified September 2026
+release adp
+name ADP employment
+agency ADP
+importance medium
+affects ES
+coverage 2026-11-01 2026-11-30 unverified
+source https://example.invalid/synthetic
+2026-11-04 08:15 unverified October 2026
+release synth
+name Synthetic index
+agency Test
+importance high
+affects ES NQ
+coverage 2026-11-01 2026-11-30 verified
+source https://example.invalid/synthetic
+2026-11-05 08:30 verified October 2026
+2026-11-05 17:00 verified Flash
+release jobs
+name Jobs report
+agency BLS
+importance high
+affects ES NQ ZN
+coverage 2026-11-01 2026-11-30 unverified
+source https://example.invalid/synthetic
+2026-11-06 08:30 unverified October 2026
+2026-11-20 08:30 unverified November 2026
+release sent
+name Consumer sentiment
+agency UMich
+importance low
+affects ES
+coverage 2026-11-01 2026-11-30 verified
+source https://example.invalid/synthetic
+2026-11-06 10:00 verified November prelim
+2026-11-25 10:00 verified November final
+";
 
 /// Render the scenes (the quick set unless `full`) into `dir`; 0 when every scene rendered and
 /// the lint found nothing, else 1.

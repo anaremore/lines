@@ -1,10 +1,9 @@
 //! Lists the palette opens in its place (roadmap 8b): every account's guardrails and lockout
-//! state, and the economic calendar's state and upcoming releases. Pure: the workspace gathers
-//! the accounts, the core's views and the calendar, and draws the rows.
+//! state. Pure: the workspace gathers the accounts and the core's views, and draws the rows.
+//! (The economic calendar is a pane: `crate::econ_view`.)
 
 use lines_core::UtcMillis;
 use lines_core::display_tz::DisplayTz;
-use lines_core::econ::{EconSchedule, Importance};
 use lines_trading::{GuardState, Guardrails};
 
 /// One row of a list.
@@ -18,15 +17,6 @@ pub enum Item {
         state: &'static str,
         lines: Vec<(String, bool)>,
     },
-    /// The calendar's state (Enter: Settings › Connections, where its refresh is set up).
-    Calendar { text: String, bad: bool },
-    /// A release: when (display zone), importance, title, agency.
-    Release {
-        when: String,
-        importance: &'static str,
-        title: String,
-        agency: String,
-    },
     /// Nothing to list (a line of text).
     Empty(String),
 }
@@ -36,15 +26,12 @@ pub enum Item {
 pub enum Open {
     /// Settings › Accounts on this account.
     Account(String),
-    /// Settings › Connections.
-    Connections,
 }
 
 impl Item {
     pub fn open(&self) -> Option<Open> {
         match self {
             Item::Account { id, .. } => Some(Open::Account(id.clone())),
-            Item::Calendar { .. } => Some(Open::Connections),
             _ => None,
         }
     }
@@ -156,47 +143,6 @@ pub fn when(z: &DisplayTz, t: UtcMillis) -> String {
     )
 }
 
-/// An agency in a few letters: "BLS (Employment Situation)" → "BLS", "Federal Reserve" → "Fed".
-fn short_agency(a: &str) -> &str {
-    let a = a.split(" (").next().unwrap_or(a);
-    if a == "Federal Reserve" { "Fed" } else { a }
-}
-
-/// The upcoming releases shown at most.
-pub const MAX_RELEASES: usize = 40;
-
-/// The calendar's state, then its releases from `now` on (medium and up).
-pub fn calendar_items(
-    s: &EconSchedule,
-    r: &crate::econ_ui::Refresh,
-    now: UtcMillis,
-    z: &DisplayTz,
-) -> Vec<Item> {
-    let (text, bad) = crate::econ_ui::refresh_text(r, s, now, &|t| when(z, t));
-    let mut v = vec![Item::Calendar { text, bad }];
-    let mut any = false;
-    for e in s
-        .upcoming(now)
-        .filter(|e| s.release(e).importance >= Importance::Medium)
-        .take(MAX_RELEASES)
-    {
-        any = true;
-        let rel = s.release(e);
-        v.push(Item::Release {
-            when: when(z, e.at),
-            importance: rel.importance.as_str(),
-            title: format!("{} · {}", rel.name, e.label),
-            agency: short_agency(&rel.agency).to_owned(),
-        });
-    }
-    if !any {
-        v.push(Item::Empty(
-            "No releases scheduled in the calendar".to_owned(),
-        ));
-    }
-    v
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,48 +234,6 @@ mod tests {
         assert_eq!(*state, "Active");
         assert_eq!(lines[0].0, "Waiting for the account");
         assert!(matches!(&guardrail_items(&[])[0], Item::Empty(_)));
-    }
-
-    #[test]
-    fn the_calendar_lists_its_state_then_releases() {
-        let s = lines_feed::econ::bundled();
-        let now = UtcMillis::parse_iso("2026-11-09T12:00:00Z").unwrap();
-        let r = crate::econ_ui::Refresh::default();
-        let items = calendar_items(&s, &r, now, &DisplayTz::utc());
-        assert_eq!(
-            items[0],
-            Item::Calendar {
-                text: "Calendar of 2026-11-07".into(),
-                bad: false
-            }
-        );
-        assert_eq!(items[0].open(), Some(Open::Connections));
-        // CPI, Tuesday 2026-11-10 08:30 ET = 13:30 UTC.
-        assert_eq!(
-            items[1],
-            Item::Release {
-                when: "Tue Nov 10 13:30".into(),
-                importance: "high",
-                title: "CPI · October 2026".into(),
-                agency: "BLS".into(),
-            }
-        );
-        assert!(items.len() <= MAX_RELEASES + 1);
-        // Stale, with a failed refresh: it says both.
-        let r = crate::econ_ui::Refresh {
-            problem: Some("FRED answered 400".into()),
-            ..Default::default()
-        };
-        let later = UtcMillis::parse_iso("2027-03-01T12:00:00Z").unwrap();
-        let Item::Calendar { text, bad } = &calendar_items(&s, &r, later, &DisplayTz::utc())[0]
-        else {
-            panic!()
-        };
-        assert!(bad);
-        assert_eq!(
-            text,
-            "Calendar of 2026-11-07 (stale) · refresh failed: FRED answered 400"
-        );
     }
 
     #[test]
