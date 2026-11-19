@@ -263,13 +263,19 @@ impl PaneTrade {
                     .map(|g| (g.name.clone(), g.members.clone()))
             });
         let gone_group = saved.is_some_and(|s| s.group.is_some()) && group.is_none();
+        // On a group: its first member, or (none) no account at all, never one outside it.
         let account = match &group {
-            Some((_, m)) if !m.is_empty() => Some(m[0].clone()),
-            _ => account,
+            Some((_, m)) => m.first().cloned(),
+            None => account,
         };
-        // A pane whose group is gone never comes back armed on one account.
+        // A pane whose group is gone never comes back armed on one account; nor one on a group
+        // with no members.
         let kept = account.is_some() && !gone_group;
-        let account = account.or_else(|| trading.and_then(Trading::default_account));
+        let account = if group.is_some() {
+            account
+        } else {
+            account.or_else(|| trading.and_then(Trading::default_account))
+        };
         PaneTrade {
             account,
             bracket: saved.and_then(|s| s.bracket),
@@ -343,9 +349,7 @@ impl PaneTrade {
         {
             let g = (g.name.clone(), g.members.clone());
             drop(c);
-            if let Some(first) = g.1.first() {
-                self.account = Some(first.clone());
-            }
+            self.account = g.1.first().cloned();
             self.group = Some(g);
             self.pending_group = None;
             self.seen = u64::MAX;
@@ -1193,9 +1197,8 @@ pub fn set_group<V: TradePane>(v: &mut V, name: String, cx: &mut Context<V>) {
         cx.notify();
         return;
     }
-    if let Some(first) = members.first() {
-        t.account = Some(first.clone());
-    }
+    // Its first member, or (none) no account: never one outside the group.
+    t.account = members.first().cloned();
     t.group = Some((name, members));
     t.resize_edit = None;
     t.seen = u64::MAX;
@@ -1225,6 +1228,16 @@ pub fn for_group(
     let Some((group, members)) = group else {
         return Ok(cmd);
     };
+    // A pane always names the members it saw: with none, the core would take the empty list
+    // as unchecked and place on whoever the members are now.
+    if members.is_empty()
+        && matches!(
+            cmd,
+            TradeCommand::PlaceOrder(_) | TradeCommand::PlaceBracket(_)
+        )
+    {
+        return Err("this group has no members");
+    }
     let group = group.to_owned();
     let members = members.to_vec();
     Ok(match cmd {
@@ -1937,6 +1950,7 @@ fn group_data(
             // Long and short members: no one position to show (and no new order goes).
             if p.mixed {
                 data.position = None;
+                data.stop = None;
             }
         }
     }
@@ -6438,6 +6452,8 @@ mod tests {
         };
         let place = TradeCommand::PlaceOrder(spec.clone());
         assert_eq!(for_group(None, place.clone()), Ok(place.clone()));
+        // A pane on a group it sees empty never sends an order (the core would not check it).
+        assert!(for_group(Some(("Empty", &[])), place.clone()).is_err());
         assert_eq!(
             for_group(g, place),
             Ok(TradeCommand::GroupPlace {

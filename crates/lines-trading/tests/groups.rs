@@ -798,4 +798,6 @@ fn a_group_order_for_old_members_is_refused() {
     assert_eq!(r.core.open_orders(&id("b")).count(), 0, "b never got one");
     // The members now, in any order.
     r.cmd(order(&["b", "a"])).expect("as they are");
+    // None named (the API, scripts): not checked.
+    assert_eq!(r.cmd(order(&[])).expect("unchecked").len(), 2);
 }
