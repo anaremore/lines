@@ -69,6 +69,8 @@ pub struct Shot {
     /// More read-only live accounts on the demo broker, its Sim account tradable
     /// (`--demo-accounts`).
     pub demo_accounts: usize,
+    /// The demo broker's venue warning (`--venue-warning`).
+    pub venue_warning: Option<String>,
     /// Synthetic executions made outside Lines on the demo broker (`--demo-fills`).
     pub demo_fills: bool,
     /// A broker's refusal on the demo SIM account, six ticks above the last trade
@@ -253,6 +255,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         max_order_qty,
         demo_broker,
         demo_accounts,
+        venue_warning,
         demo_fills,
         dom_flash,
         strategies_demo,
@@ -318,6 +321,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
             d.market_time.unwrap_or(lines_core::UtcMillis(0)),
             demo_accounts,
             demo_fills,
+            venue_warning.clone(),
         )];
         // Synthetic venue: its positions may be marked from the recording.
         setup.venue_marks_always = true;

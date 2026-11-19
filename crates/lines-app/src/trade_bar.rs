@@ -1885,6 +1885,8 @@ struct BarData {
     rules: Vec<(&'static str, Money, Money)>,
     /// The account's trading state, as words, when it isn't active.
     blocked: Option<String>,
+    /// The account's venue warns about a setting that changes Lines' orders there.
+    venue_warning: Option<String>,
     /// Short form of `blocked` for the switch's badge.
     blocked_short: Option<&'static str>,
     /// The guardrail lockout in force, as words (`guard_line`), and its state.
@@ -1936,6 +1938,7 @@ fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
         badge: info.badge,
         read_only: info.read_only.clone(),
         venue: info.venue.and_then(|i| venue_words(t, i)),
+        venue_warning: info.venue.and_then(|i| t.venue_warning(i)),
         position: None,
         stop: None,
         target: None,
@@ -4031,6 +4034,13 @@ pub fn dom_bar<V: TradePane>(
             (None, None, Some(b)) => status.child(lock_strip(
                 b,
                 "Flatten and Cancel all still work",
+                narrow,
+                t,
+            )),
+            // The venue changes Lines' orders (a setting there): said here, where it's seen.
+            (None, None, None) if d.venue_warning.is_some() => status.child(lock_strip(
+                d.venue_warning.as_deref().expect("checked"),
+                "",
                 narrow,
                 t,
             )),

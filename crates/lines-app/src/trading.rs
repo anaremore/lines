@@ -1890,6 +1890,16 @@ impl Trading {
             .cloned()
     }
 
+    /// A venue's warning ([`VenueStatus::warning`]), as the watcher last read it.
+    pub fn venue_warning(&self, venue: usize) -> Option<String> {
+        let v = self.venues.get(venue)?;
+        v.status
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|s| s.warning.clone())
+    }
+
     /// A venue's short name (the account list's section headers).
     pub fn venue_short(&self, venue: usize) -> Option<String> {
         self.venues.get(venue).map(|v| v.short.clone())

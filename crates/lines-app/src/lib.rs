@@ -820,6 +820,10 @@ struct Cli {
     /// (the account list's sections and scrolling).
     #[arg(long, value_name = "N", requires = "demo_broker", default_value_t = 0)]
     demo_accounts: usize,
+    /// Screenshot: the demo broker warns about a setting at the venue (TEXT): the panel's
+    /// notice line.
+    #[arg(long, value_name = "TEXT", requires = "demo_broker")]
+    venue_warning: Option<String>,
     /// Screenshot: the demo broker reports synthetic executions made outside Lines (round
     /// trips on its LIVE account over three trade dates, one on the first extra account), for
     /// the journal; its LIVE account gets the built-in preset with a consistency rule.
@@ -2372,6 +2376,7 @@ where
                 max_order_qty: cli.max_order_qty,
                 demo_broker: cli.demo_broker,
                 demo_accounts: cli.demo_accounts,
+                venue_warning: cli.venue_warning.clone(),
                 demo_fills: cli.demo_fills,
                 dom_flash: cli.dom_flash.clone(),
                 strategies_demo: cli.strategies_demo,
