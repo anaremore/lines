@@ -20,7 +20,16 @@
 //!   without one, a dash. A file that isn't there says so in a notice.
 //! - **By account / by tag** (phase 2; header tabs, palette, pane menu, saved with the pane):
 //!   trades, win rate, net, average trade, profit factor and max drawdown per account or tag
-//!   (a trade with several tags counts in each), over the same dates as the strip.
+//!   (a trade with several tags counts in each), over the same dates as the strip. By account
+//!   adds each account's consistency-rule progress (its prop preset's rule, over all dates;
+//!   `stats::consistency`), and so does the strip when the pane shows one account.
+//! - **Accounts shown** (header chip, palette, pane menu, saved with the pane): every account,
+//!   one account group, or one account. The rows, the strip, the tables and the header's mark
+//!   all follow it. Broker accounts (a venue observed, trades placed outside Lines included)
+//!   are journaled like paper.
+//! - **Broker fills**: a net P&L whose fees are the product fee table's estimate (the broker
+//!   reported none) reads `est.`; MAE/MFE that Lines' own market data didn't cover read
+//!   "no data", never a guess. An account no current list has shows only the end of its id.
 //!
 //! The pane reads `lines_trading::JournalShared`'s published snapshots (the journal runs on its
 //! own thread): it polls the journal's lock-free revision (like a store's), takes the newest
@@ -51,7 +60,7 @@ use crate::pnl::{self, PnlDisplay};
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
 use crate::trading::Trading;
-use crate::wsdoc::{JournalGroup, JournalState, PaneDoc};
+use crate::wsdoc::{JournalFilter, JournalGroup, JournalState, PaneDoc};
 
 const ROW_H_100: f32 = 18.0;
 
@@ -149,7 +158,10 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
         _ => dash(),
     };
     let net = t.net();
-    let pnl = if mode.money() {
+    let pnl = if mode.money() && t.fees_estimated() {
+        // The fees are the product fee table's (the broker reported none): money-relevant.
+        format!("{} est.", money_text(net))
+    } else if mode.money() {
         money_text(net)
     } else if mode.ticks() {
         ticks.map_or_else(dash, per_contract_text)
@@ -163,6 +175,9 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
         None => "— / —".to_owned(),
     };
     let excursions = match (mode.money(), mode.ticks()) {
+        (false, false) => dash(),
+        // Lines' market data didn't cover the trade: never a guess from its fills.
+        _ if t.excursion_unavailable => "no data".to_owned(),
         (true, true) => format!(
             "{} / {}  ({excursion_ticks})",
             money_text(t.mae),
@@ -170,7 +185,6 @@ pub fn row(t: &Trade, mode: PnlDisplay) -> Row {
         ),
         (true, false) => format!("{} / {}", money_text(t.mae), money_text(t.mfe)),
         (false, true) => excursion_ticks,
-        (false, false) => dash(),
     };
     Row {
         id: t.id.clone(),
@@ -330,13 +344,14 @@ pub fn stats_text(label: &str, s: &Stats, open: usize, mode: PnlDisplay) -> Stri
         .join("  ·  ")
 }
 
-/// Columns of the by-account and by-tag tables.
-pub const GROUP_COLS: usize = 7;
+/// Columns of the by-account and by-tag tables (the last, consistency, by account only).
+pub const GROUP_COLS: usize = 8;
 
 /// One account's or tag's line (formatted once per journal change).
 #[derive(Clone, Debug, PartialEq)]
 pub struct GroupRow {
-    /// Name, trades, win rate, net, average trade, profit factor, max drawdown.
+    /// Name, trades, win rate, net, average trade, profit factor, max drawdown, consistency
+    /// (empty by tag).
     pub cells: [String; GROUP_COLS],
     /// Net P&L sign, for its color (its text is signed too); 0 when money isn't shown.
     pub sign: i8,
@@ -356,7 +371,57 @@ pub fn group_headers(g: JournalGroup) -> [&'static str; GROUP_COLS] {
         "Avg trade",
         "Profit factor",
         "Max drawdown",
+        if g == JournalGroup::Accounts {
+            "Consistency (all dates)"
+        } else {
+            ""
+        },
     ]
+}
+
+/// An account's consistency-rule progress, in words (never color alone): the best trade
+/// date's share of the total profit against the rule, and, when over and money is shown, the
+/// profit still needed. `—` without a rule.
+pub fn consistency_text(c: Option<&stats::ConsistencyProgress>, mode: PnlDisplay) -> String {
+    let Some(c) = c else {
+        return "—".to_owned();
+    };
+    let max = c.max_pct;
+    match (c.best_pct, c.ok) {
+        (Some(p), Some(true)) => format!("best day {p}% of {max}% max: within"),
+        (Some(p), _) if mode.money() => format!(
+            "best day {p}% of {max}% max: over, needs {} more profit",
+            money_text(c.needed).trim_start_matches('+')
+        ),
+        (Some(p), _) => format!("best day {p}% of {max}% max: over"),
+        (None, _) => format!("no profit yet ({max}% max)"),
+    }
+}
+
+/// Each account's consistency rule (its maximum best-day share, percent): the prop rules
+/// Settings › Accounts gives it (by name, else id), else the rules in force at the core (a
+/// paper account's). An account without one isn't listed.
+fn consistency_rules(
+    accounts: &[crate::trading::AccountInfo],
+    settings: Option<&crate::picker::Settings>,
+) -> std::collections::BTreeMap<String, u8> {
+    accounts
+        .iter()
+        .filter_map(|a| {
+            let from_settings = settings.and_then(|s| {
+                [&a.name, &a.id.0]
+                    .into_iter()
+                    .find_map(|k| s.prop_rules.get(k))
+                    .map(|d| d.resolve().ok().flatten())
+            });
+            let rules = match from_settings {
+                Some(r) => r,
+                None => a.rules.clone(),
+            };
+            let pct = rules?.consistency?.max_best_day_pct;
+            Some((a.id.0.clone(), pct))
+        })
+        .collect()
 }
 
 /// The word for an account no current list has (a broker not connected yet or gone, an
@@ -401,12 +466,24 @@ pub(crate) fn account_badges(
         .collect()
 }
 
-/// An account's label, marked when no current list has it.
+/// An account's label, marked when no current list has it. An unlisted id shows only its last
+/// four characters (a broker's account id is private; its list, once connected, decides how
+/// much of it to show), except Lines' own paper ids.
 fn account_label(names: &std::collections::HashMap<String, String>, id: &str) -> String {
     names
         .get(id)
         .cloned()
-        .unwrap_or_else(|| format!("{UNLISTED} · {id}"))
+        .unwrap_or_else(|| format!("{UNLISTED} · {}", masked_id(id)))
+}
+
+/// `…1234` for an id longer than four characters; Lines' paper ids (`paper`, `paper-…`) whole.
+fn masked_id(id: &str) -> String {
+    let n = id.chars().count();
+    if id == "paper" || id.starts_with("paper-") || n <= 4 {
+        return id.to_owned();
+    }
+    let tail: String = id.chars().skip(n - 4).collect();
+    format!("…{tail}")
 }
 
 /// What the header says the pane's money is: the kinds of the accounts that have trades in
@@ -443,6 +520,7 @@ pub fn group_rows<'a>(
     trades: impl IntoIterator<Item = &'a Trade>,
     g: JournalGroup,
     names: &std::collections::HashMap<String, String>,
+    consistency: &std::collections::HashMap<String, String>,
     mode: PnlDisplay,
 ) -> Vec<GroupRow> {
     let by = match g {
@@ -458,6 +536,12 @@ pub fn group_rows<'a>(
         .into_iter()
         .map(|(key, s)| {
             let untagged = g == JournalGroup::Tags && key == stats::UNTAGGED;
+            let rule = match g {
+                JournalGroup::Accounts => {
+                    consistency.get(&key).cloned().unwrap_or_else(|| "—".into())
+                }
+                _ => String::new(),
+            };
             let name = match g {
                 _ if untagged => "untagged".to_owned(),
                 JournalGroup::Accounts => account_label(names, &key),
@@ -475,6 +559,7 @@ pub fn group_rows<'a>(
                         _ => "—".to_owned(),
                     },
                     money(Some(-s.max_drawdown)),
+                    rule,
                 ],
                 sign: if mode.money() {
                     s.net.0.signum() as i8
@@ -622,6 +707,12 @@ pub struct JournalView {
     /// change (a broker joins, a kind or name changes).
     accounts_seen: u64,
     all_dates: bool,
+    /// Which accounts are shown (`None`: every account).
+    filter: Option<JournalFilter>,
+    /// The ids `filter` keeps (a group's members as last read; `None`: every account).
+    keep: Option<std::collections::HashSet<String>>,
+    /// Each account's consistency rule (max best-day percent), as last read.
+    rules: std::collections::BTreeMap<String, u8>,
     selected: Option<String>,
     /// First row shown.
     scroll: usize,
@@ -655,13 +746,16 @@ impl Pane for JournalView {
 
     fn save_state(&self, doc: &mut PaneDoc) {
         let columns = self.cols.save(&JournalCol::ALL);
-        doc.journal = (self.all_dates || !columns.is_empty() || !self.group.is_trades()).then_some(
-            JournalState {
-                all_dates: self.all_dates,
-                columns,
-                group: self.group,
-            },
-        );
+        doc.journal = (self.all_dates
+            || !columns.is_empty()
+            || !self.group.is_trades()
+            || self.filter.is_some())
+        .then_some(JournalState {
+            all_dates: self.all_dates,
+            columns,
+            group: self.group,
+            filter: self.filter.clone(),
+        });
     }
 
     fn seen_revision(&mut self) -> &mut u64 {
@@ -731,6 +825,9 @@ impl JournalView {
             mark: None,
             accounts_seen: u64::MAX,
             all_dates: false,
+            filter: None,
+            keep: None,
+            rules: Default::default(),
             selected: None,
             scroll: 0,
             reveal: false,
@@ -744,7 +841,127 @@ impl JournalView {
     pub fn restore(&mut self, state: &JournalState) {
         self.all_dates = state.all_dates;
         self.group = state.group;
+        self.filter = state.filter.clone();
         self.cols.load(&JournalCol::ALL, &state.columns);
+    }
+
+    pub fn filter(&self) -> Option<&JournalFilter> {
+        self.filter.as_ref()
+    }
+
+    /// Show every account, one group or one account.
+    pub fn set_filter(&mut self, f: Option<JournalFilter>, cx: &mut Context<Self>) {
+        if self.filter != f {
+            self.filter = f;
+            self.keep = None;
+            self.scroll = 0;
+            self.group_scroll = 0;
+            self.editor = None;
+            self.built = None;
+            cx.notify();
+        }
+    }
+
+    /// What can be shown, in order: every account, each group (by name), each listed account,
+    /// then accounts with trades that no list has. Each with its label.
+    pub fn filter_choices(&self, cx: &App) -> Vec<(Option<JournalFilter>, String)> {
+        let mut out = vec![(None, "All accounts".to_owned())];
+        let Some(t) = Trading::try_global(cx) else {
+            return out;
+        };
+        let mut groups: Vec<String> = t
+            .cache
+            .read()
+            .groups()
+            .iter()
+            .map(|g| g.name.clone())
+            .collect();
+        groups.sort_by_key(|g| g.to_lowercase());
+        for g in groups {
+            let label = format!("Group · {g}");
+            out.push((Some(JournalFilter::Group(g)), label));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for a in t.accounts() {
+            if seen.insert(a.id.0.clone()) {
+                out.push((
+                    Some(JournalFilter::Account(a.id.0.clone())),
+                    account_label(&self.names, &a.id.0),
+                ));
+            }
+        }
+        if let Some(snap) = self.journal.as_ref().and_then(|j| j.snapshot()) {
+            for tr in &snap.trades {
+                if seen.insert(tr.account.0.clone()) {
+                    out.push((
+                        Some(JournalFilter::Account(tr.account.0.clone())),
+                        account_label(&self.names, &tr.account.0),
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// The header chip's and the menu's words for what is shown.
+    pub fn filter_label(&self) -> String {
+        match &self.filter {
+            None => "All accounts".to_owned(),
+            Some(JournalFilter::Group(g)) => format!("Group · {g}"),
+            Some(JournalFilter::Account(a)) => account_label(&self.names, a),
+        }
+    }
+
+    /// The next choice after the one shown (wrapping to every account).
+    pub fn next_filter(&mut self, cx: &mut Context<Self>) {
+        let choices = self.filter_choices(cx);
+        let i = choices
+            .iter()
+            .position(|(f, _)| *f == self.filter)
+            .map_or(0, |i| (i + 1) % choices.len());
+        let f = choices.into_iter().nth(i).and_then(|(f, _)| f);
+        self.set_filter(f, cx);
+    }
+
+    /// The choice a menu row names by its key (0: every account); `false` if none matches
+    /// now (the list changed since the menu opened).
+    pub fn pick_filter(&mut self, key: u64, cx: &mut Context<Self>) -> bool {
+        if key == 0 {
+            self.set_filter(None, cx);
+            return true;
+        }
+        let found = self
+            .filter_choices(cx)
+            .into_iter()
+            .find_map(|(f, _)| f.filter(|f| f.key() == key));
+        match found {
+            Some(f) => {
+                self.set_filter(Some(f), cx);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The account ids the filter keeps, from the account groups as they are now.
+    fn keep_of(&self, cx: &App) -> Option<std::collections::HashSet<String>> {
+        match &self.filter {
+            None => None,
+            Some(JournalFilter::Account(a)) => Some(std::iter::once(a.clone()).collect()),
+            Some(JournalFilter::Group(g)) => Some(
+                Trading::try_global(cx)
+                    .and_then(|t| {
+                        t.cache
+                            .read()
+                            .groups()
+                            .iter()
+                            .find(|x| x.name == *g)
+                            .map(|x| x.members.iter().map(|m| m.0.clone()).collect())
+                    })
+                    // A group that is gone keeps nothing (its name still shows).
+                    .unwrap_or_default(),
+            ),
+        }
     }
 
     pub fn group(&self) -> JournalGroup {
@@ -808,6 +1025,17 @@ impl JournalView {
     /// Show a trade (a click on its chart marker): the trades list, that trade selected and
     /// scrolled into view once its row is there.
     pub fn select_trade(&mut self, id: &str, cx: &mut Context<Self>) {
+        // A trade the filter hides: show every account, so the trade asked for is there.
+        let hidden = self.keep.as_ref().is_some_and(|keep| {
+            self.journal
+                .as_ref()
+                .and_then(|j| j.snapshot())
+                .and_then(|s| s.trades.iter().find(|t| t.id == id).cloned())
+                .is_some_and(|t| !keep.contains(&t.account.0))
+        });
+        if hidden {
+            self.set_filter(None, cx);
+        }
         self.group = JournalGroup::Trades;
         self.selected = Some(id.to_owned());
         // Scrolled to at paint: a journal opened for it has no rows or size yet.
@@ -874,6 +1102,29 @@ impl JournalView {
         self.badges = account_badges(&accounts);
     }
 
+    /// The accounts' consistency rules (from settings, else the core's) and the filter's
+    /// accounts: read each render, as a Settings or group change moves no journal revision; a
+    /// change rebuilds the lines.
+    fn refresh_rules(&mut self, cx: &App) {
+        let Some(t) = Trading::try_global(cx) else {
+            return;
+        };
+        let settings = cx
+            .try_global::<crate::picker_view::AppSettings>()
+            .map(|a| &a.settings);
+        let rules = consistency_rules(&t.accounts(), settings);
+        if rules != self.rules {
+            self.rules = rules;
+            self.built = None;
+        }
+        // A group's members as they are now.
+        let keep = self.keep_of(cx);
+        if keep != self.keep {
+            self.keep = keep;
+            self.built = None;
+        }
+    }
+
     /// Rebuild rows and stats if the journal moved. Returns false if the journal was busy
     /// this instant (try again on the next poll).
     fn rebuild(&mut self) -> bool {
@@ -904,8 +1155,11 @@ impl JournalView {
             self.scroll += added;
         }
         let names = &self.names;
-        self.rows = snap
-            .trades
+        let keep = &self.keep;
+        let kept = |a: &str| keep.as_ref().is_none_or(|k| k.contains(a));
+        let trades: Vec<&Trade> = snap.trades.iter().filter(|t| kept(&t.account.0)).collect();
+        let open = snap.open_accounts.iter().filter(|a| kept(&a.0)).count();
+        self.rows = trades
             .iter()
             .rev()
             .map(|t| {
@@ -914,24 +1168,51 @@ impl JournalView {
                 r
             })
             .collect();
-        self.mark = view_mark(
-            snap.trades.iter().map(|t| t.account.0.as_str()),
-            &self.badges,
-        );
+        // With a filter, what the pane shows; with none, as before (the listed accounts'
+        // kinds while nothing has traded).
+        self.mark = if keep.is_some() && trades.is_empty() {
+            None
+        } else {
+            view_mark(trades.iter().map(|t| t.account.0.as_str()), &self.badges)
+        };
+        // Consistency over every date of each account shown, by its rule.
+        let consistency: std::collections::HashMap<String, String> = self
+            .rules
+            .iter()
+            .filter(|(a, _)| kept(a))
+            .map(|(a, &pct)| {
+                let c =
+                    stats::consistency(trades.iter().copied().filter(|t| t.account.0 == *a), pct);
+                (a.clone(), consistency_text(c.as_ref(), mode))
+            })
+            .collect();
+        let one = match &self.filter {
+            Some(JournalFilter::Account(a)) => consistency.get(a),
+            _ => None,
+        };
         self.stats_today = stats_items(
             // The trade date the stats count (the exchange's), not the display zone's day: a
             // Tokyo evening trade is the next morning there. It says whose date it is.
             &format!("Trade date {today} (exchange)"),
-            &Stats::of(snap.trades.iter().filter(|t| t.trade_date == today)),
-            snap.open,
+            &Stats::of(trades.iter().copied().filter(|t| t.trade_date == today)),
+            open,
             mode,
         );
-        self.stats_all = stats_items("All dates", &Stats::of(&snap.trades), snap.open, mode);
+        self.stats_all = stats_items("All dates", &Stats::of(trades.iter().copied()), open, mode);
+        if let Some(c) = one {
+            for s in [&mut self.stats_today, &mut self.stats_all] {
+                s.push(item(format!("consistency: {c}")));
+            }
+        }
         let all = self.all_dates;
         self.groups = group_rows(
-            snap.trades.iter().filter(|t| all || t.trade_date == today),
+            trades
+                .iter()
+                .copied()
+                .filter(|t| all || t.trade_date == today),
             self.group,
             names,
+            &consistency,
             mode,
         );
         // Fewer lines than before (another date range, a tag gone): keep the first in view.
@@ -1236,12 +1517,18 @@ impl JournalView {
                 *wc = wc.max(self.glyphs.width(cell, t.text_main, c == 3, window));
             }
         }
-        for wc in &mut widths {
-            *wc += pad() * 4.0;
+        for (wc, head) in widths.iter_mut().zip(heads) {
+            // By tag has no consistency column.
+            *wc = if head.is_empty() {
+                0.0
+            } else {
+                *wc + pad() * 4.0
+            };
         }
         // The name column always shows (cut to fit if it must, at least 80 px); number
-        // columns that don't fit whole are left out from the right.
-        let numbers: f32 = widths[1..].iter().sum();
+        // columns that don't fit whole are left out from the right. The consistency column
+        // (last, wide) never squeezes the name: it is the first left out.
+        let numbers: f32 = widths[1..GROUP_COLS - 1].iter().sum();
         widths[0] = widths[0].min((w - numbers).max(80.0)).min(w);
         let mut shown = 1;
         let mut used = widths[0];
@@ -1401,6 +1688,36 @@ impl JournalView {
             }))
     }
 
+    /// Which accounts are shown, in words; a click shows the next (every account, each group,
+    /// each account). The pane menu's Accounts list picks one directly.
+    fn filter_chip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let t = self.theme;
+        div()
+            .id("journal-filter")
+            .flex_shrink_0()
+            .px_1()
+            .rounded_sm()
+            .border_1()
+            .border_color(t.axis_line)
+            .cursor_pointer()
+            .text_color(if self.filter.is_some() {
+                t.text_main
+            } else {
+                t.text_dim
+            })
+            .when(self.filter.is_some(), |d| {
+                d.font_weight(gpui::FontWeight::SEMIBOLD)
+            })
+            .child(self.filter_label())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.next_filter(cx);
+                }),
+            )
+    }
+
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
         let right = match &self.journal {
@@ -1458,7 +1775,8 @@ impl JournalView {
                                         .into_any_element(),
                                 }
                             }))
-                            .child(self.group_tabs(cx)),
+                            .child(self.group_tabs(cx))
+                            .child(self.filter_chip(cx)),
                     )
                     .child(div().text_color(t.text_dim).child(right)),
             )
@@ -1576,6 +1894,7 @@ impl JournalView {
 impl Render for JournalView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.refresh_accounts(cx);
+        self.refresh_rules(cx);
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()
             .map(|a| a.settings.pnl_display)
@@ -1844,7 +2163,14 @@ mod tests {
         let all = [win, loss, plain];
         let names: std::collections::HashMap<String, String> =
             [("eval".to_owned(), "Paper 50K eval".to_owned())].into();
-        let by_account = group_rows(&all, JournalGroup::Accounts, &names, PnlDisplay::Both);
+        let no_rules = std::collections::HashMap::new();
+        let by_account = group_rows(
+            &all,
+            JournalGroup::Accounts,
+            &names,
+            &no_rules,
+            PnlDisplay::Both,
+        );
         let cells = |r: &GroupRow| r.cells.clone();
         assert_eq!(
             cells(&by_account[1]),
@@ -1855,7 +2181,8 @@ mod tests {
                 "−$4.96",
                 "−$2.48",
                 "0.00",
-                "−$4.96"
+                "−$4.96",
+                "—"
             ]
             .map(String::from)
         );
@@ -1869,27 +2196,50 @@ mod tests {
                 "+$310.02",
                 "+$310.02",
                 "—",
-                "$0.00"
+                "$0.00",
+                "—"
             ]
             .map(String::from),
             "an account no list has says so, with its id"
         );
-        let by_tag = group_rows(&all, JournalGroup::Tags, &names, PnlDisplay::Both);
+        let by_tag = group_rows(
+            &all,
+            JournalGroup::Tags,
+            &names,
+            &no_rules,
+            PnlDisplay::Both,
+        );
         let order: Vec<&str> = by_tag.iter().map(|r| r.cells[0].as_str()).collect();
         assert_eq!(order, ["A+", "breakout", "fade", "untagged"]);
         assert_eq!(by_tag[0].cells[3], "+$310.02");
-        let off = group_rows(&all, JournalGroup::Tags, &names, PnlDisplay::Off);
+        let off = group_rows(&all, JournalGroup::Tags, &names, &no_rules, PnlDisplay::Off);
         assert!(off.iter().all(|r| r.sign == 0));
         assert!(
-            off.iter().all(|r| r.cells[3..].iter().all(|c| c == "—")),
+            off.iter()
+                .all(|r| r.cells[3..GROUP_COLS - 1].iter().all(|c| c == "—")),
             "no money"
         );
         assert_eq!(off[0].cells[1..3], ["1".to_owned(), "100%".to_owned()]);
         // With money hidden the order is by name, so it doesn't tell the P&L either.
-        let off_accounts = group_rows(&all, JournalGroup::Accounts, &names, PnlDisplay::Off);
+        let off_accounts = group_rows(
+            &all,
+            JournalGroup::Accounts,
+            &names,
+            &no_rules,
+            PnlDisplay::Off,
+        );
         let order: Vec<&str> = off_accounts.iter().map(|r| r.cells[0].as_str()).collect();
         assert_eq!(order, ["Paper 50K eval", "UNLISTED · paper"]);
-        assert!(group_rows(&all, JournalGroup::Trades, &names, PnlDisplay::Both).is_empty());
+        assert!(
+            group_rows(
+                &all,
+                JournalGroup::Trades,
+                &names,
+                &no_rules,
+                PnlDisplay::Both
+            )
+            .is_empty()
+        );
         // Each account says paper or live in words (a broker account next to paper ones).
         let account = |id: &str, name: &str, paper: bool, badge| crate::trading::AccountInfo {
             id: AccountId::new(id),
@@ -1956,6 +2306,143 @@ mod tests {
         let clash = [clash[1].clone(), clash[0].clone()];
         assert_eq!(account_badges(&clash)["same"], "LIVE");
         assert_eq!(group_headers(JournalGroup::Tags)[0], "Tag");
+        // By tag has no consistency column; by account does.
+        assert_eq!(group_headers(JournalGroup::Tags)[GROUP_COLS - 1], "");
+        assert!(off.iter().all(|r| r.cells[GROUP_COLS - 1].is_empty()));
+        assert_eq!(
+            group_headers(JournalGroup::Accounts)[GROUP_COLS - 1],
+            "Consistency (all dates)"
+        );
+    }
+
+    /// A broker trade whose fees are the fee table's says `est.` on its net; one Lines' market
+    /// data didn't cover says "no data" for MAE/MFE in every mode that shows numbers.
+    #[test]
+    fn broker_rows_label_estimates_and_unmeasured_excursions() {
+        let mut t = trade();
+        for f in &mut t.fills {
+            f.fee_estimated = true;
+        }
+        t.excursion_unavailable = true;
+        let c = |m: PnlDisplay| {
+            let r = row(&t, m);
+            (
+                r.cells[JournalCol::Pnl.index()].clone(),
+                r.cells[JournalCol::MaeMfe.index()].clone(),
+            )
+        };
+        assert_eq!(
+            c(PnlDisplay::Both),
+            ("+$310.02 est.".into(), "no data".into())
+        );
+        assert_eq!(c(PnlDisplay::Ticks).1, "no data");
+        assert_eq!(
+            c(PnlDisplay::Ticks).0,
+            "+6.3 t/ct",
+            "ticks are by price: no fees"
+        );
+        assert_eq!(c(PnlDisplay::Off), ("—".into(), "—".into()));
+        // A measured paper trade reads as before.
+        assert_eq!(
+            row(&trade(), PnlDisplay::Both).cells[JournalCol::Pnl.index()],
+            "+$310.02"
+        );
+    }
+
+    /// An account no list has (a broker not connected yet) shows only the end of its id;
+    /// Lines' paper ids show whole.
+    #[test]
+    fn unlisted_broker_ids_are_masked() {
+        let none = std::collections::HashMap::new();
+        assert_eq!(account_label(&none, "ACCT-0000123456"), "UNLISTED · …3456");
+        assert_eq!(account_label(&none, "paper-eval"), "UNLISTED · paper-eval");
+        assert_eq!(account_label(&none, "paper"), "UNLISTED · paper");
+        assert_eq!(masked_id("abcd"), "abcd");
+    }
+
+    /// Consistency in words: within, over (with the profit needed only when money shows), no
+    /// profit yet, no rule.
+    #[test]
+    fn consistency_reads_in_words() {
+        let mut win = trade(); // +$310.02 on 2026-11-05
+        win.id = "w".into();
+        let mut small = trade();
+        small.id = "s".into();
+        small.realized = Money::cents(10_248); // net +$100.00
+        small.trade_date = CivilDate::new(2026, 11, 6).unwrap();
+        let c = stats::consistency([&win, &small], 50);
+        assert_eq!(
+            consistency_text(c.as_ref(), PnlDisplay::Both),
+            "best day 75% of 50% max: over, needs $210.02 more profit"
+        );
+        assert_eq!(
+            consistency_text(c.as_ref(), PnlDisplay::Off),
+            "best day 75% of 50% max: over"
+        );
+        let c = stats::consistency([&win, &small], 80);
+        assert_eq!(
+            consistency_text(c.as_ref(), PnlDisplay::Both),
+            "best day 75% of 80% max: within"
+        );
+        let mut loss = trade();
+        loss.realized = Money::ZERO;
+        let c = stats::consistency([&loss], 30);
+        assert_eq!(
+            consistency_text(c.as_ref(), PnlDisplay::Both),
+            "no profit yet (30% max)"
+        );
+        assert_eq!(consistency_text(None, PnlDisplay::Both), "—");
+    }
+
+    /// Each account's rule: Settings › Accounts' prop rules (by name, else id) win over the
+    /// core's; an account with neither, or a preset without consistency, has none.
+    #[test]
+    fn consistency_rules_come_from_settings_else_the_core() {
+        let preset = |pct: Option<u8>| {
+            let mut p = lines_trading::rules::presets()
+                .into_iter()
+                .next()
+                .expect("a built-in preset");
+            p.consistency = pct.map(|p| lines_trading::rules::Consistency {
+                max_best_day_pct: p,
+            });
+            p
+        };
+        let account = |id: &str, name: &str, rules| crate::trading::AccountInfo {
+            id: AccountId::new(id),
+            name: name.into(),
+            paper: false,
+            rules,
+            option_guard: Default::default(),
+            venue: Some(0),
+            badge: "LIVE",
+            read_only: None,
+            start_balance: None,
+        };
+        let accounts = [
+            account("a1", "Eval one", Some(preset(Some(40)))),
+            account("a2", "Eval two", None),
+            account("a3", "Funded", Some(preset(None))),
+        ];
+        let core = consistency_rules(&accounts, None);
+        assert_eq!(
+            core.into_iter().collect::<Vec<_>>(),
+            [("a1".to_owned(), 40)]
+        );
+        let with = lines_trading::rules::presets()
+            .into_iter()
+            .find(|p| p.consistency.is_some())
+            .expect("a built-in preset with consistency");
+        let pct = with.consistency.as_ref().unwrap().max_best_day_pct;
+        let mut settings = crate::picker::Settings::default();
+        settings.prop_rules.insert(
+            "Eval two".into(),
+            serde_json::from_value(serde_json::json!({ "preset": with.name })).unwrap(),
+        );
+        let both = consistency_rules(&accounts, Some(&settings));
+        assert_eq!(both.get("a2"), Some(&pct), "by name, from settings");
+        assert_eq!(both.get("a1"), Some(&40));
+        assert_eq!(both.get("a3"), None);
     }
 
     #[test]

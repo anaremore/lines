@@ -152,3 +152,61 @@ pub fn grouped<'a>(
     }
     groups.into_iter().map(|(k, v)| (k, Stats::of(v))).collect()
 }
+
+/// One account's progress through a consistency rule (a prop preset's: the best trade date may
+/// hold at most `max_pct` percent of the total profit), from its closed trades in the journal:
+/// net after fees per trade date. Open trades don't count, so it can differ from the rule
+/// strip's figure while a position is open (that one counts today's open P&L).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConsistencyProgress {
+    pub max_pct: u8,
+    /// Σ net of every trade date.
+    pub total: Money,
+    /// The best trade date and its net (`None`: no trades).
+    pub best_day: Option<(lines_core::CivilDate, Money)>,
+    /// The best day's share of the total, whole percent rounded down (the rule strip's
+    /// arithmetic); `None` without a total profit.
+    pub best_pct: Option<u8>,
+    /// Within the rule, exactly (`None` without a total profit: nothing to measure yet).
+    pub ok: Option<bool>,
+    /// More total profit needed for the best day to fit (zero when it does).
+    pub needed: Money,
+}
+
+/// [`ConsistencyProgress`] over `trades` (one account's), for a rule of `max_pct` percent;
+/// `None` for a rule of 0 % (nothing can meet it).
+pub fn consistency<'a>(
+    trades: impl IntoIterator<Item = &'a Trade>,
+    max_pct: u8,
+) -> Option<ConsistencyProgress> {
+    if max_pct == 0 {
+        return None;
+    }
+    let mut days: BTreeMap<lines_core::CivilDate, Money> = BTreeMap::new();
+    for t in trades {
+        *days.entry(t.trade_date).or_insert(Money::ZERO) += t.net();
+    }
+    let total = days.values().fold(Money::ZERO, |a, &b| a + b);
+    // The first of equal best days (dates in order).
+    let best_day = days.iter().fold(
+        None,
+        |best: Option<(lines_core::CivilDate, Money)>, (&d, &m)| match best {
+            Some((_, b)) if b >= m => best,
+            _ => Some((d, m)),
+        },
+    );
+    let best = best_day.map_or(Money::ZERO, |(_, m)| m.max(Money::ZERO));
+    let best_pct = (total > Money::ZERO).then(|| ((best.0 * 100) / total.0).clamp(0, 255) as u8);
+    // best × 100 ≤ max × total  ⇔  total ≥ ⌈best × 100 / max⌉.
+    let max = i128::from(max_pct);
+    let required = Money((best.0 * 100 + max - 1) / max);
+    Some(ConsistencyProgress {
+        max_pct,
+        total,
+        best_day,
+        best_pct,
+        // Exact, not from the rounded percent: 30.4 % is over a 30 % rule.
+        ok: (total > Money::ZERO).then(|| best.0 * 100 <= max * total.0),
+        needed: (required - total).max(Money::ZERO),
+    })
+}

@@ -610,6 +610,24 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     j.push("--paper".into());
     j.push("buy 2 mkt; ack; print 6011.50; wait 20; sell 2 mkt; ack".into());
     v.push(s("journal", false, end, j));
+    // A broker's executions made outside Lines (synthetic): fee-table estimates labelled,
+    // MAE/MFE "no data" where Lines' prints didn't cover a trade, consistency progress.
+    for (name, file, theme) in [
+        ("journal-broker-dark", "journal.json", "dark"),
+        ("journal-broker-light", "journal.json", "light"),
+        ("journal-broker-accounts", "journal-accounts.json", "dark"),
+        (
+            "journal-broker-accounts-light",
+            "journal-accounts.json",
+            "light",
+        ),
+    ] {
+        let mut a = vec!["--workspace".into(), ws(file)];
+        a.extend(args(&format!(
+            "--size 1400x800 --theme {theme} --demo-broker --demo-accounts 1 --demo-fills"
+        )));
+        v.push(s(name, false, end, a));
+    }
     // The strategy panel (decision 0025) on the synthetic instances, beside a DOM.
     let mut st = vec![
         "--workspace".into(),
@@ -1486,6 +1504,14 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         pane("dom", ""),
         pane("journal", "")
     );
+    let journal_accounts = format!(
+        r#"{{ "split": {{ "axis": "column", "ratio": 0.4, "first": {}, "second": {} }} }}"#,
+        pane("dom", ""),
+        pane(
+            "journal",
+            r#", "journal": { "group": "accounts", "all_dates": true }"#
+        )
+    );
     let strategies = format!(
         r#"{{ "split": {{ "axis": "row", "ratio": 0.35, "first": {}, "second": {} }} }}"#,
         pane("dom", ""),
@@ -1693,6 +1719,7 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ("footprint.json", footprint),
         ("footprint-500t.json", footprint_500t),
         ("journal.json", journal),
+        ("journal-accounts.json", journal_accounts),
         ("strategies.json", strategies),
         ("strategy-marks.json", strategy_marks),
         ("unlinked.json", unlinked),

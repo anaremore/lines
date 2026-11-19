@@ -1555,13 +1555,18 @@ impl WindowView {
             Command::JournalEdit
             | Command::JournalAllDates
             | Command::JournalOpenChart
-            | Command::JournalGroup(_) => {
+            | Command::JournalGroup(_)
+            | Command::JournalFilter(_) => {
                 let Some(PaneHandle::Journal(j)) = self.tab().focused_handle().cloned() else {
                     self.refuse("focus the journal first (Open journal)", cx);
                     return;
                 };
                 if let Command::JournalGroup(g) = cmd {
                     j.update(cx, |v, cx| v.set_group(g, cx));
+                } else if let Command::JournalFilter(f) = cmd {
+                    if !j.update(cx, |v, cx| journal_filter(v, f, cx)) {
+                        self.refuse("that account or group is no longer listed", cx);
+                    }
                 } else if cmd == Command::JournalAllDates {
                     j.update(cx, |v, cx| v.toggle_all_dates(cx));
                 } else if cmd == Command::JournalOpenChart {
@@ -2722,10 +2727,23 @@ impl WindowView {
             _ => None,
         };
         let journal = match h {
-            PaneHandle::Journal(j) => Some(JournalMenu {
-                group: j.read(cx).group(),
-                all_dates: j.read(cx).all_dates(),
-            }),
+            PaneHandle::Journal(j) => {
+                let v = j.read(cx);
+                let shown = v.filter().cloned();
+                Some(JournalMenu {
+                    group: v.group(),
+                    all_dates: v.all_dates(),
+                    filter: v.filter_label(),
+                    filters: v
+                        .filter_choices(cx)
+                        .into_iter()
+                        .map(|(f, label)| {
+                            let on = f == shown;
+                            (label, f.as_ref().map_or(0, |f| f.key()), on)
+                        })
+                        .collect(),
+                })
+            }
             _ => None,
         };
         PaneMenu {
@@ -5840,4 +5858,25 @@ fn palette_rank(
         history,
         &mut crate::picker::Searcher::default(),
     )
+}
+
+/// Run a journal filter command on a journal pane (main window or popped out); `false` when
+/// the row picked is no longer listed.
+pub(crate) fn journal_filter(
+    v: &mut crate::journal_view::JournalView,
+    f: crate::commands::JournalFilterCmd,
+    cx: &mut Context<crate::journal_view::JournalView>,
+) -> bool {
+    use crate::commands::JournalFilterCmd as F;
+    match f {
+        F::All => {
+            v.set_filter(None, cx);
+            true
+        }
+        F::Next => {
+            v.next_filter(cx);
+            true
+        }
+        F::Pick(key) => v.pick_filter(key, cx),
+    }
 }

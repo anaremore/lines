@@ -69,6 +69,8 @@ pub struct Shot {
     /// More read-only live accounts on the demo broker, its Sim account tradable
     /// (`--demo-accounts`).
     pub demo_accounts: usize,
+    /// Synthetic executions made outside Lines on the demo broker (`--demo-fills`).
+    pub demo_fills: bool,
     /// Synthetic strategy instances for the strategy panel (`--strategies-demo`).
     pub strategies_demo: bool,
     /// Charts and DOMs start with the account list open (`--account-menu`).
@@ -246,6 +248,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         max_order_qty,
         demo_broker,
         demo_accounts,
+        demo_fills,
         strategies_demo,
         account_menu,
         panel_menu,
@@ -307,6 +310,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
             d.product.price.tick,
             d.market_time.unwrap_or(lines_core::UtcMillis(0)),
             demo_accounts,
+            demo_fills,
         )];
         // Synthetic venue: its positions may be marked from the recording.
         setup.venue_marks_always = true;
@@ -422,6 +426,21 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
                 fail(&anyhow::anyhow!("--update-shot: {e}"));
             }
             let mut settings = AppSettings::ephemeral();
+            // `--demo-fills`: the demo LIVE account under a preset with a consistency rule, as
+            // Settings › Accounts would give it.
+            if demo_fills
+                && let Some(p) = lines_trading::rules::presets()
+                    .into_iter()
+                    .find(|p| p.consistency.is_some())
+            {
+                settings.settings.prop_rules.insert(
+                    crate::demo_broker::LIVE_NAME.into(),
+                    crate::settings_schema::PropRulesDoc {
+                        preset: Some(p.name),
+                        ..Default::default()
+                    },
+                );
+            }
             // `--ui-zoom` as Settings › Appearance would have saved it (its row shows it).
             settings.settings.ui_zoom = ui_zoom.and_then(crate::zoom::saved);
             // `--ui-font` as Settings › Appearance would have saved it (its row shows it).

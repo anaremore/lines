@@ -572,6 +572,7 @@ mod tests {
             fee: Money::ZERO,
             source,
             reconciled: false,
+            fee_estimated: false,
         };
         Trade {
             id: "t".into(),
@@ -597,6 +598,7 @@ mod tests {
             note: String::new(),
             screenshots: Vec::new(),
             incomplete: false,
+            excursion_unavailable: false,
         }
     }
 

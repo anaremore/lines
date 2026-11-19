@@ -2,7 +2,10 @@
 //! a SIM and a LIVE account, both read-only (observe mode), the SIM one long 2 with a working
 //! sell limit on the recording's contract. With `--demo-accounts N`: N more read-only live
 //! accounts, and the SIM account tradable, to show the account list's sections. Its broker
-//! accepts nothing either way: a request that reached it would only be logged.
+//! accepts nothing either way: a request that reached it would only be logged. With
+//! `--demo-fills` it reports a few made-up executions placed outside Lines (no fees, like a
+//! venue that reports none), for the journal: round trips on its LIVE account over three trade
+//! dates, and one on the first extra account.
 
 use std::sync::Arc;
 
@@ -59,7 +62,7 @@ impl AccountSource for Accounts {
             },
             ExtensionAccount {
                 id: AccountId::new(LIVE),
-                label: "Demo live".into(),
+                label: LIVE_NAME.into(),
                 kind: AccountKind::Live,
                 tradable: Err("live trading off".into()),
             },
@@ -87,6 +90,8 @@ impl AccountSource for Accounts {
 
 struct DemoBroker {
     snapshot: BrokerSnapshot,
+    /// `--demo-fills`' executions, until the first poll.
+    fills: Vec<BrokerEvent>,
 }
 
 impl Broker for DemoBroker {
@@ -100,7 +105,9 @@ impl Broker for DemoBroker {
         tracing::error!("demo broker: a request reached a read-only venue");
     }
     fn market(&mut self, _now: UtcMillis, _c: ContractKey, _i: &MarketInput) {}
-    fn poll(&mut self, _now: UtcMillis, _out: &mut Vec<BrokerEvent>) {}
+    fn poll(&mut self, _now: UtcMillis, out: &mut Vec<BrokerEvent>) {
+        out.append(&mut self.fills);
+    }
     fn next_wake(&self) -> Option<UtcMillis> {
         None
     }
@@ -115,6 +122,48 @@ struct Demo {
     last: Price,
     tick: i64,
     at: UtcMillis,
+    fills: bool,
+}
+
+impl Demo {
+    /// `--demo-fills`: executions made outside Lines, reported once at the first poll. Nets on
+    /// LIVE (ES: $12.50 a tick): +$300 two trade dates back, +$100 the day before, +$50 just
+    /// before `at` (inside the recording); on the first extra account, −$50 half an hour back.
+    fn executions(&self) -> Vec<BrokerEvent> {
+        if !self.fills {
+            return Vec::new();
+        }
+        const DAY: i64 = 86_400_000;
+        let t = self.tick;
+        let mut n = 0;
+        let mut fill = |account: &str, side, ticks: i64, qty, ago_ms: i64| {
+            n += 1;
+            BrokerEvent::ExternalFill {
+                account: AccountId::new(account),
+                contract: self.contract,
+                side,
+                price: Price(self.last.0 + ticks * t),
+                qty: Qty(qty),
+                fee: Money::ZERO,
+                at: UtcMillis(self.at.0 - ago_ms),
+                trade_id: format!("demo-x{n}"),
+            }
+        };
+        let mut v = vec![
+            fill(LIVE, Side::Buy, 0, 2, 2 * DAY + 600_000),
+            fill(LIVE, Side::Sell, 12, 2, 2 * DAY),
+            fill(LIVE, Side::Buy, -4, 1, DAY + 900_000),
+            fill(LIVE, Side::Sell, 4, 1, DAY),
+            fill(LIVE, Side::Sell, 2, 1, 90_000),
+            fill(LIVE, Side::Buy, -2, 1, 30_000),
+        ];
+        if self.extra > 0 {
+            let first = extra_id(1);
+            v.push(fill(&first, Side::Buy, 0, 1, 1_800_000));
+            v.push(fill(&first, Side::Sell, -4, 1, 1_500_000));
+        }
+        v
+    }
 }
 
 impl BrokerExtension for Demo {
@@ -189,6 +238,7 @@ impl BrokerExtension for Demo {
             updated: self.at,
         };
         Ok(Box::new(DemoBroker {
+            fills: self.executions(),
             snapshot: BrokerSnapshot {
                 accounts: vec![
                     BrokerAccount {
@@ -228,6 +278,7 @@ pub fn extension(
     tick: i64,
     at: UtcMillis,
     extra: usize,
+    fills: bool,
 ) -> Arc<dyn BrokerExtension> {
     Arc::new(Demo {
         extra,
@@ -235,5 +286,9 @@ pub fn extension(
         last,
         tick,
         at,
+        fills,
     })
 }
+
+/// The demo LIVE account's name (Settings › Accounts keys prop rules by it).
+pub const LIVE_NAME: &str = "Demo live";
