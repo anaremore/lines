@@ -9,7 +9,7 @@ use std::sync::Arc;
 use lines_core::{ContractKey, Price, Qty, UtcMillis};
 use lines_trading::broker::{BrokerAccount, BrokerPosition};
 use lines_trading::extension::{
-    AccountKind, AccountSource, BrokerExtension, ExtensionAccount, VenueStatus,
+    AccountKind, AccountSource, BrokerExtension, ExtensionAccount, Field, FieldKind, VenueStatus,
 };
 use lines_trading::order::Role;
 use lines_trading::position::{Lot, Position};
@@ -108,6 +108,30 @@ impl BrokerExtension for Demo {
     }
     fn accounts(&self) -> Arc<dyn AccountSource> {
         Arc::new(Accounts)
+    }
+    /// A local venue's settings, as an observe-only broker describes them (Settings ›
+    /// Connections evidence).
+    fn fields(&self) -> Vec<Field> {
+        let text = |key, label| Field {
+            key,
+            label,
+            kind: FieldKind::Text,
+            required: false,
+            env: None,
+            keychain: None,
+        };
+        vec![
+            text("host", "Host"),
+            text("port", "Port"),
+            text("username", "User name"),
+            Field {
+                kind: FieldKind::Secret,
+                ..text("password", "Password")
+            },
+        ]
+    }
+    fn plan(&self) -> Option<String> {
+        Some("Observe only: order entry disabled".to_owned())
     }
     fn open(&self) -> anyhow::Result<Box<dyn Broker>> {
         let mut long2 = Position::default();

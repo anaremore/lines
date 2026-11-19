@@ -3396,16 +3396,8 @@ impl SettingsWindow {
         use crate::connections_view::Action;
         match a {
             Action::Switch(name, on) => update_settings(cx, |s| {
-                if on {
-                    s.sources.remove(&name);
-                } else {
-                    s.sources.insert(
-                        name,
-                        crate::sources::SourcePrefs {
-                            enabled: Some(false),
-                        },
-                    );
-                }
+                let opt_in = crate::connections::broker_opt_in(&name);
+                crate::connections::switch(&mut s.sources, name, on, opt_in);
             }),
             Action::Edit(name, field) => {
                 let buf = match field.kind {

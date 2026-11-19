@@ -305,6 +305,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         )];
         // Synthetic venue: its positions may be marked from the recording.
         setup.venue_marks_always = true;
+        crate::connections::set_brokers(&setup.brokers, &setup.brokers);
     }
     let mut trading = Trading::start(
         setup,
