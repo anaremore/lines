@@ -58,12 +58,15 @@ impl Broker for Picky {
         _ctx: &RequestContext,
     ) -> Result<(), String> {
         match new {
-            Admit::Place(spec, _) => {
+            Admit::Place(spec, role) => {
                 self.asked
                     .lock()
                     .unwrap()
-                    .push(format!("place {:?}", spec.kind));
-                Ok(())
+                    .push(format!("place {:?} {role:?}", spec.kind));
+                match spec.kind {
+                    OrderKind::StopLimit { .. } => Err("picky: no stop-limits".into()),
+                    _ => Ok(()),
+                }
             }
             Admit::Bracket(b) => {
                 self.asked
@@ -159,4 +162,27 @@ fn a_broker_refusal_before_sending_is_a_command_reject() {
     );
     assert_eq!(*b.sent.lock().unwrap(), ["bracket", "place"]);
     assert_eq!(b.asked.lock().unwrap().len(), 3, "asked before each");
+
+    // A single order it won't send: the same, a command reject with nothing made.
+    core.submit(
+        t0(),
+        Source::Dom,
+        Instant::now(),
+        Command::PlaceOrder(spec(OrderKind::StopLimit {
+            trigger: Price(601000),
+            limit: Price(601250),
+        })),
+    );
+    let events = core.drain();
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Command { result: Err(r), .. } if r.message == "picky: no stop-limits"
+    )));
+    assert!(!events.iter().any(|e| matches!(e, Event::Order(_))));
+    assert_eq!(b.sent.lock().unwrap().len(), 2, "nothing more sent");
+    let asked = b.asked.lock().unwrap().clone();
+    assert!(
+        asked[2].ends_with("Single"),
+        "a plain order is asked as Single: {asked:?}"
+    );
 }

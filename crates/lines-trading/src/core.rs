@@ -2264,7 +2264,12 @@ impl TradingCore {
 
     /// The broker's own pre-check of a new order or bracket ([`Broker::admit`]): a refusal
     /// refuses the command (DENIED), before any order exists.
-    fn admit(&mut self, now: UtcMillis, env: &Envelope, new: Admit<'_>) -> Result<(), Reject> {
+    pub(super) fn admit(
+        &mut self,
+        now: UtcMillis,
+        env: &Envelope,
+        new: Admit<'_>,
+    ) -> Result<(), Reject> {
         let ctx = RequestContext::new(env.source, env.pane);
         self.broker
             .admit(now, new, &ctx)
