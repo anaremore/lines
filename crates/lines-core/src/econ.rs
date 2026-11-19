@@ -569,6 +569,167 @@ impl EconSchedule {
     pub fn minutes_left(now: UtcMillis, until: UtcMillis) -> i64 {
         ((until.0 - now.0).max(0) + MINUTE - 1) / MINUTE
     }
+
+    /// The schedule in its file format (parses back to an equal schedule): how a refreshed
+    /// schedule is cached.
+    pub fn to_text(&self) -> String {
+        use std::fmt::Write as _;
+        let mut out = format!(
+            "format 1
+version {}
+zone {}
+",
+            self.version, self.zone
+        );
+        for (i, r) in self.releases.iter().enumerate() {
+            let _ = write!(
+                out,
+                "
+release {}
+name {}
+agency {}
+importance {}
+affects {}
+coverage {} {} {}
+",
+                r.key,
+                r.name,
+                r.agency,
+                r.importance.as_str(),
+                r.affects.join(" "),
+                r.coverage.0,
+                r.coverage.1,
+                if r.coverage_verified {
+                    "verified"
+                } else {
+                    "unverified"
+                },
+            );
+            for src in &r.sources {
+                let _ = writeln!(out, "source {src}");
+            }
+            for e in self.events.iter().filter(|e| e.release == i) {
+                let (date, time) = self.local(e.at);
+                let st = if e.verified { "verified" } else { "unverified" };
+                let _ = writeln!(out, "{date} {time} {st} {}", e.label);
+            }
+        }
+        out
+    }
+
+    /// This schedule with official release dates fetched from `source` (a refresh, roadmap
+    /// 8b), as of the local date `today`:
+    ///
+    /// - For a release with dates, its events from `today` through the last fetched date are
+    ///   the fetched ones: a date the schedule had and the source no longer lists is gone
+    ///   (rescheduled), a date both list keeps the schedule's line (its time, label and
+    ///   status), and a new date gets the release's usual local time (the most common among
+    ///   its events), `unverified`, labelled by its month. Events before `today` and after
+    ///   the last fetched date stay. Coverage runs through the later of the old end and the
+    ///   last fetched date, `unverified` when a new date came in.
+    /// - A release the source didn't answer for (absent from `fetched`, or only past dates)
+    ///   stays as it was.
+    /// - The version becomes `today` only when every release was answered (`complete`):
+    ///   otherwise the unanswered ones would look freshly checked.
+    pub fn refreshed(
+        &self,
+        fetched: &[(String, Vec<CivilDate>)],
+        source: &dyn Fn(&str) -> Option<String>,
+        today: CivilDate,
+        complete: bool,
+    ) -> Result<EconSchedule, ScheduleError> {
+        let mut out = self.clone();
+        let mut events: Vec<EconEvent> = Vec::with_capacity(self.events.len());
+        for (i, r) in self.releases.iter().enumerate() {
+            let old: Vec<(CivilDate, &EconEvent)> = self
+                .events
+                .iter()
+                .filter(|e| e.release == i)
+                .map(|e| (self.local_date(e.at), e))
+                .collect();
+            let mut dates: Vec<CivilDate> = fetched
+                .iter()
+                .find(|(k, _)| *k == r.key)
+                .map(|(_, d)| d.iter().copied().filter(|d| *d >= today).collect())
+                .unwrap_or_default();
+            dates.sort();
+            dates.dedup();
+            let (Some(&first), Some(&last)) = (dates.first(), dates.last()) else {
+                events.extend(old.iter().map(|(_, e)| (*e).clone()));
+                continue;
+            };
+            let time = usual_time(old.iter().map(|(_, e)| self.local_time(e)));
+            let mut added = false;
+            for (d, e) in &old {
+                if *d < today || *d > last {
+                    events.push((*e).clone());
+                }
+            }
+            for d in dates {
+                match old.iter().find(|(od, _)| *od == d) {
+                    Some((_, e)) => events.push((*e).clone()),
+                    None => {
+                        let Some(at) = exact_instant(&self.tz, d, time) else {
+                            return err(0, format!("{} on {d} {time}: not exactly once", r.key));
+                        };
+                        added = true;
+                        events.push(EconEvent {
+                            at,
+                            release: i,
+                            label: format!("{} {} release", MONTHS[d.month as usize - 1], d.year),
+                            verified: false,
+                        });
+                    }
+                }
+            }
+            let rel = &mut out.releases[i];
+            rel.coverage.0 = rel.coverage.0.min(first);
+            rel.coverage.1 = rel.coverage.1.max(last);
+            if added {
+                rel.coverage_verified = false;
+            }
+            if let Some(src) = source(&r.key)
+                && !rel.sources.contains(&src)
+            {
+                rel.sources.push(src);
+            }
+        }
+        events.sort_by_key(|e| e.at);
+        out.events = events;
+        if complete {
+            out.version = out.version.max(today);
+        }
+        // Through the parser again: every rule a file must meet, a refreshed one meets.
+        EconSchedule::parse(&out.to_text())
+    }
+}
+
+const MONTHS: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+/// The most common time among `times` (ties: the earliest), 08:30 when there are none.
+fn usual_time(times: impl Iterator<Item = LocalTime>) -> LocalTime {
+    let mut seen: Vec<(LocalTime, usize)> = Vec::new();
+    for t in times {
+        match seen.iter_mut().find(|(s, _)| *s == t) {
+            Some((_, n)) => *n += 1,
+            None => seen.push((t, 1)),
+        }
+    }
+    seen.sort_by_key(|&(t, n)| (std::cmp::Reverse(n), t));
+    seen.first().map_or(LocalTime::hm(8, 30), |&(t, _)| t)
 }
 
 #[cfg(test)]

@@ -81,6 +81,8 @@ enum Msg {
     /// before a jump back.
     ReplayFresh,
     Sync(Sender<()>),
+    /// A newer economic calendar (a refresh): news blackouts read it from the next check.
+    Econ(Arc<lines_core::econ::EconSchedule>),
     Shutdown,
 }
 
@@ -129,6 +131,12 @@ impl TradingHandle {
     /// message, not a command (no result event).
     pub fn strategy_heartbeat(&self) {
         let _ = self.tx.send(Msg::StrategyHeartbeat);
+    }
+
+    /// The economic calendar news blackouts read from now on (a refresh replaced it). A
+    /// message, not a command (no result event).
+    pub fn set_econ_schedule(&self, schedule: Arc<lines_core::econ::EconSchedule>) {
+        let _ = self.tx.send(Msg::Econ(schedule));
     }
 
     /// Every event from now on.
@@ -514,6 +522,7 @@ fn run(
                 }
                 Ok(Msg::Sync(tx)) => syncs.push(tx),
                 Ok(Msg::StrategyHeartbeat) => last_beat = Some(Instant::now()),
+                Ok(Msg::Econ(s)) => core.set_econ_schedule(Some(s)),
                 Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
                     stop = true;
                     break;

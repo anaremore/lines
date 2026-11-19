@@ -8,16 +8,52 @@ use lines_core::econ::{EconSchedule, Importance};
 use lines_trading::news::{self, NewsAction, NewsBlackout, NewsStatus};
 
 /// A schedule standing in for the bundled one (screenshots: `--econ-calendar`), set once at
-/// start before anything reads it.
+/// start before anything reads it. Never replaced by a refresh.
 static OVERRIDE: std::sync::OnceLock<std::sync::Arc<EconSchedule>> = std::sync::OnceLock::new();
 
-/// The economic calendar the app and its trading cores read: the bundled one, unless a
-/// screenshot run gave another.
+/// The refreshed (or cached) schedule, once there is one (`crate::econ_refresh`).
+static CURRENT: std::sync::RwLock<Option<std::sync::Arc<EconSchedule>>> =
+    std::sync::RwLock::new(None);
+
+/// The trading cores that read the calendar: each gets every newer schedule.
+static CORES: std::sync::Mutex<Vec<lines_trading::service::TradingHandle>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// The economic calendar the app and its trading cores read: a screenshot's, else the
+/// refreshed or cached one, else the bundled one. Cheap (a lock read and a reference count):
+/// panes call it every frame.
 pub fn schedule() -> std::sync::Arc<EconSchedule> {
-    OVERRIDE
-        .get()
-        .cloned()
+    if let Some(o) = OVERRIDE.get() {
+        return o.clone();
+    }
+    CURRENT
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
         .unwrap_or_else(lines_feed::econ::bundled)
+}
+
+/// A newer schedule (a refresh, or the cache at start): panes read it from their next frame,
+/// every core that follows the calendar from its next check. Ignored under an override.
+pub fn replace(s: std::sync::Arc<EconSchedule>) {
+    if OVERRIDE.get().is_some() {
+        return;
+    }
+    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(s.clone());
+    for h in CORES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        h.set_econ_schedule(s.clone());
+    }
+}
+
+/// A core reads the calendar from now on (given [`schedule`] when it started): it gets each
+/// [`replace`].
+pub fn follow(h: lines_trading::service::TradingHandle) {
+    let mut cores = CORES.lock().unwrap_or_else(|e| e.into_inner());
+    // A refresh between the core's start and now isn't missed.
+    if CURRENT.read().unwrap_or_else(|e| e.into_inner()).is_some() {
+        h.set_econ_schedule(schedule());
+    }
+    cores.push(h);
 }
 
 /// Read a schedule file (the bundled format) to stand in for the bundled one.
@@ -27,6 +63,68 @@ pub fn set_override_from(path: &std::path::Path) -> anyhow::Result<()> {
     let s = EconSchedule::parse(&text).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     let _ = OVERRIDE.set(std::sync::Arc::new(s));
     Ok(())
+}
+
+/// Where the calendar refresh stands (`crate::econ_refresh` writes it; the palette list and
+/// Settings › Connections read it).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Refresh {
+    /// No FRED API key: no refresh runs.
+    pub no_key: bool,
+    pub running: bool,
+    /// The last refresh that brought dates (wall time).
+    pub updated: Option<UtcMillis>,
+    /// The last try's problem (`None`: it worked, or none ran yet).
+    pub problem: Option<String>,
+    /// This run doesn't refresh (screenshots, headless runs, tests).
+    pub not_this_run: bool,
+}
+
+static REFRESH: std::sync::RwLock<Refresh> = std::sync::RwLock::new(Refresh {
+    no_key: false,
+    running: false,
+    updated: None,
+    problem: None,
+    not_this_run: true,
+});
+
+pub fn refresh() -> Refresh {
+    REFRESH.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn set_refresh(f: impl FnOnce(&mut Refresh)) {
+    f(&mut REFRESH.write().unwrap_or_else(|e| e.into_inner()));
+}
+
+/// The calendar's state in words, and whether it is a problem (stale, or a failed refresh):
+/// "Calendar of 2026-11-19 · updated 2026-11-19 08:00", "Refresh failed: …". `fmt` writes a
+/// time in the display zone. Never color alone: a problem says so in its words.
+pub fn refresh_text(
+    r: &Refresh,
+    s: &EconSchedule,
+    now: UtcMillis,
+    fmt: &dyn Fn(UtcMillis) -> String,
+) -> (String, bool) {
+    let stale = s.local_date(now).days() - s.version.days() > lines_core::econ::STALE_AFTER_DAYS;
+    let of = format!(
+        "Calendar of {}{}",
+        s.version,
+        if stale { " (stale)" } else { "" }
+    );
+    let (text, bad) = if r.running {
+        (format!("{of} · refreshing…"), stale)
+    } else if let Some(p) = &r.problem {
+        (format!("{of} · refresh failed: {p}"), true)
+    } else if let Some(t) = r.updated {
+        (format!("{of} · updated {}", fmt(t)), stale)
+    } else if r.not_this_run {
+        (format!("{of} · not refreshed in this run"), stale)
+    } else if r.no_key {
+        (format!("{of} · no refresh: FRED API key not set up"), stale)
+    } else {
+        (of, stale)
+    };
+    (text, bad)
 }
 
 /// A release this close affecting the pane's product shows its countdown.

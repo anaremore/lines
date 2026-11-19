@@ -140,6 +140,11 @@ pub enum Command {
     OpenChain,
     /// Show the positions pane: focus one, else open one in a new tab.
     OpenPositions,
+    /// Every account's guardrails and lockout state (roadmap 8b), a list in the palette's
+    /// place; a row opens Settings › Accounts on its account.
+    Guardrails,
+    /// The economic calendar: its state and the upcoming releases (roadmap 8b).
+    EconCalendar,
     /// The focused chain's One-click switch: a click on a bid or ask sends a limit there.
     ChainOneClick,
     /// The focused option chain's chart beside it, on one price scale (decision 0029).
@@ -952,6 +957,8 @@ pub fn label(c: Command) -> String {
         Command::OpenJournal => "Open journal".into(),
         Command::OpenChain => "Open option chain".into(),
         Command::OpenPositions => "Open positions".into(),
+        Command::Guardrails => "Trade: Guardrails and lockouts (every account)".into(),
+        Command::EconCalendar => "Economic calendar: upcoming releases".into(),
         Command::StartRecording => "Start recording".into(),
         Command::StopRecording => "Stop recording".into(),
         Command::ChainOneClick => "Option chain: One-click on/off".into(),
@@ -1158,6 +1165,8 @@ pub fn palette() -> Vec<Command> {
         Command::OpenJournal,
         Command::OpenChain,
         Command::OpenPositions,
+        Command::Guardrails,
+        Command::EconCalendar,
         Command::ChainOneClick,
         Command::ChainChart,
         Command::ChainPnl,
@@ -1797,6 +1806,10 @@ mod tests {
             )))]
         );
         assert_eq!(filter("performance", &p), vec![Command::TogglePerfStats]);
+        // Roadmap 8b: the guardrails list and the calendar, by the words a trader types.
+        assert_eq!(filter("lockouts", &p), vec![Command::Guardrails]);
+        assert!(filter("guardrails", &p).contains(&Command::Guardrails));
+        assert_eq!(filter("economic calendar", &p), vec![Command::EconCalendar]);
         // Timeframes: one entry each, "Timeframe: 1m" … "Timeframe: 1W"; no keys of their own
         // (digits and letters typed on a chart are the chart's).
         assert_eq!(

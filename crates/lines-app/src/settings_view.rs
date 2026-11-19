@@ -592,6 +592,21 @@ pub fn open_section(section: schema::Section, cx: &mut App) {
     open(schema::all().iter().position(|s| s.section == section), cx);
 }
 
+/// Settings › Accounts on one account (the palette's guardrails list).
+pub fn open_account(id: &str, cx: &mut App) {
+    open_section(schema::Section::Accounts, cx);
+    if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
+        let id = id.to_owned();
+        let _ = h.update(cx, |v, _, cx| {
+            if let Some(a) = v.facts.accounts.iter().find(|a| a.id == id) {
+                v.target.account = Some(a.id.clone());
+                v.target.account_name = Some(a.name.clone());
+            }
+            cx.notify();
+        });
+    }
+}
+
 /// Settings › Groups, typing a new group's name or with the new paper account's form open
 /// (the palette's "New group…" and "New paper account…").
 pub fn open_groups(start: crate::groups_view::Start, cx: &mut App) {
@@ -3577,12 +3592,20 @@ impl SettingsWindow {
             Action::Remove(name, key) => {
                 if self.conn.press_remove(&name, key) {
                     self.conn.reload(Some(Box::new(move || {
-                        crate::connections::remove_secret(&name, key)
+                        let r = crate::connections::remove_secret(&name, key);
+                        if name == crate::econ_refresh::NAME {
+                            crate::econ_refresh::refresh_now();
+                        }
+                        r
                     })));
                 }
             }
             Action::Set(name, key, value) => {
                 self.conn_commit(crate::connections_view::Commit::Plain(name, key, value), cx)
+            }
+            // The calendar's Refresh now: its refresher, not a feed.
+            Action::Test(name) if name == crate::econ_refresh::NAME => {
+                crate::econ_refresh::refresh_now()
             }
             Action::Test(name) => self.conn.start_test(&name, cx),
             Action::Save => {
@@ -3601,7 +3624,11 @@ impl SettingsWindow {
         use crate::connections_view::Commit;
         match c {
             Commit::Secret(name, key, value) => self.conn.reload(Some(Box::new(move || {
-                crate::connections::set_secret(&name, key, &value)
+                let r = crate::connections::set_secret(&name, key, &value);
+                if name == crate::econ_refresh::NAME {
+                    crate::econ_refresh::refresh_now();
+                }
+                r
             }))),
             Commit::Plain(name, key, value) => {
                 update_settings(cx, |s| {

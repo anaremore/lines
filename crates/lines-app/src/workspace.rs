@@ -320,6 +320,10 @@ impl PaneHandle {
         }
     }
 
+    fn store(&self, cx: &App) -> std::sync::Arc<lines_feed::store::ChartStore> {
+        each!(self, e => e.read(cx).store().clone())
+    }
+
     fn set_feed(&self, feed: PaneFeed, cx: &mut App) {
         each!(self, e => e.update(cx, |p, cx| p.set_feed(feed, cx)))
     }
@@ -786,6 +790,86 @@ enum Prompt {
         history: crate::palette_rank::PaletteHistory,
         recall: crate::palette_rank::Recall,
     },
+    /// A list in the palette's place (`crate::palette_lists`), its rows built afresh each
+    /// frame (a lockout ends, a refresh finishes while it is open).
+    List {
+        kind: ListKind,
+        selected: usize,
+    },
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ListKind {
+    Guardrails,
+    Calendar,
+}
+
+impl ListKind {
+    fn title(self) -> &'static str {
+        match self {
+            ListKind::Guardrails => "Guardrails",
+            ListKind::Calendar => "Economic calendar",
+        }
+    }
+}
+
+/// A list's rows at `now` (the trading clock: market time in a replay).
+fn list_items(
+    kind: ListKind,
+    now: lines_core::UtcMillis,
+    cx: &App,
+) -> Vec<crate::palette_lists::Item> {
+    use crate::palette_lists as pl;
+    match kind {
+        ListKind::Calendar => pl::calendar_items(
+            &crate::econ_ui::schedule(),
+            &crate::econ_ui::refresh(),
+            now,
+            &lines_core::display_tz::current(),
+        ),
+        ListKind::Guardrails => {
+            let Some(t) = crate::trading::Trading::try_global(cx) else {
+                return pl::guardrail_items(&[]);
+            };
+            // Accounts Lines sends orders for (live accounts are read-only: no guardrails).
+            let accounts: Vec<_> = t
+                .accounts()
+                .into_iter()
+                .filter(|a| a.read_only.is_none())
+                .collect();
+            let state = t.cache.read();
+            let views: Vec<_> = accounts
+                .iter()
+                .map(|a| {
+                    let limits = state.account(&a.id).map(|v| v.limits.clone());
+                    let lock = state.guard(&a.id).map(|g| {
+                        let l = lines_trading::guardrails::Lockout {
+                            state: g.state,
+                            reason: g.reason.clone().unwrap_or_default(),
+                            until: g.until.unwrap_or(now),
+                            date: None,
+                        };
+                        (g.state, l.message(now))
+                    });
+                    (limits, lock)
+                })
+                .collect();
+            drop(state);
+            let rows: Vec<pl::AccountIn<'_>> = accounts
+                .iter()
+                .zip(&views)
+                .map(|(a, (limits, lock))| pl::AccountIn {
+                    id: &a.id.0,
+                    name: &a.name,
+                    badge: a.badge,
+                    in_force: limits.as_ref().map(|l| &l.guardrails_in_force),
+                    pending: limits.as_ref().and_then(|l| l.guardrails_pending.as_ref()),
+                    lock: lock.clone(),
+                })
+                .collect();
+            pl::guardrail_items(&rows)
+        }
+    }
 }
 
 /// Dragging a pane by its header (out of the window pops it out).
@@ -1666,6 +1750,18 @@ impl WindowView {
                     selected: 0,
                     history,
                     recall: Default::default(),
+                });
+            }
+            Command::Guardrails => {
+                self.prompt = Some(Prompt::List {
+                    kind: ListKind::Guardrails,
+                    selected: 0,
+                });
+            }
+            Command::EconCalendar => {
+                self.prompt = Some(Prompt::List {
+                    kind: ListKind::Calendar,
+                    selected: 0,
                 });
             }
             Command::NextTab => {
@@ -2837,6 +2933,7 @@ impl WindowView {
     /// Enter in the open prompt (or a click on a row): save, open the selected workspace, run
     /// the selected command.
     fn prompt_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let list_now = self.list_now(cx);
         match self.prompt.as_mut() {
             Some(Prompt::SaveAs { text, error }) => match wsdoc::valid_name(text) {
                 Ok(name) => {
@@ -2882,6 +2979,27 @@ impl WindowView {
                     self.run(cmd, window, cx);
                 }
             }
+            Some(Prompt::List { kind, selected }) => {
+                use crate::palette_lists::Open;
+                let kind = *kind;
+                let open = list_items(kind, list_now, cx)
+                    .get(*selected)
+                    .and_then(crate::palette_lists::Item::open);
+                match open {
+                    Some(Open::Account(id)) => {
+                        self.prompt = None;
+                        crate::settings_view::open_account(&id, cx);
+                    }
+                    Some(Open::Connections) => {
+                        self.prompt = None;
+                        crate::settings_view::open_section(
+                            crate::settings_schema::Section::Connections,
+                            cx,
+                        );
+                    }
+                    None => {}
+                }
+            }
             // The replay bar's Go to: a time in the display time zone; jumps and pauses there.
             Some(Prompt::GoTo { text, error }) => {
                 let now = cx
@@ -2902,11 +3020,25 @@ impl WindowView {
         }
     }
 
+    /// The time the palette's lists read: the trading clock on the focused pane's data (the
+    /// replay's time in a replay), else the wall's.
+    fn list_now(&self, cx: &App) -> lines_core::UtcMillis {
+        self.tab()
+            .focused_handle()
+            .map(|h| h.store(cx))
+            .and_then(|st| crate::trading::Trading::try_global(cx)?.now(&st))
+            .unwrap_or_else(lines_feed::now_utc)
+    }
+
     /// A click on row `i` of the open list: as Enter on it.
     fn prompt_pick(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         crate::popover::mark_moved_under_pointer();
         match self.prompt.as_mut() {
-            Some(Prompt::Open { selected, .. } | Prompt::Palette { selected, .. }) => *selected = i,
+            Some(
+                Prompt::Open { selected, .. }
+                | Prompt::Palette { selected, .. }
+                | Prompt::List { selected, .. },
+            ) => *selected = i,
             _ => return,
         }
         self.prompt_enter(window, cx);
@@ -2914,8 +3046,10 @@ impl WindowView {
     }
 
     /// The wheel over the open list: the selection moves `rows` (the list follows it).
-    fn prompt_wheel(&mut self, rows: isize) {
+    fn prompt_wheel(&mut self, rows: isize, cx: &App) {
+        let now = self.list_now(cx);
         let (selected, n) = match self.prompt.as_mut() {
+            Some(Prompt::List { kind, selected }) => (selected, list_items(*kind, now, cx).len()),
             Some(Prompt::Open {
                 items, selected, ..
             }) => (selected, items.len()),
@@ -2932,6 +3066,7 @@ impl WindowView {
     fn prompt_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let key = k.key.as_str();
+        let list_now = self.list_now(cx);
         if key == "escape" {
             self.prompt = None;
             cx.notify();
@@ -2958,6 +3093,14 @@ impl WindowView {
                             *error = None;
                         }
                     }
+                }
+            }
+            Some(Prompt::List { kind, selected }) => {
+                let n = list_items(*kind, list_now, cx).len().max(1);
+                match key {
+                    "down" => *selected = (*selected + 1) % n,
+                    "up" => *selected = (*selected + n - 1) % n,
+                    _ => {}
                 }
             }
             Some(Prompt::Open {
@@ -4042,7 +4185,11 @@ impl WindowView {
             "palette" => Command::Palette,
             "open" => Command::Open,
             "save" => Command::SaveAs,
-            _ => anyhow::bail!("--prompt: expected palette[:QUERY], open or save"),
+            "guardrails" => Command::Guardrails,
+            "calendar" => Command::EconCalendar,
+            _ => anyhow::bail!(
+                "--prompt: expected palette[:QUERY], open, save, guardrails or calendar"
+            ),
         };
         self.run(cmd, window, cx);
         if let Some(Prompt::Palette {
@@ -4516,6 +4663,110 @@ impl WindowView {
                     error.clone(),
                 )
             }
+            Prompt::List { kind, selected } => {
+                use crate::palette_lists::Item;
+                let items = list_items(*kind, self.list_now(cx), cx);
+                let mut list = div().flex().flex_col().py_1();
+                // A window of rows around the selection (the wheel and keys move it).
+                let first = selected.saturating_sub(9);
+                for (i, item) in items.iter().enumerate().skip(first).take(10) {
+                    let sel = i == *selected;
+                    let line = |text: String, strong: bool| {
+                        div()
+                            .min_w_0()
+                            .text_color(if strong { t.text_main } else { t.text_dim })
+                            .when(strong, |d| d.font_weight(gpui::FontWeight::BOLD))
+                            .child(text)
+                    };
+                    let body = match item {
+                        Item::Account {
+                            name,
+                            badge,
+                            state,
+                            lines,
+                            ..
+                        } => {
+                            let head = div()
+                                .flex()
+                                .flex_row()
+                                .justify_between()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(div().text_color(t.text_main).child(name.clone()))
+                                        .child(
+                                            div()
+                                                .px_1()
+                                                .border_1()
+                                                .border_color(t.axis_line)
+                                                .rounded_sm()
+                                                .text_size(crate::zoom::ui(11.0))
+                                                .text_color(t.text_main)
+                                                .child(*badge),
+                                        ),
+                                )
+                                .child(div().text_color(t.text_main).child(*state));
+                            let mut col = div().flex().flex_col().flex_1().min_w_0().child(head);
+                            for (text, warn) in lines {
+                                col = col.child(line(text.clone(), *warn));
+                            }
+                            col
+                        }
+                        Item::Calendar { text, bad } => {
+                            div().flex_1().min_w_0().child(line(text.clone(), *bad))
+                        }
+                        Item::Release {
+                            when,
+                            importance,
+                            title,
+                            agency,
+                        } => div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(crate::zoom::ui(118.0))
+                                    .flex_none()
+                                    .text_color(t.text_main)
+                                    .child(when.clone()),
+                            )
+                            .child(
+                                div()
+                                    .w(crate::zoom::ui(52.0))
+                                    .flex_none()
+                                    .text_color(t.text_main)
+                                    .when(*importance == "high", |d| {
+                                        d.font_weight(gpui::FontWeight::BOLD)
+                                    })
+                                    .child(*importance),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(t.text_main)
+                                    .child(title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(t.text_dim)
+                                    .child(agency.clone()),
+                            ),
+                        Item::Empty(text) => div().child(line(text.clone(), false)),
+                    };
+                    list = list.child(row("list-row", i, sel, cx).child(body));
+                }
+                (crate::popover::Panel::Palette, kind.title(), list, None)
+            }
             Prompt::Palette {
                 query,
                 shown,
@@ -4597,7 +4848,7 @@ impl WindowView {
                             .on_scroll(cx.listener(|this, ev: &gpui::ScrollEvent, window, cx| {
                                 let n = crate::popover::wheel_rows(ev, window);
                                 if n != 0 {
-                                    this.prompt_wheel(n);
+                                    this.prompt_wheel(n, cx);
                                     cx.notify();
                                 }
                             }))

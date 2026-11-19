@@ -540,6 +540,15 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
     let mut brokers_heading = false;
     for row in conn::rows() {
         let name = row.name.clone();
+        if row.calendar {
+            out = out.child(
+                div()
+                    .mt_2()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(t.text_main)
+                    .child("Economic calendar"),
+            );
+        }
         if row.broker.is_some() && !brokers_heading {
             // Brokers after the sources, under their own heading: not a data source.
             brokers_heading = true;
@@ -594,8 +603,23 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
             Some(_) => conn::broker_state(&name, on),
             None => conn::state(on, entry.is_some(), needs, &feeds),
         };
+        // The calendar's state is its refresh's, in words.
+        let calendar_state = row.calendar.then(|| {
+            let zone = lines_core::display_tz::current();
+            crate::econ_ui::refresh_text(
+                &crate::econ_ui::refresh(),
+                &crate::econ_ui::schedule(),
+                lines_feed::now_utc(),
+                &|t| crate::palette_lists::when(&zone, t),
+            )
+        });
         let checking = !row.fields.is_empty() && page.loaded.is_none();
-        let dot = match state.tone() {
+        let tone = match &calendar_state {
+            Some((_, true)) => Tone::Bad,
+            Some(_) => Tone::Good,
+            None => state.tone(),
+        };
+        let dot = match tone {
             Tone::Good => div().size(crate::zoom::ui(8.0)).rounded_full().bg(t.accent),
             Tone::Bad => div()
                 .size(crate::zoom::ui(8.0))
@@ -608,21 +632,28 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                 .border_2()
                 .border_color(t.text_dim),
         };
-        let state_text = if checking {
+        let state_text = if let Some((text, _)) = &calendar_state {
+            text.clone()
+        } else if checking {
             "Checking…".to_owned()
         } else {
             state.text()
         };
-        let switch = segments(
-            &format!("conn-{name}-switch"),
-            &[
-                ("Off", !on, Action::Switch(name.clone(), false)),
-                ("On", on, Action::Switch(name.clone(), true)),
-            ],
-            &mut ctl,
-            t,
-            cx,
-        );
+        let switch = if row.calendar {
+            // No switch: removing the key stops the refresh.
+            div().into_any_element()
+        } else {
+            segments(
+                &format!("conn-{name}-switch"),
+                &[
+                    ("Off", !on, Action::Switch(name.clone(), false)),
+                    ("On", on, Action::Switch(name.clone(), true)),
+                ],
+                &mut ctl,
+                t,
+                cx,
+            )
+        };
         let mut card = div()
             .flex()
             .flex_col()
@@ -644,6 +675,7 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                             .text_color(t.text_main)
                             .child(match &row.broker {
                                 Some(b) => b.label.clone(),
+                                None if row.calendar => "FRED".to_owned(),
                                 None => crate::sources::source_label(&name),
                             }),
                     )
@@ -827,7 +859,7 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
         } else {
             test_row.child(button(
                 format!("conn-{name}-test"),
-                "Test",
+                if row.calendar { "Refresh now" } else { "Test" },
                 Action::Test(name.clone()),
                 &mut ctl,
                 t,

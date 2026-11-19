@@ -83,6 +83,8 @@ cargo run -p lines-app -- --source kraken --instrument BTC/USD.KR               
 cargo run -p lines-app -- --source kraken --headless 60          # prints book checksums ok / mismatches / resyncs
 # Databento (decision 0033), your own key: DATABENTO_API_KEY, or the OS keychain entry lines-databento.
 # Without a key it is "not set up" (no requests, not in the run's sources). Billed by Databento.
+# Economic calendar refresh (roadmap 8b): a free FRED API key in Settings › Connections (keychain `lines`, `fred.api-key`)
+# or LINES_FRED_API_KEY; the interactive app refreshes on start and every 12 hours, cached in <data dir>/econ-calendar.txt.
 cargo run -p lines-app -- --source databento --instrument MNQ --headless 120   # LINES_DATABENTO_REPLAY_HOURS / _DEPTH / _GATEWAY
 cargo run -p lines-databento -- cost --symbols ESZ6 --start 2026-11-09 --end 2026-11-10        # free cost check; then download / import (crate README)
 cargo run -p lines-app -- --source mock --headless 5 --record recordings/x.lfr
@@ -188,7 +190,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # DOM/T&S evidence from synthetic data: record the mock (it has depth), then shoot the replay:
 #   lines --source mock --headless 6 --record recordings/dom-mock.lfr
 #   lines --replay recordings/dom-mock.lfr --screenshot out.png --size 1600x900 --dom-grouping 2 --large-print 6
-# --prompt palette[:QUERY]|open|save opens a workspace prompt; --panel-at X,Y draws every pop-up panel as if dragged there (kept inside the window).
+# --prompt palette[:QUERY]|open|save|guardrails|calendar opens a workspace prompt (guardrails, calendar: the palette's lists); --panel-at X,Y draws every pop-up panel as if dragged there (kept inside the window).
 # --picker "nq" renders the symbol picker open on that query (screenshots never read or write user settings).
 # Backtest a strategy (decision 0025), headless: --backtest NAME --replay FILE|DIR [--replay-levels DIR]
 #   --backtest-config settings.json [--report out.json]. The public build has only the example `level-touch`.
