@@ -288,6 +288,7 @@ fn a_remove_waits_until_nothing_is_left_and_leaves_its_groups() {
         &[AccountGroup {
             name: "Evals".into(),
             members: vec![AccountId::new("a")],
+            ..Default::default()
         }]
     );
     let file = trading_file(&r.core, &paper()).unwrap();

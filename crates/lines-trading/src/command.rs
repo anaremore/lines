@@ -267,6 +267,16 @@ pub enum Command {
         )]
         contract: Option<ContractKey>,
     },
+    /// One order per member of a group (`core/groups.rs`): each member's own `PlaceOrder` or
+    /// `PlaceBracket` (its id from the internal range, its own result), checked by that
+    /// account's risk limits, prop rules, guardrails and bracket mode exactly as if sent alone;
+    /// a refused member doesn't stop the rest. Each member order's id maps to this command's
+    /// ([`crate::TradingCore::group_command_of`]). A person's (or the API's), never a
+    /// strategy's.
+    GroupPlace {
+        group: String,
+        order: GroupOrder,
+    },
     /// [`Command::Flatten`] on every member of a group, as [`Command::GroupCancelAll`].
     GroupFlatten {
         group: String,
@@ -277,6 +287,44 @@ pub enum Command {
         )]
         contract: Option<ContractKey>,
     },
+}
+
+/// The order a [`Command::GroupPlace`] places for each member: its spec's account is
+/// replaced by each member's, its quantity by the member's size (`group::MemberSize`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "order", rename_all = "snake_case")]
+pub enum GroupOrder {
+    Order(OrderSpec),
+    Bracket(BracketSpec),
+}
+
+impl GroupOrder {
+    /// The member's own command: this order on `account` at `qty`.
+    pub fn for_member(&self, account: AccountId, qty: Qty) -> Command {
+        match self {
+            GroupOrder::Order(o) => Command::PlaceOrder(OrderSpec {
+                account,
+                qty,
+                ..o.clone()
+            }),
+            GroupOrder::Bracket(b) => Command::PlaceBracket(BracketSpec {
+                entry: OrderSpec {
+                    account,
+                    qty,
+                    ..b.entry.clone()
+                },
+                ..b.clone()
+            }),
+        }
+    }
+
+    /// The order's own quantity (each member's is this at its size).
+    pub fn qty(&self) -> Qty {
+        match self {
+            GroupOrder::Order(o) => o.qty,
+            GroupOrder::Bracket(b) => b.entry.qty,
+        }
+    }
 }
 
 /// Exits for manual trades on an account and contract.
@@ -326,6 +374,7 @@ impl Command {
             | Command::DeleteGroup { .. }
             | Command::SetGroupMembers { .. }
             | Command::GroupCancelAll { .. }
+            | Command::GroupPlace { .. }
             | Command::GroupFlatten { .. } => None,
         }
     }
@@ -338,6 +387,7 @@ impl Command {
             | Command::DeleteGroup { group }
             | Command::SetGroupMembers { group, .. }
             | Command::GroupCancelAll { group, .. }
+            | Command::GroupPlace { group, .. }
             | Command::GroupFlatten { group, .. } => Some(group),
             _ => None,
         }

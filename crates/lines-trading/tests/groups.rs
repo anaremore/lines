@@ -11,9 +11,9 @@ use lines_trading::persist;
 use lines_trading::service::trading_file;
 use lines_trading::strategy::StrategyId;
 use lines_trading::{
-    AccountConfig, AccountId, Command, Event, FillModel, MarketInput, Money, OrderId, OrderKind,
-    OrderSpec, OrderState, PaperBroker, PaperConfig, RejectCode, RiskLimits, Side, Source,
-    TradingCore,
+    AccountConfig, AccountId, Command, Event, FillModel, GroupOrder, MarketInput, Money, OrderId,
+    OrderKind, OrderSpec, OrderState, PaperBroker, PaperConfig, RejectCode, RiskLimits, Side,
+    Source, TradingCore,
 };
 
 const LAT: i64 = 20;
@@ -42,6 +42,7 @@ fn group(name: &str, members: &[&str]) -> AccountGroup {
     AccountGroup {
         name: name.into(),
         members: ids(members),
+        ..Default::default()
     }
 }
 
@@ -543,4 +544,201 @@ fn groups_survive_a_restart() {
         core.groups(),
         [group("Evals", &["b", "a"]), group("Funded", &["c"])]
     );
+}
+
+// ---- group orders (`Command::GroupPlace`) ---------------------------------------------------
+
+fn limit_spec(qty: i64, price: f64) -> OrderSpec {
+    OrderSpec {
+        // Replaced by each member's.
+        account: id("template"),
+        contract: es(),
+        side: Side::Buy,
+        qty: Qty(qty),
+        kind: OrderKind::Limit { price: px(price) },
+    }
+}
+
+fn group_place(
+    r: &mut Rig,
+    group: &str,
+    order: GroupOrder,
+) -> Result<Vec<OrderId>, lines_trading::Reject> {
+    r.cmd(Command::GroupPlace {
+        group: group.into(),
+        order,
+    })
+}
+
+/// One order per member, each its own command and result, each mapped back to the group
+/// command; the group command answers with every member's order id.
+#[test]
+fn a_group_order_places_one_order_per_member() {
+    let mut r = Rig::new();
+    create(&mut r, "Evals", &["a", "b", "c"]).unwrap();
+    r.market(es(), 5999.75, 6000.25, 6000.00);
+    r.events.clear();
+    let gid = r.core.submit(
+        r.now(),
+        Source::Dom,
+        Instant::now(),
+        Command::GroupPlace {
+            group: "Evals".into(),
+            order: GroupOrder::Order(limit_spec(2, 5990.0)),
+        },
+    );
+    r.collect();
+    let (name, results) = r.group_results();
+    assert_eq!(name, "Evals");
+    assert_eq!(
+        results
+            .iter()
+            .map(|m| m.account.0.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    let mut all = Vec::new();
+    for m in &results {
+        let ids = m.result.as_ref().expect("placed");
+        assert_eq!(ids.len(), 1);
+        let o = r.core.order(ids[0]).unwrap();
+        assert_eq!((&o.account, o.qty), (&m.account, Qty(2)));
+        assert_eq!(r.core.group_command_of(ids[0]), Some(gid));
+        all.extend(ids.iter().copied());
+    }
+    // Each member's own `Event::Command`, then the group's carrying every id.
+    let group_result = r
+        .events
+        .iter()
+        .find_map(|e| match e {
+            Event::Command { id, result, .. } if *id == gid => Some(result.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(group_result.unwrap(), all);
+    for m in &results {
+        assert!(r.events.iter().any(
+            |e| matches!(e, Event::Command { id, source: Source::Dom, .. } if *id == m.command)
+        ));
+    }
+    r.wait(LAT);
+    for a in ["a", "b", "c"] {
+        assert_eq!(r.core.open_orders(&id(a)).count(), 1, "{a}");
+    }
+}
+
+/// Each member's order meets that account's own limits, as if sent alone: a refused member
+/// is named, the rest proceed; with every member refused the group order is refused.
+#[test]
+fn each_member_is_checked_alone() {
+    let mut r = Rig::new();
+    create(&mut r, "Evals", &["a", "b", "c"]).unwrap();
+    r.market(es(), 5999.75, 6000.25, 6000.00);
+    r.cmd(Command::SetMaxOrderQty {
+        account: id("c"),
+        max: Some(1),
+    })
+    .unwrap();
+    let placed = group_place(&mut r, "Evals", GroupOrder::Order(limit_spec(2, 5990.0)));
+    assert_eq!(placed.unwrap().len(), 2);
+    let (_, results) = r.group_results();
+    assert!(results[0].result.is_ok() && results[1].result.is_ok());
+    assert_eq!(results[2].account, id("c"));
+    assert_eq!(
+        results[2].result.as_ref().unwrap_err().code,
+        RejectCode::Risk
+    );
+    // Only c in the group, still too large: the group order is refused, with c's reason.
+    r.cmd(Command::SetGroupMembers {
+        group: "Evals".into(),
+        members: ids(&["c"]),
+    })
+    .unwrap();
+    let e = group_place(&mut r, "Evals", GroupOrder::Order(limit_spec(2, 5990.0))).unwrap_err();
+    assert_eq!(e.code, RejectCode::Risk);
+    assert!(e.message.contains("c:"), "{}", e.message);
+    // Never from a strategy.
+    let e = r
+        .cmd_from(
+            Source::Strategy(StrategyId(1)),
+            Command::GroupPlace {
+                group: "Evals".into(),
+                order: GroupOrder::Order(limit_spec(1, 5990.0)),
+            },
+        )
+        .unwrap_err();
+    assert_eq!(e.code, RejectCode::Strategy);
+}
+
+/// A bracket per member: each its own entry and exits, all mapped to the group command.
+#[test]
+fn a_group_bracket_is_one_bracket_per_member() {
+    let mut r = Rig::new();
+    create(&mut r, "Evals", &["a", "b"]).unwrap();
+    r.market(es(), 5999.75, 6000.25, 6000.00);
+    let gid = r.core.submit(
+        r.now(),
+        Source::Dom,
+        Instant::now(),
+        Command::GroupPlace {
+            group: "Evals".into(),
+            order: GroupOrder::Bracket(lines_trading::BracketSpec {
+                entry: limit_spec(1, 5990.0),
+                take_profit: Some(px(6000.0)),
+                stop_loss: Some(px(5980.0)),
+            }),
+        },
+    );
+    r.collect();
+    r.wait(LAT);
+    for a in ["a", "b"] {
+        let orders: Vec<_> = r
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Order(o) if o.account == id(a) => Some(o.id),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(orders.len(), 3, "{a}: entry, stop and target");
+        for o in orders {
+            assert_eq!(r.core.group_command_of(o), Some(gid), "{a}: {o:?}");
+        }
+    }
+}
+
+/// A member's size (the copier's ratio): exact, or that member refused, never rounded.
+#[test]
+fn member_sizes_scale_exactly() {
+    let mut r = Rig::new();
+    let mut g = group("Evals", &["a", "b"]);
+    g.sizing
+        .insert(id("b"), lines_trading::group::MemberSize { num: 1, den: 2 });
+    r.core.restore_groups(vec![g]);
+    r.collect();
+    r.market(es(), 5999.75, 6000.25, 6000.00);
+    group_place(&mut r, "Evals", GroupOrder::Order(limit_spec(4, 5990.0))).unwrap();
+    let (_, results) = r.group_results();
+    let qty = |m: &MemberResult| r.core.order(m.result.as_ref().unwrap()[0]).unwrap().qty;
+    assert_eq!((qty(&results[0]), qty(&results[1])), (Qty(4), Qty(2)));
+    group_place(&mut r, "Evals", GroupOrder::Order(limit_spec(3, 5990.0))).unwrap();
+    let (_, results) = r.group_results();
+    assert!(results[0].result.is_ok());
+    let e = results[1].result.as_ref().unwrap_err();
+    assert!(e.message.contains("whole number"), "{}", e.message);
+    // Sizes survive members kept, and go with members dropped.
+    r.cmd(Command::SetGroupMembers {
+        group: "Evals".into(),
+        members: ids(&["b"]),
+    })
+    .unwrap();
+    assert_eq!(r.core.groups()[0].sizing.len(), 1);
+    r.cmd(Command::SetGroupMembers {
+        group: "Evals".into(),
+        members: ids(&["a"]),
+    })
+    .unwrap();
+    assert!(r.core.groups()[0].sizing.is_empty());
 }

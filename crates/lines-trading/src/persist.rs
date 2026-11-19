@@ -586,6 +586,7 @@ b",
         let g = |n: &str, m: &[&str]| crate::group::AccountGroup {
             name: n.into(),
             members: m.iter().map(|s| crate::types::AccountId::new(s)).collect(),
+            ..Default::default()
         };
         assert_eq!(
             f.groups,
