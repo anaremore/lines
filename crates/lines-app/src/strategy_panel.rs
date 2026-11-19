@@ -599,6 +599,7 @@ mod tests {
             screenshots: Vec::new(),
             incomplete: false,
             excursion_unavailable: false,
+            cover_checked: false,
         }
     }
 

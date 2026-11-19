@@ -329,6 +329,35 @@ pub fn kept_after(keep: usize, closed: &[usize]) -> usize {
     keep - closed.iter().filter(|&&i| i < keep).count()
 }
 
+/// A tab's title without a name of its own (Rename tab): the symbols of its market panes
+/// (chart, DOM, time & sales, option chain), each once, in layout order. A tab with no market
+/// pane is named after its other panes ("Journal", "Positions", "Strategies"): a journal opened
+/// in its own tab never reads as the feed it happens to follow. `panes`: each leaf's kind and
+/// symbol (empty: not known yet).
+pub fn auto_title(panes: &[(crate::layout::PaneKind, String)]) -> String {
+    use crate::layout::PaneKind as K;
+    let market = |k: K| matches!(k, K::Chart | K::Dom | K::Tape | K::Chain);
+    let mut seen: Vec<String> = Vec::new();
+    let any_market = panes.iter().any(|(k, _)| market(*k));
+    for (k, sym) in panes {
+        let word = if market(*k) {
+            sym.clone()
+        } else if any_market {
+            continue;
+        } else {
+            k.label().to_owned()
+        };
+        if !word.is_empty() && !seen.contains(&word) {
+            seen.push(word);
+        }
+    }
+    if seen.is_empty() {
+        "empty".into()
+    } else {
+        seen.join(" · ")
+    }
+}
+
 /// A tab's name as typed into Rename tab: trimmed; empty gives the tab its symbols again.
 pub fn tab_name(typed: &str) -> Option<String> {
     let t = typed.trim();
@@ -471,6 +500,26 @@ pub fn syncs_price(price_sync: bool, from: ProductId, to: ProductId) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A tab of only the journal (or positions, strategies) is named after it, never after the
+    /// feed it follows; with a market pane the symbols name it, as before.
+    #[test]
+    fn non_market_tabs_are_named_after_their_panes() {
+        use crate::layout::PaneKind as K;
+        let p = |k, s: &str| (k, s.to_owned());
+        assert_eq!(auto_title(&[p(K::Journal, "ES")]), "Journal");
+        assert_eq!(
+            auto_title(&[p(K::Journal, "ES"), p(K::Positions, "ES")]),
+            "Journal · Positions"
+        );
+        assert_eq!(auto_title(&[p(K::Dom, "ES"), p(K::Journal, "ES")]), "ES");
+        assert_eq!(
+            auto_title(&[p(K::Chart, "ES"), p(K::Dom, "NQ"), p(K::Chart, "ES")]),
+            "ES · NQ"
+        );
+        assert_eq!(auto_title(&[p(K::Chart, "")]), "empty");
+        assert_eq!(auto_title(&[]), "empty");
+    }
+
     use super::*;
 
     #[test]

@@ -965,7 +965,7 @@ pub fn label(c: Command) -> String {
         Command::ChainChart => "Option chain: chart beside the chain on/off".into(),
         Command::ChainPnl => "Option chain: P&L to close on/off".into(),
         Command::ExportJournal => "Export journal (CSV)".into(),
-        Command::JournalEdit => "Journal: edit tags and note".into(),
+        Command::JournalEdit => "Journal: tags and note of the selected trades".into(),
         Command::JournalAllDates => "Journal: stats for all dates / today".into(),
         Command::JournalOpenChart => "Journal: open the selected trade's snapshot".into(),
         Command::JournalGroup(g) => match g {

@@ -110,30 +110,13 @@ pub fn remember(stores: &Stores, store: &Arc<ChartStore>) {
     }
 }
 
-/// Start the drawing thread, writing into `dir`. It ends when the journal's thread does.
-pub fn spawn(stores: Stores, kinds: Kinds, dir: PathBuf) -> Option<Sender<ShotMsg>> {
+/// Start the drawing thread, writing into `dir`, with `fetch` for contracts no pane shows. It
+/// ends when the journal's thread does.
+pub fn spawn(stores: Stores, kinds: Kinds, dir: PathBuf, fetch: Fetch) -> Option<Sender<ShotMsg>> {
     let (tx, rx) = mpsc::channel::<ShotMsg>();
     let spawned = std::thread::Builder::new()
         .name("lines-shots".into())
-        .spawn(move || {
-            for msg in rx {
-                match msg {
-                    ShotMsg::Take(req) => {
-                        let data = chart_data(&stores, &req.trade);
-                        let kind = kind_word(&kinds, &req.account);
-                        let svg = render(&req.trade, kind, data.as_ref(), look());
-                        // Logged by name only: the folder would hold the OS user name. The
-                        // viewer's missing-file notice covers it.
-                        if let Err(e) = write_atomic(&dir.join(&req.file), &svg) {
-                            tracing::warn!("journal chart {} not written: {e}", req.file);
-                        }
-                    }
-                    ShotMsg::Flush(done) => {
-                        let _ = done.send(());
-                    }
-                }
-            }
-        });
+        .spawn(move || serve(rx, stores, kinds, dir, fetch));
     match spawned {
         Ok(_) => Some(tx),
         Err(e) => {
@@ -450,9 +433,10 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         );
     }
     let (Some(d), Some(product)) = (data.filter(|d| !d.bars.is_empty()), product.as_ref()) else {
+        let _ = writeln!(s, "<g {NO_DATA_MARK}=\"1\"/>");
         let _ = writeln!(
             s,
-            "<text x=\"{}\" y=\"{}\" font-size=\"14\" text-anchor=\"middle\" {}>No chart data for {} when this was taken.</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"14\" text-anchor=\"middle\" {}>No chart data for {} yet.</text>",
             W / 2.0,
             H / 2.0 - 10.0,
             paint("fill", th.text_main),
@@ -460,7 +444,7 @@ pub fn render(t: &Trade, kind: &str, data: Option<&ChartBars>, look: Look) -> St
         );
         let _ = writeln!(
             s,
-            "<text x=\"{}\" y=\"{}\" font-size=\"13\" text-anchor=\"middle\" {}>Trade snapshots use the bars of an open chart or DOM of the contract.</text>",
+            "<text x=\"{}\" y=\"{}\" font-size=\"13\" text-anchor=\"middle\" {}>Lines draws it again once data is in: an open chart, the local store or the data source.</text>",
             W / 2.0,
             H / 2.0 + 14.0,
             paint("fill", th.text_dim)
@@ -738,6 +722,445 @@ fn plot(s: &mut String, t: &Trade, d: &ChartBars, product: &Product, th: Theme, 
             paint("fill", th.text_main),
             paint("stroke", th.bg)
         );
+    }
+}
+
+// ---- data when no pane shows the contract, and repairs ------------------------------------
+
+/// Where a snapshot's bars and a measurement's prints come from when no open pane holds the
+/// contract: the running source's local store, then a short-lived feed of the contract on it
+/// (a live source only: it back-fills the day's prints, as a chart opened on the contract
+/// would). Neither in a replay or a screenshot (the store only when one is given).
+#[derive(Clone, Default)]
+pub struct Fetch {
+    /// The local store's root and the source's directory in it.
+    pub store: Option<(PathBuf, String)>,
+    /// The registry and the running source's config (its target set per contract).
+    pub feed: Option<(lines_feed::registry::FeedRegistry, lines_feed::FeedConfig)>,
+}
+
+/// How long a short-lived feed may take to bring a trade's span.
+const FEED_WAIT: std::time::Duration = std::time::Duration::from_secs(45);
+/// A feed is opened only for trades this recent (a source back-fills the current day or so).
+const FEED_REACH_MS: i64 = 3 * 86_400_000;
+/// Repairs that found no data try again after this (doubling, at most 8 times).
+const RETRY: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_TRIES: u32 = 8;
+
+/// Whether a snapshot file is one drawn without data (or isn't there): worth drawing again.
+pub fn needs_drawing(path: &Path) -> bool {
+    match std::fs::read_to_string(path) {
+        Ok(svg) => svg.contains(NO_DATA_MARK) || svg.contains("No chart data for"),
+        Err(_) => true,
+    }
+}
+
+/// The attribute a snapshot drawn without data carries.
+pub const NO_DATA_MARK: &str = "data-lines-nodata";
+
+/// What a repair still has to do.
+struct Job {
+    shot: Option<lines_trading::journal::ShotRequest>,
+    measure: Option<Trade>,
+    sink: Option<lines_trading::journal::MeasureSink>,
+    tries: u32,
+    next: std::time::Instant,
+}
+
+impl Job {
+    fn trade(&self) -> Option<&Trade> {
+        self.shot
+            .as_ref()
+            .map(|s| &s.trade)
+            .or(self.measure.as_ref())
+    }
+
+    fn done(&self) -> bool {
+        self.shot.is_none() && self.measure.is_none()
+    }
+}
+
+/// The local store's 1-minute bars and prints of a contract over `from..=to`.
+fn from_disk(
+    fetch: &Fetch,
+    product: &Product,
+    contract: lines_core::ContractKey,
+    from: UtcMillis,
+    to: UtcMillis,
+) -> (Vec<Bar>, Vec<(UtcMillis, Price)>) {
+    let Some((root, source)) = &fetch.store else {
+        return (Vec::new(), Vec::new());
+    };
+    let dir = lines_feed::disk::ContractDir::new(root, source, product, Some(contract));
+    let bars: Vec<Bar> = lines_feed::disk::bars::load(&dir.bars_path(), 60_000)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|b| b.time >= from && b.time <= to)
+        .collect();
+    let prints = dir.trades_between(from, to).unwrap_or_default();
+    (bars, prints)
+}
+
+/// 1-minute bars of `prints` (time order).
+fn minute_bars(prints: &[(UtcMillis, Price)]) -> Vec<Bar> {
+    let mut out: Vec<Bar> = Vec::new();
+    for &(at, p) in prints {
+        let time = at.floor_to(60_000);
+        match out.last_mut() {
+            Some(b) if b.time == time => {
+                b.high = Price(b.high.0.max(p.0));
+                b.low = Price(b.low.0.min(p.0));
+                b.close = p;
+                b.volume = Qty(b.volume.0 + 1);
+            }
+            _ => out.push(Bar {
+                time,
+                open: p,
+                high: p,
+                low: p,
+                close: p,
+                volume: Qty(1),
+            }),
+        }
+    }
+    out
+}
+
+/// A short-lived feed of `contract` on the running source: its bars over `from..=to` and the
+/// prints it delivered, once its history is in and its time is past `to` (or [`FEED_WAIT`]).
+/// Dropped at the end (its thread joins), so it costs what opening a chart briefly would.
+fn from_feed(
+    fetch: &Fetch,
+    contract: lines_core::ContractKey,
+    from: UtcMillis,
+    to: UtcMillis,
+) -> (Vec<Bar>, Vec<(UtcMillis, Price)>) {
+    let Some((registry, base)) = &fetch.feed else {
+        return (Vec::new(), Vec::new());
+    };
+    let mut cfg = base.clone();
+    cfg.target = Some(lines_feed::catalog::Target::Contract(contract));
+    cfg.record = None;
+    let sub = match registry.subscribe(cfg) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("journal snapshot: no feed for its contract ({e:#})");
+            return (Vec::new(), Vec::new());
+        }
+    };
+    let rx = lines_feed::listen::listen(sub.store().feed_id());
+    let deadline = std::time::Instant::now() + FEED_WAIT;
+    let mut prints = Vec::new();
+    loop {
+        if let Ok(batch) = rx.recv_timeout(std::time::Duration::from_millis(250)) {
+            for e in batch.iter() {
+                if let lines_feed::provider::MarketEvent::Trade { time, price, .. } = *e
+                    && time.0 >= from.0
+                    && time.0 <= to.0
+                {
+                    prints.push((time, price));
+                }
+            }
+        }
+        let ready = sub.store().try_read().is_some_and(|d| {
+            !matches!(d.history, lines_feed::store::HistoryState::Loading)
+                && d.market_time.is_some_and(|m| m.0 >= to.0)
+        });
+        if ready || std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
+    for batch in rx.try_iter() {
+        for e in batch.iter() {
+            if let lines_feed::provider::MarketEvent::Trade { time, price, .. } = *e
+                && time.0 >= from.0
+                && time.0 <= to.0
+            {
+                prints.push((time, price));
+            }
+        }
+    }
+    let bars = {
+        let d = sub.store().read();
+        d.series
+            .bars()
+            .iter()
+            .filter(|b| b.time >= from && b.time <= to)
+            .copied()
+            .collect()
+    };
+    drop(sub);
+    (bars, prints)
+}
+
+/// What short-lived feeds brought, by contract, for a while: repairs of several trades of one
+/// contract open one feed, not one each (a source's history requests are rate-limited).
+#[derive(Default)]
+struct FeedCache {
+    /// Contract, when fetched, the time its data reaches, its bars and prints.
+    #[allow(clippy::type_complexity)]
+    got: Vec<(
+        lines_core::ContractKey,
+        std::time::Instant,
+        UtcMillis,
+        Vec<Bar>,
+        Vec<(UtcMillis, Price)>,
+    )>,
+}
+
+/// A feed's answer is reused this long.
+const FEED_REUSE: std::time::Duration = std::time::Duration::from_secs(600);
+
+impl FeedCache {
+    /// The contract's bars and prints over `from..=to`: from a feed opened within
+    /// [`FEED_REUSE`] whose data reaches `to` (it asked for everything [`FEED_REACH_MS`]
+    /// back), else a new one. An empty answer isn't kept: the next try asks again.
+    fn get(
+        &mut self,
+        fetch: &Fetch,
+        contract: lines_core::ContractKey,
+        from: UtcMillis,
+        to: UtcMillis,
+    ) -> (Vec<Bar>, Vec<(UtcMillis, Price)>) {
+        self.got.retain(|(k, at, until, ..)| {
+            at.elapsed() < FEED_REUSE && !(*k == contract && until.0 < to.0)
+        });
+        if !self.got.iter().any(|(k, ..)| *k == contract) {
+            let now = lines_feed::now_utc();
+            let (b, p) = from_feed(fetch, contract, UtcMillis(now.0 - FEED_REACH_MS), now);
+            if b.is_empty() && p.is_empty() {
+                return (b, p);
+            }
+            self.got
+                .push((contract, std::time::Instant::now(), now, b, p));
+        }
+        let (_, _, _, b, p) = self
+            .got
+            .iter()
+            .find(|(k, ..)| *k == contract)
+            .expect("just fetched");
+        (
+            b.iter()
+                .filter(|x| x.time >= from && x.time <= to)
+                .copied()
+                .collect(),
+            p.iter()
+                .filter(|(t, _)| t.0 >= from.0 && t.0 <= to.0)
+                .copied()
+                .collect(),
+        )
+    }
+}
+
+/// Prints from two places, in time order, each once.
+fn merged(a: Vec<(UtcMillis, Price)>, b: Vec<(UtcMillis, Price)>) -> Vec<(UtcMillis, Price)> {
+    let mut v = a;
+    v.extend(b);
+    v.sort_by_key(|(t, p)| (t.0, p.0));
+    v.dedup();
+    v
+}
+
+/// Do what `job` still needs: draw its snapshot if the file lacks data, measure its trade.
+/// Bars: whichever of an open pane's and the local store's covers more of the window, else a
+/// short-lived feed's (one per contract a while, recent trades only); prints: the local
+/// store's and the feed's together.
+fn run_job(
+    job: &mut Job,
+    stores: &Stores,
+    kinds: &Kinds,
+    dir: &Path,
+    fetch: &Fetch,
+    feeds: &mut FeedCache,
+) {
+    if let Some(s) = &job.shot
+        && !needs_drawing(&dir.join(&s.file))
+    {
+        job.shot = None;
+    }
+    let Some(t) = job.trade().cloned() else {
+        return;
+    };
+    let Some(product) = lines_feed::catalog::get(t.contract.product) else {
+        job.shot = None;
+        job.measure = None;
+        return;
+    };
+    let tf = pick_timeframe(t.duration_ms());
+    let from = UtcMillis(t.entry_time.0 - (CONTEXT_BARS + 2) * tf.nominal_ms());
+    let gap = lines_trading::journal::FEED_GAP_MS;
+    let (pfrom, pto) = (UtcMillis(t.entry_time.0 - gap), t.exit_time);
+    let pane = if job.shot.is_some() {
+        chart_data(stores, &t).map(|d| d.bars).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let (mut minute, mut prints) =
+        from_disk(fetch, &product, t.contract, from.min(pfrom), t.exit_time);
+    if minute.is_empty() && job.shot.is_some() {
+        // No bar index for the window (a day stored as trades only): the stored prints'.
+        minute = minute_bars(&prints);
+    }
+    let measure = job.measure.clone();
+    let measured = |p: &[(UtcMillis, Price)]| {
+        measure
+            .as_ref()
+            .and_then(|m| lines_trading::journal::measure(m, p))
+    };
+    let need_bars = job.shot.is_some() && pane.is_empty() && minute.is_empty();
+    let need_prints = measure.is_some() && measured(&prints).is_none();
+    let recent = lines_feed::now_utc().0 - t.exit_time.0 <= FEED_REACH_MS;
+    if (need_bars || need_prints) && recent && fetch.feed.is_some() {
+        let (fb, fp) = feeds.get(fetch, t.contract, from.min(pfrom), t.exit_time);
+        if minute.is_empty() {
+            minute = if fb.is_empty() { minute_bars(&fp) } else { fb };
+        }
+        prints = merged(prints, fp);
+        // What the feed stored meanwhile.
+        if measured(&prints).is_none() {
+            prints = merged(prints, from_disk(fetch, &product, t.contract, pfrom, pto).1);
+        }
+    }
+    if let Some(x) = measured(&prints)
+        && let (Some(m), Some(sink)) = (job.measure.take(), &job.sink)
+    {
+        sink.send(m.id.clone(), x);
+    }
+    let stored = if minute.is_empty() {
+        Vec::new()
+    } else {
+        derive(
+            &minute,
+            tf,
+            lines_feed::catalog::sessions(t.contract.product),
+        )
+    };
+    // A pane opened mid-trade holds fewer bars of the window than the store: the fuller one.
+    let bars = if stored.len() > pane.len() {
+        stored
+    } else {
+        pane
+    };
+    if let Some(s) = &job.shot
+        && !bars.is_empty()
+    {
+        let data = ChartBars { product, tf, bars };
+        let kind = kind_word(kinds, &s.account);
+        let svg = render(&s.trade, kind, Some(&data), look());
+        match write_atomic(&dir.join(&s.file), &svg) {
+            Ok(()) => job.shot = None,
+            Err(e) => tracing::warn!("journal chart {} not redrawn: {e}", s.file),
+        }
+    }
+}
+
+/// Whether a waiting job is the same work as a new repair's part: both name the same trade
+/// (`Some` on both sides; `None` never matches).
+fn same<T: PartialEq>(a: Option<T>, b: &Option<T>) -> bool {
+    matches!((a, b), (Some(x), Some(y)) if x == *y)
+}
+
+/// A new repair of trade `key` (measure) and snapshot `file`: the same parts of waiting jobs
+/// are dropped (a job left with nothing goes); every other job keeps waiting.
+fn give_way(waiting: &mut Vec<Job>, key: Option<String>, file: Option<String>) {
+    for j in waiting.iter_mut() {
+        if same(j.measure.as_ref().map(|m| m.id.clone()), &key) {
+            j.measure = None;
+        }
+        if same(j.shot.as_ref().map(|s| s.file.clone()), &file) {
+            j.shot = None;
+        }
+    }
+    waiting.retain(|j| !j.done());
+}
+
+/// The drawing thread's loop: new snapshots as trades close, repairs (asked-for ones first),
+/// and retries of what found no data, until the journal's thread ends.
+fn serve(rx: mpsc::Receiver<ShotMsg>, stores: Stores, kinds: Kinds, dir: PathBuf, fetch: Fetch) {
+    use std::time::{Duration, Instant};
+    let mut waiting: Vec<Job> = Vec::new();
+    let mut feeds = FeedCache::default();
+    let retry = |mut job: Job, waiting: &mut Vec<Job>| {
+        if job.done() || job.tries >= MAX_TRIES {
+            return;
+        }
+        job.tries += 1;
+        job.next = Instant::now() + RETRY * 2u32.pow(job.tries.min(5) - 1);
+        waiting.push(job);
+    };
+    loop {
+        let now = Instant::now();
+        let wait = waiting
+            .iter()
+            .map(|j| j.next.saturating_duration_since(now))
+            .min()
+            .unwrap_or(Duration::from_secs(3600));
+        let first = match rx.recv_timeout(wait) {
+            Ok(m) => Some(m),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        // What else is queued: a trader's "view" first, the rest in order (a flush still
+        // answers after everything sent before it).
+        let mut batch: Vec<ShotMsg> = first.into_iter().chain(rx.try_iter()).collect();
+        batch.sort_by_key(|m| !matches!(m, ShotMsg::Repair(r) if r.asked));
+        for msg in batch {
+            let now = Instant::now();
+            match msg {
+                ShotMsg::Take(req) => {
+                    let data = chart_data(&stores, &req.trade);
+                    let kind = kind_word(&kinds, &req.account);
+                    let svg = render(&req.trade, kind, data.as_ref(), look());
+                    // Logged by name only: the folder would hold the OS user name. The
+                    // viewer's missing-file notice covers it.
+                    if let Err(e) = write_atomic(&dir.join(&req.file), &svg) {
+                        tracing::warn!("journal chart {} not written: {e}", req.file);
+                    }
+                    if data.is_none_or(|d| d.bars.is_empty()) {
+                        // No pane of the contract: the store or the source next (now, then
+                        // later).
+                        let mut job = Job {
+                            shot: Some(*req),
+                            measure: None,
+                            sink: None,
+                            tries: 0,
+                            next: now,
+                        };
+                        run_job(&mut job, &stores, &kinds, &dir, &fetch, &mut feeds);
+                        retry(job, &mut waiting);
+                    }
+                }
+                ShotMsg::Repair(r) => {
+                    let r = *r;
+                    // The same work already waiting gives way to this one (its other part,
+                    // if any, keeps waiting).
+                    give_way(
+                        &mut waiting,
+                        r.measure.as_ref().map(|m| m.id.clone()),
+                        r.shot.as_ref().map(|s| s.file.clone()),
+                    );
+                    let mut job = Job {
+                        shot: r.shot,
+                        measure: r.measure,
+                        sink: Some(r.sink),
+                        tries: 0,
+                        next: now,
+                    };
+                    run_job(&mut job, &stores, &kinds, &dir, &fetch, &mut feeds);
+                    retry(job, &mut waiting);
+                }
+                ShotMsg::Flush(done) => {
+                    let _ = done.send(());
+                }
+            }
+        }
+        let now = Instant::now();
+        let (due, later): (Vec<Job>, Vec<Job>) = waiting.drain(..).partition(|j| j.next <= now);
+        waiting = later;
+        for mut job in due {
+            run_job(&mut job, &stores, &kinds, &dir, &fetch, &mut feeds);
+            retry(job, &mut waiting);
+        }
     }
 }
 
@@ -1020,7 +1443,7 @@ mod tests {
             None,
         )];
         assert_eq!(kind_word(&kinds, &AccountId::new("elsewhere")), "UNLISTED");
-        let tx = spawn(stores, kinds, dir.to_path_buf()).unwrap();
+        let tx = spawn(stores, kinds, dir.to_path_buf(), Fetch::default()).unwrap();
         let file = r.file.clone();
         tx.send(ShotMsg::Take(Box::new(r))).unwrap();
         let (done, wait) = mpsc::channel();
@@ -1171,7 +1594,7 @@ mod tests {
     fn no_chart_data_says_so() {
         let r = request();
         let svg = render(&r.trade, "PAPER", None, look(PnlDisplay::Both));
-        assert!(svg.contains("No chart data for ESZ26 when this was taken."));
+        assert!(svg.contains("No chart data for ESZ26 yet."));
         assert!(!svg.contains("<polygon"));
         let empty = ChartBars {
             product: catalog::get(catalog::ES).unwrap(),
@@ -1215,7 +1638,13 @@ mod tests {
     #[test]
     fn the_thread_writes_the_named_file_and_a_flush_waits_for_it() {
         let dir = temp("thread");
-        let tx = spawn(Stores::default(), Kinds::default(), dir.to_path_buf()).unwrap();
+        let tx = spawn(
+            Stores::default(),
+            Kinds::default(),
+            dir.to_path_buf(),
+            Fetch::default(),
+        )
+        .unwrap();
         let r = request();
         let file = r.file.clone();
         tx.send(ShotMsg::Take(Box::new(r))).unwrap();
@@ -1235,7 +1664,13 @@ mod tests {
         let dir = temp("blocked");
         std::fs::create_dir_all(dir.parent().unwrap()).unwrap();
         std::fs::write(&dir, "a file where the folder should be").unwrap();
-        let tx = spawn(Stores::default(), Kinds::default(), dir.to_path_buf()).unwrap();
+        let tx = spawn(
+            Stores::default(),
+            Kinds::default(),
+            dir.to_path_buf(),
+            Fetch::default(),
+        )
+        .unwrap();
         tx.send(ShotMsg::Take(Box::new(request()))).unwrap();
         let (done, wait) = mpsc::channel();
         tx.send(ShotMsg::Flush(done)).unwrap();
@@ -1276,5 +1711,201 @@ mod tests {
             file_url(Path::new(r"\\server\share\x.svg")),
             "file://server/share/x.svg"
         );
+    }
+
+    /// A broker trade on a contract no pane shows (MNQ while only NQ is open): its snapshot
+    /// was drawn without data and its MAE/MFE are unavailable. With the trade's day in the
+    /// running source's local store (synthetic), the repair at start draws it from the stored
+    /// bars and measures it from the stored prints; the journal saves the measurement. With
+    /// `LINES_EVIDENCE_DIR` set, the drawn file is copied there (`store-snapshot.svg`).
+    #[test]
+    fn a_contract_no_pane_shows_is_drawn_and_measured_from_the_local_store() {
+        use lines_feed::native::{Aggressor, NativeEvent};
+        use lines_trading::JournalShared;
+        use lines_trading::journal::{Record, store::JournalWriter};
+        let root = lines_core::scratch::Scratch::new("shots-store");
+        let mnq = catalog::get(catalog::MNQ).unwrap();
+        let k = ContractKey::monthly(catalog::MNQ, 2026, lines_core::Month::new(12).unwrap());
+        // 2026-11-04 (Wed), 13:11:51 → 13:22:00 Chicago: 19:11:51 → 19:22:00 UTC.
+        let day = CivilDate::new(2026, 11, 4).unwrap();
+        let entry = UtcMillis::parse_iso("2026-11-04T19:11:51Z").unwrap();
+        let exit = UtcMillis::parse_iso("2026-11-04T19:22:00Z").unwrap();
+        let now = UtcMillis::parse_iso("2026-11-06T12:00:00Z").unwrap();
+        let mut w = lines_feed::disk::day::DayWriter::begin(&root, "test", &mnq, Some(k), day, now)
+            .unwrap();
+        // A print every 15 s from 18:00 to 20:00 UTC: down to 26,734.75 at 19:14, up to
+        // 26,799.50 at 19:20, otherwise near 26,750 (MNQ ticks are 0.25 = 25 units).
+        let start = UtcMillis::parse_iso("2026-11-04T18:00:00Z").unwrap().0;
+        for i in 0..480i64 {
+            let t = start + i * 15_000;
+            let price = match t {
+                _ if t == UtcMillis::parse_iso("2026-11-04T19:14:00Z").unwrap().0 => 2_673_475,
+                _ if t == UtcMillis::parse_iso("2026-11-04T19:20:00Z").unwrap().0 => 2_679_950,
+                _ => 2_675_000 + ((i % 8) - 4) * 25,
+            };
+            let us = t * 1000;
+            w.block(
+                us,
+                &[NativeEvent::Trade {
+                    time_us: us,
+                    price: Price(price),
+                    qty: Qty(1),
+                    aggressor: Aggressor::Buy,
+                }],
+            )
+            .unwrap();
+        }
+        w.commit().unwrap();
+        // The trade, as a broker's (no prints of Lines' while it was open).
+        let acct = AccountId::new("venue-live-16");
+        let fill = |id: &str, side, price, at: UtcMillis| {
+            Event::Fill(FillEvent {
+                account: acct.clone(),
+                order: OrderId(0),
+                contract: k,
+                side,
+                price: Price(price),
+                qty: Qty(1),
+                fee: Money::ZERO,
+                realised: Money::ZERO,
+                trade_id: id.into(),
+                reconciled: false,
+                at,
+            })
+        };
+        let mut j = Journal::new();
+        j.add_venue([acct.clone()], true);
+        j.set_shots(true);
+        j.on_event(&fill("x1", Side::Buy, 2_674_475, entry));
+        let t = j
+            .on_event(&fill("x2", Side::Sell, 2_679_475, exit))
+            .remove(0);
+        assert!(t.excursion_unavailable);
+        let shots = root.join("shots");
+        let file = t.screenshots[0].clone();
+        // Drawn without data when it closed (the old wording).
+        std::fs::create_dir_all(&shots).unwrap();
+        std::fs::write(
+            shots.join(&file),
+            "<svg>No chart data for MNQZ26 when this was taken.</svg>",
+        )
+        .unwrap();
+        let fetch = Fetch {
+            store: Some((root.to_path_buf(), "test".into())),
+            feed: None,
+        };
+        let tx = spawn(Stores::default(), Kinds::default(), shots.clone(), fetch).unwrap();
+        let path = root.join("j.jsonl");
+        let writer = JournalWriter::open(path.clone(), "t", None).unwrap();
+        let shared = JournalShared::start_with_shots(
+            Journal::from_records([Record::Trade(Box::new(t.clone()))]),
+            Some(writer),
+            Some(tx),
+        );
+        // The venue's watcher lists the account: its trades are measured from then on.
+        shared.add_venue(vec![acct.clone()], true);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let measured = loop {
+            shared.sync();
+            let snap = shared.snapshot().unwrap();
+            if !snap.trades[0].excursion_unavailable {
+                break snap.trades[0].clone();
+            }
+            assert!(std::time::Instant::now() < deadline, "measured in time");
+            std::thread::yield_now();
+        };
+        // Entry 26,744.75; low 26,734.75 (−10 points × $2 = −$20), high 26,799.50 (+$109.50).
+        assert_eq!(measured.mae, Money::cents(-2000));
+        assert_eq!(measured.mfe, Money::cents(10950));
+        assert!(shared.flush(std::time::Duration::from_secs(10)));
+        let svg = std::fs::read_to_string(shots.join(&file)).unwrap();
+        assert!(!needs_drawing(&shots.join(&file)), "drawn with data");
+        assert!(
+            svg.contains("MNQZ26") && svg.contains("<rect"),
+            "{}",
+            &svg[..200]
+        );
+        if let Ok(out) = std::env::var("LINES_EVIDENCE_DIR") {
+            let out = PathBuf::from(out);
+            std::fs::create_dir_all(&out).unwrap();
+            std::fs::copy(shots.join(&file), out.join("store-snapshot.svg")).unwrap();
+        }
+        // The measurement is saved: the trade line (written here as the file it came from)
+        // and the edit record the journal appended read back measured.
+        drop(shared);
+        let loaded = lines_trading::journal::store::read(&path).unwrap().unwrap();
+        let again = Journal::from_records(
+            std::iter::once(Record::Trade(Box::new(t))).chain(loaded.records),
+        );
+        assert_eq!(
+            again.trades()[0].excursion(),
+            Some((Money::cents(-2000), Money::cents(10950)))
+        );
+    }
+
+    /// A placeholder (this build's or an older build's wording) or a missing file is drawn
+    /// again; a file drawn with data isn't.
+    #[test]
+    fn placeholders_are_drawn_again() {
+        let dir = lines_core::scratch::Scratch::new("shots-placeholder");
+        let p = dir.join("a.svg");
+        assert!(needs_drawing(&p), "missing");
+        let t = request().trade;
+        std::fs::write(&p, render(&t, "LIVE", None, look(PnlDisplay::Both))).unwrap();
+        assert!(needs_drawing(&p), "this build's placeholder");
+        std::fs::write(
+            &p,
+            "<svg>No chart data for ESZ26 when this was taken.</svg>",
+        )
+        .unwrap();
+        assert!(needs_drawing(&p), "an older build's");
+        std::fs::write(
+            &p,
+            render(&t, "LIVE", Some(&data(&t)), look(PnlDisplay::Both)),
+        )
+        .unwrap();
+        assert!(!needs_drawing(&p));
+    }
+
+    /// A repair replaces only the same work waiting: other trades' retries (measure-only or
+    /// snapshot-only) stay, and a job keeps its other part.
+    #[test]
+    fn a_repair_gives_way_only_to_the_same_work() {
+        let job = |shot: Option<&str>, measure: Option<&str>| {
+            let r = request();
+            Job {
+                shot: shot.map(|f| ShotRequest {
+                    file: f.into(),
+                    ..r.clone()
+                }),
+                measure: measure.map(|id| {
+                    let mut t = r.trade.clone();
+                    t.id = id.into();
+                    t
+                }),
+                sink: None,
+                tries: 1,
+                next: std::time::Instant::now(),
+            }
+        };
+        let mut w = vec![
+            job(None, Some("a")),
+            job(Some("b.svg"), None),
+            job(Some("c.svg"), Some("c")),
+        ];
+        // Another trade's measurement: nothing waiting goes.
+        give_way(&mut w, Some("x".into()), None);
+        assert_eq!(w.len(), 3);
+        give_way(&mut w, None, Some("y.svg".into()));
+        assert_eq!(w.len(), 3);
+        // The same snapshot: only that part goes; the job keeps its measurement.
+        give_way(&mut w, None, Some("c.svg".into()));
+        assert_eq!(w.len(), 3);
+        assert!(w[2].shot.is_none() && w[2].measure.is_some());
+        // The same measurement: the job is left with nothing and goes.
+        give_way(&mut w, Some("c".into()), None);
+        assert_eq!(w.len(), 2);
+        give_way(&mut w, Some("a".into()), Some("b.svg".into()));
+        assert!(w.is_empty());
     }
 }

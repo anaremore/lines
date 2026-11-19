@@ -59,6 +59,9 @@ const ORDERS: &str =
 /// A buy staged under [`ORDERS`]' working orders, with both legs (`--stage-order`).
 const STAGED: &str = "buy limit 6011.00 stop 6009.00 target 6023.00";
 
+/// Three paper round trips (the tag editor's scenes need a few trades).
+const JOURNAL_TAGS_SCRIPT: &str = "buy 1 mkt; ack; print 6011.50; wait 10; sell 1 mkt; ack; buy 2 mkt; ack; wait 10; sell 2 mkt; ack; buy 1 mkt; ack; wait 5; sell 1 mkt; ack";
+
 /// The scenes. `dir` holds the workspace files some of them use.
 pub fn scenes(dir: &Path) -> Vec<Scene> {
     let ws = |f: &str| dir.join(f).display().to_string();
@@ -635,6 +638,20 @@ pub fn scenes(dir: &Path) -> Vec<Scene> {
     j.push("--paper".into());
     j.push("buy 2 mkt; ack; print 6011.50; wait 20; sell 2 mkt; ack".into());
     v.push(s("journal", false, end, j));
+    // A tab holding only the journal is named "Journal"; its tag editor open (owner mock,
+    // 2026-11-19).
+    for (name, theme) in [
+        ("journal-tags-dark", "dark"),
+        ("journal-tags-light", "light"),
+    ] {
+        let mut a = vec!["--workspace".into(), ws("journal-tab.json")];
+        a.extend(args(&format!(
+            "--size 1400x800 --theme {theme} --journal-tags"
+        )));
+        a.push("--paper".into());
+        a.push(JOURNAL_TAGS_SCRIPT.into());
+        v.push(s(name, false, end, a));
+    }
     // A broker's executions made outside Lines (synthetic): fee-table estimates labelled,
     // MAE/MFE "no data" where Lines' prints didn't cover a trade, consistency progress.
     for (name, file, theme) in [
@@ -1738,6 +1755,14 @@ fn write_workspaces(dir: &Path) -> Result<()> {
         ),
     )
     .context("chain-popout.json")?;
+    // A chart's tab, then a tab holding only the journal (named after it), active.
+    let journal_tab = format!(
+        r#"{{ "version": 3, "name": "gallery", "crosshair_sync": false,
+  "windows": [ {{ "active_tab": 1, "tabs": [ {{ "focused": 0, "layout": {} }}, {{ "focused": 0, "layout": {} }} ] }} ] }}"#,
+        pane("chart", ""),
+        pane("journal", "")
+    );
+    std::fs::write(dir.join("journal-tab.json"), journal_tab).context("journal-tab.json")?;
     for (f, layout) in [
         ("chart-over-dom.json", chart_over_dom),
         ("popout.json", popout),

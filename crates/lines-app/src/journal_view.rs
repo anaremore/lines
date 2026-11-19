@@ -48,7 +48,7 @@ use gpui::{
 use lines_core::{CivilDate, UtcMillis};
 use lines_feed::store::ChartStore;
 use lines_trading::journal::stats::{self, GroupBy, Stats};
-use lines_trading::journal::{Edit, Trade, price_value};
+use lines_trading::journal::{Trade, price_value};
 use lines_trading::{JournalShared, Money, Side};
 
 use crate::feeds::PaneFeed;
@@ -57,6 +57,7 @@ use crate::pane_columns::{
     self, ColumnCmd, ColumnMenu, Columns, HeaderHit, JournalCol, Table, header_row_h,
 };
 use crate::pnl::{self, PnlDisplay};
+use crate::popover;
 use crate::text::{Glyphs, f};
 use crate::theme::Theme;
 use crate::trading::Trading;
@@ -587,89 +588,6 @@ pub fn group_rows<'a>(
     rows.into_iter().map(|(_, _, r)| r).collect()
 }
 
-/// Which field of the inline editor has the cursor.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Field {
-    Tags,
-    Note,
-}
-
-/// The inline tags/note editor (pure: keys in, an [`Edit`] out).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Editor {
-    pub id: String,
-    pub tags: String,
-    pub note: String,
-    pub field: Field,
-}
-
-/// What a key did to the editor.
-#[derive(Clone, Debug, PartialEq)]
-pub enum EditorKey {
-    /// Still editing.
-    Typing,
-    Save(Edit),
-    Cancel,
-    /// Not the editor's key.
-    Ignored,
-}
-
-impl Editor {
-    pub fn new(r: &Row) -> Editor {
-        Editor {
-            id: r.id.clone(),
-            tags: r.tags.join(", "),
-            note: r.note.clone(),
-            field: Field::Tags,
-        }
-    }
-
-    fn text(&mut self) -> &mut String {
-        match self.field {
-            Field::Tags => &mut self.tags,
-            Field::Note => &mut self.note,
-        }
-    }
-
-    /// A key (`key` as GPUI names it; `typed`: the character it types, if any).
-    pub fn key(&mut self, key: &str, typed: Option<&str>) -> EditorKey {
-        match key {
-            "enter" => EditorKey::Save(self.edit()),
-            "escape" => EditorKey::Cancel,
-            "tab" => {
-                self.field = match self.field {
-                    Field::Tags => Field::Note,
-                    Field::Note => Field::Tags,
-                };
-                EditorKey::Typing
-            }
-            "backspace" => {
-                self.text().pop();
-                EditorKey::Typing
-            }
-            _ => match typed.filter(|c| !c.chars().any(char::is_control)) {
-                Some(c) => {
-                    let t = self.text();
-                    if t.chars().count() < 400 {
-                        t.push_str(c);
-                    }
-                    EditorKey::Typing
-                }
-                None => EditorKey::Ignored,
-            },
-        }
-    }
-
-    /// Tags split at commas (the journal trims and de-duplicates them).
-    pub fn edit(&self) -> Edit {
-        Edit {
-            id: self.id.clone(),
-            tags: self.tags.split(',').map(str::to_owned).collect(),
-            note: self.note.trim().to_owned(),
-        }
-    }
-}
-
 pub struct JournalView {
     feed: PaneFeed,
     common: PaneCommon,
@@ -718,7 +636,15 @@ pub struct JournalView {
     scroll: usize,
     /// Bring the selected trade into view at the next paint (`select_trade`).
     reveal: bool,
-    editor: Option<Editor>,
+    /// The tag editor (a floating panel), when open.
+    tags: Option<crate::journal_tags::TagEditor>,
+    /// More selected trades beside `selected` (Ctrl+click, Shift+click): the tag editor
+    /// applies to all of them.
+    also: Vec<String>,
+    /// The screenshot fixture `--journal-tags` was applied.
+    shot_tags: bool,
+    /// The trade row under the pointer (its Tags cell offers "+ tag").
+    hover: Option<String>,
     glyphs: Glyphs,
     cols: Columns,
     bounds: Bounds<Pixels>,
@@ -831,7 +757,10 @@ impl JournalView {
             selected: None,
             scroll: 0,
             reveal: false,
-            editor: None,
+            tags: None,
+            also: Vec::new(),
+            shot_tags: false,
+            hover: None,
             glyphs: Glyphs::new(TEXT_PX),
             cols: Columns::new(Table::Journal),
             bounds: Bounds::default(),
@@ -856,7 +785,7 @@ impl JournalView {
             self.keep = None;
             self.scroll = 0;
             self.group_scroll = 0;
-            self.editor = None;
+            self.close_tags(cx);
             self.built = None;
             cx.notify();
         }
@@ -973,7 +902,7 @@ impl JournalView {
         if self.group != g {
             self.group = g;
             self.group_scroll = 0;
-            self.editor = None;
+            self.close_tags(cx);
             self.built = None;
             cx.notify();
         }
@@ -1005,21 +934,130 @@ impl JournalView {
         cx.notify();
     }
 
-    /// Edit the selected trade's tags and note (else the newest trade's).
+    /// Open the tag editor for the selected trades (else the newest trade).
     pub fn start_edit(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
         if !self.group.is_trades() {
-            return Err("switch the journal to Trades to edit a trade");
+            return Err("switch the journal to Trades to tag a trade");
         }
         let i = self
             .selected_index()
             .or((!self.rows.is_empty()).then_some(0));
-        let r = i
+        let id = i
             .and_then(|i| self.rows.get(i))
-            .ok_or("no trades to edit yet")?;
-        self.selected = Some(r.id.clone());
-        self.editor = Some(Editor::new(r));
+            .map(|r| r.id.clone())
+            .ok_or("no trades to tag yet")?;
+        if self.selected.as_deref() != Some(id.as_str()) {
+            self.selected = Some(id);
+            self.also.clear();
+        }
+        self.open_tags(cx)
+    }
+
+    /// Every selected trade's id that the pane shows (a filter may hide some): the primary
+    /// first.
+    fn selection(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.selected.iter().cloned().collect();
+        for a in &self.also {
+            if !v.contains(a) {
+                v.push(a.clone());
+            }
+        }
+        v.retain(|id| self.rows.iter().any(|r| &r.id == id));
+        v
+    }
+
+    fn is_selected(&self, id: &str) -> bool {
+        self.selected.as_deref() == Some(id) || self.also.iter().any(|a| a == id)
+    }
+
+    /// Screenshot fixture (`--journal-tags`): tag the second and third newest trades, then open
+    /// the editor on the newest. Blocks on the journal (screenshots only).
+    fn shot_fixture(&mut self, cx: &mut Context<Self>) {
+        let wanted = Trading::try_global(cx).is_some_and(|t| t.start_journal_tags);
+        if self.shot_tags || !wanted || self.rows.len() < 3 {
+            return;
+        }
+        let Some(j) = self.journal.clone() else {
+            return;
+        };
+        self.shot_tags = true;
+        for (i, tags) in [(1, vec!["RI bounce"]), (2, vec!["chase", "late"])] {
+            j.edit(lines_trading::journal::Edit {
+                id: self.rows[i].id.clone(),
+                tags: tags.into_iter().map(str::to_owned).collect(),
+                note: String::new(),
+                excursion: None,
+            });
+        }
+        j.sync();
+        self.built = None;
+        let _ = self.rebuild();
+        self.selected = Some(self.rows[0].id.clone());
+        let _ = self.open_tags(cx);
+    }
+
+    /// Open the tag editor on the selection (the popover rule: any other popover closes).
+    fn open_tags(&mut self, cx: &mut Context<Self>) -> Result<(), &'static str> {
+        let snap = self
+            .journal
+            .as_ref()
+            .and_then(|j| j.snapshot())
+            .ok_or("the journal is busy; try again")?;
+        let ids = self.selection();
+        let trades: Vec<&Trade> = ids
+            .iter()
+            .filter_map(|id| snap.trades.iter().find(|t| &t.id == id))
+            .collect();
+        let Some(first) = trades.first() else {
+            return Err("select a trade in the journal first");
+        };
+        let title = if trades.len() == 1 {
+            let label = account_label(&self.names, &first.account.0);
+            let time = clock_text(first.entry_time);
+            let hm = time.get(6..11).unwrap_or(&time);
+            format!("Tags · {label} · {hm}")
+        } else {
+            format!("Tags · {} trades", trades.len())
+        };
+        let recent = crate::journal_tags::recent_tags(snap.trades.iter());
+        self.tags = Some(crate::journal_tags::TagEditor::new(title, &trades, &recent));
+        crate::popover::opened(
+            cx,
+            crate::popover::Kind::JournalTags,
+            |v: &mut Self, cx| v.close_tags(cx),
+            |v: &Self| v.tags.is_some(),
+        );
         cx.notify();
         Ok(())
+    }
+
+    /// Close the tag editor, saving a typed note.
+    fn close_tags(&mut self, cx: &mut Context<Self>) {
+        if let Some(ed) = self.tags.take() {
+            self.save(ed.close());
+            crate::popover::closed(cx, crate::popover::Kind::JournalTags);
+            cx.notify();
+        }
+    }
+
+    fn save(&self, edits: Vec<lines_trading::journal::Edit>) {
+        if let Some(j) = &self.journal {
+            for e in edits {
+                j.edit(e);
+            }
+        }
+    }
+
+    /// The tag editor's click on a chip's × (`remove`) or a recent tag (`add`).
+    fn tag_click(&mut self, tag: &str, add: bool, cx: &mut Context<Self>) {
+        let Some(ed) = &mut self.tags else {
+            return;
+        };
+        let edits = if add { ed.add(tag) } else { ed.remove(tag) };
+        if let Some(e) = edits {
+            self.save(e);
+        }
+        cx.notify();
     }
 
     /// Show a trade (a click on its chart marker): the trades list, that trade selected and
@@ -1054,12 +1092,30 @@ impl JournalView {
             .selected_index()
             .and_then(|i| self.rows.get(i))
             .ok_or("select a trade in the journal first")?;
-        self.open_chart(r.shot.as_deref(), cx)
+        self.open_chart(&r.id, r.shot.as_deref(), cx)
     }
 
-    fn open_chart(&self, file: Option<&str>, cx: &mut Context<Self>) -> Result<(), &'static str> {
+    /// Open trade `id`'s snapshot `file`. One drawn without data (or missing) is asked for again
+    /// (the store, then the data source) and the notice says so, rather than opening a blank.
+    fn open_chart(
+        &self,
+        id: &str,
+        file: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
         let dir = Trading::try_global(cx).and_then(|t| t.shots_dir.clone());
-        let path = crate::journal_shots::locate(dir.as_deref(), file)?;
+        let found = crate::journal_shots::locate(dir.as_deref(), file);
+        let redraw = match &found {
+            Ok(path) => crate::journal_shots::needs_drawing(path),
+            Err(_) => file.is_some() && dir.is_some(),
+        };
+        if redraw && let Some(j) = self.journal.as_ref().filter(|j| j.persistent()) {
+            j.repair(id.to_owned());
+            return Err(
+                "no chart data for this trade yet: fetching it now; view it again in a moment",
+            );
+        }
+        let path = found?;
         cx.open_url(&crate::journal_shots::file_url(&path));
         Ok(())
     }
@@ -1250,7 +1306,52 @@ impl JournalView {
                 if i >= 0.0
                     && let Some(r) = self.rows.get(self.scroll + i as usize).cloned()
                 {
+                    let m = ev.modifiers;
+                    if m.control || m.platform {
+                        // Ctrl/Cmd+click: add or take out one trade.
+                        if self.selected.as_deref() == Some(r.id.as_str()) {
+                            self.selected = self.also.pop();
+                        } else if let Some(k) = self.also.iter().position(|a| *a == r.id) {
+                            self.also.remove(k);
+                        } else {
+                            if let Some(s) = self.selected.take() {
+                                self.also.push(s);
+                            }
+                            self.selected = Some(r.id.clone());
+                        }
+                        cx.notify();
+                        return;
+                    }
+                    if m.shift
+                        && let Some(a) = self.selected_index()
+                    {
+                        // Shift+click: the range from the selected trade.
+                        let n = self.scroll + i as usize;
+                        let (lo, hi) = (a.min(n), a.max(n));
+                        self.also = self.rows[lo..=hi]
+                            .iter()
+                            .map(|x| x.id.clone())
+                            .filter(|x| Some(x) != self.selected.as_ref())
+                            .collect();
+                        cx.notify();
+                        return;
+                    }
+                    let in_selection = self.is_selected(&r.id);
+                    let on_tags = self
+                        .cols
+                        .cell(JournalCol::Tags.index(), 0.0)
+                        .is_some_and(|(cx0, cw)| x >= cx0 && x < cx0 + cw);
+                    if !(on_tags && in_selection) {
+                        self.also.clear();
+                    }
                     self.selected = Some(r.id.clone());
+                    if on_tags && ev.click_count == 1 {
+                        if let Err(e) = self.open_tags(cx) {
+                            cx.defer(move |cx| crate::workspace::notice(e.to_owned(), cx));
+                        }
+                        cx.stop_propagation();
+                        return;
+                    }
                     let on_chart = r.shot.is_some()
                         && self
                             .cols
@@ -1259,13 +1360,15 @@ impl JournalView {
                     if on_chart {
                         // The first click of a double opens it, once; the editor stays shut.
                         if ev.click_count == 1
-                            && let Err(e) = self.open_chart(r.shot.as_deref(), cx)
+                            && let Err(e) = self.open_chart(&r.id, r.shot.as_deref(), cx)
                         {
                             // Deferred: a notice redraws windows, this one being updated now.
                             cx.defer(move |cx| crate::workspace::notice(e.to_owned(), cx));
                         }
-                    } else if ev.click_count >= 2 {
-                        self.editor = Some(Editor::new(&r));
+                    } else if ev.click_count >= 2
+                        && let Err(e) = self.open_tags(cx)
+                    {
+                        cx.defer(move |cx| crate::workspace::notice(e.to_owned(), cx));
                     }
                     cx.notify();
                 }
@@ -1275,6 +1378,17 @@ impl JournalView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.cols.drag.is_none() {
+            // The row under the pointer: its Tags cell offers "+ tag".
+            let (_, y) = self.table_xy(ev.position);
+            let i = ((y - header_row_h()) / row_h()).floor();
+            let hover = (self.group.is_trades() && i >= 0.0 && ev.pressed_button.is_none())
+                .then(|| self.rows.get(self.scroll + i as usize))
+                .flatten()
+                .map(|r| r.id.clone());
+            if hover != self.hover {
+                self.hover = hover;
+                cx.notify();
+            }
             return;
         }
         if ev.pressed_button != Some(MouseButton::Left) {
@@ -1302,29 +1416,43 @@ impl JournalView {
         if self.cols.hit(x, y, 1) != HeaderHit::Outside {
             cx.emit(ColumnMenu(ev.position));
             cx.stop_propagation();
+            return;
+        }
+        // A row: it becomes the selection (kept if already in it) for the menu's "Tags…".
+        let i = ((y - header_row_h()) / row_h()).floor();
+        if i >= 0.0
+            && let Some(id) = self
+                .rows
+                .get(self.scroll + i as usize)
+                .map(|r| r.id.clone())
+            && !self.is_selected(&id)
+        {
+            self.selected = Some(id);
+            self.also.clear();
+            cx.notify();
         }
     }
 
     fn on_key_down(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         let m = k.modifiers;
-        if let Some(ed) = &mut self.editor {
+        if let Some(ed) = &mut self.tags {
             // AltGr (Ctrl+Alt on Windows) types characters such as @ { €; other modified
             // keys are commands and still work while editing.
             let alt_gr = m.control && m.alt && k.key_char.is_some();
             if (m.control || m.alt || m.platform) && !alt_gr {
                 return;
             }
+            use crate::journal_tags::TagKey;
             match ed.key(k.key.as_str(), k.key_char.as_deref()) {
-                EditorKey::Typing => {}
-                EditorKey::Cancel => self.editor = None,
-                EditorKey::Save(e) => {
-                    self.editor = None;
-                    if let Some(j) = &self.journal {
-                        j.edit(e);
-                    }
+                TagKey::Typing => {}
+                TagKey::Changed(e) => self.save(e),
+                TagKey::Close(e) => {
+                    self.save(e);
+                    self.tags = None;
+                    crate::popover::closed(cx, crate::popover::Kind::JournalTags);
                 }
-                EditorKey::Ignored => return,
+                TagKey::Ignored => return,
             }
             cx.stop_propagation();
             cx.notify();
@@ -1338,8 +1466,11 @@ impl JournalView {
         let next = match k.key.as_str() {
             "down" => Some(i.map_or(0, |i| (i + 1).min(n.saturating_sub(1)))),
             "up" => Some(i.map_or(0, |i| i.saturating_sub(1))),
-            "enter" => {
-                let _ = self.start_edit(cx);
+            // Enter, or T (the journal's own key, like Enter: no app binding, a row selected).
+            "enter" | "t" if !m.shift => {
+                if let Err(e) = self.start_edit(cx) {
+                    cx.defer(move |cx| crate::workspace::notice(e.to_owned(), cx));
+                }
                 cx.stop_propagation();
                 return;
             }
@@ -1349,6 +1480,7 @@ impl JournalView {
             return;
         };
         self.selected = Some(self.rows[next].id.clone());
+        self.also.clear();
         let visible = self.visible_rows();
         if next < self.scroll {
             self.scroll = next;
@@ -1437,12 +1569,13 @@ impl JournalView {
             );
             return;
         }
-        let selected = self.selected_index();
         for (n, i) in (self.scroll..end).enumerate() {
             let y = oy + n as f32 * row_h();
             if y + row_h() > top + h + 0.5 {
                 break;
             }
+            let picked = self.is_selected(&self.rows[i].id);
+            let offer = picked || self.hover.as_deref() == Some(self.rows[i].id.as_str());
             let r = &self.rows[i];
             for (c, col) in JournalCol::ALL.iter().enumerate() {
                 let Some((x, cw)) = self.cols.cell(c, ox) else {
@@ -1476,7 +1609,30 @@ impl JournalView {
                     }
                 });
             }
-            if Some(i) == selected {
+            // "+ tag" in the Tags cell of the row under the pointer or selected (only there:
+            // no clutter), after its tags; a click on the cell opens the tag editor.
+            if offer && let Some((x, cw)) = self.cols.cell(JournalCol::Tags.index(), ox) {
+                let tags = &self.rows[i].cells[JournalCol::Tags.index()];
+                let tw = if tags.is_empty() {
+                    0.0
+                } else {
+                    self.glyphs.width(tags, t.text_main, false, window) + 8.0
+                };
+                let cell = Bounds::new(point(px(x), px(y)), size(px(cw), px(row_h())));
+                window.with_content_mask(Some(gpui::ContentMask { bounds: cell }), |window| {
+                    self.glyphs.paint(
+                        "+ tag",
+                        x + pad() + tw,
+                        y,
+                        row_h(),
+                        t.accent,
+                        false,
+                        window,
+                        cx,
+                    );
+                });
+            }
+            if picked {
                 // Selection: an accent outline (no fill, so text contrast is untouched).
                 for (yy, hh) in [(y, hair * 2.0), (y + row_h() - hair * 2.0, hair * 2.0)] {
                     window.paint_quad(fill(
@@ -1838,51 +1994,212 @@ impl JournalView {
             )
     }
 
-    fn editor_bar(&self) -> Option<impl IntoElement> {
-        let ed = self.editor.as_ref()?;
+    /// The tag editor's floating panel (owner-approved mock, 2026-11-19), opened under the
+    /// selected row's Tags cell, over the table (it never grows a row or the pane): chips with
+    /// a × each, the input, recent tags, the note, and the keys in one dim line.
+    fn tags_panel(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        use crate::journal_tags::Field;
+        let ed = self.tags.as_ref()?;
         let t = self.theme;
-        let field = |label: &'static str, text: &str, active: bool| {
-            div()
-                .flex()
-                .flex_row()
-                .gap_1()
-                .child(div().text_color(t.text_dim).child(label))
-                .child(
-                    div()
-                        .px_1()
-                        .min_w(px(80.0))
-                        .border_1()
-                        .border_color(if active { t.accent } else { t.axis_line })
-                        .text_color(t.text_main)
-                        .child(if active {
-                            format!("{text}▏")
-                        } else {
-                            text.to_owned()
-                        }),
-                )
+        const WIDTH: f32 = 300.0;
+        // Under the selected row's Tags cell, inside the table (pane px from the table's corner).
+        let (bw, bh) = (f(self.bounds.size.width), f(self.bounds.size.height));
+        let row = self
+            .selected_index()
+            .filter(|i| *i >= self.scroll)
+            .map_or(0, |i| i - self.scroll);
+        let x = self
+            .cols
+            .cell(JournalCol::Tags.index(), 0.0)
+            .map_or(0.0, |(x, _)| x)
+            .min((bw - WIDTH - 8.0).max(0.0))
+            .max(0.0);
+        let below = header_row_h() + (row + 1) as f32 * row_h() + 2.0;
+        // Room for the panel under the row, else above it.
+        // The frame puts its title bar where the body would start, the body under it.
+        let y = if below + 200.0 + popover::title_h() > bh {
+            (below - row_h() - 200.0 - popover::title_h()).max(0.0)
+        } else {
+            below
         };
-        Some(
+        let chip =
+            |id: (&'static str, usize), text: &str, removable: bool, cx: &mut Context<Self>| {
+                let tag = text.to_owned();
+                let mut c = div()
+                    .id(id)
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_1()
+                    .px_1()
+                    .rounded_sm()
+                    .bg(t.element_selected)
+                    .text_color(t.text_main)
+                    .child(text.to_owned());
+                if removable {
+                    c = c.child(
+                        div()
+                            .id((id.0, id.1 + 10_000))
+                            .cursor_pointer()
+                            .text_color(t.text_dim)
+                            .hover(|s| s.text_color(t.text_main))
+                            .child("×")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |v, _: &MouseDownEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    v.tag_click(&tag, false, cx);
+                                }),
+                            ),
+                    );
+                } else {
+                    c = c
+                        .cursor_pointer()
+                        .hover(|s| s.bg(t.element_hover))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |v, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                v.tag_click(&tag, true, cx);
+                            }),
+                        );
+                }
+                c
+            };
+        let caret = |on: bool| if on { "▏" } else { "" };
+        let tags_on = ed.field == Field::Tags;
+        let input = div()
+            .id("journal-tags-input")
+            .flex()
+            .flex_row()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .py(px(2.0))
+            .min_h(px(22.0))
+            .border_1()
+            .border_color(if tags_on { t.accent } else { t.control_edge })
+            .rounded_sm()
+            .cursor_text()
+            .children(
+                ed.chips
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| chip(("journal-tag-chip", i), c, true, cx))
+                    .collect::<Vec<_>>(),
+            )
+            .child(if ed.input.is_empty() && !tags_on {
+                div().text_color(t.text_dim).child("Add a tag")
+            } else if ed.input.is_empty() {
+                div()
+                    .text_color(t.text_dim)
+                    .child(format!("{}type a tag, Enter to add", caret(true)))
+            } else {
+                div()
+                    .text_color(t.text_main)
+                    .child(format!("{}{}", ed.input, caret(tags_on)))
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(ed) = &mut v.tags {
+                        ed.field = Field::Tags;
+                    }
+                    cx.notify();
+                }),
+            );
+        let recent = (!ed.recent.is_empty()).then(|| {
             div()
                 .flex()
                 .flex_row()
-                .gap_3()
+                .flex_wrap()
                 .items_center()
-                .px_2()
-                .py_1()
-                .bg(t.panel)
-                .border_t_1()
-                .border_color(t.axis_line)
-                .text_size(crate::zoom::ui(12.0))
-                .whitespace_nowrap()
-                .overflow_hidden()
-                .child(field("Tags", &ed.tags, ed.field == Field::Tags))
-                .child(field("Note", &ed.note, ed.field == Field::Note))
-                .child(
-                    div()
-                        .text_color(t.text_dim)
-                        .child("Tab: next field  ·  Enter: save  ·  Esc: cancel"),
-                ),
-        )
+                .gap_1()
+                .text_color(t.text_dim)
+                .child("Recent:")
+                .children(
+                    ed.recent
+                        .iter()
+                        .enumerate()
+                        .map(|(i, r)| chip(("journal-tag-recent", i), r, false, cx))
+                        .collect::<Vec<_>>(),
+                )
+        });
+        let note_on = ed.field == Field::Note;
+        let note_text = if !ed.note.is_empty() || note_on {
+            (format!("{}{}", ed.note, caret(note_on)), t.text_main)
+        } else if ed.mixed_note {
+            ("Notes differ: typing replaces them".to_owned(), t.text_dim)
+        } else {
+            ("Note…".to_owned(), t.text_dim)
+        };
+        let note = div()
+            .id("journal-tags-note")
+            .px_1()
+            .py(px(2.0))
+            .min_h(px(22.0))
+            .border_1()
+            .border_color(if note_on { t.accent } else { t.control_edge })
+            .rounded_sm()
+            .cursor_text()
+            .text_color(note_text.1)
+            .child(note_text.0)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|v, _: &MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    if let Some(ed) = &mut v.tags {
+                        ed.field = Field::Note;
+                    }
+                    cx.notify();
+                }),
+            );
+        let keys = if ed.count() > 1 {
+            format!(
+                "Esc closes · Backspace removes the last tag · applies to the {} selected trades",
+                ed.count()
+            )
+        } else {
+            "Esc closes · Backspace removes the last tag · Tab: note".to_owned()
+        };
+        let body = div()
+            .absolute()
+            .left(px(x))
+            .top(px(y))
+            .w(px(WIDTH))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
+            .bg(t.panel)
+            .border_1()
+            .border_color(t.axis_line)
+            .rounded_b_md()
+            .text_size(crate::zoom::ui(12.0))
+            .occlude()
+            .on_mouse_down(MouseButton::Left, |_, _, cx: &mut App| {
+                cx.stop_propagation()
+            })
+            .child(input)
+            .children(recent)
+            .child(note)
+            .child(
+                div()
+                    .text_size(crate::zoom::ui(11.0))
+                    .text_color(t.text_dim)
+                    .child(keys),
+            );
+        let dismiss: popover::OnDismiss =
+            Box::new(cx.listener(|v, _: &MouseDownEvent, _, cx| v.close_tags(cx)));
+        Some(popover::floating(
+            popover::Panel::JournalTags,
+            ed.title.clone(),
+            &t,
+            body,
+            dismiss,
+        ))
     }
 }
 
@@ -1890,7 +2207,7 @@ impl JournalView {
     /// Taking typed text now (a note being edited): the workspace leaves drawing keys to it
     /// (`commands::runs_while_typing`).
     pub fn takes_text(&self) -> bool {
-        self.editor.is_some()
+        self.tags.is_some()
     }
 }
 
@@ -1910,6 +2227,7 @@ impl Render for JournalView {
             // The trading thread held the journal this instant: draw again on the next poll.
             self.seen_revision = u64::MAX;
         }
+        self.shot_fixture(cx);
         let entity = cx.entity();
         let t = self.theme;
         let e = entity.clone();
@@ -1941,9 +2259,16 @@ impl Render for JournalView {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll))
-                    .child(body),
+                    // "+ tag" goes with the pointer.
+                    .id("journal-table")
+                    .on_hover(cx.listener(|v, hovered: &bool, _, cx| {
+                        if !*hovered && v.hover.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
+                    .child(body)
+                    .children(self.tags_panel(cx)),
             )
-            .children(self.editor_bar())
     }
 }
 
@@ -2446,37 +2771,5 @@ mod tests {
         assert_eq!(both.get("a2"), Some(&pct), "by name, from settings");
         assert_eq!(both.get("a1"), Some(&40));
         assert_eq!(both.get("a3"), None);
-    }
-
-    #[test]
-    fn editor_types_switches_saves_and_cancels() {
-        let r = row(&trade(), PnlDisplay::Both);
-        let mut ed = Editor::new(&r);
-        assert_eq!(ed.tags, "breakout, A+");
-        assert_eq!(ed.key("backspace", None), EditorKey::Typing);
-        assert_eq!(ed.key("backspace", None), EditorKey::Typing);
-        for c in [",", " ", "o", "p", "e", "n"] {
-            ed.key(c, Some(c));
-        }
-        assert_eq!(ed.key("tab", None), EditorKey::Typing);
-        for c in ["g", "o", "o", "d"] {
-            ed.key(c, Some(c));
-        }
-        assert_eq!(ed.key("f5", None), EditorKey::Ignored);
-        assert_eq!(
-            ed.key("escape-ish", Some("\u{1b}")),
-            EditorKey::Ignored,
-            "control characters never type"
-        );
-        let EditorKey::Save(e) = ed.key("enter", None) else {
-            panic!("saves")
-        };
-        // "breakout, A+" less two characters, then ", open": an empty tag in the middle.
-        assert_eq!(e.tags, ["breakout", " ", " open"]);
-        assert_eq!(e.note, "good");
-        // The journal tidies the tags.
-        let mut j = Journal::from_records([Record::Trade(Box::new(trade()))]);
-        assert_eq!(j.edit(e).unwrap().tags, ["breakout", "open"]);
-        assert_eq!(Editor::new(&r).key("escape", None), EditorKey::Cancel);
     }
 }

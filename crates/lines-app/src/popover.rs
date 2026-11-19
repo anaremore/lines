@@ -78,6 +78,8 @@ pub enum Kind {
     StyleEditor,
     /// The orders of a chart's group tag (`crate::order_group_view`).
     OrderGroup,
+    /// The journal's tag editor (`crate::journal_tags`).
+    JournalTags,
 }
 
 /// The one open popover, as a pure value: `K` names a popover (owner and kind).
@@ -370,12 +372,14 @@ pub enum Panel {
     GoTo,
     /// Rename tab.
     RenameTab,
+    /// The journal's tag editor (`crate::journal_tags`).
+    JournalTags,
 }
 
 impl Panel {
     /// Every kind (screenshots' `--panel-at`, tests).
     #[cfg_attr(not(any(test, feature = "screenshot")), allow(dead_code))]
-    pub const ALL: [Panel; 9] = [
+    pub const ALL: [Panel; 10] = [
         Panel::Palette,
         Panel::Picker,
         Panel::OpenWorkspace,
@@ -385,6 +389,7 @@ impl Panel {
         Panel::OrderGroup,
         Panel::GoTo,
         Panel::RenameTab,
+        Panel::JournalTags,
     ];
 
     /// Its key in `Settings::panel_places`.
@@ -399,6 +404,7 @@ impl Panel {
             Panel::OrderGroup => "order_group",
             Panel::GoTo => "go_to",
             Panel::RenameTab => "rename_tab",
+            Panel::JournalTags => "journal_tags",
         }
     }
 }
