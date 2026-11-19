@@ -1019,6 +1019,9 @@ pub struct Trading {
     /// Screenshot fixture (`--account-menu`): charts and DOMs start with the account list
     /// open. Never set in the app.
     pub start_account_menu: bool,
+    /// Screenshot fixture (`--journal-tags`): the journal opens its tag editor on its newest
+    /// trade, two older trades tagged first. Never set in the app.
+    pub start_journal_tags: bool,
     /// Screenshot fixture (`--drag-order PRICE`): charts and DOMs hold their newest working
     /// entry dragged to this price (`dom_orders::DragOrder::fixture`). Never set in the app.
     pub start_drag_order: Option<String>,
@@ -1399,8 +1402,12 @@ impl Trading {
         let shot_stores = crate::journal_shots::Stores::default();
         // Filled below: no trade can close before the service starts.
         let shot_kinds = crate::journal_shots::Kinds::default();
-        let (journal, journal_report) =
-            open_journal(journal_file.as_ref(), &shot_stores, &shot_kinds);
+        let (journal, journal_report) = open_journal(
+            journal_file.as_ref(),
+            &shot_stores,
+            &shot_kinds,
+            shot_fetch(&registry, &base),
+        );
         let loaded = match &setup.file {
             Some(path) => match persist::load(path) {
                 Ok(f) => f,
@@ -1752,6 +1759,7 @@ impl Trading {
             start_hotkeys: false,
             start_order_controls: false,
             start_account_menu: false,
+            start_journal_tags: false,
             start_drag_order: None,
             start_panel_menu: None,
             start_chain_ticket: None,
@@ -2164,10 +2172,24 @@ fn first_price(k: &OrderKind) -> Option<Price> {
 /// The journal from its file (if any): its trades and edits, and a writer appending to it.
 /// A file this build can't read is left alone and not written this run (reported). Only a
 /// journal being saved takes trade snapshots, in `shots/` beside its file, from `stores`' bars.
+/// Where trade snapshots and later measurements find data no pane shows: the source's local
+/// store, and (a live source only) a short-lived feed of the contract on it.
+fn shot_fetch(registry: &FeedRegistry, base: &FeedConfig) -> crate::journal_shots::Fetch {
+    let live = !matches!(base.source, lines_feed::Source::Replay { .. });
+    crate::journal_shots::Fetch {
+        store: base
+            .store
+            .as_ref()
+            .map(|s| (s.root.clone(), s.source.clone())),
+        feed: live.then(|| (registry.clone(), base.clone())),
+    }
+}
+
 fn open_journal(
     file: Option<&(PathBuf, String)>,
     stores: &crate::journal_shots::Stores,
     kinds: &crate::journal_shots::Kinds,
+    fetch: crate::journal_shots::Fetch,
 ) -> (Arc<JournalShared>, Option<String>) {
     use lines_trading::journal::store::{self, JournalWriter};
     let Some((path, source)) = file else {
@@ -2191,7 +2213,7 @@ fn open_journal(
             };
             let journal = Journal::from_records(loaded.map(|l| l.records).unwrap_or_default());
             let shots = path.parent().filter(|_| writer.is_some()).and_then(|d| {
-                crate::journal_shots::spawn(stores.clone(), kinds.clone(), d.join("shots"))
+                crate::journal_shots::spawn(stores.clone(), kinds.clone(), d.join("shots"), fetch)
             });
             (
                 JournalShared::start_with_shots(journal, writer, shots),
@@ -2848,6 +2870,7 @@ impl Trading {
                             id: t.id,
                             tags: tags.clone(),
                             note: t.note,
+                            excursion: None,
                         });
                     }
                 }

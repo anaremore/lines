@@ -227,6 +227,7 @@ fn colliding_ids_on_load_are_kept_apart() {
             id: "t5".into(),
             tags: vec!["first".into()],
             note: String::new(),
+            excursion: None,
         }),
     ]);
     assert_eq!(j.trades().len(), 2);
@@ -476,6 +477,7 @@ fn edits_last_one_wins_and_tags_are_tidy() {
             id: "t5".into(),
             tags: vec!["first".into()],
             note: "one".into(),
+            excursion: None,
         }),
         Record::Edit(Edit {
             id: "t5".into(),
@@ -486,6 +488,7 @@ fn edits_last_one_wins_and_tags_are_tidy() {
                 "A+".into(),
             ],
             note: "two".into(),
+            excursion: None,
         }),
     ]);
     let t = j.trade("t5").unwrap();
@@ -495,7 +498,8 @@ fn edits_last_one_wins_and_tags_are_tidy() {
         j.edit(Edit {
             id: "nope".into(),
             tags: vec![],
-            note: String::new()
+            note: String::new(),
+            excursion: None,
         })
         .is_none()
     );
@@ -529,6 +533,7 @@ fn reading_tolerates_a_torn_tail_and_refuses_newer_versions() {
         id: "t5".into(),
         tags: vec!["x".into()],
         note: String::new(),
+        excursion: None,
     }))
     .unwrap();
     let full = format!("{header}{trade}\n{edit}\n");
@@ -649,6 +654,7 @@ fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
             id: "t5".into(),
             tags: vec!["first".into()],
             note: String::new(),
+            excursion: None,
         }));
     } // dropped: the thread drains, syncs and stops
     let wait = |n: usize| {
@@ -675,6 +681,7 @@ fn writer_appends_in_the_background_and_cuts_a_torn_tail() {
             id: "t5".into(),
             tags: vec!["second".into()],
             note: "n".into(),
+            excursion: None,
         }));
     }
     let l2 = wait(3);
@@ -881,6 +888,7 @@ fn only_a_saved_journal_asks_and_a_flush_waits_for_the_drawing() {
         while let Ok(m) = rx.recv() {
             match m {
                 ShotMsg::Take(r) => taken.push(r.file),
+                ShotMsg::Repair(_) => {}
                 ShotMsg::Flush(done) => {
                     let _ = done.send(());
                 }
@@ -986,6 +994,7 @@ fn shared_journal_runs_on_its_own_thread() {
         id: snap.trades[0].id.clone(),
         tags: vec!["t".into()],
         note: String::new(),
+        excursion: None,
     });
     shared.sync();
     assert_eq!(shared.snapshot().unwrap().trades[0].tags, ["t"]);
@@ -1343,4 +1352,204 @@ fn a_backfill_from_before_the_entry_covers_nothing() {
     feed(&mut k, &[vfill("q1", Side::Buy, 6000.00, 1, 1)]);
     let q = feed(&mut k, &[vfill("q2", Side::Sell, 6001.00, 1, 20)]);
     assert!(q[0].excursion_unavailable);
+}
+
+// ---- measuring later, and older builds' broker trades -------------------------------------
+
+/// A broker trade closed with no print of Lines' (unavailable): `measure` from prints that
+/// cover it gives its exact MAE/MFE; prints that don't (none near the entry, a gap, none near
+/// the exit) give nothing, and a seeded trade is never measured.
+#[test]
+fn measure_follows_the_coverage_rule_and_the_trades_lots() {
+    let mut j = venue_journal(true);
+    feed(&mut j, &[vfill("m1", Side::Buy, 6000.00, 2, 0)]);
+    feed(&mut j, &[vfill("m2", Side::Sell, 6001.00, 1, 300)]);
+    let t = feed(&mut j, &[vfill("m3", Side::Sell, 6004.00, 1, 600)]).remove(0);
+    assert!(t.excursion_unavailable && t.cover_checked);
+    let p = |pt: f64, s: i64| (at(s), px(pt));
+    // Every minute: down 3 points at 2 min (2 contracts), up 5 at 8 min (1 left after 5 min).
+    let prints: Vec<_> = (0..=10)
+        .map(|m| {
+            let price = match m {
+                2 => 5997.00,
+                8 => 6005.00,
+                _ => 6000.50,
+            };
+            p(price, m * 60)
+        })
+        .collect();
+    let x = measure(&t, &prints).expect("covered");
+    // −3 points × 2 × $50 = −$300; at 8 min: realized +$50 (1 at +1.00) + 1 × 5 points = +$300.
+    assert_eq!(x.mae, dollars(-300.0));
+    assert_eq!(x.mfe, dollars(300.0));
+    assert_eq!((x.low, x.high), (px(5997.00), px(6005.00)));
+    // A print before the entry, within the gap, starts the cover; a later one is ignored.
+    let mut late = prints.clone();
+    late.retain(|(at_, _)| *at_ != at(0));
+    late.push(p(6000.0, -60));
+    late.push(p(1.0, -60 - FEED_GAP_MS / 1000 - 1));
+    assert_eq!(measure(&t, &late).map(|x| x.low), Some(px(5997.00)));
+    // Not covered.
+    let gap: Vec<_> = prints
+        .iter()
+        .copied()
+        .filter(|(a, _)| a.0 < at(120).0 || a.0 > at(400).0)
+        .collect();
+    assert_eq!(measure(&t, &gap), None, "a gap mid-trade");
+    let early: Vec<_> = prints
+        .iter()
+        .copied()
+        .filter(|(a, _)| a.0 <= at(300).0)
+        .collect();
+    assert_eq!(measure(&t, &early), None, "nothing near the exit");
+    assert_eq!(measure(&t, &[]), None);
+    let mut seeded = t.clone();
+    seeded.incomplete = true;
+    assert_eq!(measure(&seeded, &prints), None);
+}
+
+/// Saved by an older build (no coverage check): a broker account's trade loads as it was and
+/// turns unavailable once the account is known as a broker's; a measurement fills it in as an
+/// edit (tags and note kept) that survives a reload, and a later tag edit keeps it.
+#[test]
+fn older_broker_trades_turn_unavailable_and_a_measurement_is_saved() {
+    let mut j = venue_journal(true);
+    j.on_market(es(), &[print(6000.00, 0)]);
+    feed(&mut j, &[vfill("o1", Side::Buy, 6000.00, 1, 1)]);
+    let mut old = feed(&mut j, &[vfill("o2", Side::Sell, 6002.00, 1, 60)]).remove(0);
+    // As an older build saved it: no check, MAE/MFE from its fills.
+    old.cover_checked = false;
+    old.excursion_unavailable = false;
+    old.tags = vec!["RI bounce".into()];
+    let paper = closed(10.0, 5, &[]);
+    let mut k = Journal::from_records([
+        Record::Trade(Box::new(old.clone())),
+        Record::Trade(Box::new(paper)),
+    ]);
+    assert!(
+        !k.trades()[0].excursion_unavailable,
+        "not known as a broker's yet"
+    );
+    let changed = k.add_venue([venue_acct()], true);
+    assert_eq!(changed, [old.id.clone()]);
+    assert!(k.trades()[0].excursion_unavailable);
+    assert!(!k.trades()[1].excursion_unavailable, "paper untouched");
+    assert!(k.add_venue([venue_acct()], true).is_empty(), "once");
+    assert_eq!(k.unmeasured().count(), 1);
+    // Measured: the edit keeps the tags.
+    let x = Excursion {
+        mae: dollars(-25.0),
+        mfe: dollars(150.0),
+        low: px(5999.50),
+        high: px(6003.00),
+    };
+    let e = k.measured(&old.id, x).expect("applied");
+    assert_eq!(e.tags, ["RI bounce"]);
+    assert_eq!(
+        k.trades()[0].excursion(),
+        Some((dollars(-25.0), dollars(150.0)))
+    );
+    assert_eq!(k.measured(&old.id, x), None, "only once");
+    // A reload: the trade line, then the measurement and a later tag edit.
+    let tag = Edit {
+        id: old.id.clone(),
+        tags: vec!["A+".into()],
+        note: String::new(),
+        excursion: None,
+    };
+    let line = serde_json::to_string(&Record::Edit(e)).unwrap();
+    assert!(line.contains("\"excursion\""), "{line}");
+    let mut r = Journal::from_records([
+        Record::Trade(Box::new(old.clone())),
+        serde_json::from_str(&line).unwrap(),
+        Record::Edit(tag),
+    ]);
+    assert!(r.add_venue([venue_acct()], true).is_empty());
+    let t = &r.trades()[0];
+    assert_eq!(t.excursion(), Some((dollars(-25.0), dollars(150.0))));
+    assert_eq!(t.tags, ["A+"]);
+    // An edit line without the field (an older build's) reads as before.
+    let plain = format!(r#"{{"edit":{{"id":"{}","tags":["x"],"note":""}}}}"#, old.id);
+    assert!(matches!(
+        serde_json::from_str::<Record>(&plain).unwrap(),
+        Record::Edit(Edit {
+            excursion: None,
+            ..
+        })
+    ));
+}
+
+/// The journal thread asks the snapshot thread to mend the newest trades at start, and a trade
+/// on request (a "view"); an unmeasured broker trade that closes is sent to be measured; the
+/// answer is applied and saved.
+#[test]
+fn repairs_are_asked_for_and_answers_saved() {
+    let dir = lines_core::scratch::Scratch::new("journal-repairs");
+    let path = dir.join("t.jsonl");
+    let mut seed = venue_journal(true);
+    seed.set_shots(true);
+    feed(&mut seed, &[vfill("r1", Side::Buy, 6000.00, 1, 0)]);
+    let t = feed(&mut seed, &[vfill("r2", Side::Sell, 6001.00, 1, 600)]).remove(0);
+    assert!(t.excursion_unavailable && !t.screenshots.is_empty());
+    let writer = JournalWriter::open(path.clone(), "t", None).unwrap();
+    let (tx, rx) = mpsc::channel();
+    let shared = JournalShared::start_with_shots(
+        Journal::from_records([Record::Trade(Box::new(t.clone()))]),
+        Some(writer),
+        Some(tx),
+    );
+    let first = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let ShotMsg::Repair(r) = first else {
+        panic!("a repair at start")
+    };
+    assert!(!r.asked);
+    let shot = r.shot.as_ref().expect("its snapshot");
+    assert!(
+        shot.trade.id.is_empty() && shot.trade.account.0.is_empty(),
+        "blanked"
+    );
+    let m = r.measure.as_ref().expect("its measurement");
+    assert_eq!(m.id, t.id);
+    // The answer comes back and is saved.
+    r.sink.send(
+        t.id.clone(),
+        Excursion {
+            mae: dollars(-10.0),
+            mfe: dollars(60.0),
+            low: px(5999.80),
+            high: px(6001.20),
+        },
+    );
+    shared.sync();
+    let snap = shared.snapshot().unwrap();
+    assert!(!snap.trades[0].excursion_unavailable);
+    // Asked for by a "view".
+    shared.repair(t.id.clone());
+    shared.sync();
+    let ShotMsg::Repair(r) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("a repair on request")
+    };
+    assert!(
+        r.asked && r.measure.is_none(),
+        "measured already: the snapshot only"
+    );
+    // The snapshot thread answers the quit flush.
+    thread::spawn(move || {
+        for m in rx {
+            if let ShotMsg::Flush(done) = m {
+                let _ = done.send(());
+            }
+        }
+    });
+    assert!(shared.flush(Duration::from_secs(5)));
+    drop(shared);
+    // The file holds the measurement as an edit record (the trade line came from elsewhere).
+    let loaded = store::read(&path).unwrap().unwrap();
+    assert!(loaded.records.iter().any(|r| matches!(
+        r,
+        Record::Edit(Edit {
+            excursion: Some(_),
+            ..
+        })
+    )));
 }

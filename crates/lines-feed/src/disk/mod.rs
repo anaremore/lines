@@ -40,7 +40,7 @@ pub mod writer;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use lines_core::{Bar, CivilDate, ContractKey, Delivery, Product, Stitcher, UtcMillis};
+use lines_core::{Bar, CivilDate, ContractKey, Delivery, Price, Product, Stitcher, UtcMillis};
 
 pub use coverage::{Coverage, Ranges};
 pub use segment::FlushPolicy;
@@ -230,6 +230,41 @@ impl ContractDir {
             }
         }
         out
+    }
+
+    /// The stored trades (time, price) from `from` to `to` inclusive, oldest first, read from
+    /// the segments of the trade dates that overlap them. Whether they are all of that span's
+    /// trades is [`ContractDir::trade_coverage`]'s to say.
+    pub fn trades_between(
+        &self,
+        from: UtcMillis,
+        to: UtcMillis,
+    ) -> io::Result<Vec<(UtcMillis, Price)>> {
+        let mut out = Vec::new();
+        let mut events = Vec::new();
+        for d in self.dates() {
+            let (open, close) = partition::trade_date_span(&self.product, d);
+            if close.0 <= from.0 || open.0 > to.0 {
+                continue;
+            }
+            let mut r = segment::SegmentReader::open(&self.segment_path(d))?;
+            while let Ok(b) = r.next_block()? {
+                events.clear();
+                if crate::native::decode(&b.events, &mut events).is_err() {
+                    continue;
+                }
+                for e in &events {
+                    if let crate::native::NativeEvent::Trade { time_us, price, .. } = *e {
+                        let at = UtcMillis(time_us.div_euclid(1000));
+                        if at.0 >= from.0 && at.0 <= to.0 {
+                            out.push((at, price));
+                        }
+                    }
+                }
+            }
+        }
+        out.sort_by_key(|(t, _)| t.0);
+        Ok(out)
     }
 
     /// Rebuild bars from the stored trades (the bar index's source of truth).

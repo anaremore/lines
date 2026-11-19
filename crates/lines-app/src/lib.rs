@@ -47,6 +47,7 @@ mod gallery;
 mod groups_view;
 mod icons;
 mod journal_shots;
+mod journal_tags;
 mod journal_view;
 mod keycap;
 mod keymap;
@@ -988,6 +989,10 @@ struct Cli {
     /// Screenshot: charts and DOMs with their account list open (the header's account chip).
     #[arg(long, requires = "screenshot")]
     account_menu: bool,
+    /// Screenshot: the journal's tag editor open on its newest trade, two older trades tagged
+    /// first (synthetic tags, for the chips and the recent list).
+    #[arg(long, requires = "screenshot")]
+    journal_tags: bool,
     /// Screenshot: DOMs start with this trade panel list open: `qty` or `bracket`.
     #[arg(long, requires = "screenshot", value_parser = ["qty", "bracket"])]
     panel_menu: Option<String>,
@@ -2354,6 +2359,7 @@ where
                 demo_fills: cli.demo_fills,
                 strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,
+                journal_tags: cli.journal_tags,
                 panel_menu: cli.panel_menu.as_deref().map(|m| match m {
                     "bracket" => trade_bar::PanelMenu::Bracket,
                     _ => trade_bar::PanelMenu::Qty,

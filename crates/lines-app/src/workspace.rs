@@ -569,20 +569,14 @@ impl Tab {
         if let Some(n) = &self.name {
             return n.clone();
         }
-        let mut seen: Vec<String> = Vec::new();
-        for id in self.layout.leaves() {
-            if let Some(h) = self.handle(*id) {
-                let s = h.symbol(cx);
-                if !s.is_empty() && !seen.contains(&s) {
-                    seen.push(s);
-                }
-            }
-        }
-        if seen.is_empty() {
-            "empty".into()
-        } else {
-            seen.join(" · ")
-        }
+        let panes: Vec<(PaneKind, String)> = self
+            .layout
+            .leaves()
+            .into_iter()
+            .filter_map(|id| self.handle(*id))
+            .map(|h| (h.kind(), h.symbol(cx)))
+            .collect();
+        tabstate::auto_title(&panes)
     }
 
     fn doc(&self, cx: &mut App) -> TabDoc {

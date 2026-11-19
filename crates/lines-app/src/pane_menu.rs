@@ -429,7 +429,7 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
                 })
                 .collect(),
         ));
-        v.push(row("Edit tags and note…", Command::JournalEdit));
+        v.push(row("Tags…", Command::JournalEdit));
         v.push(row("Open the trade's snapshot", Command::JournalOpenChart));
         v.push(MenuItem::of(Command::ExportJournal, false));
         v.push(MenuItem::sep());

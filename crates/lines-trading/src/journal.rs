@@ -33,7 +33,16 @@
 //!   entry and no longer gap until the exit. Otherwise (no pane on the contract, a stale feed,
 //!   a replay's prices) the trade says [`Trade::excursion_unavailable`] and its MAE/MFE are
 //!   never shown, rather than a guess from its fills. A trade seeded after a restart (its entry
-//!   unknown) is unavailable too.
+//!   unknown) is unavailable too. A broker trade judged this way says so
+//!   ([`Trade::cover_checked`]); one saved by an older build without that check loads as
+//!   unavailable once its account is known to be a broker's ([`Journal::add_venue`]). An
+//!   unavailable trade is measured later from stored or fetched prints that cover it
+//!   ([`measure`], the same rule), and the result saved as an [`Edit`] carrying an
+//!   [`Excursion`] (an optional field of the existing edit record).
+//! - **Repairs**: the journal asks the snapshot thread ([`ShotMsg::Repair`]) to redraw a
+//!   snapshot drawn without data and to measure an unavailable trade, at start for its recent
+//!   trades, when a broker's accounts join, as an unmeasured trade closes, and when the app
+//!   asks ([`JournalShared::repair`]); the answers come back as [`MeasureSink`] messages.
 //! - **Source of each fill**: the source of the command that created its order (DOM, chart,
 //!   hotkey, rule, …), learned from the command results in the same stream.
 //! - **Trade date**: the session's trade date of the entry (`disk::partition::trade_date`).
@@ -155,6 +164,90 @@ pub struct Trade {
     /// `low`/`high`) hold only what was seen and are never shown as the trade's excursion.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub excursion_unavailable: bool,
+    /// A broker trade whose MAE/MFE were judged by the coverage rule (measured or not). A
+    /// broker trade without it was saved by an older build, from its fills alone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cover_checked: bool,
+}
+
+/// MAE/MFE measured after the fact ([`measure`]), with the price range they saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Excursion {
+    pub mae: Money,
+    pub mfe: Money,
+    #[serde(with = "price_serde")]
+    pub low: Price,
+    #[serde(with = "price_serde")]
+    pub high: Price,
+}
+
+/// MAE/MFE of `t` from `prints` (time, price; any order), by the journal's coverage rule: a
+/// print within [`FEED_GAP_MS`] before or after the entry, no longer gap between prints (or the
+/// last print and the exit) until the exit. `None` when they don't cover it, for a trade seeded
+/// after a restart, or a product the catalog doesn't know. Exact: the trade's own FIFO lots,
+/// fills applied in time order with the prints between them.
+pub fn measure(t: &Trade, prints: &[(UtcMillis, Price)]) -> Option<Excursion> {
+    if t.incomplete || t.fills.is_empty() {
+        return None;
+    }
+    let product = lines_feed::catalog::get(t.contract.product)?;
+    let spec = ContractSpec::new(product, t.contract, Money::ZERO)?;
+    let (entry, exit) = (t.entry_time.0, t.exit_time.0);
+    let mut ps: Vec<(UtcMillis, Price)> = prints
+        .iter()
+        .copied()
+        .filter(|(at, _)| at.0 >= entry - FEED_GAP_MS && at.0 <= exit)
+        .collect();
+    ps.sort_by_key(|(at, _)| at.0);
+    // Coverage.
+    let mut last: Option<i64> = None;
+    for (at, _) in &ps {
+        if at.0 >= entry {
+            let from = last.map_or(entry, |l| l.max(entry - FEED_GAP_MS));
+            if at.0 - from > FEED_GAP_MS {
+                return None;
+            }
+        }
+        last = Some(at.0);
+    }
+    let last = last?;
+    if exit - last > FEED_GAP_MS {
+        return None;
+    }
+    // Replay: fills and in-span prints in time order (a fill first at the same instant).
+    let mut fills: Vec<&TradeFill> = t.fills.iter().collect();
+    fills.sort_by_key(|f| f.at.0);
+    let mut pos = Position::default();
+    let mut realized = Money::ZERO;
+    let (mut mae, mut mfe) = (Money::ZERO, Money::ZERO);
+    let (mut low, mut high) = (t.fills[0].price, t.fills[0].price);
+    let mut see = |pos: &Position, realized: Money, p: Price| {
+        low = Price(low.0.min(p.0));
+        high = Price(high.0.max(p.0));
+        let r = realized + spec.money(pos.unrealised(p), 1);
+        mae = mae.min(r);
+        mfe = mfe.max(r);
+    };
+    let mut fi = fills.into_iter().peekable();
+    for (at, p) in ps.iter().filter(|(at, _)| at.0 >= entry) {
+        while let Some(f) = fi.next_if(|f| f.at.0 <= at.0) {
+            realized += spec.money(pos.apply_fill(f.side, f.price, f.qty), 1);
+            see(&pos, realized, f.price);
+        }
+        if pos.qty() != 0 {
+            see(&pos, realized, *p);
+        }
+    }
+    for f in fi {
+        realized += spec.money(pos.apply_fill(f.side, f.price, f.qty), 1);
+        see(&pos, realized, f.price);
+    }
+    Some(Excursion {
+        mae,
+        mfe,
+        low,
+        high,
+    })
 }
 
 impl Trade {
@@ -213,13 +306,16 @@ impl Trade {
 }
 
 /// A user edit of a trade's tags and note (saved as its own record; the last one wins).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Edit {
     pub id: String,
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub note: String,
+    /// MAE/MFE measured after the trade closed ([`measure`]); older builds ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excursion: Option<Excursion>,
 }
 
 /// What the journal file holds after its header, one per line: `{"trade":{…}}` or
@@ -243,12 +339,64 @@ pub struct ShotRequest {
     pub account: AccountId,
 }
 
+/// Where a repair's measurement goes: back to the journal thread. Weak: a snapshot thread still
+/// holding one never keeps the journal (or its thread) alive.
+#[derive(Clone)]
+pub struct MeasureSink(std::sync::Weak<JournalShared>);
+
+impl std::fmt::Debug for MeasureSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("MeasureSink")
+    }
+}
+
+impl MeasureSink {
+    /// The trade `id` measured (applied and saved on the journal thread).
+    pub fn send(&self, id: String, x: Excursion) {
+        if let Some(j) = self.0.upgrade() {
+            let _ = j.tx.send(Msg::Measured(id, x));
+        }
+    }
+}
+
+/// Mend a closed trade: draw its snapshot again if the file was drawn without data (or is
+/// missing), and measure its MAE/MFE if they are unavailable.
+#[derive(Debug)]
+pub struct Repair {
+    /// The snapshot to redraw if it lacks data (`ShotRequest`'s blanked trade).
+    pub shot: Option<ShotRequest>,
+    /// The trade to measure (its id kept: the answer names it; never drawn).
+    pub measure: Option<Trade>,
+    pub sink: MeasureSink,
+    /// Asked for by the trader (a "view" of a snapshot without data): first in line.
+    pub asked: bool,
+}
+
 /// What the journal thread sends the thread that draws trade snapshots.
 #[derive(Debug)]
 pub enum ShotMsg {
     Take(Box<ShotRequest>),
+    Repair(Box<Repair>),
     /// Reply once everything sent before is written or given up on (quitting).
     Flush(Sender<()>),
+}
+
+/// The request to draw `t`'s snapshot into `file`: the trade with its ids, account, tags and note
+/// blanked (the account kept beside it for its kind only).
+pub fn shot_request(t: &Trade, file: String) -> ShotRequest {
+    let mut trade = t.clone();
+    let account = std::mem::replace(&mut trade.account, AccountId::new(""));
+    trade.id.clear();
+    trade.tags.clear();
+    trade.note.clear();
+    for f in &mut trade.fills {
+        f.trade_id.clear();
+    }
+    ShotRequest {
+        file,
+        trade,
+        account,
+    }
 }
 
 /// A trade snapshot's file name: the trade date and a 64-bit FNV-1a of the trade id (stable across
@@ -473,6 +621,14 @@ impl Journal {
         let t = &mut self.closed[i];
         t.tags = e.tags.clone();
         t.note = e.note.clone();
+        if let Some(x) = e.excursion {
+            t.mae = x.mae;
+            t.mfe = x.mfe;
+            t.low = x.low;
+            t.high = x.high;
+            t.excursion_unavailable = false;
+            t.cover_checked = true;
+        }
         Some(e)
     }
 
@@ -501,19 +657,8 @@ impl Journal {
         if shots && !kept.incomplete {
             let file = shot_file_name(kept.trade_date, &kept.id);
             kept.screenshots = vec![file.clone()];
-            let mut trade = kept.clone();
-            let account = std::mem::replace(&mut trade.account, AccountId::new(""));
-            trade.id.clear();
-            trade.tags.clear();
-            trade.note.clear();
-            for f in &mut trade.fills {
-                f.trade_id.clear();
-            }
-            self.shot_requests.push(ShotRequest {
-                file,
-                trade,
-                account,
-            });
+            let req = shot_request(kept, file);
+            self.shot_requests.push(req);
         }
         self.closed.last().cloned().expect("just pushed")
     }
@@ -538,17 +683,55 @@ impl Journal {
     /// broker's own and stable, so one a saved trade holds is never counted again, and their
     /// trades are measured only where Lines' prints cover them. `estimate_fees`: the broker
     /// reports no fees ([`crate::extension::BrokerExtension::reports_fees`]).
+    ///
+    /// A closed trade of these accounts saved without the coverage check (an older build's,
+    /// MAE/MFE from its fills alone) becomes unavailable here. Returns the ids changed.
     pub fn add_venue(
         &mut self,
         accounts: impl IntoIterator<Item = AccountId>,
         estimate_fees: bool,
-    ) {
+    ) -> Vec<String> {
         for a in accounts {
             if estimate_fees {
                 self.estimate_fees.insert(a.clone());
             }
             self.venue.insert(a);
         }
+        let mut changed = Vec::new();
+        for t in &mut self.closed {
+            if self.venue.contains(&t.account) && !t.cover_checked && !t.excursion_unavailable {
+                t.excursion_unavailable = true;
+                t.cover_checked = true;
+                changed.push(t.id.clone());
+            }
+        }
+        changed
+    }
+
+    /// Closed trades whose MAE/MFE are unavailable and could be measured later (not seeded),
+    /// newest first.
+    pub fn unmeasured(&self) -> impl Iterator<Item = &Trade> {
+        self.closed
+            .iter()
+            .rev()
+            .filter(|t| t.excursion_unavailable && !t.incomplete)
+    }
+
+    /// A measurement of a closed trade (a repair's answer): applied, and returned as the edit
+    /// to save (with the trade's tags and note as they are). `None` for an unknown trade or one
+    /// already measured.
+    pub fn measured(&mut self, id: &str, x: Excursion) -> Option<Edit> {
+        let t = self.trade(id)?;
+        if !t.excursion_unavailable {
+            return None;
+        }
+        let e = Edit {
+            id: id.to_owned(),
+            tags: t.tags.clone(),
+            note: t.note.clone(),
+            excursion: Some(x),
+        };
+        self.edit(e)
     }
 
     /// The fee table for fills a broker reported no fee for.
@@ -822,6 +1005,7 @@ impl Journal {
         if self.unmarked.contains(&t.account) || (o.venue && o.last_print.is_none()) {
             t.excursion_unavailable = true;
         }
+        t.cover_checked |= o.venue;
         t
     }
 
@@ -865,6 +1049,7 @@ fn new_trade(
         screenshots: Vec::new(),
         incomplete: false,
         excursion_unavailable: false,
+        cover_checked: false,
     }
 }
 
@@ -1016,6 +1201,10 @@ enum Msg {
     Venue(Vec<AccountId>, bool),
     /// See [`Journal::set_fee_table`].
     FeeTable(FeeTable),
+    /// A repair's measurement ([`MeasureSink`]).
+    Measured(String, Excursion),
+    /// Mend this trade's snapshot and MAE/MFE ([`JournalShared::repair`]).
+    Repair(String),
 }
 
 /// The journal on its own thread (`lines-journal`). The trading thread sends it the core's
@@ -1087,6 +1276,12 @@ impl JournalShared {
         let _ = self.tx.send(Msg::Unmarked(accounts));
     }
 
+    /// Mend trade `id`: redraw its snapshot if it was drawn without data, and measure its
+    /// MAE/MFE if unavailable (a "view" of it). Saved journals only.
+    pub fn repair(&self, id: String) {
+        let _ = self.tx.send(Msg::Repair(id));
+    }
+
     /// A broker's accounts ([`Journal::add_venue`]).
     pub fn add_venue(&self, accounts: Vec<AccountId>, estimate_fees: bool) {
         let _ = self.tx.send(Msg::Venue(accounts, estimate_fees));
@@ -1139,6 +1334,26 @@ impl JournalShared {
     }
 }
 
+/// Repairs sent at once at most (the newest trades first): older ones wait for a "view".
+const MAX_REPAIRS: usize = 50;
+
+/// The repair `t` needs, if any: its snapshot (when it has one) and its measurement (when
+/// unavailable).
+fn repair_of(t: &Trade, sink: &MeasureSink, asked: bool) -> Option<Repair> {
+    let shot = t
+        .screenshots
+        .first()
+        .filter(|f| is_shot_file_name(f))
+        .map(|f| shot_request(t, f.clone()));
+    let measure = (t.excursion_unavailable && !t.incomplete).then(|| t.clone());
+    (shot.is_some() || measure.is_some()).then(|| Repair {
+        shot,
+        measure,
+        sink: sink.clone(),
+        asked,
+    })
+}
+
 fn run(
     mut j: Journal,
     writer: Option<store::JournalWriter>,
@@ -1146,26 +1361,68 @@ fn run(
     rx: Receiver<Msg>,
     shared: std::sync::Weak<JournalShared>,
 ) {
+    let sink = MeasureSink(shared.clone());
     let publish = |j: &Journal| {
         if let Some(s) = shared.upgrade() {
             s.publish(j);
         }
     };
+    let send = |r: Option<Repair>| {
+        if let (Some(tx), Some(r)) = (&shots, r) {
+            let _ = tx.send(ShotMsg::Repair(Box::new(r)));
+        }
+    };
+    // At start: the newest trades' snapshots drawn without data, and their unmeasured MAE/MFE
+    // (the snapshot thread looks at each file and skips those that are fine).
+    for t in j.trades().iter().rev().take(MAX_REPAIRS) {
+        send(repair_of(t, &sink, false));
+    }
     while let Ok(msg) = rx.recv() {
         match msg {
             Msg::Market(k, inputs) => j.on_market(k, &inputs),
             Msg::Unmarked(accounts) => j.add_unmarked(accounts),
-            Msg::Venue(accounts, estimate) => j.add_venue(accounts, estimate),
+            Msg::Venue(accounts, estimate) => {
+                let changed = j.add_venue(accounts, estimate);
+                if !changed.is_empty() {
+                    tracing::info!(
+                        "journal: {} older broker trades' MAE/MFE marked unavailable",
+                        changed.len()
+                    );
+                    publish(&j);
+                    for id in changed.iter().take(MAX_REPAIRS) {
+                        if let Some(t) = j.trade(id) {
+                            send(repair_of(t, &sink, false));
+                        }
+                    }
+                }
+            }
             Msg::FeeTable(t) => j.set_fee_table(t),
+            Msg::Measured(id, x) => {
+                if let Some(e) = j.measured(&id, x) {
+                    if let Some(w) = &writer {
+                        w.append(Record::Edit(e));
+                    }
+                    publish(&j);
+                }
+            }
+            Msg::Repair(id) => {
+                if let Some(t) = j.trade(&id) {
+                    send(repair_of(t, &sink, true));
+                }
+            }
             Msg::Events(events) => {
                 // Publish only when what the pane shows changed: a trade closed, or the open
                 // count moved. The core reports positions on every market batch; those, and
                 // fills that only grow an open trade, change nothing shown.
                 let open = j.open_trades().count();
                 let mut closed = false;
+                let mut unmeasured = Vec::new();
                 for e in &events {
                     for t in j.on_event(e) {
                         closed = true;
+                        if t.excursion_unavailable && !t.incomplete {
+                            unmeasured.push(t.clone());
+                        }
                         if let Some(w) = &writer {
                             w.append(Record::Trade(Box::new(t)));
                         }
@@ -1197,6 +1454,16 @@ fn run(
                     if let Some(tx) = &shots {
                         let _ = tx.send(ShotMsg::Take(Box::new(r)));
                     }
+                }
+                // A trade no print of Lines' covered: measured once stored or fetched prints
+                // cover it (its snapshot is the request just sent).
+                for t in unmeasured {
+                    send(Some(Repair {
+                        shot: None,
+                        measure: Some(t),
+                        sink: sink.clone(),
+                        asked: false,
+                    }));
                 }
             }
             Msg::Edit(e) => {

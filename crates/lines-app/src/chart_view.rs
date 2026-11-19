@@ -1512,7 +1512,7 @@ impl ChartView {
                     return;
                 }
             }
-            Kind::Menu => return,
+            Kind::Menu | Kind::JournalTags => return,
         }
         popover::closed(cx, kind);
         cx.notify();
@@ -11276,7 +11276,8 @@ mod tests {
                 | Kind::Account
                 | Kind::StyleEditor
                 | Kind::OrderGroup => true,
-                Kind::Menu => false,
+                // The journal's own: never a chart's.
+                Kind::Menu | Kind::JournalTags => false,
             };
             assert_eq!(PICKER_CLOSES.contains(&kind), chart_owned, "{kind:?}");
         }
