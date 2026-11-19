@@ -403,6 +403,10 @@ pub struct ChartTradeState {
     /// Drags waiting for the broker, drawn at their new price.
     pub ghosts: Vec<Ghost>,
     pub drag: Option<DragOrder>,
+    /// A stack's drag (a group's orders at one price, moved as one): every order moving, and
+    /// the tag pressed (its id, its plot-local bottom) so a press that never moves lists them.
+    pub drag_stack: Vec<lines_trading::OrderId>,
+    pub stack_tag: Option<(u64, f32)>,
     pub adding: Option<AddExit>,
     /// A press on a tag's ×: cancels on release if still there.
     pub closing: Option<u64>,
@@ -1399,6 +1403,8 @@ impl Default for ChartTradeState {
             position: None,
             ghosts: Vec::with_capacity(8),
             drag: None,
+            drag_stack: Vec::new(),
+            stack_tag: None,
             adding: None,
             closing: None,
             grab: 0,

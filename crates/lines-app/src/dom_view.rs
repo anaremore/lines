@@ -669,7 +669,18 @@ impl DomView {
         };
         if col == DomColumn::Orders {
             let width = f(self.bounds.size.width) / crate::zoom::get();
-            match self.mark_pressed(price, ev.position).order(width) {
+            let pressed = self.mark_pressed(price, ev.position);
+            // A mark for several orders on a pane trading a group: the stack moves as one
+            // (`trade_bar::stack_drag`); elsewhere such a mark keeps its refusal.
+            if matches!(pressed, crate::dom_orders::MarkPress::Many(_))
+                && self.trade.group.is_some()
+            {
+                self.stack_press(price, ev.position, cx);
+                cx.stop_propagation();
+                cx.notify();
+                return;
+            }
+            match pressed.order(width) {
                 Ok(Some(order)) => {
                     // An unfilled entry's held legs move with it (the setting on): previewed.
                     let legs = match Trading::try_global(cx) {
@@ -715,8 +726,59 @@ impl DomView {
 
     /// Release after dragging an order: move it to the row under the pointer (unless that is
     /// its own row), with a ghost until the broker confirms.
+    /// A press on a mark for several orders, on a pane trading a group: grab the stack if
+    /// every order is the group's and at one price; else say why.
+    fn stack_press(
+        &mut self,
+        price: lines_core::Price,
+        p: gpui::Point<gpui::Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let (cell_x, w) = self
+            .cols
+            .cell(DomCol::Orders.index(), f(self.bounds.origin.x))
+            .unwrap_or((f(p.x), 0.0));
+        let ids = self
+            .orders
+            .stack_at(price, self.row_units(), f(p.x) - cell_x, w);
+        let Some(t) = Trading::try_global(cx) else {
+            return;
+        };
+        let orders: Vec<lines_trading::Order> = {
+            let c = t.cache.read();
+            ids.iter().filter_map(|id| c.order(*id).cloned()).collect()
+        };
+        let refs: Vec<&lines_trading::Order> = orders.iter().collect();
+        match trade_bar::stack_drag(&self.trade, &refs) {
+            Ok(true) => {
+                let Some(from) = orders.first().and_then(dom_trade::order_price) else {
+                    return;
+                };
+                self.orders.drag = Some(DragOrder {
+                    count: orders.len(),
+                    ..DragOrder::new(orders[0].id, from, [None; 2])
+                });
+                self.orders.drag_stack = orders.iter().map(|o| o.id).collect();
+            }
+            Ok(false) => {}
+            Err(why) => self.trade.flash(why),
+        }
+    }
+
     fn drop_order(&mut self, d: DragOrder, cx: &mut Context<Self>) {
         let issued = std::time::Instant::now();
+        // A stack: every order to the new row's price, one modify each.
+        let stack = std::mem::take(&mut self.orders.drag_stack);
+        if d.count > 1 && !stack.is_empty() {
+            let units = self.row_units();
+            if dom_trade::row_of(d.from.0, units) == dom_trade::row_of(d.to.0, units) {
+                return;
+            }
+            let ghosts =
+                trade_bar::move_stack(self, &stack, d.to, lines_trading::Source::Dom, issued, cx);
+            self.orders.ghosts.extend(ghosts);
+            return;
+        }
         let units = self.row_units();
         let Some(t) = Trading::try_global(cx) else {
             return;
@@ -832,6 +894,7 @@ impl DomView {
     /// ends.
     fn on_mouse_up_out(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.orders.drag.take().is_some() {
+            self.orders.drag_stack.clear();
             cx.notify();
         }
         if self.cols.drag.take().is_some() {
@@ -1286,6 +1349,12 @@ impl DomView {
                 if let Some(s) = tr.cache.try_read() {
                     self.orders.drag =
                         DragOrder::fixture(&s, account, contract, lines_core::Price(p), with_legs);
+                    // On a group: the stack it stands in (`trade_bar::stack_drag`).
+                    if self.trade.group.is_some()
+                        && let Some(d) = self.orders.drag.as_mut()
+                    {
+                        self.orders.drag_stack = d.widen_to_stack(&s, self.trade.view(), contract);
+                    }
                 }
             }
             if tr.start_order_controls && self.orders.hover.is_none() {
