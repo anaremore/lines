@@ -85,6 +85,11 @@ pub struct DomMenu {
 pub struct JournalMenu {
     pub group: JournalGroup,
     pub all_dates: bool,
+    /// What it shows, in words ("All accounts", "Group · Evals", an account's label).
+    pub filter: String,
+    /// Every choice: its label, its key (`JournalFilter::key`, 0 for every account) and
+    /// whether it is the one shown.
+    pub filters: Vec<(String, u64, bool)>,
 }
 
 /// A pane's state, as its menu shows it.
@@ -410,6 +415,20 @@ pub fn items(m: &PaneMenu) -> Vec<MenuItem> {
         show.push(MenuItem::sep());
         show.push(toggle("All dates", Command::JournalAllDates, j.all_dates));
         v.push(MenuItem::submenu("Show", j.group.label(), show));
+        v.push(MenuItem::submenu(
+            "Accounts",
+            &j.filter,
+            j.filters
+                .iter()
+                .map(|(label, key, on)| {
+                    pick(
+                        label,
+                        Command::JournalFilter(crate::commands::JournalFilterCmd::Pick(*key)),
+                        *on,
+                    )
+                })
+                .collect(),
+        ));
         v.push(row("Edit tags and note…", Command::JournalEdit));
         v.push(row("Open the trade's snapshot", Command::JournalOpenChart));
         v.push(MenuItem::of(Command::ExportJournal, false));
@@ -790,6 +809,12 @@ mod tests {
             journal: (kind == PaneKind::Journal).then_some(JournalMenu {
                 group: JournalGroup::Trades,
                 all_dates: false,
+                filter: "All accounts".into(),
+                filters: vec![
+                    ("All accounts".into(), 0, true),
+                    ("Group · Evals".into(), 7, false),
+                    ("SIM · Sim1".into(), 9, false),
+                ],
             }),
             pnl: PnlDisplay::Both,
             linked_dom: Some(true),
@@ -1068,6 +1093,14 @@ mod tests {
                         // Settings at a section is the palette's Settings… (same window).
                         let cmd = match cmd {
                             Command::SettingsAt(_) => Command::Settings,
+                            // One account or group from the list: the palette reaches each by
+                            // showing the next (and every account by its own row).
+                            Command::JournalFilter(crate::commands::JournalFilterCmd::Pick(0)) => {
+                                Command::JournalFilter(crate::commands::JournalFilterCmd::All)
+                            }
+                            Command::JournalFilter(crate::commands::JournalFilterCmd::Pick(_)) => {
+                                Command::JournalFilter(crate::commands::JournalFilterCmd::Next)
+                            }
                             c => c,
                         };
                         assert!(

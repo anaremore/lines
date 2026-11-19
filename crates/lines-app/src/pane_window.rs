@@ -84,6 +84,10 @@ fn command(cmd: Command) -> Option<Command> {
         Command::ZoomIn | Command::ZoomOut | Command::ZoomReset => Some(cmd),
         // The replay is app-wide too (Go to is the main window's prompt).
         Command::Replay(r) if r != crate::commands::ReplayCmd::GoTo => Some(cmd),
+        // A popped-out journal's own views (its menu's Show and Accounts lists).
+        Command::JournalGroup(_) | Command::JournalAllDates | Command::JournalFilter(_) => {
+            Some(cmd)
+        }
         _ => None,
     }
 }
@@ -170,6 +174,22 @@ impl PaneWindow {
             }
             Some(c @ (Command::ZoomIn | Command::ZoomOut | Command::ZoomReset)) => {
                 cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
+            }
+            Some(
+                c @ (Command::JournalGroup(_)
+                | Command::JournalAllDates
+                | Command::JournalFilter(_)),
+            ) => {
+                if let PaneHandle::Journal(j) = &self.handle {
+                    j.update(cx, |v, cx| match c {
+                        Command::JournalGroup(g) => v.set_group(g, cx),
+                        Command::JournalFilter(f) => {
+                            // A row no longer listed: nothing changes (the menu reopens fresh).
+                            let _ = crate::workspace::journal_filter(v, f, cx);
+                        }
+                        _ => v.toggle_all_dates(cx),
+                    });
+                }
             }
             Some(Command::VolumeOverlay(overlay)) => {
                 if let PaneHandle::Chart(chart) = &self.handle {

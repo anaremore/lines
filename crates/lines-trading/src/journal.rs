@@ -12,13 +12,28 @@
 //!   core's algorithm), so it is exact and also right for fills the core learned of by
 //!   reconciliation (which carry no P&L of their own). Fees are the fills' fees.
 //! - **Never double-counted.** Fills are keyed by their `trade_id`; a fill seen again in this
-//!   run (a reconciled fill re-reported, the same execution delivered twice) is ignored. Only
-//!   within a run: broker fill ids aren't unique across runs (paper order ids restart when the
-//!   paper file is reset), and the core never re-emits an earlier run's fills.
+//!   run (a reconciled fill re-reported, the same execution delivered twice) is ignored. A
+//!   broker account's ([`Journal::add_venue`]) execution ids are the broker's own and stable,
+//!   so for those accounts a fill whose id a saved trade already holds is ignored too (a
+//!   reconnect or restart that reports an execution again). Reconciled fills (`recon-…`, made
+//!   by the core when it learned of a fill without its execution) never count as known across
+//!   runs: their ids come from Lines' order ids, which restart. Paper ids aren't unique across
+//!   runs either (paper order ids restart when the paper file is reset), so paper dedupes
+//!   within a run only; the core never re-emits an earlier run's paper fills.
+//! - **Fees**: the fill's fee as the broker reports it. A broker that doesn't report fees
+//!   ([`crate::extension::BrokerExtension::reports_fees`]), and every reconciled fill, gets the
+//!   product fee table's fee ([`FeeTable`]) when its fee is zero, marked
+//!   [`TradeFill::fee_estimated`] so the pane and the CSV can say so.
 //! - **MAE/MFE** (maximum adverse/favorable excursion): the worst and best the open trade's
 //!   P&L (realized so far plus open, before fees) got while it was open, from the same market
 //!   batches the paper broker sees (trade and last prices) and the fills themselves; plus the
-//!   price range seen, for excursions in ticks from the average entry.
+//!   price range seen, for excursions in ticks from the average entry. A broker account's
+//!   fills aren't Lines' market data, so its trade is measured only when Lines' own prints of
+//!   the contract cover the whole trade: a print within [`FEED_GAP_MS`] before or after the
+//!   entry and no longer gap until the exit. Otherwise (no pane on the contract, a stale feed,
+//!   a replay's prices) the trade says [`Trade::excursion_unavailable`] and its MAE/MFE are
+//!   never shown, rather than a guess from its fills. A trade seeded after a restart (its entry
+//!   unknown) is unavailable too.
 //! - **Source of each fill**: the source of the command that created its order (DOM, chart,
 //!   hotkey, rule, …), learned from the command results in the same stream.
 //! - **Trade date**: the session's trade date of the entry (`disk::partition::trade_date`).
@@ -80,6 +95,9 @@ pub struct TradeFill {
     pub source: Option<Source>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reconciled: bool,
+    /// `fee` is the product fee table's, not the broker's (it reported none).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fee_estimated: bool,
 }
 
 /// A round trip.
@@ -133,12 +151,26 @@ pub struct Trade {
     /// side is approximate.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub incomplete: bool,
+    /// Lines' market data didn't cover the trade (see the module docs): `mae` and `mfe` (and
+    /// `low`/`high`) hold only what was seen and are never shown as the trade's excursion.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub excursion_unavailable: bool,
 }
 
 impl Trade {
     /// Realized P&L after fees.
     pub fn net(&self) -> Money {
         self.realized - self.fees
+    }
+
+    /// Some of the fees are the product fee table's, not the broker's.
+    pub fn fees_estimated(&self) -> bool {
+        self.fills.iter().any(|f| f.fee_estimated)
+    }
+
+    /// MAE and MFE, when measured.
+    pub fn excursion(&self) -> Option<(Money, Money)> {
+        (!self.excursion_unavailable).then_some((self.mae, self.mfe))
     }
 
     /// Average entry price (price units; display).
@@ -164,12 +196,13 @@ impl Trade {
     /// trade. Not a price excursion: `low` and `high` include prices from before a later add, and
     /// a contract held for only part of the move would make them disagree with the dollars.
     pub fn excursion_ticks(&self, product: &lines_core::Product) -> Option<(f64, f64)> {
+        let (mae, mfe) = self.excursion()?;
         let spec = ContractSpec::new(product.clone(), self.contract, Money::ZERO)?;
         let per_tick = spec.money(i128::from(spec.tick()), i128::from(self.max_qty));
         (per_tick.0 > 0).then(|| {
             (
-                self.mae.0 as f64 / per_tick.0 as f64,
-                self.mfe.0 as f64 / per_tick.0 as f64,
+                mae.0 as f64 / per_tick.0 as f64,
+                mfe.0 as f64 / per_tick.0 as f64,
             )
         })
     }
@@ -236,15 +269,44 @@ pub fn is_shot_file_name(name: &str) -> bool {
     })
 }
 
+/// The longest a broker account's trade may go without one of Lines' own prints of its contract
+/// (between two prints, or a print and a fill) and still have its MAE/MFE measured.
+pub const FEED_GAP_MS: i64 = 120_000;
+
 /// A trade in progress.
 #[derive(Clone, Debug)]
 struct Open {
     trade: Trade,
     pos: Position,
     spec: ContractSpec,
+    /// A broker account's trade: measured only while Lines' prints cover it.
+    venue: bool,
+    /// The latest of Lines' timed prints of the contract this trade has seen (one from just
+    /// before the entry counts).
+    last_print: Option<UtcMillis>,
 }
 
 impl Open {
+    /// A timed print of the contract, or a fill's time (`fill`): a gap longer than
+    /// [`FEED_GAP_MS`] since the last print, or from the entry to the first, leaves the trade
+    /// unmeasured.
+    fn covered_to(&mut self, at: UtcMillis, fill: bool) {
+        if !self.venue {
+            return;
+        }
+        // A late print from long before the entry (a backfill) covers nothing.
+        if !fill && at.0 < self.trade.entry_time.0 - FEED_GAP_MS {
+            return;
+        }
+        let from = self.last_print.unwrap_or(self.trade.entry_time);
+        if at.0 - from.0 > FEED_GAP_MS {
+            self.trade.excursion_unavailable = true;
+        }
+        if !fill {
+            self.last_print = Some(UtcMillis(from.0.max(at.0)));
+        }
+    }
+
     /// Running P&L at `mark` (realized so far + open, before fees).
     fn running(&self, mark: Price) -> Money {
         self.trade.realized + self.spec.money(self.pos.unrealised(mark), 1)
@@ -273,8 +335,8 @@ pub struct Journal {
     open: BTreeMap<(AccountId, ContractKey), Open>,
     closed: Vec<Trade>,
     by_id: HashMap<String, usize>,
-    /// Fill ids already counted in this run.
-    seen: HashSet<String>,
+    /// Fill ids already counted in this run, by account (two brokers' ids can meet).
+    seen: HashSet<(AccountId, String)>,
     /// Each order's command source (from the command results).
     sources: HashMap<OrderId, Source>,
     specs: HashMap<ContractKey, ContractSpec>,
@@ -285,6 +347,44 @@ pub struct Journal {
     shots: bool,
     /// Screenshots asked for and not yet taken by [`Journal::take_shot_requests`].
     shot_requests: Vec<ShotRequest>,
+    /// Broker accounts ([`Journal::add_venue`]): stable fill ids, MAE/MFE only where Lines'
+    /// prints cover a trade.
+    venue: HashSet<AccountId>,
+    /// Broker accounts whose fills carry no fee of their own.
+    estimate_fees: HashSet<AccountId>,
+    fee_table: FeeTable,
+    /// Execution ids of the saved trades' fills (reconciled ones left out), by account.
+    saved: HashSet<(AccountId, String)>,
+    /// When each contract's latest timed print was (Lines' market data).
+    feed_at: HashMap<ContractKey, UtcMillis>,
+}
+
+/// The product fee table: a fee per contract (quantity unit) per side by product id, and one for
+/// every other product (the paper broker's, [`crate::PaperConfig`]). The journal puts it on
+/// fills a broker reported no fee for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FeeTable {
+    pub fees: BTreeMap<u32, Money>,
+    pub default_fee: Money,
+}
+
+impl FeeTable {
+    pub fn of(cfg: &crate::PaperConfig) -> FeeTable {
+        FeeTable {
+            fees: cfg.fees.clone(),
+            default_fee: cfg.default_fee,
+        }
+    }
+
+    /// The fee for `qty` of `contract`.
+    pub fn fee(&self, contract: ContractKey, qty: Qty) -> Money {
+        let per = self
+            .fees
+            .get(&contract.product.0)
+            .copied()
+            .unwrap_or(self.default_fee);
+        Money(per.0 * i128::from(qty.0))
+    }
 }
 
 impl Journal {
@@ -304,7 +404,16 @@ impl Journal {
     /// A saved record: a closed trade or an edit.
     pub fn apply(&mut self, r: Record) {
         match r {
-            Record::Trade(t) => self.push_closed(*t),
+            Record::Trade(t) => {
+                for f in t
+                    .fills
+                    .iter()
+                    .filter(|f| !f.reconciled && !f.trade_id.is_empty())
+                {
+                    self.saved.insert((t.account.clone(), f.trade_id.clone()));
+                }
+                self.push_closed(*t)
+            }
             Record::Edit(e) => {
                 let _ = self.edit(e);
             }
@@ -425,30 +534,87 @@ impl Journal {
         self.unmarked.extend(accounts);
     }
 
+    /// These are a broker's accounts (added to those already known): their fill ids are the
+    /// broker's own and stable, so one a saved trade holds is never counted again, and their
+    /// trades are measured only where Lines' prints cover them. `estimate_fees`: the broker
+    /// reports no fees ([`crate::extension::BrokerExtension::reports_fees`]).
+    pub fn add_venue(
+        &mut self,
+        accounts: impl IntoIterator<Item = AccountId>,
+        estimate_fees: bool,
+    ) {
+        for a in accounts {
+            if estimate_fees {
+                self.estimate_fees.insert(a.clone());
+            }
+            self.venue.insert(a);
+        }
+    }
+
+    /// The fee table for fills a broker reported no fee for.
+    pub fn set_fee_table(&mut self, t: FeeTable) {
+        self.fee_table = t;
+    }
+
     /// Market prices seen (the batches the paper broker sees): MAE/MFE of open trades, except
     /// those of `unmarked` accounts.
     pub fn on_market(&mut self, contract: ContractKey, inputs: &[MarketInput]) {
         if !self.open.keys().any(|(_, k)| *k == contract) {
+            // Only the latest print's time, for a broker trade opening next.
+            // An option quote with no usable price is no print (as in the loop below).
+            if let Some(at) = inputs.iter().rev().find_map(|i| match *i {
+                MarketInput::Trade { time, .. } => Some(time),
+                MarketInput::OptionQuote {
+                    bid,
+                    ask,
+                    last,
+                    time,
+                } => match (crate::market::quote_sides(bid, ask), last) {
+                    ((Some(_), Some(_)), _) | (_, Some(_)) => Some(time),
+                    _ => None,
+                },
+                _ => None,
+            }) {
+                let e = self.feed_at.entry(contract).or_insert(at);
+                *e = UtcMillis(e.0.max(at.0));
+            }
             return;
         }
         let unmarked = &self.unmarked;
         for i in inputs {
-            let p = match *i {
-                MarketInput::Trade { price, .. } | MarketInput::Last(price) => price,
+            let (p, at) = match *i {
+                MarketInput::Trade { price, time, .. } => (price, Some(time)),
+                // No time: it moves the excursion but covers no span.
+                MarketInput::Last(price) => (price, None),
                 // An option has no prints here: its mid (the lower unit on a half), else its
                 // last.
-                MarketInput::OptionQuote { bid, ask, last, .. } => {
-                    match (crate::market::quote_sides(bid, ask), last) {
-                        ((Some(b), Some(a)), _) => Price((b.0 + a.0).div_euclid(2)),
-                        (_, Some(l)) => l,
-                        _ => continue,
-                    }
-                }
+                MarketInput::OptionQuote {
+                    bid,
+                    ask,
+                    last,
+                    time,
+                } => match (crate::market::quote_sides(bid, ask), last) {
+                    ((Some(b), Some(a)), _) => (Price((b.0 + a.0).div_euclid(2)), Some(time)),
+                    (_, Some(l)) => (l, Some(time)),
+                    _ => continue,
+                },
                 _ => continue,
             };
+            if let Some(at) = at {
+                let e = self.feed_at.entry(contract).or_insert(at);
+                *e = UtcMillis(e.0.max(at.0));
+            }
             for ((a, k), o) in self.open.iter_mut() {
                 if *k == contract && !unmarked.contains(a) {
+                    // A broker trade takes no price stamped long before its entry (a late
+                    // backfill): it was never the trade's market.
+                    if o.venue && at.is_some_and(|t| t.0 < o.trade.entry_time.0 - FEED_GAP_MS) {
+                        continue;
+                    }
                     o.saw(p);
+                    if let Some(at) = at {
+                        o.covered_to(at, false);
+                    }
                 }
             }
         }
@@ -512,7 +678,19 @@ impl Journal {
         trade.entry_value = price.0 as i128 * p.qty.abs() as i128;
         trade.max_qty = p.qty.abs();
         trade.incomplete = true;
-        self.open.insert(key, Open { trade, pos, spec });
+        // Its entry is unknown: nothing measured covers the whole trade.
+        trade.excursion_unavailable = true;
+        let venue = self.venue.contains(&p.account);
+        self.open.insert(
+            key,
+            Open {
+                trade,
+                pos,
+                spec,
+                venue,
+                last_print: None,
+            },
+        );
     }
 
     fn date(&self, spec: &ContractSpec, t: UtcMillis) -> CivilDate {
@@ -520,8 +698,19 @@ impl Journal {
     }
 
     fn on_fill(&mut self, f: &FillEvent) -> Vec<Trade> {
-        if !f.trade_id.is_empty() && !self.seen.insert(f.trade_id.clone()) {
+        if !f.trade_id.is_empty() && !self.seen.insert((f.account.clone(), f.trade_id.clone())) {
             return Vec::new(); // already counted
+        }
+        // A broker's execution a saved trade already holds (reported again after a reconnect or
+        // restart). Never a reconciled fill's id: those restart with Lines' order ids.
+        if !f.reconciled
+            && self.venue.contains(&f.account)
+            && self
+                .saved
+                .contains(&(f.account.clone(), f.trade_id.clone()))
+        {
+            tracing::info!("journal: a fill already in a saved trade was reported again; skipped");
+            return Vec::new();
         }
         let Some(spec) = self.spec(f.contract) else {
             tracing::warn!("journal: no contract spec for a fill; skipped");
@@ -531,16 +720,25 @@ impl Journal {
         let before = self.open.get(&key).map_or(0, |o| o.pos.qty());
         let signed = f.qty.0 * f.side.sign();
         let after = before + signed;
+        // No fee reported (a broker that reports none, or a reconciled fill): the table's.
+        let fee_estimated =
+            f.fee == Money::ZERO && (f.reconciled || self.estimate_fees.contains(&f.account));
         let fill = TradeFill {
             trade_id: f.trade_id.clone(),
             at: f.at,
             side: f.side,
             price: f.price,
             qty: f.qty,
-            fee: f.fee,
+            fee: if fee_estimated {
+                self.fee_table.fee(f.contract, f.qty)
+            } else {
+                f.fee
+            },
             source: self.sources.get(&f.order).copied(),
             reconciled: f.reconciled,
+            fee_estimated,
         };
+        let fee = fill.fee;
         let mut closed = Vec::new();
         match RoundTrip::of(before, after) {
             RoundTrip::None => {}
@@ -553,14 +751,15 @@ impl Journal {
             RoundTrip::Closes => {
                 if let Some(mut o) = self.open.remove(&key) {
                     add_fill(&mut o, fill);
-                    closed.push(o.trade);
+                    closed.push(self.finish(o));
                 }
             }
             RoundTrip::Reverses => {
                 // Split: the part that closes the old position, and the rest opens the next.
                 let close_qty = before.abs();
                 let open_qty = f.qty.0 - close_qty;
-                let close_fee = Money(f.fee.0 * close_qty as i128 / f.qty.0 as i128);
+                // Pro rata, the remainder to the closing side (the opening share rounds down).
+                let close_fee = fee - Money(fee.0 * open_qty as i128 / f.qty.0 as i128);
                 let closing = TradeFill {
                     qty: Qty(close_qty),
                     fee: close_fee,
@@ -568,12 +767,12 @@ impl Journal {
                 };
                 let opening = TradeFill {
                     qty: Qty(open_qty),
-                    fee: f.fee - close_fee,
+                    fee: fee - close_fee,
                     ..fill
                 };
                 if let Some(mut o) = self.open.remove(&key) {
                     add_fill(&mut o, closing);
-                    closed.push(o.trade);
+                    closed.push(self.finish(o));
                 }
                 self.open_with(key, &spec, opening, "/r");
             }
@@ -597,13 +796,33 @@ impl Journal {
             self.date(spec, fill.at),
             fill.price,
         );
+        let venue = self.venue.contains(&key.0);
+        // A print of the contract near the entry starts the cover (Lines' feed was running);
+        // none, or an older one, waits for one soon after it.
+        let last_print = self
+            .feed_at
+            .get(&key.1)
+            .copied()
+            .filter(|p| venue && (fill.at.0 - p.0).abs() <= FEED_GAP_MS);
         let mut o = Open {
             trade,
             pos: Position::default(),
             spec: spec.clone(),
+            venue,
+            last_print,
         };
         add_fill(&mut o, fill);
         self.open.insert(key, o);
+    }
+
+    /// A trade that just closed, as it is kept: unmeasured when its account takes no MAE/MFE
+    /// from the market, or (a broker's) when no print of Lines' covered it.
+    fn finish(&self, o: Open) -> Trade {
+        let mut t = o.trade;
+        if self.unmarked.contains(&t.account) || (o.venue && o.last_print.is_none()) {
+            t.excursion_unavailable = true;
+        }
+        t
     }
 
     /// Stats over closed trades matching `keep` (see [`stats`]).
@@ -645,6 +864,7 @@ fn new_trade(
         note: String::new(),
         screenshots: Vec::new(),
         incomplete: false,
+        excursion_unavailable: false,
     }
 }
 
@@ -668,18 +888,26 @@ fn add_fill(o: &mut Open, f: TradeFill) {
     t.fees += f.fee;
     t.exit_time = f.at;
     t.max_qty = t.max_qty.max(o.pos.qty().abs());
-    let p = f.price;
+    let (p, at) = (f.price, f.at);
     t.fills.push(f);
     o.saw(p);
+    // A fill after the entry (where the cover starts) must be near a print too.
+    if o.trade.fills.len() > 1 {
+        o.covered_to(at, true);
+    }
 }
 
 /// Journal CSV: one row per trade (closed trades, in order), US number format, quoted where
 /// needed. Prices are in price units converted with the product's display format. Money is the
 /// whole position; `ticks`, `mae_ticks` and `mfe_ticks` are per contract, the pane's numbers
 /// (`Trade::ticks`, `Trade::excursion_ticks`; the two excursions as magnitudes: ≥ 0).
+///
+/// The last two columns say where the fees came from (`broker`, `table` for the product fee
+/// table's estimate, or `mixed`) and whether MAE/MFE were measured (`measured`, else
+/// `unavailable` with the four excursion columns empty).
 pub fn csv(trades: &[Trade]) -> String {
     let mut out = String::from(
-        "id,account,contract,side,entry_time,exit_time,trade_date,max_qty,avg_entry,avg_exit,realized,fees,net,ticks,duration_s,mae,mfe,mae_ticks,mfe_ticks,fills,tags,note\n",
+        "id,account,contract,side,entry_time,exit_time,trade_date,max_qty,avg_entry,avg_exit,realized,fees,net,ticks,duration_s,mae,mfe,mae_ticks,mfe_ticks,fills,tags,note,fee_source,excursion\n",
     );
     for t in trades {
         let product = lines_feed::catalog::get(t.contract.product);
@@ -694,9 +922,16 @@ pub fn csv(trades: &[Trade]) -> String {
         };
         let num = |v: Option<f64>| v.map(|v| format!("{v:.2}")).unwrap_or_default();
         let excursion = product.as_ref().and_then(|p| t.excursion_ticks(p));
+        let money = |m: Option<Money>| m.map(|m| m.to_string()).unwrap_or_default();
+        let estimated = t.fills.iter().filter(|f| f.fee_estimated).count();
+        let fee_source = match estimated {
+            0 => "broker",
+            n if n == t.fills.len() => "table",
+            _ => "mixed",
+        };
         let _ = writeln!(
             out,
-            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
             quote(&t.id),
             quote(&t.account.0),
             quote(&label),
@@ -712,13 +947,19 @@ pub fn csv(trades: &[Trade]) -> String {
             t.net(),
             num(product.as_ref().and_then(|p| t.ticks(p.price.tick))),
             t.duration_ms() / 1000,
-            t.mae,
-            t.mfe,
+            money(t.excursion().map(|e| e.0)),
+            money(t.excursion().map(|e| e.1)),
             num(excursion.map(|e| e.0.abs())),
             num(excursion.map(|e| e.1)),
             t.fills.len(),
             quote(&t.tags.join(";")),
             quote(&t.note),
+            fee_source,
+            if t.excursion_unavailable {
+                "unavailable"
+            } else {
+                "measured"
+            },
         );
     }
     out
@@ -755,6 +996,8 @@ fn quote(s: &str) -> String {
 pub struct Snapshot {
     pub trades: Vec<Trade>,
     pub open: usize,
+    /// Each open trade's account (one per open trade), for a view of some accounts.
+    pub open_accounts: Vec<AccountId>,
 }
 
 enum Msg {
@@ -769,6 +1012,10 @@ enum Msg {
     Flush(Sender<()>),
     /// See [`Journal::add_unmarked`].
     Unmarked(Vec<AccountId>),
+    /// See [`Journal::add_venue`].
+    Venue(Vec<AccountId>, bool),
+    /// See [`Journal::set_fee_table`].
+    FeeTable(FeeTable),
 }
 
 /// The journal on its own thread (`lines-journal`). The trading thread sends it the core's
@@ -840,6 +1087,16 @@ impl JournalShared {
         let _ = self.tx.send(Msg::Unmarked(accounts));
     }
 
+    /// A broker's accounts ([`Journal::add_venue`]).
+    pub fn add_venue(&self, accounts: Vec<AccountId>, estimate_fees: bool) {
+        let _ = self.tx.send(Msg::Venue(accounts, estimate_fees));
+    }
+
+    /// The fee table for fills a broker reported no fee for ([`Journal::set_fee_table`]).
+    pub fn set_fee_table(&self, t: FeeTable) {
+        let _ = self.tx.send(Msg::FeeTable(t));
+    }
+
     /// Edit a trade's tags and note (applied and saved on the journal thread).
     pub fn edit(&self, e: Edit) {
         let _ = self.tx.send(Msg::Edit(e));
@@ -875,6 +1132,7 @@ impl JournalShared {
         let snap = Arc::new(Snapshot {
             trades: j.trades().to_vec(),
             open: j.open_trades().count(),
+            open_accounts: j.open_trades().map(|t| t.account.clone()).collect(),
         });
         *self.published.lock().unwrap_or_else(|e| e.into_inner()) = snap;
         self.revision.fetch_add(1, Ordering::Release);
@@ -897,6 +1155,8 @@ fn run(
         match msg {
             Msg::Market(k, inputs) => j.on_market(k, &inputs),
             Msg::Unmarked(accounts) => j.add_unmarked(accounts),
+            Msg::Venue(accounts, estimate) => j.add_venue(accounts, estimate),
+            Msg::FeeTable(t) => j.set_fee_table(t),
             Msg::Events(events) => {
                 // Publish only when what the pane shows changed: a trade closed, or the open
                 // count moved. The core reports positions on every market batch; those, and

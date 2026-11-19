@@ -1279,6 +1279,8 @@ fn venue_accounts(index: usize, source: &dyn AccountSource) -> Vec<AccountInfo> 
 /// and rebuild without waiting for `VENUE_REBUILD`; it's answered once the rebuild is sent.
 /// `unmarked`: the journal, when the app's prices aren't the venue's market (a replay or the
 /// mock): the venue's accounts are added to its unmarked set (no MAE/MFE from those prices).
+/// Every venue's accounts are told to the journal as a broker's (`Journal::add_venue`), with
+/// whether the broker reports fees.
 #[allow(clippy::too_many_arguments)]
 fn spawn_watcher(
     index: usize,
@@ -1288,6 +1290,7 @@ fn spawn_watcher(
     accounts: Arc<RwLock<Vec<AccountInfo>>>,
     cache: Arc<TradeCache>,
     unmarked: Option<Arc<JournalShared>>,
+    (venue_journal, estimate_fees): (Arc<JournalShared>, bool),
     looks: Receiver<Sender<()>>,
     stop: Arc<AtomicBool>,
 ) {
@@ -1348,6 +1351,8 @@ fn spawn_watcher(
                     if let Some(j) = &unmarked {
                         j.add_unmarked(known.clone());
                     }
+                    // Before they join: their fills reach the journal only after.
+                    venue_journal.add_venue(known.clone(), estimate_fees);
                     if !new.is_empty() {
                         handle.add_accounts(new);
                     }
@@ -1451,6 +1456,8 @@ impl Trading {
                 (core, setup.paper)
             }
         };
+        // A broker that reports no fees gets the paper broker's fee table, as an estimate.
+        journal.set_fee_table(lines_trading::journal::FeeTable::of(&paper));
         // The wall time live; a replay (market or manual clock) has no time until its first
         // data, so nothing at startup rolls its trade date (the service's first rebuild reads
         // the same `BEFORE_DATA` from its clock).
@@ -1706,6 +1713,7 @@ impl Trading {
                 accounts.clone(),
                 cache.clone(),
                 (!venue_marks).then(|| journal.clone()),
+                (journal.clone(), !ext.reports_fees()),
                 looks,
                 stop.clone(),
             );

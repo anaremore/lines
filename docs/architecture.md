@@ -197,6 +197,9 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # Run a strategy in the app, paper only, on the feed's contract (it starts stopped: the strategy panel's Start
 # arms it; palette "Open strategies"; Stop all = Ctrl+Shift+R): --strategy NAME --backtest-config settings.json
 # Screenshots of the strategy panel on synthetic instances: --strategies-demo.
+# A synthetic read-only broker for screenshots: --demo-broker (SIM + LIVE accounts), --demo-accounts N (N more
+# LIVE accounts), --demo-fills (executions made outside Lines on them, for the journal; the LIVE account gets a
+# consistency preset).
 # External levels (decision 0022): --record-levels DIR / --replay-levels DIR (with --replay); a synthetic source
 # for screenshots: build with --features screenshot,demo-levels and pass --demo-levels (ES/MES):
 #   lines --replay recordings/synth-es-2026-11-05.lfr --at 2026-11-05T19:00:00Z --layout chart --price-zoom 0.3 --demo-levels --screenshot out.png

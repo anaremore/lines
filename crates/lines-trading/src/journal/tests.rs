@@ -992,3 +992,355 @@ fn shared_journal_runs_on_its_own_thread() {
     assert!(!shared.persistent());
     assert!(shared.flush(std::time::Duration::from_secs(5)));
 }
+
+// ---- broker (venue) accounts: observed accounts like a DTC venue's, all synthetic ---------
+
+fn venue_acct() -> AccountId {
+    AccountId::new("venue-live-1")
+}
+
+/// An execution on a broker account (an order placed in the broker's own platform: no order of
+/// Lines', no fee reported).
+fn vfill(id: &str, side: Side, p: f64, q: i64, s: i64) -> Event {
+    vfill_on(venue_acct(), id, side, p, q, s)
+}
+
+fn vfill_on(account: AccountId, id: &str, side: Side, p: f64, q: i64, s: i64) -> Event {
+    Event::Fill(FillEvent {
+        account,
+        order: OrderId(0),
+        contract: es(),
+        side,
+        price: px(p),
+        qty: Qty(q),
+        fee: Money::ZERO,
+        realised: Money::ZERO,
+        trade_id: id.into(),
+        reconciled: false,
+        at: at(s),
+    })
+}
+
+fn print(p: f64, s: i64) -> MarketInput {
+    MarketInput::Trade {
+        time: at(s),
+        price: px(p),
+        qty: Qty(1),
+    }
+}
+
+fn venue_journal(estimate_fees: bool) -> Journal {
+    let mut j = Journal::new();
+    j.add_venue([venue_acct()], estimate_fees);
+    let mut table = FeeTable::default();
+    table.fees.insert(catalog::ES.0, dollars(1.25));
+    table.default_fee = dollars(0.50);
+    j.set_fee_table(table);
+    j
+}
+
+/// A broker that reports no fees: each fill gets the product fee table's, per contract,
+/// marked as an estimate; a fee the broker did report is kept. The P&L stays exact.
+#[test]
+fn a_broker_without_fees_gets_the_fee_table_marked_estimated() {
+    let mut j = venue_journal(true);
+    let mut reported = vfill("x2", Side::Sell, 6002.00, 2, 60);
+    if let Event::Fill(f) = &mut reported {
+        f.fee = dollars(3.00);
+    }
+    let closed = feed(&mut j, &[vfill("x1", Side::Buy, 6000.00, 2, 0), reported]);
+    let t = &closed[0];
+    assert_eq!(t.realized, dollars(200.0));
+    assert_eq!(t.fills[0].fee, dollars(2.50), "2 x the table's $1.25");
+    assert!(t.fills[0].fee_estimated);
+    assert_eq!(t.fills[1].fee, dollars(3.00), "the broker's own");
+    assert!(!t.fills[1].fee_estimated);
+    assert!(t.fees_estimated());
+    assert_eq!(t.fees, dollars(5.50));
+    // A broker that reports fees: a zero is its fee.
+    let mut k = venue_journal(false);
+    let closed = feed(
+        &mut k,
+        &[
+            vfill("y1", Side::Buy, 6000.00, 1, 0),
+            vfill("y2", Side::Sell, 6001.00, 1, 10),
+        ],
+    );
+    assert_eq!(closed[0].fees, Money::ZERO);
+    assert!(!closed[0].fees_estimated());
+    // Paper: always its own fees.
+    let paper = feed(
+        &mut venue_journal(true),
+        &[
+            fill("p1", 1, Side::Buy, 6000.00, 1, 0.0, 0),
+            fill("p2", 2, Side::Sell, 6001.00, 1, 0.0, 10),
+        ],
+    );
+    assert!(!paper[0].fees_estimated());
+}
+
+/// A reversal splits the estimated fee like a reported one: nothing lost or invented.
+#[test]
+fn an_estimated_fee_splits_on_a_reversal() {
+    let mut j = venue_journal(true);
+    let closed = feed(
+        &mut j,
+        &[
+            vfill("r1", Side::Buy, 6000.00, 1, 0),
+            vfill("r2", Side::Sell, 6001.00, 3, 10),
+        ],
+    );
+    let open: Vec<&Trade> = j.open_trades().collect();
+    assert_eq!(closed[0].fees + open[0].fees, dollars(1.25 * 4.0));
+    assert!(closed[0].fees_estimated() && open[0].fees_estimated());
+}
+
+/// After a restart the broker may report an execution a saved trade already holds: it is
+/// never counted again. A new execution still counts, and a reconciled fill's id (made from
+/// Lines' order ids, which restart) never blocks one.
+#[test]
+fn a_saved_broker_fill_reported_again_is_never_counted_twice() {
+    let mut first = venue_journal(true);
+    let old = feed(
+        &mut first,
+        &[
+            vfill("dtc-1", Side::Buy, 6000.00, 1, 0),
+            vfill("dtc-2", Side::Sell, 6001.00, 1, 10),
+        ],
+    );
+    let mut recon = vfill("recon-5-1", Side::Buy, 6000.00, 1, 20);
+    if let Event::Fill(f) = &mut recon {
+        f.reconciled = true;
+    }
+    let old2 = feed(
+        &mut first,
+        &[recon.clone(), vfill("dtc-3", Side::Sell, 6000.50, 1, 30)],
+    );
+    let mut next = Journal::from_records([
+        Record::Trade(Box::new(old[0].clone())),
+        Record::Trade(Box::new(old2[0].clone())),
+    ]);
+    next.add_venue([venue_acct()], true);
+    // The reconnect reports both executions again: nothing opens, nothing closes.
+    let again = feed(
+        &mut next,
+        &[
+            vfill("dtc-1", Side::Buy, 6000.00, 1, 0),
+            vfill("dtc-2", Side::Sell, 6001.00, 1, 10),
+        ],
+    );
+    assert!(again.is_empty());
+    assert_eq!(next.open_trades().count(), 0);
+    assert_eq!(next.trades().len(), 2);
+    // A reconciled fill with an id an earlier run used is a new fill.
+    feed(&mut next, &[recon]);
+    assert_eq!(
+        next.open_trades().count(),
+        1,
+        "the reconciled id never blocks"
+    );
+    let closed = feed(&mut next, &[vfill("dtc-9", Side::Sell, 6002.00, 1, 40)]);
+    assert_eq!(closed.len(), 1);
+    assert!(closed[0].fills[0].reconciled && closed[0].fills[0].fee_estimated);
+    // The same id on another account is that account's own.
+    let other = AccountId::new("venue-live-2");
+    next.add_venue([other.clone()], true);
+    feed(
+        &mut next,
+        &[vfill_on(other, "dtc-1", Side::Buy, 6000.00, 1, 50)],
+    );
+    assert_eq!(next.open_trades().count(), 1);
+}
+
+/// A broker account's MAE/MFE come from Lines' own prints of the contract, and only when they
+/// cover the whole trade; otherwise the trade says so and its excursion is never shown.
+#[test]
+fn broker_trades_are_measured_only_where_lines_prints_cover_them() {
+    // Covered: prints before, during and near the exit.
+    let mut j = venue_journal(true);
+    j.on_market(es(), &[print(6000.00, -5)]);
+    feed(&mut j, &[vfill("c1", Side::Buy, 6000.00, 1, 0)]);
+    j.on_market(es(), &[print(5998.00, 30), print(6003.00, 90)]);
+    let c = feed(&mut j, &[vfill("c2", Side::Sell, 6002.00, 1, 120)]);
+    assert!(!c[0].excursion_unavailable);
+    assert_eq!(c[0].excursion(), Some((dollars(-100.0), dollars(150.0))));
+    // No pane on the contract: no prints at all.
+    let mut j = venue_journal(true);
+    feed(&mut j, &[vfill("n1", Side::Buy, 6000.00, 1, 0)]);
+    let n = feed(&mut j, &[vfill("n2", Side::Sell, 6002.00, 1, 120)]);
+    assert!(n[0].excursion_unavailable);
+    assert_eq!(n[0].excursion(), None);
+    let product = catalog::get(catalog::ES).unwrap();
+    assert_eq!(n[0].excursion_ticks(&product), None);
+    // A stale feed: a gap longer than FEED_GAP_MS in the middle.
+    let mut j = venue_journal(true);
+    j.on_market(es(), &[print(6000.00, 0)]);
+    feed(&mut j, &[vfill("g1", Side::Buy, 6000.00, 1, 1)]);
+    j.on_market(es(), &[print(6001.00, 60)]);
+    j.on_market(es(), &[print(6001.00, 60 + FEED_GAP_MS / 1000 + 1)]);
+    let g = feed(&mut j, &[vfill("g2", Side::Sell, 6002.00, 1, 300)]);
+    assert!(g[0].excursion_unavailable, "a gap mid-trade");
+    // Prints stop before the exit.
+    let mut j = venue_journal(true);
+    j.on_market(es(), &[print(6000.00, 0)]);
+    feed(&mut j, &[vfill("s1", Side::Buy, 6000.00, 1, 1)]);
+    let s = feed(&mut j, &[vfill("s2", Side::Sell, 6002.00, 1, 600)]);
+    assert!(s[0].excursion_unavailable, "nothing near the exit");
+    // The first print long after the entry.
+    let mut j = venue_journal(true);
+    feed(&mut j, &[vfill("l1", Side::Buy, 6000.00, 1, 0)]);
+    j.on_market(es(), &[print(6001.00, 600)]);
+    let l = feed(&mut j, &[vfill("l2", Side::Sell, 6002.00, 1, 601)]);
+    assert!(l[0].excursion_unavailable, "nothing near the entry");
+    // Paper keeps its MAE/MFE from fills and batches, with no timed print needed.
+    let mut j = venue_journal(true);
+    let p = feed(
+        &mut j,
+        &[
+            fill("p1", 1, Side::Buy, 6000.00, 1, 0.0, 0),
+            fill("p2", 2, Side::Sell, 6001.00, 1, 0.0, 600),
+        ],
+    );
+    assert!(!p[0].excursion_unavailable);
+}
+
+/// Unmarked accounts (a replay's prices aren't the venue's market) and seeded trades (entry
+/// unknown) are unavailable too.
+#[test]
+fn unmarked_and_seeded_trades_are_unavailable() {
+    let mut j = venue_journal(true);
+    j.add_unmarked([venue_acct()]);
+    j.on_market(es(), &[print(6000.00, 0)]);
+    feed(&mut j, &[vfill("u1", Side::Buy, 6000.00, 1, 1)]);
+    j.on_market(es(), &[print(5990.00, 30)]);
+    let u = feed(&mut j, &[vfill("u2", Side::Sell, 6001.00, 1, 60)]);
+    assert!(u[0].excursion_unavailable);
+    let mut j = Journal::new();
+    j.on_event(&Event::Position(PositionView {
+        account: acct(),
+        contract: es(),
+        qty: 1,
+        avg_price: Some(600_000.0),
+        unrealised: Money::ZERO,
+        marked_at: None,
+    }));
+    let s = feed(&mut j, &[fill("s1", 1, Side::Sell, 6001.00, 1, 0.0, 10)]);
+    assert!(s[0].incomplete && s[0].excursion_unavailable);
+}
+
+/// The CSV says where the fees came from and whether MAE/MFE were measured (blank when not).
+#[test]
+fn csv_names_fee_source_and_unmeasured_excursions() {
+    let mut j = venue_journal(true);
+    let t = feed(
+        &mut j,
+        &[
+            vfill("e1", Side::Buy, 6000.00, 1, 0),
+            vfill("e2", Side::Sell, 6001.00, 1, 10),
+        ],
+    );
+    let out = csv(&t);
+    let header = out.lines().next().unwrap();
+    assert!(header.ends_with(",note,fee_source,excursion"), "{header}");
+    let row = out.lines().nth(1).unwrap();
+    assert!(row.ends_with(",table,unavailable"), "{row}");
+    // mae, mfe, mae_ticks and mfe_ticks are empty; the fill count follows them.
+    assert!(row.contains(",,,,2,"), "{row}");
+    let mut paper = closed(10.0, 5, &[]);
+    paper.fills.push(TradeFill {
+        trade_id: "p".into(),
+        at: at(0),
+        side: Side::Buy,
+        price: px(6000.0),
+        qty: Qty(1),
+        fee: Money::ZERO,
+        source: None,
+        reconciled: false,
+        fee_estimated: false,
+    });
+    let row = csv(&[paper]);
+    assert!(row.trim_end().ends_with(",broker,measured"), "{row}");
+}
+
+/// Consistency progress: the best trade date's share of the total, exact against the rule,
+/// and the profit still needed for the best day to fit.
+#[test]
+fn consistency_progress_from_closed_trades() {
+    use super::stats::consistency;
+    let day = |d: u8, net: f64, exit: i64| {
+        let mut t = closed(net, exit, &[]);
+        t.trade_date = lines_core::CivilDate::new(2026, 11, d).unwrap();
+        t
+    };
+    // Days: +600, +300 (two trades), -100: total 800, best 600 = 75 %.
+    let trades = [
+        day(3, 600.0, 1),
+        day(4, 200.0, 2),
+        day(4, 100.0, 3),
+        day(5, -100.0, 4),
+    ];
+    let c = consistency(&trades, 30).unwrap();
+    assert_eq!(c.total, dollars(800.0));
+    assert_eq!(c.best_day.unwrap().1, dollars(600.0));
+    assert_eq!(c.best_pct, Some(75));
+    assert_eq!(c.ok, Some(false));
+    // 600 <= 30 % of T when T >= 2000: 1200 more.
+    assert_eq!(c.needed, dollars(1200.0));
+    // Exactly at the rule is within it; a cent over is not, though both read 70 %.
+    let at_rule = [day(3, 300.0, 1), day(4, 700.0, 2)];
+    let c = consistency(&at_rule, 70).unwrap();
+    assert_eq!((c.ok, c.needed), (Some(true), Money::ZERO));
+    let over = [day(3, 300.0, 1), day(4, 700.01, 2)];
+    let c = consistency(&over, 70).unwrap();
+    assert_eq!(c.best_pct, Some(70));
+    assert_eq!(c.ok, Some(false));
+    assert!(c.needed > Money::ZERO);
+    // No profit yet: nothing to measure; a losing account still needs its best day covered.
+    let losing = [day(3, 100.0, 1), day(4, -300.0, 2)];
+    let c = consistency(&losing, 50).unwrap();
+    assert_eq!((c.best_pct, c.ok), (None, None));
+    assert_eq!(c.needed, dollars(400.0), "200 needed in all, from -200");
+    assert_eq!(consistency(&losing, 0), None);
+    assert_eq!(consistency(&[], 30).unwrap().best_day, None);
+}
+
+/// A reversal's fee goes pro rata with the remainder on the closing side: 100 units over 3,
+/// closing 1, is 34 closing and 66 opening.
+#[test]
+fn a_reversal_fee_remainder_goes_to_the_closing_side() {
+    let mut j = Journal::new();
+    let mut rev = fill("v2", 2, Side::Sell, 6001.00, 3, 0.0, 10);
+    if let Event::Fill(f) = &mut rev {
+        f.fee = Money(100);
+    }
+    let closed = feed(&mut j, &[fill("v1", 1, Side::Buy, 6000.00, 1, 0.0, 0), rev]);
+    let open: Vec<&Trade> = j.open_trades().collect();
+    assert_eq!(closed[0].fees, Money(34));
+    assert_eq!(open[0].fees, Money(66));
+}
+
+/// A late backfill of prints stamped long before a broker trade's entry neither covers it nor
+/// moves its excursion.
+#[test]
+fn a_backfill_from_before_the_entry_covers_nothing() {
+    let mut j = venue_journal(true);
+    feed(&mut j, &[vfill("b1", Side::Buy, 6000.00, 1, 600)]);
+    j.on_market(es(), &[print(5990.00, 0)]);
+    let b = feed(&mut j, &[vfill("b2", Side::Sell, 6001.00, 1, 690)]);
+    assert!(b[0].excursion_unavailable);
+    assert_eq!(b[0].low, px(6000.00), "the old price never counts");
+    // An option-less empty quote is no print either (the early path, nothing open).
+    let mut k = venue_journal(true);
+    k.on_market(
+        es(),
+        &[MarketInput::OptionQuote {
+            bid: None,
+            ask: None,
+            last: None,
+            time: at(0),
+        }],
+    );
+    feed(&mut k, &[vfill("q1", Side::Buy, 6000.00, 1, 1)]);
+    let q = feed(&mut k, &[vfill("q2", Side::Sell, 6001.00, 1, 20)]);
+    assert!(q[0].excursion_unavailable);
+}

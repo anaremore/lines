@@ -102,6 +102,12 @@ pub trait BrokerExtension: Send + Sync {
     fn opt_in(&self) -> bool {
         false
     }
+    /// Whether this broker's fills carry the venue's real commissions and fees. `false` (the
+    /// default): a zero fee means "not reported", and the journal puts the product fee table's
+    /// fee on such a fill, labelled as an estimate; a fee it does report is kept as given.
+    fn reports_fees(&self) -> bool {
+        false
+    }
 }
 
 /// Check a set of broker extensions: well-formed, unique names, none reserved.

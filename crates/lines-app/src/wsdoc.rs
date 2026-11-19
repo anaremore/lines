@@ -574,6 +574,46 @@ pub struct JournalState {
     /// value this build doesn't know reads as the trade list.
     #[serde(default, skip_serializing_if = "JournalGroup::is_trades")]
     pub group: JournalGroup,
+    /// Which accounts it shows: one account or one account group (`None`: every account).
+    /// Optional; a value this build can't read shows every account.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_filter"
+    )]
+    pub filter: Option<JournalFilter>,
+}
+
+/// One account (by id) or one account group (by name) a journal pane is narrowed to.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalFilter {
+    Account(String),
+    Group(String),
+}
+
+impl JournalFilter {
+    /// A stable key for a menu row (64-bit FNV-1a of its kind and name): `Command` is `Copy`,
+    /// so a row names its filter by this and the pane finds it again.
+    pub fn key(&self) -> u64 {
+        let (kind, name) = match self {
+            JournalFilter::Account(a) => (b'a', a),
+            JournalFilter::Group(g) => (b'g', g),
+        };
+        std::iter::once(kind)
+            .chain(name.bytes())
+            .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+                (h ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+            })
+    }
+}
+
+/// Anything this build can't read (a newer kind, a wrong shape) is no filter.
+fn lenient_filter<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<JournalFilter>, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).ok())
 }
 
 /// What a journal pane lists.
@@ -1819,6 +1859,37 @@ mod tests {
             assert_eq!(newer.group, JournalGroup::Trades, "{odd}");
             assert!(newer.all_dates);
         }
+    }
+
+    /// The journal's account filter is optional: none is not written, one comes back, and a
+    /// value this build can't read shows every account (never a corrupt workspace).
+    #[test]
+    fn journal_filter_is_optional_and_lenient() {
+        let none = JournalState::default();
+        assert!(!serde_json::to_string(&none).unwrap().contains("filter"));
+        for f in [
+            JournalFilter::Account("acct-1".into()),
+            JournalFilter::Group("Evals".into()),
+        ] {
+            let s = JournalState {
+                filter: Some(f),
+                ..Default::default()
+            };
+            let json = serde_json::to_string(&s).unwrap();
+            assert_eq!(serde_json::from_str::<JournalState>(&json).unwrap(), s);
+        }
+        for odd in [r#"{"strategy": "x"}"#, "7", r#""all""#, "null"] {
+            let newer: JournalState =
+                serde_json::from_str(&format!(r#"{{"filter": {odd}, "all_dates": true}}"#))
+                    .unwrap();
+            assert_eq!(newer.filter, None, "{odd}");
+            assert!(newer.all_dates);
+        }
+        // Keys tell an account from a group of the same name.
+        assert_ne!(
+            JournalFilter::Account("x".into()).key(),
+            JournalFilter::Group("x".into()).key()
+        );
     }
 
     #[test]

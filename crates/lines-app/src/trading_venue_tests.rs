@@ -812,6 +812,10 @@ fn executions_missed_while_disconnected_reach_the_journal_after_reconnect() {
         "a long round trip, no phantom short"
     );
     assert_eq!(snap.open, 0);
+    // The broker reports no fees: the fee table's, labelled; no prints of Lines' covered the
+    // trade, so its MAE/MFE are unavailable rather than guessed from the fills.
+    assert!(trades[0].fees_estimated());
+    assert!(trades[0].excursion_unavailable);
 }
 
 /// In a replay, a venue account's journal trades take no MAE/MFE from the replay's prices.
@@ -867,4 +871,9 @@ fn replay_prices_never_reach_venue_trades_in_the_journal() {
     let snap = t.journal.snapshot().unwrap();
     let tr = snap.trades.iter().find(|tr| tr.account == sim).unwrap();
     assert_eq!(tr.mae, lines_trading::Money::ZERO);
+    assert!(
+        tr.excursion_unavailable,
+        "shown as unavailable, never as zero"
+    );
+    assert_eq!(tr.excursion(), None);
 }

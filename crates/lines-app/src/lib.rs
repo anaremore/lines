@@ -815,6 +815,11 @@ struct Cli {
     /// (the account list's sections and scrolling).
     #[arg(long, value_name = "N", requires = "demo_broker", default_value_t = 0)]
     demo_accounts: usize,
+    /// Screenshot: the demo broker reports synthetic executions made outside Lines (round
+    /// trips on its LIVE account over three trade dates, one on the first extra account), for
+    /// the journal; its LIVE account gets the built-in preset with a consistency rule.
+    #[arg(long, requires = "demo_broker")]
+    demo_fills: bool,
     /// Screenshot: a fixed set of synthetic strategy instances (armed, paused, halted at the
     /// daily loss limit, not started) on the paper account and the recording's contract, for
     /// the strategy panel until the strategy host runs in the app.
@@ -2339,6 +2344,7 @@ where
                 max_order_qty: cli.max_order_qty,
                 demo_broker: cli.demo_broker,
                 demo_accounts: cli.demo_accounts,
+                demo_fills: cli.demo_fills,
                 strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,
                 panel_menu: cli.panel_menu.as_deref().map(|m| match m {

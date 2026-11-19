@@ -728,6 +728,7 @@ mod tests {
             fee: Money::ZERO,
             source: None,
             reconciled: false,
+            fee_estimated: false,
         }
     }
 
@@ -764,6 +765,7 @@ mod tests {
             note: String::new(),
             screenshots: Vec::new(),
             incomplete: false,
+            excursion_unavailable: false,
         }
     }
 

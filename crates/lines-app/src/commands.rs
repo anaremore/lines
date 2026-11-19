@@ -159,6 +159,8 @@ pub enum Command {
     JournalOpenChart,
     /// The focused journal: list trades, or P&L by account or by tag.
     JournalGroup(crate::wsdoc::JournalGroup),
+    /// The focused journal: which accounts it shows (every account, one group, one account).
+    JournalFilter(JournalFilterCmd),
     /// The focused chart's studies menu (VWAPs, volume profile, levels; templates).
     Studies,
     /// The focused chart keeps its own studies (a copy of its symbol's), or takes its symbol's
@@ -353,6 +355,18 @@ impl DrawCmd {
         DrawCmd::ToggleDashed,
         DrawCmd::Style,
     ];
+}
+
+/// Which accounts the focused journal shows (`crate::wsdoc::JournalFilter`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JournalFilterCmd {
+    /// Every account.
+    All,
+    /// The next in the list: every account, each account group, each account, then every
+    /// account again (the header's filter chip does the same).
+    Next,
+    /// One from the pane menu, by its key (`JournalFilter::key`; 0: every account).
+    Pick(u64),
 }
 
 /// Trading actions of the focused pane (`crate::trade_bar::run`). Flatten and Cancel All act
@@ -953,6 +967,12 @@ pub fn label(c: Command) -> String {
             crate::wsdoc::JournalGroup::Tags => "Journal: P&L by tag",
         }
         .into(),
+        Command::JournalFilter(f) => match f {
+            JournalFilterCmd::All => "Journal: show all accounts",
+            JournalFilterCmd::Next => "Journal: show the next account or group",
+            JournalFilterCmd::Pick(_) => "Journal: show one account or group",
+        }
+        .into(),
         Command::Studies => "Chart: studies (VWAP, volume profile, levels, templates)…".into(),
         Command::SeparateStudies => "Chart: use separate studies on this chart (on/off)".into(),
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
@@ -1150,6 +1170,8 @@ pub fn palette() -> Vec<Command> {
         Command::JournalGroup(crate::wsdoc::JournalGroup::Trades),
         Command::JournalGroup(crate::wsdoc::JournalGroup::Accounts),
         Command::JournalGroup(crate::wsdoc::JournalGroup::Tags),
+        Command::JournalFilter(JournalFilterCmd::All),
+        Command::JournalFilter(JournalFilterCmd::Next),
         Command::Studies,
         Command::SeparateStudies,
         Command::TimeframeMenu,
