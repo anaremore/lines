@@ -2175,7 +2175,11 @@ fn first_price(k: &OrderKind) -> Option<Price> {
 /// Where trade snapshots and later measurements find data no pane shows: the source's local
 /// store, and (a live source only) a short-lived feed of the contract on it.
 fn shot_fetch(registry: &FeedRegistry, base: &FeedConfig) -> crate::journal_shots::Fetch {
-    let live = !matches!(base.source, lines_feed::Source::Replay { .. });
+    // A replay's or the mock's prices are never a broker's market (nor "now").
+    let live = !matches!(
+        base.source,
+        lines_feed::Source::Replay { .. } | lines_feed::Source::CqgMock(_)
+    );
     crate::journal_shots::Fetch {
         store: base
             .store

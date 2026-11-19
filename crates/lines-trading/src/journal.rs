@@ -1339,13 +1339,15 @@ const MAX_REPAIRS: usize = 50;
 
 /// The repair `t` needs, if any: its snapshot (when it has one) and its measurement (when
 /// unavailable).
-fn repair_of(t: &Trade, sink: &MeasureSink, asked: bool) -> Option<Repair> {
+fn repair_of(j: &Journal, t: &Trade, sink: &MeasureSink, asked: bool) -> Option<Repair> {
     let shot = t
         .screenshots
         .first()
         .filter(|f| is_shot_file_name(f))
         .map(|f| shot_request(t, f.clone()));
-    let measure = (t.excursion_unavailable && !t.incomplete).then(|| t.clone());
+    // Never an account whose venue isn't the app's market (a replay's or the mock's prices).
+    let measure = (t.excursion_unavailable && !t.incomplete && !j.unmarked.contains(&t.account))
+        .then(|| t.clone());
     (shot.is_some() || measure.is_some()).then(|| Repair {
         shot,
         measure,
@@ -1375,7 +1377,7 @@ fn run(
     // At start: the newest trades' snapshots drawn without data, and their unmeasured MAE/MFE
     // (the snapshot thread looks at each file and skips those that are fine).
     for t in j.trades().iter().rev().take(MAX_REPAIRS) {
-        send(repair_of(t, &sink, false));
+        send(repair_of(&j, t, &sink, false));
     }
     while let Ok(msg) = rx.recv() {
         match msg {
@@ -1391,7 +1393,7 @@ fn run(
                     publish(&j);
                     for id in changed.iter().take(MAX_REPAIRS) {
                         if let Some(t) = j.trade(id) {
-                            send(repair_of(t, &sink, false));
+                            send(repair_of(&j, t, &sink, false));
                         }
                     }
                 }
@@ -1407,7 +1409,7 @@ fn run(
             }
             Msg::Repair(id) => {
                 if let Some(t) = j.trade(&id) {
-                    send(repair_of(t, &sink, true));
+                    send(repair_of(&j, t, &sink, true));
                 }
             }
             Msg::Events(events) => {
@@ -1457,7 +1459,10 @@ fn run(
                 }
                 // A trade no print of Lines' covered: measured once stored or fetched prints
                 // cover it (its snapshot is the request just sent).
-                for t in unmeasured {
+                for t in unmeasured
+                    .into_iter()
+                    .filter(|t| !j.unmarked.contains(&t.account))
+                {
                     send(Some(Repair {
                         shot: None,
                         measure: Some(t),

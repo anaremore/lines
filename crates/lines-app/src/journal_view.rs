@@ -953,7 +953,8 @@ impl JournalView {
         self.open_tags(cx)
     }
 
-    /// Every selected trade's id: the primary first.
+    /// Every selected trade's id that the pane shows (a filter may hide some): the primary
+    /// first.
     fn selection(&self) -> Vec<String> {
         let mut v: Vec<String> = self.selected.iter().cloned().collect();
         for a in &self.also {
@@ -961,6 +962,7 @@ impl JournalView {
                 v.push(a.clone());
             }
         }
+        v.retain(|id| self.rows.iter().any(|r| &r.id == id));
         v
     }
 
@@ -2257,6 +2259,13 @@ impl Render for JournalView {
                     .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
                     .on_scroll(cx.listener(Self::on_scroll))
+                    // "+ tag" goes with the pointer.
+                    .id("journal-table")
+                    .on_hover(cx.listener(|v, hovered: &bool, _, cx| {
+                        if !*hovered && v.hover.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
                     .child(body)
                     .children(self.tags_panel(cx)),
             )

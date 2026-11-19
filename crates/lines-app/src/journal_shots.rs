@@ -893,10 +893,76 @@ fn from_feed(
     (bars, prints)
 }
 
+/// What short-lived feeds brought, by contract, for a while: repairs of several trades of one
+/// contract open one feed, not one each (a source's history requests are rate-limited).
+#[derive(Default)]
+struct FeedCache {
+    got: Vec<(
+        lines_core::ContractKey,
+        std::time::Instant,
+        Vec<Bar>,
+        Vec<(UtcMillis, Price)>,
+    )>,
+}
+
+/// A feed's answer is reused this long.
+const FEED_REUSE: std::time::Duration = std::time::Duration::from_secs(600);
+
+impl FeedCache {
+    /// The contract's bars and prints over `from..=to`: from a feed opened within
+    /// [`FEED_REUSE`] (it asked for everything [`FEED_REACH_MS`] back), else a new one.
+    fn get(
+        &mut self,
+        fetch: &Fetch,
+        contract: lines_core::ContractKey,
+        from: UtcMillis,
+        to: UtcMillis,
+    ) -> (Vec<Bar>, Vec<(UtcMillis, Price)>) {
+        self.got.retain(|(_, at, _, _)| at.elapsed() < FEED_REUSE);
+        if !self.got.iter().any(|(k, ..)| *k == contract) {
+            let now = lines_feed::now_utc();
+            let (b, p) = from_feed(fetch, contract, UtcMillis(now.0 - FEED_REACH_MS), now);
+            self.got.push((contract, std::time::Instant::now(), b, p));
+        }
+        let (_, _, b, p) = self
+            .got
+            .iter()
+            .find(|(k, ..)| *k == contract)
+            .expect("just fetched");
+        (
+            b.iter()
+                .filter(|x| x.time >= from && x.time <= to)
+                .copied()
+                .collect(),
+            p.iter()
+                .filter(|(t, _)| t.0 >= from.0 && t.0 <= to.0)
+                .copied()
+                .collect(),
+        )
+    }
+}
+
+/// Prints from two places, in time order, each once.
+fn merged(a: Vec<(UtcMillis, Price)>, b: Vec<(UtcMillis, Price)>) -> Vec<(UtcMillis, Price)> {
+    let mut v = a;
+    v.extend(b);
+    v.sort_by_key(|(t, p)| (t.0, p.0));
+    v.dedup();
+    v
+}
+
 /// Do what `job` still needs: draw its snapshot if the file lacks data, measure its trade.
-/// Bars: an open pane's, else the local store's, else a short-lived feed's; prints: the
-/// local store's, else the feed's (opened once per try, only for a recent trade).
-fn run_job(job: &mut Job, stores: &Stores, kinds: &Kinds, dir: &Path, fetch: &Fetch) {
+/// Bars: whichever of an open pane's and the local store's covers more of the window, else a
+/// short-lived feed's (one per contract a while, recent trades only); prints: the local
+/// store's and the feed's together.
+fn run_job(
+    job: &mut Job,
+    stores: &Stores,
+    kinds: &Kinds,
+    dir: &Path,
+    fetch: &Fetch,
+    feeds: &mut FeedCache,
+) {
     if let Some(s) = &job.shot
         && !needs_drawing(&dir.join(&s.file))
     {
@@ -914,33 +980,35 @@ fn run_job(job: &mut Job, stores: &Stores, kinds: &Kinds, dir: &Path, fetch: &Fe
     let from = UtcMillis(t.entry_time.0 - (CONTEXT_BARS + 2) * tf.nominal_ms());
     let gap = lines_trading::journal::FEED_GAP_MS;
     let (pfrom, pto) = (UtcMillis(t.entry_time.0 - gap), t.exit_time);
-    let mut bars = if job.shot.is_some() {
+    let pane = if job.shot.is_some() {
         chart_data(stores, &t).map(|d| d.bars).unwrap_or_default()
     } else {
         Vec::new()
     };
     let (mut minute, mut prints) =
         from_disk(fetch, &product, t.contract, from.min(pfrom), t.exit_time);
+    if minute.is_empty() && job.shot.is_some() {
+        // No bar index for the window (a day stored as trades only): the stored prints'.
+        minute = minute_bars(&prints);
+    }
     let measure = job.measure.clone();
     let measured = |p: &[(UtcMillis, Price)]| {
         measure
             .as_ref()
             .and_then(|m| lines_trading::journal::measure(m, p))
     };
-    let need_bars = job.shot.is_some() && bars.is_empty() && minute.is_empty();
+    let need_bars = job.shot.is_some() && pane.is_empty() && minute.is_empty();
     let need_prints = measure.is_some() && measured(&prints).is_none();
     let recent = lines_feed::now_utc().0 - t.exit_time.0 <= FEED_REACH_MS;
-    if (need_bars || need_prints) && recent {
-        let (fb, fp) = from_feed(fetch, t.contract, from.min(pfrom), t.exit_time);
+    if (need_bars || need_prints) && recent && fetch.feed.is_some() {
+        let (fb, fp) = feeds.get(fetch, t.contract, from.min(pfrom), t.exit_time);
         if minute.is_empty() {
-            minute = fb;
+            minute = if fb.is_empty() { minute_bars(&fp) } else { fb };
         }
-        if measured(&prints).is_none() {
-            prints = fp;
-        }
+        prints = merged(prints, fp);
         // What the feed stored meanwhile.
         if measured(&prints).is_none() {
-            prints = from_disk(fetch, &product, t.contract, pfrom, pto).1;
+            prints = merged(prints, from_disk(fetch, &product, t.contract, pfrom, pto).1);
         }
     }
     if let Some(x) = measured(&prints)
@@ -948,18 +1016,21 @@ fn run_job(job: &mut Job, stores: &Stores, kinds: &Kinds, dir: &Path, fetch: &Fe
     {
         sink.send(m.id.clone(), x);
     }
-    // No bar index for the window (a day stored as trades only): the stored prints' minutes.
-    if bars.is_empty() && minute.is_empty() && job.shot.is_some() {
-        let (_, p) = from_disk(fetch, &product, t.contract, from, t.exit_time);
-        minute = minute_bars(&p);
-    }
-    if bars.is_empty() && !minute.is_empty() {
-        bars = derive(
+    let stored = if minute.is_empty() {
+        Vec::new()
+    } else {
+        derive(
             &minute,
             tf,
             lines_feed::catalog::sessions(t.contract.product),
-        );
-    }
+        )
+    };
+    // A pane opened mid-trade holds fewer bars of the window than the store: the fuller one.
+    let bars = if stored.len() > pane.len() {
+        stored
+    } else {
+        pane
+    };
     if let Some(s) = &job.shot
         && !bars.is_empty()
     {
@@ -973,17 +1044,38 @@ fn run_job(job: &mut Job, stores: &Stores, kinds: &Kinds, dir: &Path, fetch: &Fe
     }
 }
 
+/// Whether a waiting job is the same work as a new repair's part: both name the same trade
+/// (`Some` on both sides; `None` never matches).
+fn same<T: PartialEq>(a: Option<T>, b: &Option<T>) -> bool {
+    matches!((a, b), (Some(x), Some(y)) if x == *y)
+}
+
+/// A new repair of trade `key` (measure) and snapshot `file`: the same parts of waiting jobs
+/// are dropped (a job left with nothing goes); every other job keeps waiting.
+fn give_way(waiting: &mut Vec<Job>, key: Option<String>, file: Option<String>) {
+    for j in waiting.iter_mut() {
+        if same(j.measure.as_ref().map(|m| m.id.clone()), &key) {
+            j.measure = None;
+        }
+        if same(j.shot.as_ref().map(|s| s.file.clone()), &file) {
+            j.shot = None;
+        }
+    }
+    waiting.retain(|j| !j.done());
+}
+
 /// The drawing thread's loop: new snapshots as trades close, repairs (asked-for ones first),
 /// and retries of what found no data, until the journal's thread ends.
 fn serve(rx: mpsc::Receiver<ShotMsg>, stores: Stores, kinds: Kinds, dir: PathBuf, fetch: Fetch) {
     use std::time::{Duration, Instant};
     let mut waiting: Vec<Job> = Vec::new();
+    let mut feeds = FeedCache::default();
     let retry = |mut job: Job, waiting: &mut Vec<Job>| {
         if job.done() || job.tries >= MAX_TRIES {
             return;
         }
         job.tries += 1;
-        job.next = Instant::now() + RETRY * 2u32.pow(job.tries.min(4) - 1);
+        job.next = Instant::now() + RETRY * 2u32.pow(job.tries.min(5) - 1);
         waiting.push(job);
     };
     loop {
@@ -993,64 +1085,71 @@ fn serve(rx: mpsc::Receiver<ShotMsg>, stores: Stores, kinds: Kinds, dir: PathBuf
             .map(|j| j.next.saturating_duration_since(now))
             .min()
             .unwrap_or(Duration::from_secs(3600));
-        match rx.recv_timeout(wait) {
-            Ok(ShotMsg::Take(req)) => {
-                let data = chart_data(&stores, &req.trade);
-                let kind = kind_word(&kinds, &req.account);
-                let svg = render(&req.trade, kind, data.as_ref(), look());
-                // Logged by name only: the folder would hold the OS user name. The
-                // viewer's missing-file notice covers it.
-                if let Err(e) = write_atomic(&dir.join(&req.file), &svg) {
-                    tracing::warn!("journal chart {} not written: {e}", req.file);
+        let first = match rx.recv_timeout(wait) {
+            Ok(m) => Some(m),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        // What else is queued: a trader's "view" first, the rest in order (a flush still
+        // answers after everything sent before it).
+        let mut batch: Vec<ShotMsg> = first.into_iter().chain(rx.try_iter()).collect();
+        batch.sort_by_key(|m| !matches!(m, ShotMsg::Repair(r) if r.asked));
+        for msg in batch {
+            let now = Instant::now();
+            match msg {
+                ShotMsg::Take(req) => {
+                    let data = chart_data(&stores, &req.trade);
+                    let kind = kind_word(&kinds, &req.account);
+                    let svg = render(&req.trade, kind, data.as_ref(), look());
+                    // Logged by name only: the folder would hold the OS user name. The
+                    // viewer's missing-file notice covers it.
+                    if let Err(e) = write_atomic(&dir.join(&req.file), &svg) {
+                        tracing::warn!("journal chart {} not written: {e}", req.file);
+                    }
+                    if data.is_none_or(|d| d.bars.is_empty()) {
+                        // No pane of the contract: the store or the source next (now, then
+                        // later).
+                        let mut job = Job {
+                            shot: Some(*req),
+                            measure: None,
+                            sink: None,
+                            tries: 0,
+                            next: now,
+                        };
+                        run_job(&mut job, &stores, &kinds, &dir, &fetch, &mut feeds);
+                        retry(job, &mut waiting);
+                    }
                 }
-                if data.is_none_or(|d| d.bars.is_empty()) {
-                    // No pane of the contract: the store or the source next (now, then later).
+                ShotMsg::Repair(r) => {
+                    let r = *r;
+                    // The same work already waiting gives way to this one (its other part,
+                    // if any, keeps waiting).
+                    give_way(
+                        &mut waiting,
+                        r.measure.as_ref().map(|m| m.id.clone()),
+                        r.shot.as_ref().map(|s| s.file.clone()),
+                    );
                     let mut job = Job {
-                        shot: Some(*req),
-                        measure: None,
-                        sink: None,
+                        shot: r.shot,
+                        measure: r.measure,
+                        sink: Some(r.sink),
                         tries: 0,
                         next: now,
                     };
-                    run_job(&mut job, &stores, &kinds, &dir, &fetch);
+                    run_job(&mut job, &stores, &kinds, &dir, &fetch, &mut feeds);
                     retry(job, &mut waiting);
                 }
-            }
-            Ok(ShotMsg::Repair(r)) => {
-                let r = *r;
-                // A repair of a trade already waiting replaces it.
-                let key = r.measure.as_ref().map(|m| m.id.clone());
-                let file = r.shot.as_ref().map(|s| s.file.clone());
-                waiting.retain(|j| {
-                    j.measure.as_ref().map(|m| m.id.clone())
-                        != key.clone().filter(|_| key.is_some())
-                        && j.shot.as_ref().map(|s| s.file.clone())
-                            != file.clone().filter(|_| file.is_some())
-                });
-                let mut job = Job {
-                    shot: r.shot,
-                    measure: r.measure,
-                    sink: Some(r.sink),
-                    tries: 0,
-                    next: now,
-                };
-                run_job(&mut job, &stores, &kinds, &dir, &fetch);
-                retry(job, &mut waiting);
-            }
-            Ok(ShotMsg::Flush(done)) => {
-                let _ = done.send(());
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let now = Instant::now();
-                let (due, later): (Vec<Job>, Vec<Job>) =
-                    waiting.drain(..).partition(|j| j.next <= now);
-                waiting = later;
-                for mut job in due {
-                    run_job(&mut job, &stores, &kinds, &dir, &fetch);
-                    retry(job, &mut waiting);
+                ShotMsg::Flush(done) => {
+                    let _ = done.send(());
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+        let now = Instant::now();
+        let (due, later): (Vec<Job>, Vec<Job>) = waiting.drain(..).partition(|j| j.next <= now);
+        waiting = later;
+        for mut job in due {
+            run_job(&mut job, &stores, &kinds, &dir, &fetch, &mut feeds);
+            retry(job, &mut waiting);
         }
     }
 }
@@ -1754,5 +1853,47 @@ mod tests {
         )
         .unwrap();
         assert!(!needs_drawing(&p));
+    }
+
+    /// A repair replaces only the same work waiting: other trades' retries (measure-only or
+    /// snapshot-only) stay, and a job keeps its other part.
+    #[test]
+    fn a_repair_gives_way_only_to_the_same_work() {
+        let job = |shot: Option<&str>, measure: Option<&str>| {
+            let r = request();
+            Job {
+                shot: shot.map(|f| ShotRequest {
+                    file: f.into(),
+                    ..r.clone()
+                }),
+                measure: measure.map(|id| {
+                    let mut t = r.trade.clone();
+                    t.id = id.into();
+                    t
+                }),
+                sink: None,
+                tries: 1,
+                next: std::time::Instant::now(),
+            }
+        };
+        let mut w = vec![
+            job(None, Some("a")),
+            job(Some("b.svg"), None),
+            job(Some("c.svg"), Some("c")),
+        ];
+        // Another trade's measurement: nothing waiting goes.
+        give_way(&mut w, Some("x".into()), None);
+        assert_eq!(w.len(), 3);
+        give_way(&mut w, None, Some("y.svg".into()));
+        assert_eq!(w.len(), 3);
+        // The same snapshot: only that part goes; the job keeps its measurement.
+        give_way(&mut w, None, Some("c.svg".into()));
+        assert_eq!(w.len(), 3);
+        assert!(w[2].shot.is_none() && w[2].measure.is_some());
+        // The same measurement: the job is left with nothing and goes.
+        give_way(&mut w, Some("c".into()), None);
+        assert_eq!(w.len(), 2);
+        give_way(&mut w, Some("a".into()), Some("b.svg".into()));
+        assert!(w.is_empty());
     }
 }
