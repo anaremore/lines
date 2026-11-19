@@ -39,11 +39,12 @@ fn cache_path() -> Option<PathBuf> {
 
 /// The cache's first line: the build calendar it was merged onto.
 fn base_line(hash: u64) -> String {
-    format!("# base {hash:016x}")
+    format!("# base {hash:016x} mapping {}", fred::MAPPING_VERSION)
 }
 
-/// The cache, if it may stand in for `bundled`: built on this build's calendar (`hash`),
-/// parses, and is at least as new.
+/// The cache, if it may stand in for `bundled`: built on this build's calendar (`hash`)
+/// under this build's FRED mapping (`fred::MAPPING_VERSION`: a cache from a mapping since
+/// found wrong is discarded with what it added), parses, and is at least as new.
 pub fn usable_cache(text: &str, bundled: &EconSchedule, hash: u64) -> Option<EconSchedule> {
     if text.lines().next() != Some(base_line(hash).as_str()) {
         return None;
@@ -119,6 +120,62 @@ fn api_key() -> Result<Option<String>, String> {
         return Ok(Some(k.trim().to_owned()));
     }
     crate::connections::secret(NAME, KEY).map(|k| k.filter(|k| !k.trim().is_empty()))
+}
+
+/// FRED's answers as of `today` onto `base`, through the mapping and the cadence check
+/// (`fred::validated`): the calendar, and what was left out (in words).
+pub fn merge(
+    base: &EconSchedule,
+    answers: Vec<(String, Vec<lines_core::CivilDate>)>,
+    today: lines_core::CivilDate,
+) -> (EconSchedule, Option<String>) {
+    let got = fred::validated(base, answers, today);
+    let complete = got.complete(base, today);
+    match base.refreshed(&got.dates, &fred::source_page, today, complete) {
+        Ok(s) => (s, got.problem),
+        Err(e) => (base.clone(), Some(e.to_string())),
+    }
+}
+
+/// Screenshots (`--econ-fred-fixture`): FRED's answers from a file (a line per release: its
+/// key, then its dates) go through [`merge`] onto the bundled calendar as of `now`, as a
+/// refresh at `now` would; no network.
+#[cfg(feature = "screenshot")]
+pub fn apply_fixture(path: &Path, now: lines_core::UtcMillis) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    let text = std::fs::read_to_string(path).with_context(|| path.display().to_string())?;
+    let mut answers = Vec::new();
+    for line in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
+        let mut w = line.split_whitespace();
+        let key = w.next().unwrap_or_default().to_owned();
+        let dates = w
+            .map(|d| {
+                let p: Vec<&str> = d.split('-').collect();
+                let n = |i: usize| p.get(i).and_then(|x| x.parse::<u16>().ok());
+                match (n(0), n(1), n(2)) {
+                    (Some(y), Some(m), Some(dd)) => {
+                        lines_core::CivilDate::new(y, m as u8, dd as u8)
+                    }
+                    _ => None,
+                }
+                .with_context(|| format!("{}: bad date {d:?}", path.display()))
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        answers.push((key, dates));
+    }
+    let base = lines_feed::econ::bundled();
+    let (s, problem) = merge(&base, answers, base.local_date(now));
+    econ_ui::replace(Arc::new(s));
+    econ_ui::set_refresh(|r| {
+        r.not_this_run = false;
+        r.updated = Some(now);
+        r.problem = problem.map(|p| format!("partly: {p}"));
+    });
+    Ok(())
 }
 
 /// One refresh of `base` as of `now`: the refreshed calendar and what didn't come in (some
@@ -227,5 +284,62 @@ mod tests {
         let older = same.replacen(&format!("version {}", b.version), "version 2026-01-01", 1);
         assert!(usable_cache(&cache(&older, h), &b, h).is_none(), "older");
         assert!(usable_cache(&cache("junk", h), &b, h).is_none());
+    }
+
+    /// The owner's cache (2026-11-19): written under the first mapping (no `mapping` on its
+    /// base line), holding FOMC "statements" every day from FRED. This build discards it at
+    /// start; the next refresh merges onto the bundled calendar again.
+    #[test]
+    fn a_cache_from_the_old_mapping_is_discarded_with_its_daily_fomc() {
+        let b = lines_feed::econ::bundled();
+        let h = lines_feed::econ::bundled_hash();
+        let today = lines_core::CivilDate::new(2026, 11, 19).unwrap();
+        let daily: Vec<lines_core::CivilDate> = (19..=30)
+            .map(|n| lines_core::CivilDate::new(2026, 11, n).unwrap())
+            .collect();
+        // What the old mapping made (no cadence check, FOMC taken from FRED).
+        let bad = b
+            .refreshed(&[("fomc".to_owned(), daily)], &|_| None, today, false)
+            .unwrap();
+        assert!(bad.events.len() > b.events.len() + 10);
+        let old = format!("# base {h:016x}\n{}", bad.to_text());
+        assert!(usable_cache(&old, &b, h).is_none(), "old mapping");
+        // The same calendar written under this mapping would load: the line is what
+        // decides.
+        assert!(usable_cache(&format!("{}\n{}", base_line(h), bad.to_text()), &b, h).is_some());
+    }
+
+    /// The live path end to end (no network): FRED's answers as the owner got them, FOMC
+    /// every day and CPI monthly, through the mapping and the cadence check onto the bundled
+    /// calendar: no FOMC line is added, CPI's are.
+    #[test]
+    fn fred_answers_with_daily_fomc_add_no_fomc_line() {
+        let b = lines_feed::econ::bundled();
+        let today = lines_core::CivilDate::new(2026, 11, 19).unwrap();
+        let d = |y, m, n| lines_core::CivilDate::new(y, m, n).unwrap();
+        let answers = vec![
+            (
+                "fomc".to_owned(),
+                (19..=30).map(|n| d(2026, 11, n)).collect::<Vec<_>>(),
+            ),
+            (
+                "cpi".to_owned(),
+                vec![d(2026, 12, 10), d(2027, 1, 14), d(2027, 2, 11)],
+            ),
+        ];
+        let (s, _) = merge(&b, answers, today);
+        let fomc = |s: &EconSchedule| {
+            s.events
+                .iter()
+                .filter(|e| s.release(e).key == "fomc")
+                .count()
+        };
+        assert_eq!(fomc(&s), fomc(&b));
+        // CPI's new date (one the bundled list lacks) is added.
+        assert!(
+            s.events
+                .iter()
+                .any(|e| s.release(e).key == "cpi" && s.local_date(e.at) == d(2027, 1, 14))
+        );
     }
 }
