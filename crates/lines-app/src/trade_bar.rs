@@ -5651,6 +5651,8 @@ fn account_chip<V: TradePane>(
 /// "… · disconnected: why"; `true` when it needs attention.
 fn venue_words(t: &Trading, venue: usize) -> Option<(String, bool)> {
     let (label, status) = t.venue_status(venue)?;
+    // The short name ("Sierra"): the chip is narrow, and the connection's words matter more.
+    let label = t.venue_short(venue).unwrap_or(label);
     let Some(s) = status else {
         return Some((label, false));
     };
