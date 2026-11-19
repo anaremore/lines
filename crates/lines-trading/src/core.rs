@@ -2987,6 +2987,11 @@ impl TradingCore {
             }
         }
         self.cancels_rebuilt();
+        // The groups too, as the rest of the state: a subscriber that missed their last
+        // change (the app's cache after a restart) has them again.
+        if !self.groups.is_empty() {
+            self.publish_groups();
+        }
         self.events.push(Event::Rebuilt {
             accounts: snap.accounts.len(),
             open_orders: open,

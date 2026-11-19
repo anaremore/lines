@@ -28,7 +28,7 @@ impl TradingCore {
         self.publish_groups();
     }
 
-    fn publish_groups(&mut self) {
+    pub(super) fn publish_groups(&mut self) {
         self.events.push(Event::Groups {
             groups: self.groups.clone(),
         });
