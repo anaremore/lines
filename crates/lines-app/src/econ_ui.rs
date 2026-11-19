@@ -40,6 +40,7 @@ pub fn replace(s: std::sync::Arc<EconSchedule>) {
         return;
     }
     *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Some(s.clone());
+    bump();
     for h in CORES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         h.set_econ_schedule(s.clone());
     }
@@ -94,6 +95,45 @@ pub fn refresh() -> Refresh {
 
 pub fn set_refresh(f: impl FnOnce(&mut Refresh)) {
     f(&mut REFRESH.write().unwrap_or_else(|e| e.into_inner()));
+    bump();
+}
+
+/// Bumped when the calendar, its refresh or the focused account changes: the calendar pane
+/// redraws on it.
+static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn bump() {
+    EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn epoch() -> u64 {
+    EPOCH.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The calendar the one in use was built on: a screenshot's stand-in, else the build's (a
+/// line it lacks came from a refresh).
+pub fn base() -> std::sync::Arc<EconSchedule> {
+    OVERRIDE
+        .get()
+        .cloned()
+        .unwrap_or_else(lines_feed::econ::bundled)
+}
+
+/// The account of the DOM or chart that last had focus (or switched account): the calendar
+/// pane shows its blackout rule.
+static FOCUSED: std::sync::RwLock<Option<lines_trading::AccountId>> = std::sync::RwLock::new(None);
+
+pub fn focused_account() -> Option<lines_trading::AccountId> {
+    FOCUSED.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub fn set_focused_account(a: Option<lines_trading::AccountId>) {
+    let mut f = FOCUSED.write().unwrap_or_else(|e| e.into_inner());
+    if a.is_some() && *f != a {
+        *f = a;
+        drop(f);
+        bump();
+    }
 }
 
 /// The calendar's state in words, and whether it is a problem (stale, or a failed refresh):

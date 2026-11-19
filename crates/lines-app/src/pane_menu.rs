@@ -449,6 +449,8 @@ pub fn settings_section(kind: PaneKind) -> crate::settings_schema::Section {
         PaneKind::Chart => Section::Charts,
         PaneKind::Dom | PaneKind::Tape => Section::Dom,
         PaneKind::Positions => Section::Accounts,
+        // Where its refresh is set up (the FRED key).
+        PaneKind::Calendar => Section::Connections,
         PaneKind::Journal | PaneKind::Strategies | PaneKind::Chain => Section::OrderEntry,
     }
 }
@@ -674,6 +676,7 @@ fn pane(m: &PaneMenu) -> MenuItem {
         PaneKind::Dom,
         PaneKind::Tape,
         PaneKind::Positions,
+        PaneKind::Calendar,
     ] {
         sub.push(pick(k.label(), Command::SetKind(k), k == m.kind));
     }
@@ -845,7 +848,7 @@ mod tests {
         assert!(find(sub(&m)).is_none(), "nothing live: no row");
     }
 
-    const KINDS: [PaneKind; 7] = [
+    const KINDS: [PaneKind; 8] = [
         PaneKind::Chart,
         PaneKind::Dom,
         PaneKind::Tape,
@@ -853,6 +856,7 @@ mod tests {
         PaneKind::Strategies,
         PaneKind::Chain,
         PaneKind::Positions,
+        PaneKind::Calendar,
     ];
 
     fn labels(items: &[MenuItem]) -> Vec<&str> {
@@ -1004,6 +1008,7 @@ mod tests {
                 "DOM",
                 "Time & sales",
                 "Positions",
+                "Calendar",
                 "---",
                 "Chart only",
                 "Linked DOM",

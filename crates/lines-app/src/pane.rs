@@ -200,7 +200,8 @@ pub fn controls(kind: PaneKind, detached: bool) -> &'static [Control] {
             | PaneKind::Journal
             | PaneKind::Strategies
             | PaneKind::Chain
-            | PaneKind::Positions,
+            | PaneKind::Positions
+            | PaneKind::Calendar,
             false,
         ) => &OTHER,
     }
@@ -241,7 +242,7 @@ fn gutter_for(n: f32) -> f32 {
 pub fn header_height(kind: PaneKind) -> f32 {
     match kind {
         PaneKind::Chart => 33.0,
-        PaneKind::Dom | PaneKind::Tape | PaneKind::Journal => 27.0,
+        PaneKind::Dom | PaneKind::Tape | PaneKind::Journal | PaneKind::Calendar => 27.0,
         // Its Flatten and Cancel buttons (20 px) set the line, shown or not.
         PaneKind::Chain => 29.0,
         // Its Stop all button (20 px) sets the line; Cancel all and Flatten all likewise.
@@ -1088,6 +1089,7 @@ mod tests {
             PaneKind::Strategies,
             PaneKind::Chain,
             PaneKind::Positions,
+            PaneKind::Calendar,
         ]
         .into_iter()
         .flat_map(|k| [(k, false), (k, true)])

@@ -682,6 +682,7 @@ mod tests {
             PaneKind::Strategies,
             PaneKind::Chain,
             PaneKind::Positions,
+            PaneKind::Calendar,
         ] {
             for c in crate::pane::controls(kind, true) {
                 assert_eq!(command(c.cmd), Some(c.cmd), "{kind:?} {}", c.name);

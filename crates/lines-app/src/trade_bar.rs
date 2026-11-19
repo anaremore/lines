@@ -1203,6 +1203,8 @@ pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut
         t.account = None;
     }
     if account.is_some() && account != t.account {
+        // The calendar pane shows the blackout rule of the account just picked.
+        crate::econ_ui::set_focused_account(account.clone());
         t.account = account;
         t.resize_edit = None;
         t.seen = u64::MAX;

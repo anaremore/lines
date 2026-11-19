@@ -262,12 +262,69 @@ pub const JOURNAL_SPECS: [ColumnSpec; 13] = [
 /// The tags column takes the journal's leftover width.
 pub const JOURNAL_FILL: usize = 12;
 
+/// Economic calendar columns, left to right (roadmap 8b, `crate::econ_view`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CalCol {
+    /// The release's time in the display zone.
+    Time,
+    Release,
+    /// High, medium or low.
+    Impact,
+    /// The focused account's blackout window around it, if its rule counts the release.
+    Window,
+    /// Where the line comes from: FRED at the release's usual time, or the bundled calendar.
+    Source,
+}
+
+impl CalCol {
+    pub const ALL: [CalCol; 5] = [
+        CalCol::Time,
+        CalCol::Release,
+        CalCol::Impact,
+        CalCol::Window,
+        CalCol::Source,
+    ];
+
+    pub fn header(self) -> &'static str {
+        match self {
+            CalCol::Window => "Blackout window",
+            c => c.label(),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CalCol::Time => "Time",
+            CalCol::Release => "Release",
+            CalCol::Impact => "Impact",
+            CalCol::Window => "Blackout",
+            CalCol::Source => "Source",
+        }
+    }
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+}
+
+pub const CAL_SPECS: [ColumnSpec; 5] = [
+    spec(64.0, 120.0, false, true),
+    spec(80.0, 220.0, true, true),
+    spec(40.0, 64.0, true, true),
+    spec(64.0, 120.0, true, true),
+    spec(64.0, 160.0, true, true),
+];
+/// The release column takes the calendar's leftover width.
+pub const CAL_FILL: usize = 1;
+
 /// A column of any table, for commands.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Column {
     Dom(DomCol),
     Tape(TapeCol),
     Journal(JournalCol),
+    Calendar(CalCol),
 }
 
 impl Column {
@@ -276,6 +333,7 @@ impl Column {
             Column::Dom(c) => format!("DOM column: {}", c.label()),
             Column::Tape(c) => format!("Time & sales column: {}", c.label()),
             Column::Journal(c) => format!("Journal column: {}", c.label()),
+            Column::Calendar(c) => format!("Calendar column: {}", c.label()),
         }
     }
 }
@@ -315,6 +373,7 @@ pub enum Table {
     Dom,
     Tape,
     Journal,
+    Calendar,
 }
 
 /// The Time header's room: "Time " and the longest zone name (a city: "DumontDUrville").
@@ -369,6 +428,7 @@ impl Columns {
                 Table::Dom => ColumnSet::new(&DOM_SPECS, DOM_FILL),
                 Table::Tape => ColumnSet::new(&TAPE_SPECS, TAPE_FILL),
                 Table::Journal => ColumnSet::new(&JOURNAL_SPECS, JOURNAL_FILL),
+                Table::Calendar => ColumnSet::new(&CAL_SPECS, CAL_FILL),
             },
             cells: [Cell::default(); MAX_COLS],
             needed: [0.0; MAX_COLS],
@@ -396,6 +456,7 @@ impl Columns {
             Table::Dom => &DOM_SPECS,
             Table::Tape => &TAPE_SPECS,
             Table::Journal => &JOURNAL_SPECS,
+            Table::Calendar => &CAL_SPECS,
         }
     }
 
@@ -405,6 +466,7 @@ impl Columns {
             (Table::Dom, Column::Dom(d)) => Some(d.index()),
             (Table::Tape, Column::Tape(t)) => Some(t.index()),
             (Table::Journal, Column::Journal(j)) => Some(j.index()),
+            (Table::Calendar, Column::Calendar(c)) => Some(c.index()),
             _ => None,
         }
     }
@@ -415,6 +477,7 @@ impl Columns {
             Table::Dom => DomCol::ALL.get(i).map(|c| Column::Dom(*c)),
             Table::Tape => TapeCol::ALL.get(i).map(|c| Column::Tape(*c)),
             Table::Journal => JournalCol::ALL.get(i).map(|c| Column::Journal(*c)),
+            Table::Calendar => CalCol::ALL.get(i).map(|c| Column::Calendar(*c)),
         }
     }
 
@@ -423,6 +486,7 @@ impl Columns {
             Some(Column::Dom(c)) => c.label(),
             Some(Column::Tape(c)) => c.label(),
             Some(Column::Journal(c)) => c.label(),
+            Some(Column::Calendar(c)) => c.label(),
             None => "",
         }
     }
@@ -485,6 +549,16 @@ impl Columns {
         );
     }
 
+    /// The calendar in `total` px: a narrow pane gives up the source first, then the impact,
+    /// then the blackout window; the time and the release stay.
+    pub fn layout_calendar(&mut self, total: f32) {
+        self.layout_fitting(
+            total,
+            &[CalCol::Source.index()],
+            &[CalCol::Impact.index(), CalCol::Window.index()],
+        );
+    }
+
     /// Time & sales in `total` px: the columns narrow to their numbers first, then the time
     /// gives way, then the size; price and the side marker stay longest (direction is never
     /// shown by color alone).
@@ -510,6 +584,7 @@ impl Columns {
                 Table::Dom => "that column isn't the DOM's",
                 Table::Tape => "that column isn't time & sales'",
                 Table::Journal => "that column isn't the journal's",
+                Table::Calendar => "that column isn't the calendar's",
             })
         };
         match cmd {
@@ -519,7 +594,7 @@ impl Columns {
                 if !self.set.set_shown(specs, i, shown) {
                     return Err(if specs[i].hideable {
                         "the last column stays"
-                    } else if self.table == Table::Journal {
+                    } else if matches!(self.table, Table::Journal | Table::Calendar) {
                         "the time column is always shown"
                     } else {
                         "the price column is always shown"
@@ -619,14 +694,15 @@ impl Columns {
 
     fn header(&self, i: usize) -> &str {
         match self.column(i) {
-            Some(Column::Tape(TapeCol::Time) | Column::Journal(JournalCol::Time))
-                if !self.time_header.is_empty() =>
-            {
-                self.time_header.as_str()
-            }
+            Some(
+                Column::Tape(TapeCol::Time)
+                | Column::Journal(JournalCol::Time)
+                | Column::Calendar(CalCol::Time),
+            ) if !self.time_header.is_empty() => self.time_header.as_str(),
             Some(Column::Dom(c)) => c.header(),
             Some(Column::Tape(c)) => c.header(),
             Some(Column::Journal(c)) => c.header(),
+            Some(Column::Calendar(c)) => c.header(),
             None => "",
         }
     }
@@ -882,11 +958,12 @@ mod tests {
     /// never on the wrong side of where it started.
     #[test]
     fn real_tables_dividers_follow_the_pointer() {
-        for table in [Table::Dom, Table::Tape, Table::Journal] {
+        for table in [Table::Dom, Table::Tape, Table::Journal, Table::Calendar] {
             // Widths that hold the table's defaults (a narrower journal leaves columns out
             // per frame: `drop_overflow`, tested on its own).
             let widths: [f32; 2] = match table {
                 Table::Journal => [1000.0, 1400.0],
+                Table::Calendar => [700.0, 1000.0],
                 _ => [420.0, 700.0],
             };
             for width in widths {

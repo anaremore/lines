@@ -305,11 +305,11 @@ mod tests {
         let mut sets = BTreeMap::new();
         assert!(adopt_legacy(&mut d, &mut sets));
         assert_eq!(sets[&1].indicators, vec![vwap("eth")]);
-        // Saved again: version 9, the mark gone, the shared chart's studies with the product.
+        // Saved again: the current version, the mark gone, the shared chart's studies with the product.
         let bytes = crate::versioned::encode(&FORMAT, &d).unwrap();
         let text = String::from_utf8(bytes).unwrap();
         assert!(
-            text.contains(r#""version": 9"#) && !text.contains("legacy"),
+            text.contains(&format!("\"version\": {}", FORMAT.current)) && !text.contains("legacy"),
             "{text}"
         );
         assert!(!text.contains("vwap"), "{text}");
