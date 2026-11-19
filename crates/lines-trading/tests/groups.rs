@@ -742,3 +742,31 @@ fn member_sizes_scale_exactly() {
     .unwrap();
     assert!(r.core.groups()[0].sizing.is_empty());
 }
+
+/// An order to no one never reads as placed; a member's prop rules refuse its own part only.
+#[test]
+fn an_empty_group_is_refused_and_prop_rules_stay_each_members() {
+    let mut r = Rig::new();
+    create(&mut r, "Empty", &[]).unwrap();
+    r.market(es(), 5999.75, 6000.25, 6000.00);
+    let e = group_place(&mut r, "Empty", GroupOrder::Order(limit_spec(1, 5990.0))).unwrap_err();
+    assert_eq!(e.code, RejectCode::Invalid);
+    assert!(e.message.contains("no members"), "{}", e.message);
+
+    // c: a 50K preset, at most 100 micros (10 ES): 11 ES is past it for c alone.
+    let preset = lines_trading::rules::presets().remove(0);
+    r.cmd(Command::SetRules {
+        account: id("c"),
+        rules: Some(preset),
+    })
+    .unwrap();
+    create(&mut r, "Evals", &["a", "c"]).unwrap();
+    let placed = group_place(&mut r, "Evals", GroupOrder::Order(limit_spec(11, 5990.0)));
+    assert_eq!(placed.unwrap().len(), 1, "a's order only");
+    let (_, results) = r.group_results();
+    assert!(results[0].result.is_ok());
+    assert_eq!(
+        results[1].result.as_ref().unwrap_err().code,
+        RejectCode::PropRule
+    );
+}

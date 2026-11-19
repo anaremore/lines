@@ -363,8 +363,14 @@ impl PaneTrade {
         match now {
             Some((n, m)) if n == *name && m == *members => false,
             Some((n, m)) => {
+                // An account added to the group was never armed here: trading off, said.
+                let added = m.iter().any(|a| !members.contains(a));
                 if let Some(first) = m.first() {
                     self.account = Some(first.clone());
+                }
+                if added && self.arming.is_armed() {
+                    self.arming = Arming::new(false);
+                    self.notice(format!("{n} has a new member: trading off"));
                 }
                 self.group = Some((n, m));
                 true
@@ -391,18 +397,12 @@ impl PaneTrade {
         let Some(c) = self.cache.as_ref().and_then(|c| c.try_read()) else {
             return false;
         };
-        let names: Vec<(AccountId, String)> = self.listed.as_ref().map_or_else(Vec::new, |l| {
-            l.0.read()
-                .unwrap_or_else(|e| e.into_inner())
-                .iter()
-                .map(|a| (a.id.clone(), a.name.clone()))
-                .collect()
-        });
+        // Names looked up only for an answer that came (never a wait on the list's lock).
+        let list = self.listed.as_ref().and_then(|l| l.0.try_read().ok());
         let name = |id: &AccountId| {
-            names
-                .iter()
-                .find(|(i, _)| i == id)
-                .map_or_else(|| id.0.clone(), |(_, n)| n.clone())
+            list.as_ref()
+                .and_then(|l| l.iter().find(|a| &a.id == id).map(|a| a.name.clone()))
+                .unwrap_or_else(|| id.0.clone())
         };
         let mut said = None;
         self.group_sent.retain(|(id, act)| {
@@ -420,6 +420,7 @@ impl PaneTrade {
             }
         });
         drop(c);
+        drop(list);
         match said {
             Some((true, m)) => {
                 self.local_flash = Some((m, Instant::now()));
@@ -804,6 +805,18 @@ pub fn read_only<V: TradePane>(v: &V, cx: &App) -> Option<String> {
 
 /// What an order from this pane needs: account, contract, quantity, position, bracket, the
 /// inside market (ladder clicks, header buttons and their keys all build from this).
+/// Why a group's new order is refused while its members' positions point different ways.
+pub const MEMBERS_DIFFER: &str =
+    "members' positions differ (long, short or flat): flatten the group or trade one account";
+
+/// Whether every position points the same way: all flat, all long or all short.
+pub fn same_direction(positions: impl IntoIterator<Item = i64>) -> bool {
+    let mut seen = None;
+    positions
+        .into_iter()
+        .all(|q| *seen.get_or_insert(q.signum()) == q.signum())
+}
+
 pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &'static str> {
     if let Some(why) = cant_trade(v, cx) {
         return Err(why);
@@ -817,11 +830,24 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
     let pt = v.trade_ref();
     let account = pt.account.clone().ok_or("no account")?;
     let contract = contract_of(v.trade_store()).ok_or("contract unknown")?;
-    let position = t
-        .cache
-        .read()
-        .position(&account, contract)
-        .map_or(0, |p| p.qty);
+    let position = {
+        let c = t.cache.read();
+        let position = c.position(&account, contract).map_or(0, |p| p.qty);
+        // On a group the order (and whether it carries the bracket: it opens or adds, or it
+        // reduces) is decided from the first member's position, then sent to every member: only
+        // while every member's position points the same way (all flat, all long, all short),
+        // so no member opens without its exits or closes with exits that could open again.
+        if let Some((_, members)) = &pt.group
+            && !same_direction(
+                members
+                    .iter()
+                    .map(|m| c.position(m, contract).map_or(0, |p| p.qty)),
+            )
+        {
+            return Err(MEMBERS_DIFFER);
+        }
+        position
+    };
     let (best_bid, best_ask, last, tick, symbol) = v
         .trade_store()
         .try_read()
@@ -1874,8 +1900,10 @@ fn group_data(
                 _ => None,
             };
             data.position = Some((p.qty, p.avg_price, ticks, p.unrealised));
+            // One stop for the card only when every member holding a position has one, at
+            // one price (else none: a member's own card says where its stop is).
             let mut stop: Option<(Price, i64)> = None;
-            let mut every = true;
+            let mut one = true;
             for m in members {
                 let Some(q) = s.position(m, k).map(|p| p.qty).filter(|q| *q != 0) else {
                     continue;
@@ -1883,12 +1911,13 @@ fn group_data(
                 match card_stop(s.open_orders(m, k), q, last) {
                     Some((px, n)) => {
                         let e = stop.get_or_insert((px, 0));
+                        one &= e.0 == px;
                         e.1 += n;
                     }
-                    None => every = false,
+                    None => one = false,
                 }
             }
-            data.stop = stop.filter(|_| every);
+            data.stop = stop.filter(|_| one);
         }
     }
     data.day_pnl = members
@@ -6383,6 +6412,19 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// A group order is built from the first member's position only while every member's
+    /// points the same way.
+    #[test]
+    fn members_positions_must_agree_in_direction() {
+        assert!(same_direction([0, 0, 0]));
+        assert!(same_direction([2, 1, 5]));
+        assert!(same_direction([-1, -3]));
+        assert!(same_direction(std::iter::empty()));
+        assert!(!same_direction([2, 0]));
+        assert!(!same_direction([0, -1]));
+        assert!(!same_direction([1, -1]));
     }
 
     /// A pane leaves a removed paper account (venues or not) for the first one listed; it
