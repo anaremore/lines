@@ -13,12 +13,22 @@
 use lines_core::{ContractKey, Price, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
-use crate::command::Source;
+use crate::command::{BracketSpec, OrderSpec, Source};
 use crate::market::MarketInput;
 use crate::order::Order;
 use crate::position::Position;
 use crate::types::OrderKind;
 use crate::types::{AccountId, Money, OrderId, contract_serde, price_serde, qty_serde, time_serde};
+
+/// A new order or bracket as a command asks for it, before the core makes its orders
+/// ([`Broker::admit`]).
+#[derive(Copy, Clone, Debug)]
+pub enum Admit<'a> {
+    /// A single order (`PlaceOrder`, `PlaceExit`), with the role it will have.
+    Place(&'a OrderSpec, crate::order::Role),
+    /// An entry with its exits (`PlaceBracket`).
+    Bracket(&'a BracketSpec),
+}
 
 /// What a broker can do (decision 0018). A missing capability is a disabled control with a
 /// reason, never a silent fallback.
@@ -252,6 +262,20 @@ pub trait Broker: Send {
     fn request_in_context(&mut self, now: UtcMillis, req: BrokerRequest, ctx: &RequestContext) {
         let _ = ctx;
         self.request(now, req);
+    }
+    /// Would the broker send this new order or bracket? Asked before the core makes any order
+    /// for the command: `Err(reason)` refuses the **command** (DENIED, decision 0018: denied is
+    /// not rejected), nothing is created and nothing is sent. Only for what the broker knows it
+    /// won't send (its own gate, an order it can't encode); a refusal by the venue after
+    /// sending stays [`BrokerEvent::Rejected`]. Default: admit everything (the paper broker).
+    fn admit(
+        &mut self,
+        now: UtcMillis,
+        new: Admit<'_>,
+        ctx: &RequestContext,
+    ) -> Result<(), String> {
+        let _ = (now, new, ctx);
+        Ok(())
     }
     /// Market data for a contract (paper and replay brokers simulate fills from it; live
     /// brokers ignore it).

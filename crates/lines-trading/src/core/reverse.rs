@@ -23,7 +23,7 @@
 use lines_core::{ContractKey, Price, Qty, UtcMillis};
 
 use super::{FLATTEN_ANSWER_MS, TradingCore};
-use crate::broker::BrokerRequest;
+use crate::broker::{Admit, BrokerRequest};
 use crate::command::{BracketSpec, Command, Envelope, OrderSpec, Reject, RejectCode};
 use crate::order::{OrderState, Role};
 use crate::types::{AccountId, OrderId, OrderKind, Side};
@@ -134,6 +134,21 @@ impl TradingCore {
                 stop_loss: sl,
             })?;
         }
+        // The broker's own pre-check of the opening, before anything is cancelled or closed: a
+        // refusal refuses the Reverse (DENIED), never a close without its opening.
+        let admitted = match bracket {
+            Some((take_profit, stop_loss)) => self.admit(
+                now,
+                env,
+                Admit::Bracket(&BracketSpec {
+                    entry: open.clone(),
+                    take_profit,
+                    stop_loss,
+                }),
+            ),
+            None => self.admit(now, env, Admit::Place(&open, Role::Single)),
+        };
+        admitted.map_err(|r| Reject::new(r.code, opening_refused(&r.message)))?;
         // Every order on the contract goes, whoever placed it; where reduce-only holds, the
         // position's reduce-only exits stay until it is flat.
         let cancel = self

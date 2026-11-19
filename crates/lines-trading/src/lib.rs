@@ -44,8 +44,8 @@ pub mod trigger;
 pub mod types;
 
 pub use broker::{
-    Broker, BrokerCaps, BrokerEvent, BrokerRequest, BrokerSnapshot, ContractSelection, Origin,
-    PaneContext, RequestContext,
+    Admit, Broker, BrokerCaps, BrokerEvent, BrokerRequest, BrokerSnapshot, ContractSelection,
+    Origin, PaneContext, RequestContext,
 };
 pub use command::{
     BracketMode, BracketSpec, Command, GroupOrder, OrderSpec, Reject, RejectCode, Source,
