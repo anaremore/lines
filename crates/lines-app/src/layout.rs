@@ -31,7 +31,9 @@ pub enum PaneKind {
 }
 
 impl PaneKind {
-    /// Every kind (a test checks each is here: `is_market`'s match lists them all).
+    /// Every kind, in `index` order (a test checks `ALL[k.index()] == k` for each and that the
+    /// length is the last index + 1; `index` is an exhaustive match, so a new kind must take
+    /// a place there).
     #[cfg_attr(not(test), allow(dead_code))]
     pub const ALL: [PaneKind; 8] = [
         PaneKind::Chart,
@@ -43,6 +45,21 @@ impl PaneKind {
         PaneKind::Positions,
         PaneKind::Calendar,
     ];
+
+    /// The kind's place in [`PaneKind::ALL`].
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub const fn index(self) -> usize {
+        match self {
+            PaneKind::Chart => 0,
+            PaneKind::Dom => 1,
+            PaneKind::Tape => 2,
+            PaneKind::Journal => 3,
+            PaneKind::Strategies => 4,
+            PaneKind::Chain => 5,
+            PaneKind::Positions => 6,
+            PaneKind::Calendar => 7,
+        }
+    }
 
     /// A pane that shows one market (a tab is named after its symbol). Exhaustive on
     /// purpose: a new kind doesn't compile until it says which it is.

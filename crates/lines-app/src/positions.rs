@@ -160,16 +160,21 @@ pub fn header_badge(
     rows: &[Row],
     filter: Option<&AccountId>,
 ) -> Option<String> {
-    if let Some(f) = filter {
-        return accounts
-            .iter()
-            .find(|(a, _, _)| a == f)
-            .map(|(_, b, _)| (*b).to_owned());
-    }
     let mut kinds: Vec<&str> = rows.iter().map(|r| r.badge).collect();
     kinds.sort_by_key(|b| rank(b));
     kinds.dedup();
-    (!kinds.is_empty()).then(|| kinds.join(" + "))
+    if !kinds.is_empty() {
+        return Some(kinds.join(" + "));
+    }
+    // One account with nothing open: its kind (an id two venues share: the most real).
+    filter.and_then(|f| {
+        accounts
+            .iter()
+            .filter(|(a, _, _)| a == f)
+            .map(|(_, b, _)| *b)
+            .min_by_key(|b| rank(b))
+            .map(str::to_owned)
+    })
 }
 
 fn row(
@@ -804,9 +809,23 @@ mod tests {
             Some("LIVE + SIM + PAPER")
         );
         assert_eq!(header_badge(&accounts, &[], None), None, "nothing shown");
-        // One account: its kind, open positions or not.
+        // One account: its positions' kind, else its own.
         assert_eq!(
             header_badge(&accounts, &[], Some(&AccountId::new("live1"))).as_deref(),
+            Some("LIVE")
+        );
+        // An id two venues share, filtered: its LIVE rows are never tagged SIM.
+        let clash: Vec<Listed> = vec![
+            (AccountId::new("A1"), "SIM", "a".into()),
+            (AccountId::new("A1"), "LIVE", "b".into()),
+        ];
+        let a1 = Some(AccountId::new("A1"));
+        assert_eq!(
+            header_badge(&clash, &[row("A1", "LIVE")], a1.as_ref()).as_deref(),
+            Some("LIVE")
+        );
+        assert_eq!(
+            header_badge(&clash, &[], a1.as_ref()).as_deref(),
             Some("LIVE")
         );
     }

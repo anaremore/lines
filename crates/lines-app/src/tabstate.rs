@@ -529,18 +529,16 @@ mod tests {
     #[test]
     fn every_pane_kind_alone_names_its_tab() {
         use crate::layout::PaneKind as K;
+        // ALL holds every kind: each at its exhaustive `index`, and none past the last.
+        for (i, k) in K::ALL.into_iter().enumerate() {
+            assert_eq!(k.index(), i, "{k:?}");
+        }
+        assert_eq!(
+            K::ALL.len(),
+            K::Calendar.index() + 1,
+            "the last kind ends ALL"
+        );
         for k in K::ALL {
-            let listed = match k {
-                K::Chart
-                | K::Dom
-                | K::Tape
-                | K::Journal
-                | K::Strategies
-                | K::Chain
-                | K::Positions
-                | K::Calendar => K::ALL.contains(&k),
-            };
-            assert!(listed);
             let title = auto_title(&[(k, "ES".to_owned())]);
             if k.is_market() {
                 assert_eq!(title, "ES", "{k:?}");
