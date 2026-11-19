@@ -850,6 +850,16 @@ pub fn short_reason(message: &str) -> &str {
         ("filled first", "stayed"),
         ("filled", "filled"),
     ];
+    // A source's name leading the reason ("Broker: account report unreadable"): tag the
+    // reason, not the name.
+    if let Some((head, rest)) = message.split_once(": ")
+        && !head.is_empty()
+        && !head.contains(' ')
+        && head.chars().all(char::is_alphabetic)
+        && !rest.trim().is_empty()
+    {
+        return short_reason(rest);
+    }
     let lower = message.to_ascii_lowercase();
     for (needle, short) in KNOWN {
         if lower.contains(needle) {
@@ -1950,6 +1960,20 @@ mod tests {
         p.qty = Qty(3);
         p.filled = Qty(1);
         assert_eq!(text(&p), "T1/3");
+    }
+
+    /// A reason led by its source's name ("Broker: …") is tagged by the reason, never by the
+    /// name alone (the owner's Sierra denial read "Sierra:" on its row).
+    #[test]
+    fn a_source_prefix_isnt_the_tag() {
+        assert_eq!(short_reason("Broker: account report unreadable"), "account");
+        assert_eq!(short_reason("Broker: market is closed"), "closed");
+        // Not a lone name: unchanged.
+        assert_eq!(
+            short_reason("still working: no answer to 3 cancels"),
+            "no cancel"
+        );
+        assert_eq!(short_reason("Broker:"), "Broker:");
     }
 
     #[test]

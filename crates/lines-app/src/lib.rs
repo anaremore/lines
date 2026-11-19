@@ -825,6 +825,10 @@ struct Cli {
     /// the journal; its LIVE account gets the built-in preset with a consistency rule.
     #[arg(long, requires = "demo_broker")]
     demo_fills: bool,
+    /// Screenshot: a broker's refusal (DENIED, MESSAGE) on the demo SIM account, six ticks
+    /// above the last trade: how the DOM header and the row's tag read it.
+    #[arg(long, value_name = "MESSAGE", requires = "demo_broker")]
+    dom_flash: Option<String>,
     /// Screenshot: a fixed set of synthetic strategy instances (armed, paused, halted at the
     /// daily loss limit, not started) on the paper account and the recording's contract, for
     /// the strategy panel until the strategy host runs in the app.
@@ -2021,7 +2025,17 @@ where
     ext.validate()?;
     for b in &ext.brokers {
         // Counts only: account ids never go to logs.
-        let s = lines_trading::extension::summarize(&b.accounts().accounts());
+        let listed = b.accounts().accounts();
+        if listed.is_empty() {
+            // Not connected yet (a broker lists its accounts once it is): no counts to give.
+            tracing::info!(
+                "broker {:?} ({}) registered: its accounts are listed once it connects",
+                b.name(),
+                b.label()
+            );
+            continue;
+        }
+        let s = lines_trading::extension::summarize(&listed);
         tracing::info!(
             "broker {:?} ({}): {} simulated, {} live, {} unknown accounts; {} tradable",
             b.name(),
@@ -2359,6 +2373,7 @@ where
                 demo_broker: cli.demo_broker,
                 demo_accounts: cli.demo_accounts,
                 demo_fills: cli.demo_fills,
+                dom_flash: cli.dom_flash.clone(),
                 strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,
                 journal_tags: cli.journal_tags,

@@ -1971,6 +1971,27 @@ impl Trading {
     }
 
     /// Wait (bounded, 5 s) until every venue's accounts are listed and its core has rebuilt
+    /// Screenshots: a DENIED refusal on `account` and `contract` at `price`, as a broker's
+    /// refusal before sending reads (`--dom-flash`).
+    #[cfg(feature = "screenshot")]
+    pub fn screenshot_deny(
+        &self,
+        account: AccountId,
+        contract: ContractKey,
+        price: Price,
+        message: String,
+    ) {
+        self.cache.read().flashes.push_back(Flash {
+            kind: FlashKind::Denied,
+            account: account.clone(),
+            contract: Some(contract),
+            price: Some(price),
+            message,
+            at: Instant::now(),
+        });
+        self.cache.bump(Some(&account));
+    }
+
     /// from the broker. Blocks: screenshots only.
     #[cfg(feature = "screenshot")]
     pub fn wait_for_venues(&self) {

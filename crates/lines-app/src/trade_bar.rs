@@ -2460,6 +2460,44 @@ pub fn status_parts(text: &str) -> impl Iterator<Item = (&str, bool)> {
         .filter(|(p, _)| !p.is_empty())
 }
 
+/// A refusal line ([`flash_line`]) as (price, reason, `+N more`): the price and the count
+/// shown whole, the reason as one piece (it may be cut with an ellipsis, never dropped).
+pub fn flash_split(text: &str) -> (Option<&str>, &str, Option<&str>) {
+    let (main, more) = match text.rfind("  +") {
+        Some(i) if text[i..].ends_with(" more") => (&text[..i], Some(text[i..].trim())),
+        _ => (text, None),
+    };
+    match main.split_once(": ") {
+        Some((p, r))
+            if !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_digit() || b == b'.' || b == b'\'' || b == b'-') =>
+        {
+            (Some(p), r, more)
+        }
+        _ => (None, main, more),
+    }
+}
+
+/// A refusal line on one line: its price, its reason (cut with an ellipsis when the header is
+/// narrow, so a long reason is never hidden whole), and `+N more`.
+fn flash_items(text: &str, color: gpui::Hsla) -> gpui::Div {
+    let (price, reason, more) = flash_split(text);
+    div()
+        .flex()
+        .flex_row()
+        .gap_x_1()
+        .min_w_0()
+        .h(crate::zoom::ui(ITEMS_LINE_H))
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(color)
+        .children(price.map(|p| div().flex_shrink_0().child(format!("{p}:"))))
+        .child(div().min_w_0().truncate().child(reason.to_owned()))
+        .children(more.map(|m| div().flex_shrink_0().child(m.to_owned())))
+}
+
 /// `text` as whole items on one line of text (centred in its slot by the caller): an item
 /// that doesn't fit wraps into the hidden overflow instead of being cut (a limit, minutes
 /// left, a price), taking its leading " · " with it.
@@ -3982,7 +4020,7 @@ pub fn dom_bar<V: TradePane>(
                             .font_weight(FontWeight::BOLD)
                             .child(label),
                     )
-                    .child(whole_items(&f, t.text_main, false)),
+                    .child(flash_items(&f, t.text_main)),
             ),
             (None, Some((_, g)), _) => status.child(lock_strip(
                 g,
@@ -7465,6 +7503,25 @@ mod tests {
 
     /// Review round 3: a narrow panel cut the lockout mid-number ("limit of 10" for 1,000,
     /// "· 1" for 12 min left). Status text is laid out as whole items instead.
+    /// A refusal line keeps its reason as one piece (cut, never dropped): the owner's header
+    /// read "DENIED 26747.25: Sierra:" with the reason hidden.
+    #[test]
+    fn a_refusal_line_keeps_its_reason_whole() {
+        assert_eq!(
+            flash_split("26747.25: Broker: account report unreadable"),
+            (Some("26747.25"), "Broker: account report unreadable", None)
+        );
+        assert_eq!(
+            flash_split("27047.00: Broker: bracket needs target and stop  +2 more"),
+            (
+                Some("27047.00"),
+                "Broker: bracket needs target and stop",
+                Some("+2 more")
+            )
+        );
+        assert_eq!(flash_split("no account"), (None, "no account", None));
+    }
+
     #[test]
     fn status_text_splits_into_whole_items() {
         let parts = |t| status_parts(t).collect::<Vec<_>>();

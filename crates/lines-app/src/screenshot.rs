@@ -71,6 +71,9 @@ pub struct Shot {
     pub demo_accounts: usize,
     /// Synthetic executions made outside Lines on the demo broker (`--demo-fills`).
     pub demo_fills: bool,
+    /// A broker's refusal on the demo SIM account, six ticks above the last trade
+    /// (`--dom-flash`).
+    pub dom_flash: Option<String>,
     /// Synthetic strategy instances for the strategy panel (`--strategies-demo`).
     pub strategies_demo: bool,
     /// Charts and DOMs start with the account list open (`--account-menu`).
@@ -251,6 +254,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         demo_broker,
         demo_accounts,
         demo_fills,
+        dom_flash,
         strategies_demo,
         account_menu,
         journal_tags,
@@ -331,6 +335,19 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
     if demo_broker {
         trading.wait_for_venues();
         trading.start_account = Some(lines_trading::AccountId::new(crate::demo_broker::SIM));
+        if let Some(message) = dom_flash
+            && let Some(d) = feeds
+                .iter()
+                .map(|f| f.store().read())
+                .find(|d| d.contract.is_some() && d.last_trade.is_some())
+        {
+            trading.screenshot_deny(
+                lines_trading::AccountId::new(crate::demo_broker::SIM),
+                d.contract.expect("checked"),
+                lines_core::Price(d.last_trade.expect("checked").0 + 6 * d.product.price.tick),
+                message,
+            );
+        }
     }
     trading.start_account_menu = account_menu;
     trading.start_journal_tags = journal_tags;
