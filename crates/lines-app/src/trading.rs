@@ -200,6 +200,19 @@ pub struct TradeState {
     resets_waiting: HashSet<AccountId>,
     /// The account groups, in the order they were created (`Event::Groups`).
     groups: Vec<lines_trading::group::AccountGroup>,
+    /// The newest group commands' per-member results (`Event::GroupCommand`), by the group
+    /// command's id: the pane that sent one says how it went.
+    group_results: VecDeque<(CommandId, String, Vec<lines_trading::group::MemberResult>)>,
+}
+
+/// A pane's position over its accounts (one account, or a group's members): quantities and
+/// open P&L summed; the average price only while every member holding one is on the same side
+/// (quantity-weighted, display only).
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct ViewPosition {
+    pub qty: i64,
+    pub avg_price: Option<f64>,
+    pub unrealised: lines_trading::Money,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -354,8 +367,15 @@ impl TradeState {
                 self.groups = groups;
                 None
             }
-            // A group command's member commands answer as their own commands.
-            Event::GroupCommand { .. } => None,
+            // A group command's member commands answer as their own commands; its results
+            // are kept for the pane that sent it.
+            Event::GroupCommand { id, group, results } => {
+                if self.group_results.len() == KEEP_RESULTS {
+                    self.group_results.pop_front();
+                }
+                self.group_results.push_back((id, group, results));
+                None
+            }
             // The account list itself is the pump's to change (`spawn_pump`).
             Event::AccountAdded { .. } => None,
             Event::AccountRemoved { account } => {
@@ -649,6 +669,84 @@ impl TradeState {
         &self.groups
     }
 
+    /// A group command's per-member results, once it answered.
+    pub fn group_result(
+        &self,
+        id: CommandId,
+    ) -> Option<(&str, &[lines_trading::group::MemberResult])> {
+        self.group_results
+            .iter()
+            .rev()
+            .find(|(i, _, _)| *i == id)
+            .map(|(_, g, r)| (g.as_str(), r.as_slice()))
+    }
+
+    /// Open orders of any of `view`'s accounts on `contract`.
+    pub fn open_orders_in<'a>(
+        &'a self,
+        view: &'a [AccountId],
+        contract: ContractKey,
+    ) -> impl Iterator<Item = &'a Order> + 'a {
+        self.orders
+            .values()
+            .filter(move |o| o.contract == contract && view.contains(&o.account))
+    }
+
+    /// The position over `view`'s accounts on `contract` (`None`: none of them has one).
+    pub fn position_in(&self, view: &[AccountId], contract: ContractKey) -> Option<ViewPosition> {
+        let mut out: Option<ViewPosition> = None;
+        let mut weighted = 0.0;
+        let mut sides = (false, false);
+        let mut priced = true;
+        // No key built (paint path): the positions held are few.
+        let held = self
+            .positions
+            .iter()
+            .filter(|((a, k), _)| *k == contract && view.contains(a));
+        for (_, p) in held {
+            let v = out.get_or_insert(ViewPosition {
+                qty: 0,
+                avg_price: None,
+                unrealised: lines_trading::Money::ZERO,
+            });
+            v.qty += p.qty;
+            v.unrealised += p.unrealised;
+            if p.qty != 0 {
+                if p.qty > 0 {
+                    sides.0 = true;
+                } else {
+                    sides.1 = true;
+                }
+                match p.avg_price {
+                    Some(px) => weighted += px * p.qty.unsigned_abs() as f64,
+                    None => priced = false,
+                }
+            }
+        }
+        if let Some(v) = out.as_mut()
+            && v.qty != 0
+            && priced
+            && !(sides.0 && sides.1)
+        {
+            v.avg_price = Some(weighted / v.qty.unsigned_abs() as f64);
+        }
+        out
+    }
+
+    /// Refusals of any of `view`'s accounts (see [`TradeState::flashes`]).
+    pub fn flashes_in<'a>(
+        &'a self,
+        view: &'a [AccountId],
+        contract: Option<ContractKey>,
+        now: Instant,
+    ) -> impl Iterator<Item = &'a Flash> + 'a {
+        self.flashes.iter().filter(move |f| {
+            view.contains(&f.account)
+                && (f.contract.is_none() || f.contract == contract)
+                && now.duration_since(f.at) <= FLASH
+        })
+    }
+
     pub fn resetting(&self, account: &AccountId) -> bool {
         self.resets_waiting.contains(account)
     }
@@ -934,6 +1032,8 @@ pub struct Trading {
     pub check_sessions: bool,
     /// Screenshot fixture (a `--paper` script's first `account`): the panes' account.
     pub start_account: Option<AccountId>,
+    /// Screenshot fixture (a `--paper` script's `pane-group NAME`): the panes' group.
+    pub start_group: Option<String>,
     /// The trade journal (roadmap 8c), fed on the trading thread.
     pub journal: Arc<JournalShared>,
     /// The data source's name, as a paper reset names its account ("Paper (mock)").
@@ -1642,6 +1742,7 @@ impl Trading {
             settled: std::sync::atomic::AtomicBool::new(false),
             check_sessions,
             start_account: None,
+            start_group: None,
             journal,
             source,
             reset_arm: Mutex::new(None),
@@ -2015,7 +2116,8 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         TradeCommand::AddPaperAccount { .. } | TradeCommand::RemovePaperAccount { .. } => {
             return None;
         }
-        TradeCommand::CreateGroup { .. }
+        TradeCommand::GroupPlace { .. }
+        | TradeCommand::CreateGroup { .. }
         | TradeCommand::RenameGroup { .. }
         | TradeCommand::DeleteGroup { .. }
         | TradeCommand::SetGroupMembers { .. }
@@ -2290,6 +2392,9 @@ pub enum Step {
     Ack,
     /// Use this account from here on.
     Account(AccountId),
+    /// Panes trade this account group, and the script's orders, Flatten and Cancel all from
+    /// here on are the group's (`pane-group NAME`).
+    PaneGroup(String),
     /// Send the following commands from this source (`strategy N`: as that instance;
     /// `manual`: as a person, the default).
     Source(Source),
@@ -2449,6 +2554,7 @@ pub fn parse_script(
                 account = AccountId::new(id);
                 out.push(Step::Account(account.clone()));
             }
+            ["pane-group", name] => out.push(Step::PaneGroup(name.replace('_', " "))),
             // Strategies (decision 0025): add instance N on this account and contract (any
             // hours, max 10, daily loss 100), arm it, and send what follows as it; `halt N`
             // pauses it at its daily loss (the core's exact reason), as a person.
@@ -2636,6 +2742,44 @@ pub fn parse_script(
             _ => bail!("{raw:?}: not a paper script step"),
         }
     }
+    // After `pane-group`: orders, Flatten and Cancel all are the group's, as a pane on it
+    // sends them.
+    let mut group: Option<String> = None;
+    for step in &mut out {
+        match step {
+            Step::PaneGroup(g) => group = Some(g.clone()),
+            Step::Command(c) => {
+                if let Some(g) = &group {
+                    let pt_cmd = std::mem::replace(
+                        c,
+                        TradeCommand::DeleteGroup {
+                            group: String::new(),
+                        },
+                    );
+                    *c = match pt_cmd {
+                        TradeCommand::PlaceOrder(o) => TradeCommand::GroupPlace {
+                            group: g.clone(),
+                            order: lines_trading::GroupOrder::Order(o),
+                        },
+                        TradeCommand::PlaceBracket(b) => TradeCommand::GroupPlace {
+                            group: g.clone(),
+                            order: lines_trading::GroupOrder::Bracket(b),
+                        },
+                        TradeCommand::Flatten { contract, .. } => TradeCommand::GroupFlatten {
+                            group: g.clone(),
+                            contract,
+                        },
+                        TradeCommand::CancelAll { contract, .. } => TradeCommand::GroupCancelAll {
+                            group: g.clone(),
+                            contract,
+                        },
+                        other => other,
+                    };
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(out)
 }
 
@@ -2722,7 +2866,7 @@ impl Trading {
                         None => tracing::warn!("script move: no working entry"),
                     }
                 }
-                Step::Account(_) => {}
+                Step::Account(_) | Step::PaneGroup(_) => {}
             }
         }
         self.settle();
@@ -3300,6 +3444,68 @@ mod tests {
             t.cache.read().groups()[0].members,
             vec![AccountId::new("paper")]
         );
+    }
+
+    /// A group order through the app: one order per member, the per-member results kept for
+    /// the pane that sent it, the members' position summed over the group.
+    #[test]
+    fn group_orders_reach_every_member_and_their_results_the_cache() {
+        let t = trading(vec![
+            AccountConfig::paper("a", 50_000),
+            AccountConfig::paper("b", 50_000),
+        ]);
+        let members = vec![AccountId::new("a"), AccountId::new("b")];
+        t.submit(
+            Source::Test,
+            Instant::now(),
+            TradeCommand::CreateGroup {
+                name: "Evals".into(),
+                members: members.clone(),
+            },
+        );
+        let open = UtcMillis::parse_iso("2026-11-10T15:00:00Z").unwrap();
+        t.handle().advance_to(open);
+        t.handle().market(
+            es(),
+            vec![
+                MarketInput::BookClear,
+                MarketInput::Book {
+                    side: lines_core::Side::Bid,
+                    price: px(5999.75),
+                    qty: Qty(50),
+                },
+                MarketInput::Book {
+                    side: lines_core::Side::Ask,
+                    price: px(6000.0),
+                    qty: Qty(50),
+                },
+            ],
+        );
+        t.settle();
+        let id = t.submit(
+            Source::Dom,
+            Instant::now(),
+            TradeCommand::GroupPlace {
+                group: "Evals".into(),
+                order: lines_trading::GroupOrder::Order(lines_trading::OrderSpec {
+                    account: AccountId::new("a"),
+                    contract: es(),
+                    side: lines_trading::Side::Buy,
+                    qty: Qty(2),
+                    kind: OrderKind::Market,
+                }),
+            },
+        );
+        t.handle().advance_to(UtcMillis(open.0 + 1_000));
+        t.settle();
+        let s = t.cache.read();
+        let (group, results) = s.group_result(id).expect("results kept");
+        assert_eq!(group, "Evals");
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|m| m.result.is_ok()), "{results:?}");
+        let p = s.position_in(&members, es()).expect("a position");
+        assert_eq!(p.qty, 4);
+        assert!(p.avg_price.is_some());
     }
 
     /// Reset paper account: one press only arms it; the second sends it, the core flattens,

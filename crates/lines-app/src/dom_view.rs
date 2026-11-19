@@ -702,9 +702,7 @@ impl DomView {
                     Ok(cmd) => match trade_bar::size_refusal(self, &cmd, cx) {
                         Some(why) => self.trade.flash(why),
                         None => {
-                            if let Some(t) = Trading::try_global(cx) {
-                                t.submit(lines_trading::Source::Dom, issued, cmd);
-                            }
+                            trade_bar::send(self, lines_trading::Source::Dom, issued, cmd, cx);
                         }
                     },
                     Err(Refusal(why)) => self.trade.flash(why),
@@ -859,9 +857,11 @@ impl DomView {
             let width = f(self.bounds.size.width) / crate::zoom::get();
             match self.mark_pressed(price, ev.position).order(width) {
                 Ok(Some(order)) => {
-                    if let (Some(account), Some(t)) =
-                        (self.trade.account.clone(), Trading::try_global(cx))
-                    {
+                    // The order's own account (on a group, each member's order is its own).
+                    let t = Trading::try_global(cx);
+                    let account =
+                        t.and_then(|t| t.cache.read().order(order).map(|o| o.account.clone()));
+                    if let (Some(account), Some(t)) = (account, t) {
                         t.submit(
                             lines_trading::Source::Dom,
                             std::time::Instant::now(),
@@ -1271,10 +1271,7 @@ impl DomView {
         // The trader's orders, the position marker and rejections, over the rows.
         if let Some(tr) = Trading::try_global(cx) {
             let contract = trade_bar::contract_of(&self.store);
-            for (p, why) in self
-                .orders
-                .prepare(&tr.cache, self.trade.account.as_ref(), contract)
-            {
+            for (p, why) in self.orders.prepare(&tr.cache, self.trade.view(), contract) {
                 self.trade
                     .flash(format!("{}: {why}", fmt.format::<32>(p).as_str()));
             }

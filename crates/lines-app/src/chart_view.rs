@@ -811,7 +811,7 @@ impl crate::trade_bar::TradePane for ChartView {
             }
             Ok(p) if p.grows => {
                 let (Some(account), Some(contract)) = (
-                    self.trade.account.clone(),
+                    self.trade.switch_id(),
                     crate::trade_bar::contract_of(&self.store),
                 ) else {
                     return;
@@ -4429,11 +4429,13 @@ impl ChartView {
 
     /// Cancel one of the chart's orders (its tag's ×): no switch needed, as on the DOM.
     fn cancel_order(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let (Some(m), Some(account), Some(t)) = (
-            self.ct.mark(id).copied(),
-            self.trade.account.clone(),
-            crate::trading::Trading::try_global(cx),
-        ) {
+        let t = crate::trading::Trading::try_global(cx);
+        let m = self.ct.mark(id).copied();
+        // The order's own account (on a group, each member's order is its own).
+        let account = m
+            .zip(t)
+            .and_then(|(m, t)| t.cache.read().order(m.id).map(|o| o.account.clone()));
+        if let (Some(m), Some(account), Some(t)) = (m, account, t) {
             t.submit(
                 lines_trading::Source::Chart,
                 std::time::Instant::now(),
@@ -4515,7 +4517,12 @@ impl ChartView {
                 )
             })
             .unwrap_or((None, None, None));
-        match crate::chart_trade::exit_command(&account, contract, qty, a.target, a.to, inside) {
+        let built =
+            crate::chart_trade::exit_command(&account, contract, qty, a.target, a.to, inside)
+                .and_then(|c| {
+                    crate::trade_bar::for_pane(&self.trade, c).map_err(crate::dom_trade::Refusal)
+                });
+        match built {
             Ok(command) => cx.emit(ChartOrder {
                 command,
                 refused: crate::chart_trade::ENABLE_TO_ADD,
@@ -4610,19 +4617,26 @@ impl ChartView {
                     self.trade.flash(why);
                     false
                 }
-                None => {
-                    cx.emit(ChartOrder {
-                        command,
-                        refused: ENABLE_TO_ORDER,
-                        staged,
-                        resize: None,
-                        account: ctx.account,
-                        contract: ctx.contract,
-                        link: self.common.link,
-                        issued,
-                    });
-                    true
-                }
+                None => match crate::trade_bar::for_pane(&self.trade, command) {
+                    Err(why) => {
+                        self.trade.flash(why);
+                        false
+                    }
+                    Ok(command) => {
+                        cx.emit(ChartOrder {
+                            command,
+                            refused: ENABLE_TO_ORDER,
+                            staged,
+                            resize: None,
+                            // Who the linked DOM's switch must be for (a group: the group).
+                            account: self.trade.switch_id().unwrap_or(ctx.account),
+                            contract: ctx.contract,
+                            link: self.common.link,
+                            issued,
+                        });
+                        true
+                    }
+                },
             },
             Err(why) => {
                 self.trade.flash(why);
@@ -5173,10 +5187,10 @@ impl ChartView {
     /// account, or while the trading cache is busy.
     fn position_for_draw(&self, cx: &App) -> Option<(i64, f64, lines_trading::Money, PnlDisplay)> {
         let trading = crate::trading::Trading::try_global(cx)?;
-        let account = self.trade.account.as_ref()?;
         let contract = crate::trade_bar::contract_of(&self.store)?;
         let s = trading.cache.try_read()?;
-        let p = s.position(account, contract)?;
+        // Its account's, or its group's members' together.
+        let p = s.position_in(self.trade.view(), contract)?;
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()
             .map(|a| a.settings.pnl_display)
@@ -5296,9 +5310,7 @@ impl ChartView {
             return;
         };
         let contract = crate::trade_bar::contract_of(&self.store);
-        let refused = self
-            .ct
-            .prepare(&t.cache, self.trade.account.as_ref(), contract);
+        let refused = self.ct.prepare(&t.cache, self.trade.view(), contract);
         // Screenshot fixture: the position line held dragged (a preview, never placed: it sets
         // only `adding`, never `pos_drag` or `moved`, so a release would see a click; and the
         // flag exists only with `--screenshot`, which has no pointer).

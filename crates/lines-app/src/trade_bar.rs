@@ -58,6 +58,21 @@ pub struct TradeDoc {
     /// Order hotkeys on for this pane ("Keys on"; sticky, written only when on).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hotkeys: bool,
+    /// The account group the pane trades (by name; `account` is then its first member).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+/// [`PaneTrade::switch_id`]'s prefix for a group (never an account id: those come from
+/// names as `paper-…`, or from a broker).
+pub const GROUP_SWITCH: &str = "group:";
+
+/// What a group command sent from a pane was, to say how it went.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum GroupAct {
+    Place,
+    Flatten,
+    CancelAll,
 }
 
 /// One pane's trading state.
@@ -118,6 +133,52 @@ pub struct PaneTrade {
     listed: Option<(crate::journal_shots::Kinds, crate::trading::Retired, bool)>,
     /// `trading::accounts_epoch` last checked.
     seen_accounts: u64,
+    /// The account group the pane trades: its name and members as last seen (`account` is
+    /// the first member, for what is one account's: bracket presets, the rule strip's
+    /// settings). `None`: one account.
+    pub group: Option<(String, Vec<AccountId>)>,
+    /// Group commands sent from here, waiting for their per-member results.
+    group_sent: Vec<(lines_trading::CommandId, GroupAct)>,
+    /// Screenshot fixture (`pane-group NAME`): the group to take once the script made it.
+    pending_group: Option<String>,
+}
+
+/// A group command's outcome in words: "Placed on 2 of 3 · Evals · Eval 2: daily loss limit
+/// reached". `name(id)`: an account's name.
+pub fn group_words(
+    act: GroupAct,
+    group: &str,
+    results: &[lines_trading::group::MemberResult],
+    name: impl Fn(&AccountId) -> String,
+) -> String {
+    let (done, nothing) = match act {
+        GroupAct::Place => ("Placed on", ""),
+        GroupAct::Flatten => ("Flattened", "nothing open"),
+        GroupAct::CancelAll => ("Canceled orders on", "no orders"),
+    };
+    // A member that acted: placed, or had something to flatten or cancel.
+    let acted = results
+        .iter()
+        .filter(|m| m.result.as_ref().is_ok_and(|ids| !ids.is_empty()))
+        .count();
+    let mut out = format!("{done} {acted} of {} · {group}", results.len());
+    let mut others = 0;
+    for m in results {
+        let why = match &m.result {
+            Err(r) => r.message.clone(),
+            Ok(ids) if ids.is_empty() && !nothing.is_empty() => nothing.to_owned(),
+            Ok(_) => continue,
+        };
+        if out.matches(" · ").count() < 3 {
+            let _ = write!(out, " · {}: {why}", name(&m.account));
+        } else {
+            others += 1;
+        }
+    }
+    if others > 0 {
+        let _ = write!(out, " · {others} more");
+    }
+    out
 }
 
 /// The confirmation to replace working exits: what it was shown for, exactly.
@@ -185,7 +246,26 @@ impl PaneTrade {
         // The switch is the saved account's: a pane whose account is gone (removed while the
         // app ran) comes back on another one with trading off, never armed on an account the
         // trader didn't arm.
-        let kept = account.is_some();
+        // A saved group, if it still exists: the pane trades its members.
+        let group = saved
+            .and_then(|s| s.group.as_deref())
+            // Screenshot fixture (`pane-group NAME`): panes start on the group.
+            .or_else(|| trading.and_then(|t| t.start_group.as_deref()))
+            .and_then(|name| {
+                let t = trading?;
+                let c = t.cache.read();
+                c.groups()
+                    .iter()
+                    .find(|g| lines_trading::group::same_name(&g.name, name))
+                    .map(|g| (g.name.clone(), g.members.clone()))
+            });
+        let gone_group = saved.is_some_and(|s| s.group.is_some()) && group.is_none();
+        let account = match &group {
+            Some((_, m)) if !m.is_empty() => Some(m[0].clone()),
+            _ => account,
+        };
+        // A pane whose group is gone never comes back armed on one account.
+        let kept = account.is_some() && !gone_group;
         let account = account.or_else(|| trading.and_then(Trading::default_account));
         PaneTrade {
             account,
@@ -217,6 +297,140 @@ impl PaneTrade {
             switch_pending: false,
             listed: trading.map(|t| (t.account_list(), t.retired_list(), t.has_venues())),
             seen_accounts,
+            pending_group: trading
+                .and_then(|t| t.start_group.clone())
+                .filter(|_| group.is_none()),
+            group,
+            group_sent: Vec::new(),
+        }
+    }
+
+    /// Who the pane's trading switch is for: its account, or its group (`group:NAME`), so a
+    /// chart's order on a group goes only through a linked DOM armed on the same group.
+    pub fn switch_id(&self) -> Option<AccountId> {
+        match &self.group {
+            Some((name, _)) => Some(AccountId::new(&format!("{GROUP_SWITCH}{name}"))),
+            None => self.account.clone(),
+        }
+    }
+
+    /// The accounts the pane shows and trades: a group's members, or its one account.
+    pub fn view(&self) -> &[AccountId] {
+        match (&self.group, &self.account) {
+            (Some((_, m)), _) => m,
+            (None, Some(a)) => std::slice::from_ref(a),
+            (None, None) => &[],
+        }
+    }
+
+    /// A group command sent from this pane: its result is said when it comes.
+    pub fn group_sent(&mut self, id: lines_trading::CommandId, act: GroupAct) {
+        self.group_sent.push((id, act));
+    }
+
+    /// The pane's group as the core has it now: members followed; a group deleted (or
+    /// renamed) leaves the pane on its first member, trading off, and says so.
+    fn sync_group(&mut self) -> bool {
+        if let Some(name) = self.pending_group.clone()
+            && let Some(c) = self.cache.as_ref().and_then(|c| c.try_read())
+            && let Some(g) = c
+                .groups()
+                .iter()
+                .find(|g| lines_trading::group::same_name(&g.name, &name))
+        {
+            let g = (g.name.clone(), g.members.clone());
+            drop(c);
+            if let Some(first) = g.1.first() {
+                self.account = Some(first.clone());
+            }
+            self.group = Some(g);
+            self.pending_group = None;
+            self.seen = u64::MAX;
+            return true;
+        }
+        let Some((name, members)) = &self.group else {
+            return false;
+        };
+        let Some(c) = self.cache.as_ref().and_then(|c| c.try_read()) else {
+            return false;
+        };
+        let now = c
+            .groups()
+            .iter()
+            .find(|g| lines_trading::group::same_name(&g.name, name))
+            .map(|g| (g.name.clone(), g.members.clone()));
+        drop(c);
+        match now {
+            Some((n, m)) if n == *name && m == *members => false,
+            Some((n, m)) => {
+                if let Some(first) = m.first() {
+                    self.account = Some(first.clone());
+                }
+                self.group = Some((n, m));
+                true
+            }
+            None => {
+                let old = name.clone();
+                self.group = None;
+                self.arming = Arming::new(false);
+                self.bracket_forget();
+                self.notice(format!(
+                    "Group {old} is gone: now on one account, trading off"
+                ));
+                true
+            }
+        }
+    }
+
+    /// Group commands sent from here that answered: their outcome as a notice (a refusal of
+    /// the whole command as NOT SENT's kin, DENIED).
+    fn group_answers(&mut self) -> bool {
+        if self.group_sent.is_empty() {
+            return false;
+        }
+        let Some(c) = self.cache.as_ref().and_then(|c| c.try_read()) else {
+            return false;
+        };
+        let names: Vec<(AccountId, String)> = self.listed.as_ref().map_or_else(Vec::new, |l| {
+            l.0.read()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .map(|a| (a.id.clone(), a.name.clone()))
+                .collect()
+        });
+        let name = |id: &AccountId| {
+            names
+                .iter()
+                .find(|(i, _)| i == id)
+                .map_or_else(|| id.0.clone(), |(_, n)| n.clone())
+        };
+        let mut said = None;
+        self.group_sent.retain(|(id, act)| {
+            if let Some((group, results)) = c.group_result(*id) {
+                said = Some((false, group_words(*act, group, results, name)));
+                return false;
+            }
+            match c.result(*id) {
+                Some(Err(r)) => {
+                    said = Some((true, r.message.clone()));
+                    false
+                }
+                Some(Ok(_)) => false,
+                None => true,
+            }
+        });
+        drop(c);
+        match said {
+            Some((true, m)) => {
+                self.local_flash = Some((m, Instant::now()));
+                self.local_flash_label = "DENIED";
+                true
+            }
+            Some((false, m)) => {
+                self.notice(m);
+                true
+            }
+            None => false,
         }
     }
 
@@ -254,6 +468,7 @@ impl PaneTrade {
             account: self.account.as_ref().map(|a| a.0.clone()),
             bracket: self.bracket,
             hotkeys: self.hotkeys,
+            group: self.group.as_ref().map(|(n, _)| n.clone()),
         };
         (d != TradeDoc::default()).then_some(d)
     }
@@ -292,13 +507,19 @@ impl PaneTrade {
             self.seen_size = e;
             changed = true;
         }
-        if let (Some(c), Some(a)) = (&self.cache, &self.account) {
-            let r = c.revision(a);
+        if let Some(c) = &self.cache {
+            // Every account the pane shows (a group's members).
+            let r = self
+                .view()
+                .iter()
+                .fold(0u64, |r, a| r.wrapping_mul(31).wrapping_add(c.revision(a)));
             if r != self.seen {
                 self.seen = r;
                 changed = true;
+                changed |= self.sync_group();
             }
         }
+        changed |= self.group_answers();
         if self
             .local_flash
             .as_ref()
@@ -696,13 +917,25 @@ fn run_with<V: TradePane>(
             Ok(c) => match size_refusal(v, &c, cx) {
                 Some(why) => v.trade().flash(why),
                 None => {
-                    if let Some(t) = Trading::try_global(cx) {
-                        t.submit(source, issued, c);
-                    }
+                    send(v, source, issued, c, cx);
                 }
             },
             Err(dom_trade::Refusal(why)) => v.trade().flash(why),
         }
+        cx.notify();
+        return;
+    }
+    // What is one account's own: not from a pane on a group.
+    if v.trade_ref().group.is_some()
+        && matches!(
+            cmd,
+            TradeCmd::Breakeven
+                | TradeCmd::ResetPaper
+                | TradeCmd::ResetPaperJournal
+                | TradeCmd::BracketMode
+        )
+    {
+        v.trade().flash("per account: pick one account to do this");
         cx.notify();
         return;
     }
@@ -805,11 +1038,9 @@ fn run_with<V: TradePane>(
             // Never gated by arming, risk or rules: only by having something to act on.
             if let Some(w) = why {
                 v.trade().flash(w);
-            } else if let (Some(account), Some(contract), Some(t)) = (
-                v.trade_ref().account.clone(),
-                contract_of(v.trade_store()),
-                Trading::try_global(cx),
-            ) {
+            } else if let (Some(account), Some(contract)) =
+                (v.trade_ref().account.clone(), contract_of(v.trade_store()))
+            {
                 let c = if cmd == TradeCmd::Flatten {
                     TradeCommand::Flatten {
                         account,
@@ -821,7 +1052,8 @@ fn run_with<V: TradePane>(
                         contract: Some(contract),
                     }
                 };
-                t.submit(source, issued, c);
+                // On a group: every member's (`for_pane`).
+                send(v, source, issued, c, cx);
             }
         }
         TradeCmd::NextAccount => {
@@ -877,6 +1109,10 @@ pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut
     crate::popover::mark_moved_under_pointer();
     close_account_menu(v, cx);
     let t = v.trade();
+    // One account again: the group is left (a change of what the pane trades).
+    if account.is_some() && t.group.take().is_some() {
+        t.account = None;
+    }
     if account.is_some() && account != t.account {
         t.account = account;
         t.resize_edit = None;
@@ -886,6 +1122,113 @@ pub fn set_account<V: TradePane>(v: &mut V, account: Option<AccountId>, cx: &mut
         v.trade().bracket_forget();
     }
     cx.notify();
+}
+
+/// Trade an account group from this pane: one order per member (`Command::GroupPlace`), the
+/// header's Flatten and Cancel all on every member. The pane shows every member's orders and
+/// their position together. A change of what the pane trades, as a change of account.
+pub fn set_group<V: TradePane>(v: &mut V, name: String, cx: &mut Context<V>) {
+    crate::popover::mark_moved_under_pointer();
+    close_account_menu(v, cx);
+    let members = Trading::try_global(cx).and_then(|t| {
+        t.cache
+            .read()
+            .groups()
+            .iter()
+            .find(|g| lines_trading::group::same_name(&g.name, &name))
+            .map(|g| (g.name.clone(), g.members.clone()))
+    });
+    let Some((name, members)) = members else {
+        v.trade().flash("no such group");
+        return;
+    };
+    let t = v.trade();
+    if t.group.as_ref().is_some_and(|(n, _)| *n == name) {
+        cx.notify();
+        return;
+    }
+    if let Some(first) = members.first() {
+        t.account = Some(first.clone());
+    }
+    t.group = Some((name, members));
+    t.resize_edit = None;
+    t.seen = u64::MAX;
+    v.trade().arm_event(ArmEvent::AccountChanged, cx);
+    v.trade().editor = None;
+    v.trade().bracket_forget();
+    cx.notify();
+}
+
+/// A pane's command as it is sent: on a group, a new order becomes one per member
+/// (`GroupPlace`), Flatten and Cancel all the group's; what acts on one order (a modify, a
+/// cancel) names that order's own account already. What a group can't do yet is refused, with
+/// why: an exit added to a position, Reverse, BE.
+pub fn for_pane(pt: &PaneTrade, cmd: TradeCommand) -> Result<TradeCommand, &'static str> {
+    for_group(pt.group.as_ref().map(|(n, _)| n.as_str()), cmd)
+}
+
+/// [`for_pane`] for a pane on `group` (`None`: one account).
+pub fn for_group(group: Option<&str>, cmd: TradeCommand) -> Result<TradeCommand, &'static str> {
+    let Some(group) = group else {
+        return Ok(cmd);
+    };
+    let group = group.to_owned();
+    Ok(match cmd {
+        TradeCommand::PlaceOrder(o) => TradeCommand::GroupPlace {
+            group,
+            order: lines_trading::GroupOrder::Order(o),
+        },
+        TradeCommand::PlaceBracket(b) => TradeCommand::GroupPlace {
+            group,
+            order: lines_trading::GroupOrder::Bracket(b),
+        },
+        TradeCommand::Flatten { contract, .. } => TradeCommand::GroupFlatten { group, contract },
+        TradeCommand::CancelAll { contract, .. } => {
+            TradeCommand::GroupCancelAll { group, contract }
+        }
+        TradeCommand::PlaceExit(_) => return Err("not on a group yet: pick one account"),
+        TradeCommand::Reverse { .. } => return Err("Reverse is per account: pick one account"),
+        TradeCommand::ResetPaper { .. } => return Err("reset is per account: pick one account"),
+        TradeCommand::SetBracketMode { .. } => {
+            return Err("bracket mode is per account: pick one account");
+        }
+        other => other,
+    })
+}
+
+/// What a group command from a pane is, for its notice.
+pub fn group_act(cmd: &TradeCommand) -> Option<GroupAct> {
+    match cmd {
+        TradeCommand::GroupPlace { .. } => Some(GroupAct::Place),
+        TradeCommand::GroupFlatten { .. } => Some(GroupAct::Flatten),
+        TradeCommand::GroupCancelAll { .. } => Some(GroupAct::CancelAll),
+        _ => None,
+    }
+}
+
+/// Send a pane's command (`for_pane`): on a group, as the group's, its outcome said when it
+/// comes; refused here (NOT SENT) when a group can't do it. Returns the id sent.
+pub fn send<V: TradePane>(
+    v: &mut V,
+    source: Source,
+    issued: Instant,
+    cmd: TradeCommand,
+    cx: &mut Context<V>,
+) -> Option<lines_trading::CommandId> {
+    let cmd = match for_pane(v.trade_ref(), cmd) {
+        Ok(c) => c,
+        Err(why) => {
+            v.trade().flash(why);
+            cx.notify();
+            return None;
+        }
+    };
+    let act = group_act(&cmd);
+    let id = Trading::try_global(cx)?.submit(source, issued, cmd);
+    if let Some(act) = act {
+        v.trade().group_sent(id, act);
+    }
+    Some(id)
 }
 
 /// Whether an order is live in the market (not held server-side, not pending, something
@@ -1487,11 +1830,105 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
             })
             .collect();
         data.unresolved = s.unresolved(account);
+        if let Some((name, members)) = &pt.group {
+            group_data(&mut data, &s, t, name, members, contract, last, product);
+        }
     }
     if let Some(m) = pt.local_flash() {
         data.flashes.push((pt.local_flash_label, m.to_owned()));
     }
     Some(data)
+}
+
+/// The header's data for a pane on a group, over the one account's (`gather`): the group's
+/// name and kind; its members' position, P&L, orders and refusals together; a stop only when
+/// every member holding a position has one (else "no stop" is the truth for some member).
+/// Rules and guardrails stay each member's: a member past one says so by name.
+#[allow(clippy::too_many_arguments)]
+fn group_data(
+    data: &mut BarData,
+    s: &crate::trading::TradeState,
+    t: &Trading,
+    name: &str,
+    members: &[AccountId],
+    contract: Option<ContractKey>,
+    last: Option<Price>,
+    product: &Product,
+) {
+    let member_name = |a: &AccountId| t.account(a).map_or_else(|| a.0.clone(), |i| i.name);
+    data.account_name = format!("Group: {name} ({})", members.len());
+    data.badge = "PAPER";
+    data.read_only = None;
+    data.venue = None;
+    data.rules.clear();
+    data.guard = None;
+    data.position = None;
+    data.stop = None;
+    data.target = None;
+    if let Some(k) = contract {
+        data.working = s.open_orders_in(members, k).count();
+        data.market_left = market_left(s.open_orders_in(members, k));
+        if let Some(p) = s.position_in(members, k) {
+            let ticks = match (p.avg_price, last) {
+                (Some(a), Some(m)) => open_ticks(p.qty, a, m, product.price.tick),
+                _ => None,
+            };
+            data.position = Some((p.qty, p.avg_price, ticks, p.unrealised));
+            let mut stop: Option<(Price, i64)> = None;
+            let mut every = true;
+            for m in members {
+                let Some(q) = s.position(m, k).map(|p| p.qty).filter(|q| *q != 0) else {
+                    continue;
+                };
+                match card_stop(s.open_orders(m, k), q, last) {
+                    Some((px, n)) => {
+                        let e = stop.get_or_insert((px, 0));
+                        e.1 += n;
+                    }
+                    None => every = false,
+                }
+            }
+            data.stop = stop.filter(|_| every);
+        }
+    }
+    data.day_pnl = members
+        .iter()
+        .filter_map(|m| s.account(m).map(|a| a.day_pnl))
+        .reduce(|a, b| a + b);
+    // A member past a rule: by name (each member's rules are its own).
+    data.blocked = None;
+    data.blocked_short = None;
+    for m in members {
+        let Some(a) = s.account(m) else { continue };
+        let words = match a.trading {
+            lines_trading::rules::TradingState::Active => continue,
+            lines_trading::rules::TradingState::ReducingOnly => "reducing only",
+            lines_trading::rules::TradingState::Halted => "halted",
+        };
+        data.blocked = Some(format!(
+            "{}: {words} · its orders are refused",
+            member_name(m)
+        ));
+        data.blocked_short = Some("a member limited");
+        break;
+    }
+    let now = Instant::now();
+    data.flashes = s
+        .flashes_in(members, contract, now)
+        .map(|f| {
+            let message = if data.mode.shown() {
+                std::borrow::Cow::Borrowed(f.message.as_str())
+            } else {
+                crate::pnl::redact_amounts(&f.message)
+            };
+            (
+                f.kind.label(),
+                format!("{}: {message}", member_name(&f.account)),
+            )
+        })
+        .collect();
+    data.unresolved = members.iter().map(|m| s.unresolved(m)).sum();
+    data.strategies_armed = members.iter().map(|m| s.strategies_armed(m)).sum();
 }
 
 /// Why orders from this pane would be denied right now, in two or three words, for the
@@ -3401,6 +3838,7 @@ pub fn dom_bar<V: TradePane>(
     //    Flatten outlined in the warning color, bold).
     let labels = util_labels(width);
     let size = util_text(width);
+    let group_n = v.trade_ref().group.as_ref().map(|(_, m)| m.len());
     let util = [
         (
             TradeCmd::Breakeven,
@@ -3424,7 +3862,12 @@ pub fn dom_bar<V: TradePane>(
         let label: std::borrow::Cow<'static, str> = if off {
             format!("{label} off").into()
         } else {
-            label.into()
+            // On a group: every member's (the mock's "Flatten all 3").
+            match (group_n, cmd) {
+                (Some(n), TradeCmd::Flatten) => format!("Flatten all {n}").into(),
+                (Some(n), TradeCmd::CancelAll) => format!("Cancel all {n}").into(),
+                _ => label.into(),
+            }
         };
         let name = if off {
             "Read-only: Lines can't act on this account"
@@ -3985,10 +4428,13 @@ fn meters<V: TradePane>(
         .flex_col()
         .justify_center();
     if rules.is_empty() {
-        return slot.child(div().text_color(t.text_dim).child(if narrow {
-            "No prop rules"
-        } else {
-            "No prop rules on this account"
+        // A group has no rules of its own: each member's apply to its own order.
+        let group = v.trade_ref().group.is_some();
+        return slot.child(div().text_color(t.text_dim).child(match (group, narrow) {
+            (true, true) => "Members' own rules",
+            (true, false) => "Each member's own prop rules apply",
+            (false, true) => "No prop rules",
+            (false, false) => "No prop rules on this account",
         }));
     }
     if !narrow {
@@ -4917,6 +5363,10 @@ pub fn paper_badge(t: &Theme) -> gpui::Div {
 /// paper.
 pub fn chart_account<V: TradePane>(v: &V, cx: &gpui::App) -> Option<(String, bool)> {
     let trading = Trading::try_global(cx)?;
+    if let Some((name, members)) = &v.trade_ref().group {
+        // A group holds paper accounts only.
+        return Some((format!("Group: {name} ({}) ▾", members.len()), true));
+    }
     let info = v
         .trade_ref()
         .account
@@ -5012,6 +5462,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
     }
     let trading = Trading::try_global(cx)?;
     let current = v.trade_ref().account.clone();
+    let current_group = v.trade_ref().group.as_ref().map(|(n, _)| n.clone());
     let lit = t.ghost_selected;
     // The trigger's label, only while recording (and only with a current account).
     let trigger = crate::layout_rec::on()
@@ -5047,6 +5498,18 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
     // Sections, one line per account (`account_menu`); past ~15 rows the rows scroll, the
     // list's size fixed (it floats over the pane, never grows it).
     let accounts = trading.accounts();
+    // Groups (Settings › Groups), their own section after the accounts'. Never waits on the
+    // trading thread while drawing (busy this instant: the next frame).
+    let groups: Vec<(String, usize)> = trading
+        .cache
+        .try_read()
+        .map(|c| {
+            c.groups()
+                .iter()
+                .map(|g| (g.name.clone(), g.members.len()))
+                .collect()
+        })
+        .unwrap_or_default();
     let sections = crate::account_menu::sections(&accounts, |v| trading.venue_short(v));
     let row_h = crate::zoom::ui(22.0);
     let mut rows = div()
@@ -5086,7 +5549,7 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
                 continue;
             };
             let id = a.id.clone();
-            let on = current.as_ref() == Some(&a.id);
+            let on = current_group.is_none() && current.as_ref() == Some(&a.id);
             let text = if r.read_only { t.text_dim } else { t.text_main };
             let chip = if r.read_only && a.badge == "LIVE" {
                 // Read-only live: an outlined chip in the row's dim words.
@@ -5151,9 +5614,76 @@ fn account_menu<V: TradePane>(v: &V, t: &Theme, cx: &mut Context<V>) -> Option<A
             );
         }
     }
+    // Groups: one order per member, each checked by its own rules (a section as the
+    // accounts', one line per group, scrolling with them).
+    if !groups.is_empty() {
+        rows = rows.child(
+            div()
+                .px_2()
+                .pt(crate::zoom::ui(6.0))
+                .pb(crate::zoom::ui(2.0))
+                .text_size(crate::zoom::ui(11.0))
+                .text_color(t.text_dim)
+                .font_weight(FontWeight::BOLD)
+                .child("Groups"),
+        );
+    }
+    for (i, (name, n)) in groups.into_iter().enumerate() {
+        let on = current_group.as_deref() == Some(name.as_str());
+        let pick = name.clone();
+        rows = rows.child(
+            div()
+                .id(("acct-group", i as u64))
+                .h(row_h)
+                .flex_none()
+                .px_2()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap_2()
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .hover(move |s| s.bg(lit))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(t.text_main)
+                        .font_weight(if on {
+                            FontWeight::BOLD
+                        } else {
+                            FontWeight::NORMAL
+                        })
+                        .child(if on { format!("✓ {name}") } else { name }),
+                )
+                .child(badge("PAPER", t))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_right()
+                        .text_color(t.text_dim)
+                        .text_size(crate::zoom::ui(11.0))
+                        .child(match n {
+                            1 => "1 account".to_owned(),
+                            n => format!("{n} accounts"),
+                        }),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |v: &mut V, _, _, cx| {
+                        cx.stop_propagation();
+                        set_group(v, pick.clone(), cx);
+                    }),
+                ),
+        );
+    }
     list = list.child(rows);
     // The current account, when paper: reset it (a second press confirms; `paper_reset`).
-    if let Some(info) = current.as_ref().and_then(|a| trading.account(a))
+    if let Some(info) = current
+        .as_ref()
+        .filter(|_| current_group.is_none())
+        .and_then(|a| trading.account(a))
         && info.paper
     {
         let who = crate::paper_reset::account_words(&info.name, &trading.source);
@@ -5279,6 +5809,11 @@ pub fn chart_chip<V: TradePane>(
     let mut data = empty_data(&info, trading);
     data.read_only = None;
     data.venue = None;
+    if let Some((name, members)) = &pt.group {
+        // As `chart_account` measures it.
+        data.account_name = format!("Group: {name} ({})", members.len());
+        data.badge = "PAPER";
+    }
     // Whole or not at all (the header's fit decides): never shrunk and cut.
     Some(
         div()
@@ -5748,6 +6283,107 @@ pub fn confirm_text(n: usize, preset: &str, contract: &str, width: f32) -> Strin
 mod tests {
     use super::*;
     use lines_trading::{OrderId, Side};
+
+    /// A group's outcome in words: how many acted, then who didn't and why, a few at most.
+    #[test]
+    fn group_outcomes_name_the_members_that_didnt() {
+        use lines_trading::group::MemberResult;
+        use lines_trading::{CommandId, Reject, RejectCode};
+        let m = |a: &str, r: Result<Vec<OrderId>, Reject>| MemberResult {
+            account: AccountId::new(a),
+            command: CommandId(1),
+            result: r,
+        };
+        let name = |a: &AccountId| a.0.to_uppercase();
+        let all = [
+            m("a", Ok(vec![OrderId(1)])),
+            m("b", Ok(vec![OrderId(2)])),
+            m("c", Ok(vec![OrderId(3)])),
+        ];
+        assert_eq!(
+            group_words(GroupAct::Flatten, "Evals", &all, name),
+            "Flattened 3 of 3 · Evals"
+        );
+        let some = [
+            m("a", Ok(vec![OrderId(1)])),
+            m("b", Ok(vec![])),
+            m(
+                "c",
+                Err(Reject::new(
+                    RejectCode::PropRule,
+                    "daily loss limit reached",
+                )),
+            ),
+        ];
+        assert_eq!(
+            group_words(GroupAct::Flatten, "Evals", &some, name),
+            "Flattened 1 of 3 · Evals · B: nothing open · C: daily loss limit reached"
+        );
+        assert_eq!(
+            group_words(GroupAct::Place, "Evals", &some, name),
+            "Placed on 1 of 3 · Evals · C: daily loss limit reached"
+        );
+        let many: Vec<_> = (0..5)
+            .map(|i| m(&format!("x{i}"), Err(Reject::new(RejectCode::Risk, "no"))))
+            .collect();
+        let w = group_words(GroupAct::Place, "G", &many, name);
+        assert!(w.ends_with("· 3 more"), "{w}");
+    }
+
+    /// On a group, new orders become one per member and Flatten / Cancel all the group's; a
+    /// modify or cancel of one order goes as it is; what is one account's is refused.
+    #[test]
+    fn a_group_pane_sends_the_groups_commands() {
+        let a = AccountId::new("a");
+        let g = Some("Evals");
+        let spec = lines_trading::OrderSpec {
+            account: a.clone(),
+            contract: lines_core::ContractKey::monthly(
+                lines_feed::catalog::ES,
+                2026,
+                lines_core::Month::new(12).unwrap(),
+            ),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: lines_trading::OrderKind::Market,
+        };
+        let place = TradeCommand::PlaceOrder(spec.clone());
+        assert_eq!(for_group(None, place.clone()), Ok(place.clone()));
+        assert_eq!(
+            for_group(g, place),
+            Ok(TradeCommand::GroupPlace {
+                group: "Evals".into(),
+                order: lines_trading::GroupOrder::Order(spec.clone()),
+            })
+        );
+        let flat = for_group(
+            g,
+            TradeCommand::Flatten {
+                account: a.clone(),
+                contract: Some(spec.contract),
+            },
+        )
+        .unwrap();
+        assert_eq!(group_act(&flat), Some(GroupAct::Flatten));
+        let cancel = TradeCommand::CancelOrder {
+            account: AccountId::new("b"),
+            order: OrderId(9),
+        };
+        assert_eq!(for_group(g, cancel.clone()), Ok(cancel));
+        assert!(for_group(g, TradeCommand::PlaceExit(spec.clone())).is_err());
+        assert!(
+            for_group(
+                g,
+                TradeCommand::Reverse {
+                    account: a,
+                    contract: spec.contract,
+                    take_profit: None,
+                    stop_loss: None,
+                }
+            )
+            .is_err()
+        );
+    }
 
     /// A pane leaves a removed paper account (venues or not) for the first one listed; it
     /// keeps a listed account, and with venues a broker account not listed yet.
@@ -6309,6 +6945,7 @@ mod tests {
             account: Some("paper".into()),
             bracket: None,
             hotkeys: true,
+            group: None,
         };
         let c = doc.clone().copied();
         assert!(
@@ -7535,6 +8172,7 @@ mod tests {
                 target_ticks: 16,
             }),
             hotkeys: true,
+            group: Some("Evals".into()),
         };
         let json = serde_json::to_string(&d).unwrap();
         assert!(json.starts_with(r#"{"enabled":true"#), "{json}");

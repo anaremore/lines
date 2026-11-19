@@ -1428,11 +1428,11 @@ impl ChartTradeState {
     pub fn prepare(
         &mut self,
         cache: &TradeCache,
-        account: Option<&AccountId>,
+        view: &[AccountId],
         contract: Option<ContractKey>,
     ) -> Vec<(Price, String)> {
         let mut refused = Vec::new();
-        let (Some(account), Some(contract)) = (account, contract) else {
+        let (false, Some(contract)) = (view.is_empty(), contract) else {
             self.marks.clear();
             self.position = None;
             self.ghosts.clear();
@@ -1442,10 +1442,11 @@ impl ChartTradeState {
             return refused;
         };
         self.marks.clear();
+        // Every account the chart shows (a group's members: each order its own tag).
         self.marks
-            .extend(s.open_orders(account, contract).filter_map(order_mark));
+            .extend(s.open_orders_in(view, contract).filter_map(order_mark));
         self.position = s
-            .position(account, contract)
+            .position_in(view, contract)
             .and_then(|p| p.avg_price.map(|a| (p.qty, a)))
             .filter(|p| p.0 != 0);
         self.resize_grows = self
@@ -1456,7 +1457,7 @@ impl ChartTradeState {
                     .parent
                     .and_then(|p| s.order(p))
                     .is_some_and(lines_trading::Order::is_open);
-                let position = s.position(account, contract).map_or(0, |p| p.qty);
+                let position = s.position(&o.account, contract).map_or(0, |p| p.qty);
                 crate::order_resize::can_grow(o, working, position)
             });
         self.ghosts.retain(|g| {

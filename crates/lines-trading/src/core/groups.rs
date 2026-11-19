@@ -100,6 +100,15 @@ impl TradingCore {
                 })
             }
             Command::GroupPlace { group, order } => {
+                // An order to no one never reads as placed.
+                if let Ok(i) = self.group_index(&group)
+                    && self.groups[i].members.is_empty()
+                {
+                    return Some(Err(Reject::new(
+                        RejectCode::Invalid,
+                        format!("{} has no members", self.groups[i].name),
+                    )));
+                }
                 let r = self.group_each(now, env, &group, |account, size| {
                     let qty = size.of(order.qty()).ok_or_else(|| {
                         Reject::new(

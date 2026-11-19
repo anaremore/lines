@@ -382,6 +382,10 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
                 crate::trading::Step::Account(a) => Some(a.clone()),
                 _ => None,
             });
+            trading.start_group = steps.iter().find_map(|s| match s {
+                crate::trading::Step::PaneGroup(g) => Some(g.clone()),
+                _ => None,
+            });
             Some((
                 steps,
                 at.ok_or_else(|| anyhow!("--paper: the replay has no market time"))?,
