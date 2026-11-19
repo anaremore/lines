@@ -1508,6 +1508,16 @@ fn repairs_are_asked_for_and_answers_saved() {
         shot.trade.id.is_empty() && shot.trade.account.0.is_empty(),
         "blanked"
     );
+    assert!(
+        r.measure.is_none(),
+        "not measured before the account is known as a broker's"
+    );
+    // The venue's watcher lists the account (after saying whether it is unmarked): measure.
+    shared.add_venue(vec![venue_acct()], true);
+    let ShotMsg::Repair(r) = rx.recv_timeout(Duration::from_secs(5)).unwrap() else {
+        panic!("a measurement")
+    };
+    assert!(r.shot.is_none());
     let m = r.measure.as_ref().expect("its measurement");
     assert_eq!(m.id, t.id);
     // The answer comes back and is saved.

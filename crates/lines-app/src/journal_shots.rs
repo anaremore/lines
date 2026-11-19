@@ -897,9 +897,12 @@ fn from_feed(
 /// contract open one feed, not one each (a source's history requests are rate-limited).
 #[derive(Default)]
 struct FeedCache {
+    /// Contract, when fetched, the time its data reaches, its bars and prints.
+    #[allow(clippy::type_complexity)]
     got: Vec<(
         lines_core::ContractKey,
         std::time::Instant,
+        UtcMillis,
         Vec<Bar>,
         Vec<(UtcMillis, Price)>,
     )>,
@@ -910,7 +913,8 @@ const FEED_REUSE: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl FeedCache {
     /// The contract's bars and prints over `from..=to`: from a feed opened within
-    /// [`FEED_REUSE`] (it asked for everything [`FEED_REACH_MS`] back), else a new one.
+    /// [`FEED_REUSE`] whose data reaches `to` (it asked for everything [`FEED_REACH_MS`]
+    /// back), else a new one. An empty answer isn't kept: the next try asks again.
     fn get(
         &mut self,
         fetch: &Fetch,
@@ -918,13 +922,19 @@ impl FeedCache {
         from: UtcMillis,
         to: UtcMillis,
     ) -> (Vec<Bar>, Vec<(UtcMillis, Price)>) {
-        self.got.retain(|(_, at, _, _)| at.elapsed() < FEED_REUSE);
+        self.got.retain(|(k, at, until, ..)| {
+            at.elapsed() < FEED_REUSE && !(*k == contract && until.0 < to.0)
+        });
         if !self.got.iter().any(|(k, ..)| *k == contract) {
             let now = lines_feed::now_utc();
             let (b, p) = from_feed(fetch, contract, UtcMillis(now.0 - FEED_REACH_MS), now);
-            self.got.push((contract, std::time::Instant::now(), b, p));
+            if b.is_empty() && p.is_empty() {
+                return (b, p);
+            }
+            self.got
+                .push((contract, std::time::Instant::now(), now, b, p));
         }
-        let (_, _, b, p) = self
+        let (_, _, _, b, p) = self
             .got
             .iter()
             .find(|(k, ..)| *k == contract)
@@ -1792,6 +1802,8 @@ mod tests {
             Some(writer),
             Some(tx),
         );
+        // The venue's watcher lists the account: its trades are measured from then on.
+        shared.add_venue(vec![acct.clone()], true);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         let measured = loop {
             shared.sync();

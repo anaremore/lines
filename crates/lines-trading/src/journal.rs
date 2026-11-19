@@ -1345,9 +1345,13 @@ fn repair_of(j: &Journal, t: &Trade, sink: &MeasureSink, asked: bool) -> Option<
         .first()
         .filter(|f| is_shot_file_name(f))
         .map(|f| shot_request(t, f.clone()));
-    // Never an account whose venue isn't the app's market (a replay's or the mock's prices).
-    let measure = (t.excursion_unavailable && !t.incomplete && !j.unmarked.contains(&t.account))
-        .then(|| t.clone());
+    // A broker account's only, once known as one (its venue's watcher says whether the app's
+    // prices are its market first: never an unmarked account, a replay's or the mock's).
+    let measure = (t.excursion_unavailable
+        && !t.incomplete
+        && j.venue.contains(&t.account)
+        && !j.unmarked.contains(&t.account))
+    .then(|| t.clone());
     (shot.is_some() || measure.is_some()).then(|| Repair {
         shot,
         measure,
@@ -1384,6 +1388,11 @@ fn run(
             Msg::Market(k, inputs) => j.on_market(k, &inputs),
             Msg::Unmarked(accounts) => j.add_unmarked(accounts),
             Msg::Venue(accounts, estimate) => {
+                let new: Vec<AccountId> = accounts
+                    .iter()
+                    .filter(|a| !j.venue.contains(a))
+                    .cloned()
+                    .collect();
                 let changed = j.add_venue(accounts, estimate);
                 if !changed.is_empty() {
                     tracing::info!(
@@ -1391,10 +1400,22 @@ fn run(
                         changed.len()
                     );
                     publish(&j);
-                    for id in changed.iter().take(MAX_REPAIRS) {
-                        if let Some(t) = j.trade(id) {
-                            send(repair_of(&j, t, &sink, false));
-                        }
+                }
+                // Accounts known as a broker's for the first time: measure their unmeasured
+                // trades (the start sent their snapshots only).
+                let ids: Vec<String> = j
+                    .unmeasured()
+                    .filter(|t| new.contains(&t.account))
+                    .take(MAX_REPAIRS)
+                    .map(|t| t.id.clone())
+                    .collect();
+                for id in ids {
+                    if let Some(t) = j.trade(&id) {
+                        let r = repair_of(&j, t, &sink, false).map(|mut r| {
+                            r.shot = None;
+                            r
+                        });
+                        send(r.filter(|r| r.measure.is_some()));
                     }
                 }
             }
