@@ -537,8 +537,20 @@ pub(crate) fn list(page: &ConnPage, t: &Theme, cx: &mut Context<SettingsWindow>)
                 .child(format!("Keychain: {err}")),
         );
     }
+    let mut brokers_heading = false;
     for row in conn::rows() {
         let name = row.name.clone();
+        if row.broker.is_some() && !brokers_heading {
+            // Brokers after the sources, under their own heading: not a data source.
+            brokers_heading = true;
+            out = out.child(
+                div()
+                    .mt_2()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(t.text_main)
+                    .child("Brokers"),
+            );
+        }
         let on = match &row.broker {
             Some(b) => conn::broker_on(&prefs, &name, b.opt_in),
             None => prefs.get(&name).is_none_or(crate::sources::SourcePrefs::on),
