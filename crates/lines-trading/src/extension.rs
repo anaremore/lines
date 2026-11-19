@@ -90,6 +90,10 @@ pub trait BrokerExtension: Send + Sync {
     /// Off until switched on in Settings › Connections (it applies at the next start): the
     /// broker isn't opened, and connects to nothing, until then. `false`: on unless switched
     /// off.
+    ///
+    /// The app may call [`BrokerExtension::accounts`] (and the source's methods) on a broker
+    /// that is switched off (startup logs, the Connections card): they must do no I/O and
+    /// connect to nothing before [`BrokerExtension::open`].
     fn opt_in(&self) -> bool {
         false
     }
