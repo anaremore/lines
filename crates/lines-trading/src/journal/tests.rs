@@ -1520,6 +1520,15 @@ fn repairs_are_asked_for_and_answers_saved() {
     assert!(r.shot.is_none());
     let m = r.measure.as_ref().expect("its measurement");
     assert_eq!(m.id, t.id);
+    // An unmarked account (a replay's or the mock's prices), listed after: nothing measured.
+    let other = AccountId::new("venue-live-9");
+    shared.add_unmarked(vec![other.clone()]);
+    shared.add_venue(vec![other], true);
+    shared.sync();
+    assert!(
+        rx.try_recv().is_err(),
+        "an unmarked account is never measured"
+    );
     // The answer comes back and is saved.
     r.sink.send(
         t.id.clone(),

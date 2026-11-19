@@ -1405,7 +1405,7 @@ fn run(
                 // trades (the start sent their snapshots only).
                 let ids: Vec<String> = j
                     .unmeasured()
-                    .filter(|t| new.contains(&t.account))
+                    .filter(|t| new.contains(&t.account) && !j.unmarked.contains(&t.account))
                     .take(MAX_REPAIRS)
                     .map(|t| t.id.clone())
                     .collect();
