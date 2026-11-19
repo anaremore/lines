@@ -1729,7 +1729,9 @@ impl Trading {
     /// configured) a broker account not listed yet, since brokers connect after start. It
     /// then shows as waiting and read-only until listed; the saved choice is never replaced.
     pub fn keeps_saved_account(&self, id: &AccountId) -> bool {
-        !self.is_retired(id) && (!self.venues.is_empty() || self.account(id).is_some())
+        // As `trade_bar::moved_to`: listed, or a broker account not listed yet (never a
+        // removed paper account's id).
+        self.account(id).is_some() || (!self.venues.is_empty() && !self.is_retired(id))
     }
 
     /// Whether the id is a removed paper account's.

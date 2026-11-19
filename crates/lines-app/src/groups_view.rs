@@ -105,7 +105,8 @@ fn presets() -> Vec<RulePreset> {
 /// What a command sent from here was, to say how it went.
 #[derive(Clone, Debug, PartialEq)]
 enum Sent {
-    Created(String),
+    /// A new group, and whether its answer selects it (not once another was picked).
+    Created(String, bool),
     Renamed(String),
     Members(String),
     Deleted(String),
@@ -235,8 +236,10 @@ impl GroupPage {
                 Err(r) => (capitalized(&r.message), true),
                 Ok(_) => {
                     let text = match &sent {
-                        Sent::Created(n) => {
-                            self.selected = Some(n.clone());
+                        Sent::Created(n, select) => {
+                            if *select {
+                                self.selected = Some(n.clone());
+                            }
                             format!("Created {n}")
                         }
                         Sent::Renamed(n) => {
@@ -270,7 +273,7 @@ impl GroupPage {
             crate::trading::Trading::try_global(cx)
                 .map(|t| t.cache.read().groups().to_vec())
                 .unwrap_or_default();
-        let chosen = self.chosen(&groups).cloned();
+        let mut chosen = self.chosen(&groups).cloned();
         // A click on the field being typed keeps typing (it never starts it over).
         let typed = |f: Field| matches!(&self.typing, Some((x, _)) if *x == f);
         if (a == Action::NewGroup && typed(Field::NewGroup))
@@ -280,13 +283,23 @@ impl GroupPage {
             return;
         }
         // Another press ends typing: what was typed is applied, never dropped unseen.
-        if !matches!(a, Action::Cancel | Action::Nothing) {
-            self.commit_typing(cx);
+        if !matches!(a, Action::Cancel | Action::Nothing)
+            && let Some(renamed) = self.commit_typing(cx)
+            && let Some(g) = chosen.as_mut()
+        {
+            // The rename went first: what follows acts on the new name.
+            g.name = renamed;
         }
         match a {
             Action::Nothing => {}
             Action::Select(name) => {
                 self.typing = None;
+                // A group being created no longer takes the selection when it answers.
+                for (_, s) in &mut self.waiting {
+                    if let Sent::Created(_, select) = s {
+                        *select = false;
+                    }
+                }
                 self.selected = Some(name);
             }
             Action::NewGroup => {
@@ -388,10 +401,9 @@ impl GroupPage {
     }
 
     /// What is being typed, applied: a name or rename sent; a form field kept in the form.
-    fn commit_typing(&mut self, cx: &App) {
-        let Some((field, buf)) = self.typing.take() else {
-            return;
-        };
+    /// Returns the group's new name when a rename was sent.
+    fn commit_typing(&mut self, cx: &App) -> Option<String> {
+        let (field, buf) = self.typing.take()?;
         match field {
             Field::NewGroup => {
                 let name = buf.trim().to_owned();
@@ -401,7 +413,7 @@ impl GroupPage {
                             name: name.clone(),
                             members: Vec::new(),
                         },
-                        Sent::Created(name),
+                        Sent::Created(name, true),
                         cx,
                     );
                 }
@@ -422,9 +434,10 @@ impl GroupPage {
                             group,
                             name: name.clone(),
                         },
-                        Sent::Renamed(name),
+                        Sent::Renamed(name.clone()),
                         cx,
                     );
+                    return Some(name);
                 }
             }
             Field::AccountName => {
@@ -438,6 +451,7 @@ impl GroupPage {
                 }
             }
         }
+        None
     }
 
     /// A key on the page. `true`: handled (redraw).
@@ -456,14 +470,14 @@ impl GroupPage {
             let field = *field;
             match k.key.as_str() {
                 "enter" => {
-                    self.commit_typing(cx);
+                    let _ = self.commit_typing(cx);
                     // Enter on the form's last field creates the account.
                     if field == Field::Balance {
                         self.press(Action::Create, cx);
                     }
                 }
                 "tab" if matches!(field, Field::AccountName) => {
-                    self.commit_typing(cx);
+                    let _ = self.commit_typing(cx);
                     self.press(Action::Type(Field::Balance), cx);
                 }
                 "escape" => self.typing = None,

@@ -856,6 +856,10 @@ impl Quotes {
 impl EventEmitter<FeedChanged> for ChainView {}
 
 impl Pane for ChainView {
+    fn on_hidden_tick(&mut self) {
+        self.trade.hidden_tick();
+    }
+
     fn store(&self) -> &Arc<ChartStore> {
         &self.store
     }

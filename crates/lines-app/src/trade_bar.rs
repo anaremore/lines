@@ -173,6 +173,9 @@ pub(crate) fn moved_to(
 impl PaneTrade {
     pub fn new(saved: Option<&TradeDoc>, cx: &App) -> PaneTrade {
         let trading = Trading::try_global(cx);
+        // Read before the account is checked: a remove landing in between moves the epoch
+        // past this, so the pane looks again.
+        let seen_accounts = crate::trading::accounts_epoch();
         let account = saved
             .and_then(|s| s.account.as_ref())
             .map(|a| AccountId::new(a))
@@ -213,7 +216,7 @@ impl PaneTrade {
             bracket_told: None,
             switch_pending: false,
             listed: trading.map(|t| (t.account_list(), t.retired_list(), t.has_venues())),
-            seen_accounts: crate::trading::accounts_epoch(),
+            seen_accounts,
         }
     }
 
