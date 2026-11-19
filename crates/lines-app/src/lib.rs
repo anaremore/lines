@@ -2,6 +2,7 @@
 //! (decision 0020) call the same entry point with their own sources registered through
 //! [`Extensions`]; nothing in this crate names them.
 
+mod account_menu;
 mod bench;
 mod brackets;
 mod chain_lines;
@@ -810,6 +811,10 @@ struct Cli {
     /// the panes trade its SIM account, long 2 with a working order on the recording's contract.
     #[arg(long, requires = "screenshot")]
     demo_broker: bool,
+    /// Screenshot: N more read-only live accounts on the demo broker, its SIM account tradable
+    /// (the account list's sections and scrolling).
+    #[arg(long, value_name = "N", requires = "demo_broker", default_value_t = 0)]
+    demo_accounts: usize,
     /// Screenshot: a fixed set of synthetic strategy instances (armed, paused, halted at the
     /// daily loss limit, not started) on the paper account and the recording's contract, for
     /// the strategy panel until the strategy host runs in the app.
@@ -2333,6 +2338,7 @@ where
                 }),
                 max_order_qty: cli.max_order_qty,
                 demo_broker: cli.demo_broker,
+                demo_accounts: cli.demo_accounts,
                 strategies_demo: cli.strategies_demo,
                 account_menu: cli.account_menu,
                 panel_menu: cli.panel_menu.as_deref().map(|m| match m {

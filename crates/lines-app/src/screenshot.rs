@@ -66,6 +66,9 @@ pub struct Shot {
     pub max_order_qty: Option<i64>,
     /// A synthetic read-only broker; the panes trade its SIM account (`--demo-broker`).
     pub demo_broker: bool,
+    /// More read-only live accounts on the demo broker, its Sim account tradable
+    /// (`--demo-accounts`).
+    pub demo_accounts: usize,
     /// Synthetic strategy instances for the strategy panel (`--strategies-demo`).
     pub strategies_demo: bool,
     /// Charts and DOMs start with the account list open (`--account-menu`).
@@ -242,6 +245,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
         drawing_tools_dock,
         max_order_qty,
         demo_broker,
+        demo_accounts,
         strategies_demo,
         account_menu,
         panel_menu,
@@ -302,6 +306,7 @@ pub fn run(registry: FeedRegistry, ws: Workspace, mut shot: Shot) -> Result<i32>
             d.last_trade.expect("checked"),
             d.product.price.tick,
             d.market_time.unwrap_or(lines_core::UtcMillis(0)),
+            demo_accounts,
         )];
         // Synthetic venue: its positions may be marked from the recording.
         setup.venue_marks_always = true;

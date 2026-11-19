@@ -955,6 +955,8 @@ impl Global for Trading {}
 /// A broker extension's core, as the app runs it.
 struct Venue {
     label: String,
+    /// `BrokerExtension::short_label`: the account list's section headers.
+    short: String,
     handle: TradingHandle,
     _service: Arc<TradingService>,
     #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
@@ -1602,6 +1604,7 @@ impl Trading {
             );
             venues.push(Venue {
                 label: ext.label().to_owned(),
+                short: ext.short_label().to_owned(),
                 handle: vh,
                 _service: Arc::new(service),
                 source,
@@ -1758,6 +1761,11 @@ impl Trading {
             .iter()
             .find(|a| &a.id == id)
             .cloned()
+    }
+
+    /// A venue's short name (the account list's section headers).
+    pub fn venue_short(&self, venue: usize) -> Option<String> {
+        self.venues.get(venue).map(|v| v.short.clone())
     }
 
     /// A venue's name and connection state (for the account chip).
