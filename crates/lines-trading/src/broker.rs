@@ -287,6 +287,18 @@ pub trait Broker: Send {
         let _ = (now, account, balance);
         false
     }
+    /// Open a new simulated account at `balance` (`Command::AddPaperAccount`). Only simulated
+    /// brokers can; the default refuses.
+    fn open_account(&mut self, account: &AccountId, balance: Money) -> bool {
+        let _ = (account, balance);
+        false
+    }
+    /// Forget a simulated account (`Command::RemovePaperAccount`): asked only once it holds
+    /// nothing and has nothing open. Only simulated brokers can; the default refuses.
+    fn close_account(&mut self, account: &AccountId) -> bool {
+        let _ = account;
+        false
+    }
     /// State to save locally (paper: its accounts and open orders; live brokers hold their
     /// own and return `None`).
     fn saved_state(&self) -> Option<serde_json::Value> {

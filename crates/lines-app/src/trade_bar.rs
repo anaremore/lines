@@ -112,6 +112,12 @@ pub struct PaneTrade {
     bracket_told: Option<(AccountId, ContractKey, lines_trading::BracketMode)>,
     /// Switch the bracket mode as the trader would, once drawn (screenshot fixture).
     pub switch_pending: bool,
+    /// The app's account list (`None`: not trading), to notice the pane's paper account
+    /// removed (`Command::RemovePaperAccount`), and whether broker venues are configured (an
+    /// account they don't list now is kept: they list theirs after connecting).
+    listed: Option<(crate::journal_shots::Kinds, bool)>,
+    /// `trading::accounts_epoch` last checked.
+    seen_accounts: u64,
 }
 
 /// The confirmation to replace working exits: what it was shown for, exactly.
@@ -186,6 +192,42 @@ impl PaneTrade {
             bracket_refused: None,
             bracket_told: None,
             switch_pending: false,
+            listed: trading.map(|t| (t.account_list(), t.has_venues())),
+            seen_accounts: crate::trading::accounts_epoch(),
+        }
+    }
+
+    /// The account list moved: a pane on a paper account that was removed moves to the first
+    /// account listed, with its trading switch off (it never trades another account armed)
+    /// and a notice saying so.
+    fn account_gone(&mut self) {
+        let Some((list, venues)) = &self.listed else {
+            return;
+        };
+        if *venues {
+            return;
+        }
+        let first = {
+            let l = list.read().unwrap_or_else(|e| e.into_inner());
+            if self
+                .account
+                .as_ref()
+                .is_none_or(|a| l.iter().any(|x| &x.id == a))
+            {
+                return;
+            }
+            l.first().map(|a| (a.id.clone(), a.name.clone()))
+        };
+        self.account = first.as_ref().map(|(id, _)| id.clone());
+        self.arming = Arming::new(false);
+        self.resize_edit = None;
+        self.editor = None;
+        self.seen = u64::MAX;
+        self.bracket_forget();
+        if let Some((_, name)) = first {
+            self.notice(format!(
+                "Its account was removed: now on {name}, trading off"
+            ));
         }
     }
 
@@ -210,6 +252,12 @@ impl PaneTrade {
         let e = crate::pnl::display_epoch();
         if e != self.seen_display {
             self.seen_display = e;
+            changed = true;
+        }
+        let e = crate::trading::accounts_epoch();
+        if e != self.seen_accounts {
+            self.seen_accounts = e;
+            self.account_gone();
             changed = true;
         }
         let e = SIZE_EPOCH.load(Ordering::Relaxed);

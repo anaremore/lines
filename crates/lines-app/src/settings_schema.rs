@@ -25,6 +25,8 @@ pub enum Section {
     OrderEntry,
     /// Everything about one account: guardrails, the news blackout, prop rules, reset.
     Accounts,
+    /// Account groups and new paper accounts (`crate::groups_view`).
+    Groups,
     /// Data: the sources (decision 0030).
     Connections,
     /// Installed plugins' own settings, one entry per plugin (a level source is the first
@@ -36,7 +38,7 @@ pub enum Section {
 }
 
 impl Section {
-    pub const ALL: [Section; 11] = [
+    pub const ALL: [Section; 12] = [
         Section::General,
         Section::Appearance,
         Section::Keys,
@@ -44,6 +46,7 @@ impl Section {
         Section::Dom,
         Section::OrderEntry,
         Section::Accounts,
+        Section::Groups,
         Section::Connections,
         Section::Plugins,
         Section::DataFolder,
@@ -59,6 +62,7 @@ impl Section {
             Section::Dom => "DOM",
             Section::OrderEntry => "Order entry",
             Section::Accounts => "Accounts",
+            Section::Groups => "Groups",
             Section::Connections => "Connections",
             Section::Plugins => "Plugins",
             Section::DataFolder => "Data folder",
@@ -71,7 +75,7 @@ impl Section {
         match self {
             Section::General | Section::Appearance | Section::Keys => "APP",
             Section::Charts | Section::Dom => "PANES",
-            Section::OrderEntry | Section::Accounts => "TRADING",
+            Section::OrderEntry | Section::Accounts | Section::Groups => "TRADING",
             Section::Connections | Section::Plugins | Section::DataFolder => "DATA",
             Section::About => "",
         }
@@ -143,6 +147,8 @@ impl Scope {
 pub const CONNECTIONS_LIST: &str = "connections.list";
 /// Settings › Plugins' cards (`plugins_view`).
 pub const PLUGINS_LIST: &str = "plugins.list";
+/// Settings › Groups' page (`groups_view`).
+pub const GROUPS_LIST: &str = "groups.list";
 /// The public sources' switches: rows for search and the palette, drawn on their cards.
 pub const SOURCE_SWITCHES: [&str; 3] = ["data.coinbase", "data.kraken", "data.databento"];
 
@@ -2201,6 +2207,27 @@ fn table() -> Vec<Setting> {
             Value::Number(None),
         ),
         s(
+            REMOVE_ACCOUNT_KEY,
+            Sec::Accounts,
+            "Remove paper account",
+            "Only when flat with nothing open. Its journal stays.",
+            Scope::Account,
+            Trading,
+            Editor,
+            |_, t, f| {
+                let a = f
+                    .accounts
+                    .iter()
+                    .find(|a| Some(&a.id) == t.account.as_ref());
+                Value::Text(match a {
+                    None => "Choose an account".to_owned(),
+                    Some(a) if !a.paper => format!("{} is a broker account", a.name),
+                    Some(a) => a.name.clone(),
+                })
+            },
+            None,
+        ),
+        s(
             RESET_KEY,
             Sec::Accounts,
             "Reset paper account",
@@ -2303,6 +2330,19 @@ fn table() -> Vec<Setting> {
                 }),
             ),
             Value::List(Vec::new()),
+        ),
+        // Groups: account groups and new paper accounts (drawn by `groups_view`; the trading
+        // core keeps them, nothing here is saved by Settings).
+        s(
+            GROUPS_LIST,
+            Sec::Groups,
+            "Account groups",
+            "Act on several accounts at once. Each keeps its own rules.",
+            Scope::App,
+            Normal,
+            Info,
+            |_, _, _| Value::Text(String::new()),
+            None,
         ),
         // Plugins: each installed plugin's own settings (drawn as cards by `plugins_view`).
         s(
@@ -2981,6 +3021,8 @@ fn data_status(st: &Setting, p: &Prefs, f: &Facts) -> Option<String> {
 
 /// Settings › Accounts › Reset paper account (its buttons are the window's own).
 pub const RESET_KEY: &str = "accounts.reset";
+/// Settings › Accounts › Remove paper account (`Command::RemovePaperAccount`).
+pub const REMOVE_ACCOUNT_KEY: &str = "accounts.remove";
 /// Settings › Accounts › Largest order.
 pub const MAX_ORDER_KEY: &str = "accounts.max_order";
 /// Settings › About › Roll back (a button, decision 0031).
@@ -3187,7 +3229,14 @@ const ACCOUNTS: &[Group] = &[
             line!(sub "", "prop.profit_target"),
         ],
     ),
-    group("ACCOUNT", &[line!("accounts.list"), line!(RESET_KEY)]),
+    group(
+        "ACCOUNT",
+        &[
+            line!("accounts.list"),
+            line!(RESET_KEY),
+            line!(REMOVE_ACCOUNT_KEY),
+        ],
+    ),
 ];
 /// Decision 0030: the sources' cards (`connections_view`, drawn under the list's line). The
 /// switches are on their cards; their lines here only place them for search and the palette.
@@ -3204,6 +3253,8 @@ const CONNECTIONS: &[Group] = &[group(
 /// Installed plugins' settings: a card per plugin (`plugins_view`, drawn under the list's
 /// line).
 const PLUGINS: &[Group] = &[group("", &[line!(PLUGINS_LIST)])];
+/// Account groups and new paper accounts (`groups_view`, drawn under the list's line).
+const GROUPS: &[Group] = &[group("", &[line!(GROUPS_LIST)])];
 const DATA_FOLDER: &[Group] = &[group(
     "",
     &[
@@ -3237,6 +3288,7 @@ pub fn page(s: Section) -> &'static [Group] {
         Section::Accounts => ACCOUNTS,
         Section::Connections => CONNECTIONS,
         Section::Plugins => PLUGINS,
+        Section::Groups => GROUPS,
         Section::DataFolder => DATA_FOLDER,
         Section::About => ABOUT,
     }
@@ -3617,7 +3669,9 @@ mod tests {
                 "trading.move_bracket",
                 PROP_OVERRIDES_KEY,
                 // Settings › Plugins' cards (each plugin's own settings, nothing of the table's).
-                PLUGINS_LIST
+                PLUGINS_LIST,
+                // Settings › Groups' page (the trading core's groups, nothing saved here).
+                GROUPS_LIST,
             ]
         );
         assert_eq!(by_key("charts.trades").map(|s| s.section), Some(S::Charts));

@@ -226,6 +226,10 @@ pub struct SettingsWindow {
     /// Text typed into the selected number setting.
     edit: Option<String>,
     note: Option<(usize, String, Tone)>,
+    /// Remove paper account: the first press (the account, when), waiting for the second.
+    remove_armed: Option<(lines_trading::AccountId, std::time::Instant)>,
+    /// A remove sent: its id, its row and the account's name, waiting for the answer.
+    remove_sent: Option<(lines_trading::CommandId, usize, String)>,
     pending: Option<Pending>,
     target: Target,
     facts: Facts,
@@ -262,6 +266,8 @@ pub struct SettingsWindow {
     pub(crate) conn: crate::connections_view::ConnPage,
     /// Settings › Plugins (`crate::plugins_view`).
     pub(crate) plugins: crate::plugins_view::PluginPage,
+    /// Settings › Groups (`crate::groups_view`).
+    pub(crate) groups: crate::groups_view::GroupPage,
     /// Settings › Keys (`crate::keys_view`).
     pub(crate) keys: crate::keys_view::KeysPage,
     /// Accounts › Prop rules: the overrides are shown (Override…).
@@ -400,6 +406,9 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
             }
         }
     }
+    for s in set.iter().filter_map(|s| s.strip_prefix("groups:")) {
+        crate::groups_view::check_shot(s)?;
+    }
     for s in set.iter().filter_map(|s| s.strip_prefix("keys:")) {
         let known = ["bind:", "capture:", "press:", "filter:", "chip:"];
         if !known.iter().any(|k| s.starts_with(k)) {
@@ -417,6 +426,7 @@ pub fn check_shot(section: &str, set: &[String]) -> anyhow::Result<()> {
         !s.starts_with("account=")
             && *s != "trading.brackets=edit"
             && !s.starts_with("keys:")
+            && !s.starts_with("groups:")
             && !s.starts_with(SELECT)
             && List::typed(s).is_none()
             && !s.starts_with(DATA_PICK)
@@ -483,6 +493,10 @@ pub fn open_for_screenshot(
                 .press(crate::plugins_view::Action::Open(src, key), cx);
         }
         for s in &set {
+            if let Some(g) = s.strip_prefix("groups:") {
+                v.groups.shot(g);
+                continue;
+            }
             if s.starts_with("keys:") {
                 if let Err(e) = crate::keys_view::shot(&mut v.keys, s, cx) {
                     tracing::warn!("{e}");
@@ -576,6 +590,18 @@ pub fn open(at: Option<usize>, cx: &mut App) {
 /// [`open`] at a section's first setting (a pane menu's "Settings…").
 pub fn open_section(section: schema::Section, cx: &mut App) {
     open(schema::all().iter().position(|s| s.section == section), cx);
+}
+
+/// Settings › Groups, typing a new group's name or with the new paper account's form open
+/// (the palette's "New group…" and "New paper account…").
+pub fn open_groups(start: crate::groups_view::Start, cx: &mut App) {
+    open_section(schema::Section::Groups, cx);
+    if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
+        let _ = h.update(cx, |v, _, cx| {
+            v.groups.start(start);
+            cx.notify();
+        });
+    }
 }
 
 /// [`open`] at a given size (screenshots; the app opens at [`SIZE`]).
@@ -962,6 +988,8 @@ impl SettingsWindow {
             row: 0,
             edit: None,
             note: None,
+            remove_armed: None,
+            remove_sent: None,
             pending: None,
             target: default_target(&facts),
             products: lines_feed::catalog::all()
@@ -984,6 +1012,7 @@ impl SettingsWindow {
             awaiting: Vec::new(),
             conn: Default::default(),
             plugins: Default::default(),
+            groups: Default::default(),
             keys: Default::default(),
             seen_revision: 0,
             overrides_open: false,
@@ -1090,6 +1119,7 @@ impl SettingsWindow {
         self.conn.leave();
         self.keys.leave();
         self.plugins.leave();
+        self.groups.leave();
         self.edit = None;
         self.cancel_pending();
         self.editor = None;
@@ -1690,6 +1720,14 @@ impl SettingsWindow {
             cx.notify();
             return;
         }
+        // Settings › Groups: its fields, list and controls take the keys (a field being typed
+        // or a list open takes them on a search's results too).
+        if ((self.section == Section::Groups && self.query.trim().is_empty()) || self.groups.busy())
+            && self.groups.key(ev, cx)
+        {
+            cx.notify();
+            return;
+        }
         // A source's field being typed takes every key (Enter saves, Esc cancels).
         if self.conn.edit.is_some()
             && self.section == Section::Connections
@@ -1909,6 +1947,7 @@ impl SettingsWindow {
                 self.edit = Some(n.map(|n| n.to_string()).unwrap_or_default());
             }
             (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_press(i, false, cx),
+            (Kind::Editor, _) if st.key == schema::REMOVE_ACCOUNT_KEY => self.remove_press(i, cx),
             (Kind::Editor, _) if st.key == schema::ROLLBACK_KEY => self.rollback_press(cx),
             (Kind::Editor, _) if st.key == schema::PROP_OVERRIDES_KEY => {
                 self.overrides_open = !self.overrides_open;
@@ -2567,6 +2606,7 @@ impl SettingsWindow {
                 self.stepper(i, *n, field, !steps, cx)
             }
             (Kind::Editor, _) if st.key == schema::RESET_KEY => self.reset_buttons(i, cx),
+            (Kind::Editor, _) if st.key == schema::REMOVE_ACCOUNT_KEY => self.remove_button(i, cx),
             (Kind::Editor, _) if st.key == schema::DATA_FOLDER_KEY => self.data_buttons(i, cx),
             (Kind::Editor, _) if st.key == schema::ROLLBACK_KEY => {
                 match self.facts.rollback.clone() {
@@ -2863,6 +2903,116 @@ impl SettingsWindow {
     }
 
     /// A press of a reset button (or Enter on the row: the one keeping the journal).
+    /// The chosen account, if it is a paper account Lines can remove.
+    fn removable(&self, cx: &App) -> Option<crate::trading::AccountInfo> {
+        let id = lines_trading::AccountId::new(self.target.account.as_deref()?);
+        crate::trading::Trading::try_global(cx)?
+            .account(&id)
+            .filter(|a| a.paper)
+    }
+
+    /// Remove paper account's button: "Remove…", then "Press again: remove" while the first
+    /// press waits (`paper_reset::CONFIRM`), as a reset asks.
+    fn remove_button(&self, i: usize, cx: &mut Context<Self>) -> AnyElement {
+        let t = self.theme;
+        let Some(a) = self.removable(cx) else {
+            return div().into_any_element();
+        };
+        let armed = self
+            .remove_armed
+            .as_ref()
+            .is_some_and(|(id, at)| *id == a.id && at.elapsed() < crate::paper_reset::CONFIRM);
+        div()
+            .id(("remove-account", i))
+            .flex_none()
+            .whitespace_nowrap()
+            .px_2()
+            .rounded_sm()
+            .border_1()
+            .border_color(if armed { t.warn } else { t.axis_line })
+            .when(armed, |d| d.font_weight(FontWeight::BOLD))
+            .cursor_pointer()
+            .child(if armed {
+                "Press again: remove"
+            } else {
+                "Remove…"
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |v, _, _, cx| {
+                    v.select(i);
+                    v.remove_press(i, cx);
+                }),
+            )
+            .into_any_element()
+    }
+
+    /// A press on Remove paper account: the first arms it, the second (in time) sends it.
+    fn remove_press(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(a) = self.removable(cx) else {
+            self.note = Some((i, "Choose a paper account".to_owned(), Tone::Problem));
+            cx.notify();
+            return;
+        };
+        let armed = self
+            .remove_armed
+            .take()
+            .is_some_and(|(id, at)| id == a.id && at.elapsed() < crate::paper_reset::CONFIRM);
+        if !armed {
+            self.remove_armed = Some((a.id.clone(), std::time::Instant::now()));
+            self.note = Some((i, format!("Press again to remove {}", a.name), Tone::Done));
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(crate::paper_reset::CONFIRM)
+                    .await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+            cx.notify();
+            return;
+        }
+        if let Some(t) = crate::trading::Trading::try_global(cx) {
+            let id = t.submit(
+                lines_trading::Source::Palette,
+                std::time::Instant::now(),
+                lines_trading::Command::RemovePaperAccount {
+                    account: a.id.clone(),
+                },
+            );
+            self.remove_sent = Some((id, i, a.name.clone()));
+            self.note = Some((i, format!("Removing {}", a.name), Tone::Done));
+        }
+        cx.notify();
+    }
+
+    /// The core's answer to a remove sent from here.
+    fn remove_answer(&mut self, cx: &mut Context<Self>) {
+        let Some((id, i, name)) = self.remove_sent.clone() else {
+            return;
+        };
+        let answer = match crate::trading::Trading::try_global(cx).and_then(|t| t.cache.try_read())
+        {
+            Some(c) => c.result(id).cloned(),
+            None => return,
+        };
+        let Some(result) = answer else { return };
+        self.remove_sent = None;
+        self.note = Some(match result {
+            Ok(_) => {
+                // The page moves to the first account still listed.
+                let f = gather_facts(cx);
+                let first = f.accounts.first();
+                self.target.account = first.map(|a| a.id.clone());
+                self.target.account_name = first.map(|a| a.name.clone());
+                self.overrides_open = false;
+                self.facts = f;
+                (i, format!("Removed {name}"), Tone::Done)
+            }
+            Err(r) => (i, r.message, Tone::Problem),
+        });
+        cx.notify();
+    }
+
     fn reset_press(&mut self, i: usize, journal: bool, cx: &mut Context<Self>) {
         let Some(account) = self
             .target
@@ -3374,6 +3524,18 @@ impl SettingsWindow {
         cx.notify();
     }
 
+    /// A press on the Groups page.
+    pub(crate) fn groups_action(&mut self, a: crate::groups_view::Action, cx: &mut Context<Self>) {
+        self.groups.press(a, cx);
+        cx.notify();
+    }
+
+    /// A row of the Groups page's prop rules list clicked.
+    pub(crate) fn groups_pick_preset(&mut self, k: usize, cx: &mut Context<Self>) {
+        self.groups.pick_preset(k);
+        cx.notify();
+    }
+
     /// A row of an open plugin choice's list clicked.
     pub(crate) fn plugin_pick(&mut self, k: usize, cx: &mut Context<Self>) {
         if let Some(o) = self.plugins.open.take()
@@ -3835,6 +3997,8 @@ impl Render for SettingsWindow {
         }
         self.seen_revision = Self::trading_revision(cx);
         self.check_answers(cx);
+        self.remove_answer(cx);
+        self.groups.check(cx);
         let prefs = current_prefs(cx);
         // Parts hidden while their guardrail is off (↑↓ skip them too).
         self.dormant = schema::all()
@@ -3945,6 +4109,10 @@ impl Render for SettingsWindow {
                     // Settings › Plugins: a card per installed plugin.
                     k if k == schema::PLUGINS_LIST => {
                         out.push(crate::plugins_view::list(&v.plugins, &v.theme, cx))
+                    }
+                    // Settings › Groups: the groups and new paper accounts.
+                    k if k == schema::GROUPS_LIST => {
+                        out.push(crate::groups_view::list(&v.groups, &v.theme, cx))
                     }
                     _ => {}
                 }

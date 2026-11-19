@@ -42,6 +42,7 @@ mod footer;
 mod footprint;
 #[cfg(feature = "screenshot")]
 mod gallery;
+mod groups_view;
 mod icons;
 mod journal_shots;
 mod journal_view;

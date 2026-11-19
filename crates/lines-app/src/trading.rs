@@ -198,6 +198,8 @@ pub struct TradeState {
     pub fills_seen: u64,
     /// Paper accounts whose reset waits for its flatten (`Event::ResetWaiting`).
     resets_waiting: HashSet<AccountId>,
+    /// The account groups, in the order they were created (`Event::Groups`).
+    groups: Vec<lines_trading::group::AccountGroup>,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -348,9 +350,20 @@ impl TradeState {
                 self.rebuilds += 1;
                 None
             }
-            // Account groups have no UI yet (headless commands, roadmap 6); a group command's
-            // member commands answer as their own commands.
-            Event::Groups { .. } | Event::GroupCommand { .. } => None,
+            Event::Groups { groups } => {
+                self.groups = groups;
+                None
+            }
+            // A group command's member commands answer as their own commands.
+            Event::GroupCommand { .. } => None,
+            // The account list itself is the pump's to change (`spawn_pump`).
+            Event::AccountAdded { .. } => None,
+            Event::AccountRemoved { account } => {
+                self.accounts.remove(&account);
+                self.guards.remove(&account);
+                self.resets_waiting.remove(&account);
+                None
+            }
             Event::ResetWaiting { account } => {
                 self.resets_waiting.insert(account.clone());
                 Some(account)
@@ -631,6 +644,11 @@ impl TradeState {
     }
 
     /// Whether the account's reset waits for its flatten to fill.
+    /// The account groups, in the order they were created.
+    pub fn groups(&self) -> &[lines_trading::group::AccountGroup] {
+        &self.groups
+    }
+
     pub fn resetting(&self, account: &AccountId) -> bool {
         self.resets_waiting.contains(account)
     }
@@ -1428,14 +1446,7 @@ impl Trading {
                 });
             }
         }
-        let accounts: Vec<AccountInfo> = core
-            .accounts()
-            .map(|(c, _)| AccountInfo {
-                option_guard: c.limits.option_guard.clone().unwrap_or_default(),
-                start_balance: Some(c.starting_balance),
-                ..AccountInfo::paper(c.id.clone(), c.name.clone(), c.rules.clone())
-            })
-            .collect();
+        let accounts: Vec<AccountInfo> = core.accounts().map(|(c, _)| paper_info(c)).collect();
         let brokers = std::mem::take(&mut setup.brokers);
         let venue_marks = setup.venue_marks_always
             || !matches!(
@@ -1460,6 +1471,8 @@ impl Trading {
         let (notes, notes_rx) = mpsc::channel();
         let (barrier, barrier_rx) = mpsc::channel();
         let bridge = FeedBridge::new(registry.clone(), base.clone());
+        *shot_kinds.write().unwrap_or_else(|e| e.into_inner()) = accounts;
+        let accounts = shot_kinds;
         spawn_pump(
             handle.subscribe(),
             notes_rx,
@@ -1467,11 +1480,10 @@ impl Trading {
             cache.clone(),
             None,
             Some((bridge.clone(), handle.clone())),
+            Some(accounts.clone()),
         );
         // The full state as the first events.
         handle.rebuild();
-        *shot_kinds.write().unwrap_or_else(|e| e.into_inner()) = accounts;
-        let accounts = shot_kinds;
         let mut venues = Vec::new();
         for ext in brokers {
             let broker = match ext.open() {
@@ -1555,6 +1567,7 @@ impl Trading {
                 cache.clone(),
                 Some(ids.clone()),
                 // Triggers are paper only.
+                None,
                 None,
             );
             let source = ext.accounts();
@@ -1665,6 +1678,16 @@ impl Trading {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// The account list itself (panes notice a removed paper account from it).
+    pub(crate) fn account_list(&self) -> Arc<RwLock<Vec<AccountInfo>>> {
+        self.accounts.clone()
+    }
+
+    /// Whether broker venues are configured.
+    pub fn has_venues(&self) -> bool {
+        !self.venues.is_empty()
     }
 
     /// Whether the account is read-only (no copy: render paths call this). An account no one
@@ -1947,8 +1970,12 @@ fn note_for(cmd: &TradeCommand) -> Option<Note> {
         | TradeCommand::ArmStrategy { .. }
         | TradeCommand::PauseStrategy { .. }
         | TradeCommand::StopStrategies { .. } => return None,
-        // Group commands name no one account (no UI yet). They go to the paper core with the
-        // rest (`Trading::submit`), so a group holds paper accounts only for now (known gap).
+        // Group commands name no one account. They go to the paper core with the rest
+        // (`Trading::submit`), so a group holds paper accounts only for now (known gap). So do
+        // paper accounts added or removed; Settings shows their answers itself.
+        TradeCommand::AddPaperAccount { .. } | TradeCommand::RemovePaperAccount { .. } => {
+            return None;
+        }
         TradeCommand::CreateGroup { .. }
         | TradeCommand::RenameGroup { .. }
         | TradeCommand::DeleteGroup { .. }
@@ -2038,6 +2065,39 @@ fn set_aside(path: &Path, e: &anyhow::Error) -> String {
 }
 
 /// The pump: core events → cache, then the touched accounts' revisions.
+/// The app's account list after a paper account was added or removed (the paper core's
+/// `Event::AccountAdded` / `AccountRemoved`). A new one is listed among the paper accounts in
+/// id order (as after a restart), before any venue's.
+fn paper_account_listed(list: &RwLock<Vec<AccountInfo>>, e: &Event) {
+    let mut l = list.write().unwrap_or_else(|e| e.into_inner());
+    match e {
+        Event::AccountAdded { config: c } => {
+            if l.iter().any(|a| a.id == c.id) {
+                return;
+            }
+            // In id order among the paper accounts, as the core lists them after a restart.
+            let at = l
+                .iter()
+                .take_while(|a| a.venue.is_none() && a.id < c.id)
+                .count();
+            l.insert(at, paper_info(c));
+        }
+        Event::AccountRemoved { account } => l.retain(|a| a.venue.is_some() || &a.id != account),
+        _ => return,
+    }
+    drop(l);
+    ACCOUNTS_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
+
+/// A paper account as the UI lists it.
+fn paper_info(c: &AccountConfig) -> AccountInfo {
+    AccountInfo {
+        option_guard: c.limits.option_guard.clone().unwrap_or_default(),
+        start_balance: Some(c.starting_balance),
+        ..AccountInfo::paper(c.id.clone(), c.name.clone(), c.rules.clone())
+    }
+}
+
 fn spawn_pump(
     events: Receiver<Event>,
     notes: Receiver<(CommandId, Note)>,
@@ -2045,6 +2105,7 @@ fn spawn_pump(
     cache: Arc<TradeCache>,
     ids: Option<Arc<Mutex<VenueIds>>>,
     trigger_feeds: Option<(FeedBridge, TradingHandle)>,
+    paper_accounts: Option<Arc<RwLock<Vec<AccountInfo>>>>,
 ) {
     // A venue's ids, translated into the shared cache's.
     let tag = ids
@@ -2054,9 +2115,16 @@ fn spawn_pump(
         Some(tag) => (venue_command(tag, id), n),
         None => (id, n),
     };
-    let event_in = move |e: Event| match &ids {
-        Some(m) => m.lock().unwrap_or_else(|e| e.into_inner()).event(e),
-        None => e,
+    let event_in = move |e: Event| {
+        // A paper account added or removed: the account list follows, before the event
+        // reaches the cache (a pane may pick it as soon as it is listed).
+        if let Some(list) = &paper_accounts {
+            paper_account_listed(list, &e);
+        }
+        match &ids {
+            Some(m) => m.lock().unwrap_or_else(|e| e.into_inner()).event(e),
+            None => e,
+        }
     };
     let spawned = std::thread::Builder::new()
         .name("lines-trading-ui".into())
@@ -2356,6 +2424,38 @@ pub fn parse_script(
                 out.push(Step::Source(Source::Strategy(id)));
             }
             ["manual"] => out.push(Step::Source(Source::Test)),
+            // A new paper account (`_` for spaces), at a balance or with prop preset K (from 1).
+            ["new-account", name, "preset", k] => {
+                let rules = k
+                    .parse::<usize>()
+                    .ok()
+                    .and_then(|k| k.checked_sub(1))
+                    .and_then(|k| rules::presets().into_iter().nth(k))
+                    .ok_or_else(|| anyhow!("new-account {name}: preset {k:?}: 1 to 3"))?;
+                out.push(Step::Command(TradeCommand::AddPaperAccount {
+                    name: name.replace('_', " "),
+                    starting_balance: rules.account_size,
+                    rules: Some(rules),
+                }));
+            }
+            ["new-account", name, balance] => {
+                out.push(Step::Command(TradeCommand::AddPaperAccount {
+                    name: name.replace('_', " "),
+                    starting_balance: balance
+                        .parse()
+                        .map_err(|_| anyhow!("new-account {name}: balance {balance:?}"))?,
+                    rules: None,
+                }));
+            }
+            // An account group (`_` for spaces) of these account ids (`,` between).
+            ["group", name, members] => out.push(Step::Command(TradeCommand::CreateGroup {
+                name: name.replace('_', " "),
+                members: members
+                    .split(',')
+                    .filter(|m| !m.is_empty())
+                    .map(AccountId::new)
+                    .collect(),
+            })),
             ["reset"] => out.push(Step::Reset {
                 account: account.clone(),
                 journal: false,
@@ -3051,6 +3151,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A paper account added or removed by command: the app's list follows (after the other
+    /// paper accounts), the epoch moves so panes look again, and groups reach the cache.
+    #[test]
+    fn paper_accounts_added_and_removed_reach_the_list() {
+        let t = trading(vec![AccountConfig::paper("paper", 50_000)]);
+        let epoch = accounts_epoch();
+        let id = t.submit(
+            Source::Test,
+            Instant::now(),
+            TradeCommand::AddPaperAccount {
+                name: "Eval 2".into(),
+                starting_balance: 25_000,
+                rules: None,
+            },
+        );
+        t.settle();
+        assert_eq!(t.cache.read().result(id).cloned(), Some(Ok(Vec::new())));
+        let new = AccountId::new("paper-eval-2");
+        let listed = t.accounts();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1].id, new);
+        assert_eq!(listed[1].name, "Eval 2");
+        assert_eq!(listed[1].start_balance, Some(25_000));
+        assert!(listed[1].paper);
+        assert!(accounts_epoch() > epoch);
+        t.submit(
+            Source::Test,
+            Instant::now(),
+            TradeCommand::CreateGroup {
+                name: "Evals".into(),
+                members: vec![AccountId::new("paper"), new.clone()],
+            },
+        );
+        t.settle();
+        assert_eq!(t.cache.read().groups().len(), 1);
+        let epoch = accounts_epoch();
+        let id = t.submit(
+            Source::Test,
+            Instant::now(),
+            TradeCommand::RemovePaperAccount {
+                account: new.clone(),
+            },
+        );
+        t.settle();
+        assert_eq!(t.cache.read().result(id).cloned(), Some(Ok(Vec::new())));
+        assert!(t.account(&new).is_none());
+        assert_eq!(t.accounts().len(), 1);
+        assert!(accounts_epoch() > epoch);
+        assert_eq!(
+            t.cache.read().groups()[0].members,
+            vec![AccountId::new("paper")]
+        );
     }
 
     /// Reset paper account: one press only arms it; the second sends it, the core flattens,

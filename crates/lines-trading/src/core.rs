@@ -42,6 +42,7 @@ use crate::types::{AccountId, CommandId, ContractSpec, Money, OrderId, OrderKind
 
 /// The order id a fill made outside Lines carries ([`BrokerEvent::ExternalFill`]): no order.
 pub const EXTERNAL_ORDER: OrderId = OrderId(0);
+mod accounts;
 mod cancels;
 mod flatten;
 mod groups;
@@ -714,8 +715,13 @@ impl TradingCore {
     /// [`TradingCore::handle`], returning the command's result (also in its `Event::Command`).
     fn handle_result(&mut self, now: UtcMillis, env: Envelope) -> Result<Vec<OrderId>, Reject> {
         self.seen_now = self.seen_now.max(now);
-        // Group commands (`core/groups.rs`): managing groups, or one member command each.
-        if let Some(result) = self.group_command(now, &env) {
+        // Group commands (`core/groups.rs`) and adding or removing paper accounts
+        // (`core/accounts.rs`).
+        let early = match self.group_command(now, &env) {
+            Some(r) => Some(r),
+            None => self.account_command(now, &env),
+        };
+        if let Some(result) = early {
             if env.id.0 < INTERNAL_COMMAND_IDS {
                 self.next_command = self.next_command.max(env.id.0 + 1);
             }
@@ -1262,6 +1268,9 @@ impl TradingCore {
             | Command::SetGroupMembers { .. }
             | Command::GroupCancelAll { .. }
             | Command::GroupFlatten { .. } => unreachable!("handled by group_command"),
+            Command::AddPaperAccount { .. } | Command::RemovePaperAccount { .. } => {
+                unreachable!("handled by account_command")
+            }
             Command::Reverse {
                 contract,
                 take_profit,
