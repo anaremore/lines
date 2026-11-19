@@ -27,7 +27,7 @@ use lines_core::sessions::SessionKind;
 use lines_core::{CivilDate, ContractKey, Price, ProductId, Qty, UtcMillis};
 use serde::{Deserialize, Serialize};
 
-use crate::broker::{Broker, BrokerEvent, BrokerRequest, PaneContext, RequestContext};
+use crate::broker::{Admit, Broker, BrokerEvent, BrokerRequest, PaneContext, RequestContext};
 use crate::command::{BracketSpec, Command, Envelope, OrderSpec, Reject, RejectCode, Source};
 use crate::event::{AccountView, Event, FillEvent, PositionView};
 use crate::guardrails::{Entry, GuardChange, GuardState, GuardrailTracker};
@@ -841,6 +841,7 @@ impl TradingCore {
             } => self.trigger_move(now, env, contract, id, level),
             Command::PlaceOrder(spec) => {
                 self.check_new(now, &spec)?;
+                self.admit(now, env, Admit::Place(&spec, Role::Single))?;
                 let o = self.new_order(now, &spec, Role::Single, None);
                 let id = o.id;
                 self.send(env, now, BrokerRequest::Place(o));
@@ -867,6 +868,7 @@ impl TradingCore {
                     spec.kind,
                     OrderKind::Stop { .. } | OrderKind::StopLimit { .. }
                 );
+                self.admit(now, env, Admit::Place(&spec, Role::Single))?;
                 // A sibling still holding the pair: open and not being cancelled (× then a quick
                 // re-add must pair the new exit, not leave it alone).
                 let open = |id: Option<OrderId>, orders: &BTreeMap<OrderId, Order>| {
@@ -918,6 +920,7 @@ impl TradingCore {
                 self.bracket_supported(&b.entry)?;
                 self.check_new(now, &b.entry)?;
                 self.bracket_exits_valid(&b)?;
+                self.admit(now, env, Admit::Bracket(&b))?;
                 Ok(self.bracket_send(env, now, &b))
             }
             Command::ModifyOrder {
@@ -2257,6 +2260,15 @@ impl TradingCore {
             self.events.push(Event::Order(o.clone()));
         }
         o
+    }
+
+    /// The broker's own pre-check of a new order or bracket ([`Broker::admit`]): a refusal
+    /// refuses the command (DENIED), before any order exists.
+    fn admit(&mut self, now: UtcMillis, env: &Envelope, new: Admit<'_>) -> Result<(), Reject> {
+        let ctx = RequestContext::new(env.source, env.pane);
+        self.broker
+            .admit(now, new, &ctx)
+            .map_err(|why| Reject::new(RejectCode::Broker, why))
     }
 
     /// Hand a request to the broker, recording click → sent latency (decision 0012: the
