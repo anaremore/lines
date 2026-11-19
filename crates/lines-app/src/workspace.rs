@@ -1876,6 +1876,12 @@ impl WindowView {
             }
             Command::Settings => crate::settings_view::open(None, cx),
             Command::SettingsAt(s) => crate::settings_view::open_section(s, cx),
+            Command::NewGroup => {
+                crate::settings_view::open_groups(crate::groups_view::Start::NewGroup, cx)
+            }
+            Command::NewPaperAccount => {
+                crate::settings_view::open_groups(crate::groups_view::Start::NewAccount, cx)
+            }
             Command::Setting(c) => match crate::settings_view::run(c, cx) {
                 Ok(Some(text)) => notice(text, cx),
                 Ok(None) => {}

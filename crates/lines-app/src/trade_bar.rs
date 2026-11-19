@@ -112,6 +112,12 @@ pub struct PaneTrade {
     bracket_told: Option<(AccountId, ContractKey, lines_trading::BracketMode)>,
     /// Switch the bracket mode as the trader would, once drawn (screenshot fixture).
     pub switch_pending: bool,
+    /// The app's account list (`None`: not trading), to notice the pane's paper account
+    /// removed (`Command::RemovePaperAccount`), and whether broker venues are configured (an
+    /// account they don't list now is kept: they list theirs after connecting).
+    listed: Option<(crate::journal_shots::Kinds, crate::trading::Retired, bool)>,
+    /// `trading::accounts_epoch` last checked.
+    seen_accounts: u64,
 }
 
 /// The confirmation to replace working exits: what it was shown for, exactly.
@@ -148,21 +154,44 @@ impl TradeDoc {
     }
 }
 
+/// Where a pane on `account` goes after the account list changed: `None`, it stays (listed,
+/// or with broker venues configured a broker account not listed yet); `Some(first)`, it moves
+/// to the first account listed (a removed paper account, or with no venues one not listed).
+pub(crate) fn moved_to(
+    list: &[crate::trading::AccountInfo],
+    retired: &std::collections::HashSet<AccountId>,
+    venues: bool,
+    account: Option<&AccountId>,
+) -> Option<Option<(AccountId, String)>> {
+    let a = account?;
+    if list.iter().any(|x| &x.id == a) || (venues && !retired.contains(a)) {
+        return None;
+    }
+    Some(list.first().map(|x| (x.id.clone(), x.name.clone())))
+}
+
 impl PaneTrade {
     pub fn new(saved: Option<&TradeDoc>, cx: &App) -> PaneTrade {
         let trading = Trading::try_global(cx);
+        // Read before the account is checked: a remove landing in between moves the epoch
+        // past this, so the pane looks again.
+        let seen_accounts = crate::trading::accounts_epoch();
         let account = saved
             .and_then(|s| s.account.as_ref())
             .map(|a| AccountId::new(a))
             // A broker account not listed yet (its broker connects after start) is kept; it
             // shows as waiting, read-only, until it is.
-            .filter(|a| trading.is_some_and(|t| t.keeps_saved_account(a)))
-            .or_else(|| trading.and_then(Trading::default_account));
+            .filter(|a| trading.is_some_and(|t| t.keeps_saved_account(a)));
+        // The switch is the saved account's: a pane whose account is gone (removed while the
+        // app ran) comes back on another one with trading off, never armed on an account the
+        // trader didn't arm.
+        let kept = account.is_some();
+        let account = account.or_else(|| trading.and_then(Trading::default_account));
         PaneTrade {
             account,
             bracket: saved.and_then(|s| s.bracket),
             // Sticky: restored as saved (new panes: disabled).
-            arming: Arming::new(saved.is_some_and(|s| s.enabled)),
+            arming: Arming::new(kept && saved.is_some_and(|s| s.enabled)),
             hotkeys: saved.is_some_and(|s| s.hotkeys),
             qty_edit: None,
             qty_scroll: 0.0,
@@ -186,6 +215,36 @@ impl PaneTrade {
             bracket_refused: None,
             bracket_told: None,
             switch_pending: false,
+            listed: trading.map(|t| (t.account_list(), t.retired_list(), t.has_venues())),
+            seen_accounts,
+        }
+    }
+
+    /// The account list moved: a pane on a paper account that was removed moves to the first
+    /// account listed, with its trading switch off (it never trades another account armed)
+    /// and a notice saying so.
+    fn account_gone(&mut self) {
+        let Some((list, retired, venues)) = &self.listed else {
+            return;
+        };
+        let first = {
+            let l = list.read().unwrap_or_else(|e| e.into_inner());
+            let r = retired.read().unwrap_or_else(|e| e.into_inner());
+            match moved_to(&l, &r, *venues, self.account.as_ref()) {
+                Some(first) => first,
+                None => return,
+            }
+        };
+        self.account = first.as_ref().map(|(id, _)| id.clone());
+        self.arming = Arming::new(false);
+        self.resize_edit = None;
+        self.editor = None;
+        self.seen = u64::MAX;
+        self.bracket_forget();
+        if let Some((_, name)) = first {
+            self.notice(format!(
+                "Its account was removed: now on {name}, trading off"
+            ));
         }
     }
 
@@ -204,12 +263,28 @@ impl PaneTrade {
         self.cache.as_ref()?.try_read()
     }
 
+    /// A hidden pane's tick: no paint work, but a removed account is left at once (a hidden
+    /// armed pane never stays armed on it, or saves it).
+    pub fn hidden_tick(&mut self) {
+        let e = crate::trading::accounts_epoch();
+        if e != self.seen_accounts {
+            self.seen_accounts = e;
+            self.account_gone();
+        }
+    }
+
     /// The trading state moved for this pane's account (or a local flash expired).
     pub fn changed(&mut self) -> bool {
         let mut changed = false;
         let e = crate::pnl::display_epoch();
         if e != self.seen_display {
             self.seen_display = e;
+            changed = true;
+        }
+        let e = crate::trading::accounts_epoch();
+        if e != self.seen_accounts {
+            self.seen_accounts = e;
+            self.account_gone();
             changed = true;
         }
         let e = SIZE_EPOCH.load(Ordering::Relaxed);
@@ -5615,6 +5690,31 @@ pub fn confirm_text(n: usize, preset: &str, contract: &str, width: f32) -> Strin
 mod tests {
     use super::*;
     use lines_trading::{OrderId, Side};
+
+    /// A pane leaves a removed paper account (venues or not) for the first one listed; it
+    /// keeps a listed account, and with venues a broker account not listed yet.
+    #[test]
+    fn panes_leave_a_removed_account_only() {
+        let info = |id: &str| {
+            crate::trading::AccountInfo::paper(AccountId::new(id), id.to_uppercase(), None)
+        };
+        let list = vec![info("paper"), info("paper-b")];
+        let none = std::collections::HashSet::new();
+        let gone: std::collections::HashSet<AccountId> = [AccountId::new("paper-x")].into();
+        let first = Some(Some((AccountId::new("paper"), "PAPER".to_owned())));
+        let on = |s: &str| Some(AccountId::new(s));
+        assert_eq!(moved_to(&list, &none, false, on("paper-b").as_ref()), None);
+        assert_eq!(moved_to(&list, &none, false, None), None);
+        assert_eq!(moved_to(&list, &gone, false, on("paper-x").as_ref()), first);
+        assert_eq!(moved_to(&list, &gone, true, on("paper-x").as_ref()), first);
+        // A broker account not listed yet waits for its broker.
+        assert_eq!(moved_to(&list, &gone, true, on("venue-1").as_ref()), None);
+        assert_eq!(moved_to(&list, &none, false, on("venue-1").as_ref()), first);
+        assert_eq!(
+            moved_to(&[], &gone, false, on("paper-x").as_ref()),
+            Some(None)
+        );
+    }
 
     /// A chart shows no trading switch, so the switch, order keys, BE and the preset editor
     /// never act from a focused chart (the workspace refuses them); commands that never send

@@ -92,6 +92,15 @@ pub enum Event {
         #[serde(with = "time_serde")]
         at: UtcMillis,
     },
+    /// A paper account was added (`Command::AddPaperAccount`), as configured.
+    AccountAdded {
+        config: crate::core::AccountConfig,
+    },
+    /// A paper account was removed (`Command::RemovePaperAccount`). Any group it was in has
+    /// already lost it (an `Event::Groups` came first).
+    AccountRemoved {
+        account: AccountId,
+    },
     /// The account groups after any change (created, renamed, deleted, members set, restored),
     /// all of them, in the order they were created.
     Groups {

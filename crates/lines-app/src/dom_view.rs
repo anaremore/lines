@@ -257,6 +257,10 @@ impl Pane for DomView {
         doc.trade = self.trade.doc();
     }
 
+    fn on_hidden_tick(&mut self) {
+        self.trade.hidden_tick();
+    }
+
     fn changed(&mut self) -> bool {
         // A source can refuse depth while the feed runs (read here, off the paint path); a
         // change repaints even a quiet feed.

@@ -129,7 +129,8 @@ pub fn concerns(cfg: &lines_trading::StrategyConfig, e: &Event) -> bool {
         | Event::Guardrail { account, .. }
         | Event::ResetWaiting { account }
         | Event::ResetDropped { account, .. }
-        | Event::AccountReset { account, .. } => account == a,
+        | Event::AccountReset { account, .. }
+        | Event::AccountRemoved { account } => account == a,
         Event::Overfill { account, .. } => account == a,
         Event::CancelFailed {
             account, contract, ..
@@ -140,6 +141,7 @@ pub fn concerns(cfg: &lines_trading::StrategyConfig, e: &Event) -> bool {
         // A strategy can't manage or act on groups; a group command's member commands are a
         // person's, and their orders come as `Order` events like any other.
         Event::Groups { .. } | Event::GroupCommand { .. } => false,
+        Event::AccountAdded { .. } => false,
     }
 }
 

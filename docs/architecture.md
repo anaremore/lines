@@ -137,12 +137,13 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # Settings › Appearance, else plex; screenshots without it use plex, whatever is saved; numbers are always IBM
 # Plex Mono).
 #   --settings SECTION (also render the Settings window into <out stem>-settings.png; general, appearance, keys,
-#   charts, dom, order-entry, accounts, connections, data-folder, about, or the old names risk, trading,
+#   charts, dom, order-entry, accounts, groups, connections, data-folder, about, or the old names risk, trading,
 #   diagnostics, data), --settings-search TEXT,
 #   --settings-set KEY=VALUE (repeatable; e.g. guard.max_daily_loss=1500 shows a loosening's confirmation;
 #   appearance.time_zone=list:TEXT opens the time zone's list with TEXT typed, appearance.ui_font=list:TEXT the
 #   UI font's; KEY=open opens a setting's dropdown, charts.timeframe=custom:TEXT (or dom.grouping=custom:TEXT)
-#   its "Custom…" field with TEXT typed; select=KEY selects that row and changes nothing),
+#   its "Custom…" field with TEXT typed; select=KEY selects that row and changes nothing; on Groups,
+#   groups:select=NAME, groups:new-group, groups:new-account=NAME, groups:preset=K, groups:presets=open; `_` for spaces),
 #   --settings-size WxH (the window's size, default 860x620; raised to the 640x420 minimum).
 #   --econ-calendar FILE (an economic calendar in the bundled file's format, read instead of the bundled one by
 #   the app and its trading cores: synthetic releases on synthetic data). Trading scripts: `guard news warn|block|flatten`.
@@ -210,6 +211,8 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # Paper trading evidence (in-memory core, manual clock): --paper "account paper-eval; buy 2 mkt; ack; buy 1 @ 5807.00;
 #   buy 1 @ 5808.00 bracket 4/8; ack; buy 1 @ 5806.50" (orders after the last `ack` stay pending), --enable-trading (DOMs start with trading enabled; `--arm` is the old name), --enable-hotkeys (DOMs start with order hotkeys on). --pnl off|ticks|currency|both. --order-tags right|left (where charts put working-order tags, the app's setting).
 #   `reset` / `reset journal` (script steps): a press of Reset paper account (once: its confirmation armed; twice: sent).
+#   `new-account NAME BALANCE` / `new-account NAME preset K` (a new paper account; K from 1, its size the balance) and
+#   `group NAME ID,ID` (an account group of those account ids; `_` for spaces in names) (script steps).
 #   --bracket-units ticks|points (every account), --bracket-editor (DOMs open their bracket-preset editor), --hover-header (the focused pane's header controls show as if hovered), --ui-zoom 80|90|100|110|125|150 (the UI zoom, as Settings › Appearance sets it; not the chart's time or price zoom), --ui-zoom-to PCT (after a first frame at --ui-zoom, the zoom changes to PCT as Ctrl+= would: what panes measured at the first zoom must follow), --context-menu pane|order|tab[:Label][@X,Y] (a context menu opens as a right click would: the focused pane's, the focused chart's first working order's (a stop if any), or the tab's; `:Label` opens that row's submenu; fails with no image if it can't).
 #   --bracket-position on|ask: one bracket for the whole position (on: saved for every account on the recording's product; ask: DOMs switch to it as the trader would, after --paper, showing the confirmation when exits work).
 #   `wait SECONDS` and `print PRICE [QTY]` (a market trade only the trading core sees) make round trips on a finished

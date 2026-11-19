@@ -73,6 +73,11 @@ Every Settings row shows a brief description, always (at most 60 characters; own
 - **Prop max micro contracts**: One standard contract counts as 10. Empty: the preset's.
 - **Prop profit target**: Whole dollars; shown in the DOM's rule meters, doesn't restrict orders. Empty: the preset's.
 - **Reset paper account**: Flattens and cancels everything on it, then back to its starting balance: today's P&L and prop progress cleared, guardrails and any lockout kept. The old file is kept as a dated .bak. Paper only.
+- **Remove paper account**: Takes a paper account out of Lines, once it is flat with no order, trigger, strategy or reset waiting on it (it never flattens by itself), and out of every group it was in. Press twice. Its journal trades stay; its id is never given to another account. The last account can't be removed. Paper only.
+
+## Groups
+
+- **Account groups**: Groups of paper accounts to act on at once; each account keeps its own prop rules, risk limits and guardrails. New group, members (a box per paper account), Rename and Delete group (its accounts are untouched). "+ New paper account…" adds one: a name, a starting balance and prop rules (a preset sets the balance to its account size). Groups and accounts are kept in the paper trading file, not in settings.json.
 
 ## Connections
 

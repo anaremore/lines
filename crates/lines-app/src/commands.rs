@@ -168,6 +168,10 @@ pub enum Command {
     Trade(TradeCmd),
     /// The app-wide P&L display: the next mode (off, ticks, currency, both).
     CyclePnl,
+    /// Settings › Groups, typing a new account group's name (palette only).
+    NewGroup,
+    /// Settings › Groups with the new paper account's form open (palette only).
+    NewPaperAccount,
     /// The Settings window (decision 0021; Ctrl+,).
     Settings,
     /// The Settings window at a section: a pane menu's "Settings…" (`pane_menu::settings_section`).
@@ -954,6 +958,8 @@ pub fn label(c: Command) -> String {
         Command::CyclePnl => "P&L display: next (off, ticks, currency, both)".into(),
         Command::SetPnl(m) => format!("P&L display: {}", m.label()),
         Command::Settings | Command::SettingsAt(_) => "Settings…".into(),
+        Command::NewGroup => "Accounts: new group…".into(),
+        Command::NewPaperAccount => "Accounts: new paper account…".into(),
         Command::ZoomIn => "Zoom in".into(),
         Command::ZoomOut => "Zoom out".into(),
         Command::ZoomReset => "Reset zoom".into(),
@@ -1179,6 +1185,7 @@ pub fn palette() -> Vec<Command> {
     v.extend([Command::ZoomIn, Command::ZoomOut, Command::ZoomReset]);
     v.extend(Timeframe::ALL.map(Command::Timeframe));
     v.extend(DrawCmd::ALL.map(Command::Draw));
+    v.extend([Command::NewGroup, Command::NewPaperAccount]);
     // Settings last: an existing command's words pick it first.
     v.push(Command::Settings);
     v.extend(

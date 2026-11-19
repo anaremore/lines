@@ -73,6 +73,9 @@ pub struct TradingFile {
     /// Account groups, in the order they were created (from v6). Optional: none is empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub groups: Vec<crate::group::AccountGroup>,
+    /// Ids of removed paper accounts, never given again. Optional: none is empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retired_accounts: Vec<crate::types::AccountId>,
 }
 
 /// Bring any older layout up to the current one.

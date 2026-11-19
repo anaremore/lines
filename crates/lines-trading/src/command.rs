@@ -212,6 +212,24 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         replace: bool,
     },
+    /// A new paper account (`core/accounts.rs`): its name (unique among the accounts, ignoring
+    /// case; trimmed, at most `group::MAX_NAME_CHARS`), its starting balance (whole units; with
+    /// prop rules, their account size) and prop rules (a preset, or none). Its id is made from
+    /// the name; the result names no order, and the new account comes as
+    /// `Event::AccountAdded`. Only on a simulated broker. Never from a strategy.
+    AddPaperAccount {
+        name: String,
+        starting_balance: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rules: Option<crate::rules::RulePreset>,
+    },
+    /// Forget a paper account (`core/accounts.rs`): refused unless it holds nothing and has
+    /// nothing open, unresolved, armed or waiting (orders, triggers, strategies, a reset), and
+    /// unless another paper account is left. It leaves every group it was in. Its journal
+    /// trades stay. Never from a strategy.
+    RemovePaperAccount {
+        account: AccountId,
+    },
     /// A new account group (`crate::group`): a name unique ignoring case, and its members (known
     /// accounts, each once; may be empty). Groups carry no rules: prop rules, risk limits and
     /// guardrails stay per account. Never from a strategy.
@@ -295,7 +313,9 @@ impl Command {
             | Command::SetGuardrails { account, .. }
             | Command::SetRules { account, .. }
             | Command::SetMaxOrderQty { account, .. }
-            | Command::SetBracketMode { account, .. } => Some(account),
+            | Command::SetBracketMode { account, .. }
+            | Command::RemovePaperAccount { account } => Some(account),
+            Command::AddPaperAccount { .. } => None,
             Command::AddStrategy(c) => Some(&c.account),
             Command::RemoveStrategy { .. }
             | Command::ArmStrategy { .. }
