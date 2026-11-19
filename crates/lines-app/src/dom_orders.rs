@@ -224,11 +224,11 @@ impl OrdersLayer {
     pub fn prepare(
         &mut self,
         cache: &TradeCache,
-        account: Option<&AccountId>,
+        view: &[AccountId],
         contract: Option<ContractKey>,
     ) -> GhostRefusals {
         let mut refused = Vec::new();
-        let (Some(account), Some(contract)) = (account, contract) else {
+        let (false, Some(contract)) = (view.is_empty(), contract) else {
             self.marks.clear();
             self.flashes.clear();
             self.position = None;
@@ -239,15 +239,16 @@ impl OrdersLayer {
             return refused;
         };
         self.marks.clear();
+        // Every account the pane shows (a group's members: each order its own mark).
         self.marks
-            .extend(s.open_orders(account, contract).filter_map(order_mark));
+            .extend(s.open_orders_in(view, contract).filter_map(order_mark));
         self.position = s
-            .position(account, contract)
+            .position_in(view, contract)
             .and_then(|p| p.avg_price.map(|a| (p.qty, a)));
         self.flashes.clear();
         self.text.clear();
         let now = Instant::now();
-        for f in s.flashes(account, Some(contract), now) {
+        for f in s.flashes_in(view, Some(contract), now) {
             if let Some(price) = f.price {
                 // Whose refusal (the core's: denied, never sent; the broker's: rejected) and
                 // why, in a word. The full message is in the header.
@@ -272,7 +273,8 @@ impl OrdersLayer {
                 .parent
                 .and_then(|p| s.order(p))
                 .is_some_and(lines_trading::Order::is_open);
-            let position = s.position(account, contract).map_or(0, |p| p.qty);
+            // The order's own account's position.
+            let position = s.position(&o.account, contract).map_or(0, |p| p.qty);
             crate::order_resize::can_grow(o, working, position)
         });
         self.ghosts.retain(|g| {

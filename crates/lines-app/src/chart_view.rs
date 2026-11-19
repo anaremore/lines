@@ -721,8 +721,12 @@ pub struct ChartView {
     /// The price of the last right click on the plot (snapped as the crosshair draws it), for
     /// the menu's order section; `None` off the plot, on an object, or with no bars there.
     menu_price: Option<Price>,
-    /// The account the open menu's order rows were offered on.
+    /// The account (or group, `PaneTrade::switch_id`) the open menu's order rows were offered
+    /// on.
     menu_account: Option<lines_trading::AccountId>,
+    /// Who the chart traded for at the last poll (`PaneTrade::switch_id`): a change between an
+    /// account and a group discards a staged order, as a change of account does.
+    seen_switch: Option<lines_trading::AccountId>,
     /// The hovered bar was cut short by a session break.
     cross_partial: bool,
     /// The product's drawings on this chart (roadmap 11).
@@ -811,7 +815,7 @@ impl crate::trade_bar::TradePane for ChartView {
             }
             Ok(p) if p.grows => {
                 let (Some(account), Some(contract)) = (
-                    self.trade.account.clone(),
+                    self.trade.switch_id(),
                     crate::trade_bar::contract_of(&self.store),
                 ) else {
                     return;
@@ -1067,6 +1071,7 @@ impl ChartView {
             menu_object: None,
             menu_price: None,
             menu_account: None,
+            seen_switch: None,
             cross_partial: false,
             drawings,
             saved_styles,
@@ -4414,8 +4419,18 @@ impl ChartView {
     /// feed can leave them empty for a frame, and a press must not be swallowed). The core
     /// answers for an order that has finished.
     pub(crate) fn cancel_listed(&mut self, id: u64, cx: &mut Context<Self>) {
-        let account = self.ct.group_menu.as_ref().and_then(|m| m.account.clone());
-        if let (Some(account), Some(t)) = (account, crate::trading::Trading::try_global(cx)) {
+        let t = crate::trading::Trading::try_global(cx);
+        // The order's own account (on a group, the list holds every member's orders), else the
+        // list's (an order the cache no longer holds: the core answers for it).
+        let account = t
+            .and_then(|t| {
+                t.cache
+                    .read()
+                    .order(lines_trading::OrderId(id))
+                    .map(|o| o.account.clone())
+            })
+            .or_else(|| self.ct.group_menu.as_ref().and_then(|m| m.account.clone()));
+        if let (Some(account), Some(t)) = (account, t) {
             t.submit(
                 lines_trading::Source::Chart,
                 std::time::Instant::now(),
@@ -4429,11 +4444,13 @@ impl ChartView {
 
     /// Cancel one of the chart's orders (its tag's ×): no switch needed, as on the DOM.
     fn cancel_order(&mut self, id: u64, cx: &mut Context<Self>) {
-        if let (Some(m), Some(account), Some(t)) = (
-            self.ct.mark(id).copied(),
-            self.trade.account.clone(),
-            crate::trading::Trading::try_global(cx),
-        ) {
+        let t = crate::trading::Trading::try_global(cx);
+        let m = self.ct.mark(id).copied();
+        // The order's own account (on a group, each member's order is its own).
+        let account = m
+            .zip(t)
+            .and_then(|(m, t)| t.cache.read().order(m.id).map(|o| o.account.clone()));
+        if let (Some(m), Some(account), Some(t)) = (m, account, t) {
             t.submit(
                 lines_trading::Source::Chart,
                 std::time::Instant::now(),
@@ -4515,7 +4532,12 @@ impl ChartView {
                 )
             })
             .unwrap_or((None, None, None));
-        match crate::chart_trade::exit_command(&account, contract, qty, a.target, a.to, inside) {
+        let built =
+            crate::chart_trade::exit_command(&account, contract, qty, a.target, a.to, inside)
+                .and_then(|c| {
+                    crate::trade_bar::for_pane(&self.trade, c).map_err(crate::dom_trade::Refusal)
+                });
+        match built {
             Ok(command) => cx.emit(ChartOrder {
                 command,
                 refused: crate::chart_trade::ENABLE_TO_ADD,
@@ -4610,19 +4632,26 @@ impl ChartView {
                     self.trade.flash(why);
                     false
                 }
-                None => {
-                    cx.emit(ChartOrder {
-                        command,
-                        refused: ENABLE_TO_ORDER,
-                        staged,
-                        resize: None,
-                        account: ctx.account,
-                        contract: ctx.contract,
-                        link: self.common.link,
-                        issued,
-                    });
-                    true
-                }
+                None => match crate::trade_bar::for_pane(&self.trade, command) {
+                    Err(why) => {
+                        self.trade.flash(why);
+                        false
+                    }
+                    Ok(command) => {
+                        cx.emit(ChartOrder {
+                            command,
+                            refused: ENABLE_TO_ORDER,
+                            staged,
+                            resize: None,
+                            // Who the linked DOM's switch must be for (a group: the group).
+                            account: self.trade.switch_id().unwrap_or(ctx.account),
+                            contract: ctx.contract,
+                            link: self.common.link,
+                            issued,
+                        });
+                        true
+                    }
+                },
             },
             Err(why) => {
                 self.trade.flash(why);
@@ -5173,10 +5202,10 @@ impl ChartView {
     /// account, or while the trading cache is busy.
     fn position_for_draw(&self, cx: &App) -> Option<(i64, f64, lines_trading::Money, PnlDisplay)> {
         let trading = crate::trading::Trading::try_global(cx)?;
-        let account = self.trade.account.as_ref()?;
         let contract = crate::trade_bar::contract_of(&self.store)?;
         let s = trading.cache.try_read()?;
-        let p = s.position(account, contract)?;
+        // Its account's, or its group's members' together.
+        let p = s.position_in(self.trade.view(), contract)?;
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()
             .map(|a| a.settings.pnl_display)
@@ -5296,9 +5325,7 @@ impl ChartView {
             return;
         };
         let contract = crate::trade_bar::contract_of(&self.store);
-        let refused = self
-            .ct
-            .prepare(&t.cache, self.trade.account.as_ref(), contract);
+        let refused = self.ct.prepare(&t.cache, self.trade.view(), contract);
         // Screenshot fixture: the position line held dragged (a preview, never placed: it sets
         // only `adding`, never `pos_drag` or `moved`, so a release would see a click; and the
         // flag exists only with `--screenshot`, which has no pointer).
@@ -8336,7 +8363,7 @@ impl ChartView {
     pub fn take_menu_price(&mut self) -> Option<Price> {
         let p = self.menu_price.take();
         // The account its rows are offered on (`OrderCmd::Place` checks it again).
-        self.menu_account = p.and(self.trade.account.clone());
+        self.menu_account = p.and(self.trade.switch_id());
         p
     }
 
@@ -8406,8 +8433,10 @@ impl ChartView {
                 // The account it was offered on: a switch since refuses it, as a contract or a
                 // size does.
                 let offered = self.menu_account.take();
-                if !crate::chart_trade::same_account(offered.as_ref(), self.trade.account.as_ref())
-                {
+                if !crate::chart_trade::same_account(
+                    offered.as_ref(),
+                    self.trade.switch_id().as_ref(),
+                ) {
                     self.trade.flash(crate::chart_trade::CHART_CHANGED);
                 } else {
                     self.send_entry(
@@ -8423,7 +8452,7 @@ impl ChartView {
                 let offered = self.menu_account.take();
                 let staged = if crate::chart_trade::same_account(
                     offered.as_ref(),
-                    self.trade.account.as_ref(),
+                    self.trade.switch_id().as_ref(),
                 ) {
                     crate::trade_bar::entry_ctx(self, cx).and_then(|ctx| {
                         crate::chart_trade::stage(o, offer, &ctx)
@@ -9978,10 +10007,21 @@ impl Pane for ChartView {
         // waits for the next one; a frame's marks can be briefly empty), and closes if the
         // chart's account changed.
         let mut group = self.ct.account_changed(self.trade.account.as_ref());
+        // Between one account and a group (the first member's account unchanged): a staged
+        // order and a list are another's now.
+        let switch = self.trade.switch_id();
+        // (The first poll only learns it: a fixture's staged order stays.)
+        let switched = self.seen_switch.is_some() && switch != self.seen_switch;
+        self.seen_switch = switch;
+        if switched {
+            group |= self.ct.group_menu.take().is_some();
+        }
         // A staged order: discarded on another account; a discard while hidden said now.
-        if let Some(n) = self
-            .ct
-            .staged_account(self.trade.account.as_ref())
+        let switched_away = switched
+            .then(|| self.ct.discard(crate::chart_trade::DISCARDED_ACCOUNT))
+            .flatten();
+        if let Some(n) = switched_away
+            .or_else(|| self.ct.staged_account(self.trade.account.as_ref()))
             .or_else(|| self.ct.notice.take())
         {
             self.trade.flash(n);

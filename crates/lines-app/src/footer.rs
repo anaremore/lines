@@ -412,9 +412,13 @@ pub(crate) fn accounts(
     let switches: Vec<(Option<Option<&'static str>>, bool)> = doms
         .iter()
         .map(|(_, id, _, on)| {
-            let badge = id
-                .as_ref()
-                .map(|id| trading.and_then(|t| t.account(id)).map(|a| a.badge));
+            let badge = id.as_ref().map(|id| {
+                // A group holds paper accounts only (its commands go to the paper core).
+                if id.0.starts_with(crate::trade_bar::GROUP_SWITCH) {
+                    return Some("PAPER");
+                }
+                trading.and_then(|t| t.account(id)).map(|a| a.badge)
+            });
             (badge, *on)
         })
         .collect();

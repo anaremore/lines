@@ -207,6 +207,9 @@ pub struct TradingCore {
     accounts: BTreeMap<AccountId, AccountCache>,
     /// Account groups, in the order they were created (`core/groups.rs`).
     groups: Vec<crate::group::AccountGroup>,
+    /// Each group order's member orders, by order id: the group command that placed it
+    /// (`core/groups.rs`; for the copier's drift view, roadmap 14).
+    group_origin: HashMap<OrderId, CommandId>,
     /// Ids of removed paper accounts, never given again (`core/accounts.rs`).
     retired: BTreeSet<AccountId>,
     /// The limits a paper account added by command starts with.
@@ -306,6 +309,7 @@ impl TradingCore {
             accounts: BTreeMap::new(),
             groups: Vec::new(),
             retired: BTreeSet::new(),
+            group_origin: HashMap::new(),
             new_paper_limits: RiskLimits::default(),
             orders: BTreeMap::new(),
             marks: HashMap::new(),
@@ -1273,6 +1277,7 @@ impl TradingCore {
             | Command::DeleteGroup { .. }
             | Command::SetGroupMembers { .. }
             | Command::GroupCancelAll { .. }
+            | Command::GroupPlace { .. }
             | Command::GroupFlatten { .. } => unreachable!("handled by group_command"),
             Command::AddPaperAccount { .. } | Command::RemovePaperAccount { .. } => {
                 unreachable!("handled by account_command")

@@ -1007,6 +1007,13 @@ impl WindowView {
         match crate::trading::Trading::try_global(cx) {
             Some(t) if ok => {
                 let id = t.submit(lines_trading::Source::Chart, ev.issued, ev.command.clone());
+                // A group order: the chart says how it went for each member.
+                if let Some(act) = crate::trade_bar::group_act(&ev.command) {
+                    chart.update(cx, |c, cx| {
+                        crate::trade_bar::TradePane::trade(c).group_sent(id, act);
+                        cx.notify();
+                    });
+                }
                 if ev.staged {
                     // Sent: a later refusal of another chart order never brings it back.
                     chart.update(cx, |c, _| c.ct.place_sent());
@@ -4761,7 +4768,9 @@ pub(crate) fn dom_switches(cx: &App, own: Option<(gpui::WindowId, &[Tab])>) -> V
             let p = v.trade_ref();
             (
                 v.link_group(),
-                p.account.clone(),
+                // Its account, or its group (a chart on a group trades only through a DOM on
+                // the same group).
+                p.switch_id(),
                 crate::trade_bar::contract_of(v.trade_store()),
                 p.arming.is_armed(),
             )
@@ -4774,14 +4783,14 @@ pub(crate) fn dom_switches(cx: &App, own: Option<(gpui::WindowId, &[Tab])>) -> V
 pub(crate) fn chart_trades(c: &crate::chart_view::ChartView, switches: &[DomSwitch]) -> bool {
     use crate::trade_bar::TradePane;
     let (Some(account), Some(contract)) = (
-        c.trade_ref().account.as_ref(),
+        c.trade_ref().switch_id(),
         crate::trade_bar::contract_of(c.trade_store()),
     ) else {
         return false;
     };
     crate::chart_trade::linked_dom_enabled(
         c.link_group(),
-        account,
+        &account,
         contract,
         switches
             .iter()

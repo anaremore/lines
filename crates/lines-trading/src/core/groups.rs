@@ -11,13 +11,20 @@
 //! while the broker is disconnected) doesn't stop the others; with every member refused the
 //! group command is refused too (the first member's code and reason), so a way out never
 //! reads as done when nothing was.
+//!
+//! A group order (`Command::GroupPlace`) is the same: per member a `PlaceOrder` or
+//! `PlaceBracket` at the member's size, handled as if alone, so each member's risk limits,
+//! prop rules, guardrails, rate limits and bracket mode check its own order; a member whose
+//! size isn't a whole number of contracts is refused (never rounded). Each member order's id
+//! is mapped to the group command's ([`TradingCore::group_command_of`]). A group order that
+//! names the members its sender saw is refused when they are no longer the group's.
 
 use lines_core::UtcMillis;
 
 use super::{INTERNAL_COMMAND_IDS, TradingCore};
 use crate::command::{Command, Envelope, Reject, RejectCode, Source};
 use crate::event::Event;
-use crate::group::{self, AccountGroup, MemberResult};
+use crate::group::{self, AccountGroup, MemberResult, MemberSize};
 use crate::types::{AccountId, CommandId, OrderId};
 
 impl TradingCore {
@@ -84,18 +91,80 @@ impl TradingCore {
             }),
             Command::SetGroupMembers { group, members } => self.set_group_members(&group, members),
             Command::GroupCancelAll { group, contract } => {
-                self.group_each(now, env, &group, |account| Command::CancelAll {
-                    account,
-                    contract,
+                self.group_each(now, env, &group, |account, _| {
+                    Ok(Command::CancelAll { account, contract })
                 })
             }
             Command::GroupFlatten { group, contract } => {
-                self.group_each(now, env, &group, |account| Command::Flatten {
-                    account,
-                    contract,
+                self.group_each(now, env, &group, |account, _| {
+                    Ok(Command::Flatten { account, contract })
                 })
             }
+            Command::GroupPlace {
+                group,
+                order,
+                members: seen,
+            } => {
+                if let Ok(i) = self.group_index(&group) {
+                    let g = &self.groups[i];
+                    // An order to no one never reads as placed.
+                    if g.members.is_empty() {
+                        return Some(Err(Reject::new(
+                            RejectCode::Invalid,
+                            format!("{} has no members", g.name),
+                        )));
+                    }
+                    // Sent for the members the sender saw: the group's now, or nothing.
+                    let same =
+                        seen.len() == g.members.len() && seen.iter().all(|m| g.members.contains(m));
+                    if !seen.is_empty() && !same {
+                        return Some(Err(Reject::new(
+                            RejectCode::Invalid,
+                            format!("{}'s members changed: check them and send again", g.name),
+                        )));
+                    }
+                }
+                let r = self.group_each(now, env, &group, |account, size| {
+                    let qty = size.of(order.qty()).ok_or_else(|| {
+                        Reject::new(
+                            RejectCode::Invalid,
+                            format!(
+                                "{} x {}/{} is not a whole number of contracts",
+                                order.qty().0,
+                                size.num,
+                                size.den
+                            ),
+                        )
+                    })?;
+                    Ok(order.for_member(account, qty))
+                });
+                if let Ok(ids) = &r {
+                    self.group_placed(env.id, ids);
+                }
+                r
+            }
             _ => unreachable!("every command naming a group is handled"),
+        })
+    }
+
+    /// Map a group order's member orders to it (pruned to orders the core still holds).
+    fn group_placed(&mut self, id: CommandId, orders: &[OrderId]) {
+        const KEEP: usize = 4096;
+        if self.group_origin.len() + orders.len() > KEEP {
+            let held = &self.orders;
+            self.group_origin.retain(|o, _| held.contains_key(o));
+        }
+        for o in orders {
+            self.group_origin.insert(*o, id);
+        }
+    }
+
+    /// The group command that placed this order (`Command::GroupPlace`), while the core holds
+    /// the order. Bracket exits map to it too.
+    pub fn group_command_of(&self, order: OrderId) -> Option<CommandId> {
+        self.group_origin.get(&order).copied().or_else(|| {
+            let parent = self.orders.get(&order)?.parent?;
+            self.group_origin.get(&parent).copied()
         })
     }
 
@@ -112,7 +181,11 @@ impl TradingCore {
             ));
         }
         self.group_members(&members)?;
-        self.groups.push(AccountGroup { name, members });
+        self.groups.push(AccountGroup {
+            name,
+            members,
+            ..Default::default()
+        });
         self.publish_groups();
         Ok(Vec::new())
     }
@@ -144,6 +217,8 @@ impl TradingCore {
     ) -> Result<Vec<OrderId>, Reject> {
         let i = self.group_index(group)?;
         self.group_members(&members)?;
+        // Sizes stay for the members kept.
+        self.groups[i].sizing.retain(|a, _| members.contains(a));
         self.groups[i].members = members;
         self.publish_groups();
         Ok(Vec::new())
@@ -155,17 +230,37 @@ impl TradingCore {
         now: UtcMillis,
         env: &Envelope,
         group: &str,
-        member: impl Fn(AccountId) -> Command,
+        member: impl Fn(AccountId, MemberSize) -> Result<Command, Reject>,
     ) -> Result<Vec<OrderId>, Reject> {
         let i = self.group_index(group)?;
         let name = self.groups[i].name.clone();
         let members = self.groups[i].members.clone();
+        let sizes: Vec<MemberSize> = members.iter().map(|m| self.groups[i].size_of(m)).collect();
         let mut results = Vec::with_capacity(members.len());
         let mut ids = Vec::new();
         for (n, account) in members.into_iter().enumerate() {
             let id = CommandId(self.next_internal);
             self.next_internal += 1;
             debug_assert!(id.0 >= INTERNAL_COMMAND_IDS);
+            let command = match member(account.clone(), sizes[n]) {
+                Ok(c) => c,
+                Err(r) => {
+                    // Refused before it was a command: answered as one, so the member's
+                    // refusal reads like any other.
+                    self.events.push(Event::Command {
+                        id,
+                        source: env.source,
+                        at: now,
+                        result: Err(r.clone()),
+                    });
+                    results.push(MemberResult {
+                        account,
+                        command: id,
+                        result: Err(r),
+                    });
+                    continue;
+                }
+            };
             let result = self.handle_result(
                 now,
                 Envelope {
@@ -179,7 +274,7 @@ impl TradingCore {
                     } else {
                         std::time::Instant::now()
                     },
-                    command: member(account.clone()),
+                    command,
                     pane: env.pane,
                 },
             );

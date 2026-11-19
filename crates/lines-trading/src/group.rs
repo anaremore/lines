@@ -3,7 +3,15 @@
 //! An account may be in several groups. Groups carry no rules of their own: prop rules, risk
 //! limits and guardrails stay per account, and a group command is its member accounts' own
 //! commands, one per member, each checked (or not) exactly as it would be alone.
+//!
+//! A group order ([`crate::Command::GroupPlace`]) is one order per member at its size: the
+//! order's own quantity (1:1) unless the group gives the member a [`MemberSize`]. Sizes are
+//! kept for the trade copier (roadmap 14: a follower's ratio); nothing in the app sets one
+//! yet.
 
+use std::collections::BTreeMap;
+
+use lines_core::Qty;
 use serde::{Deserialize, Serialize};
 
 use crate::command::{Reject, RejectCode};
@@ -12,12 +20,48 @@ use crate::types::{AccountId, CommandId, OrderId};
 /// The longest group name, in characters.
 pub const MAX_NAME_CHARS: usize = 64;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountGroup {
     pub name: String,
     /// In the order given; never twice the same account.
     #[serde(default)]
     pub members: Vec<AccountId>,
+    /// A member's size in a group order, when not 1:1 (members only; optional, none: every
+    /// member 1:1). For the copier (roadmap 14); no command or UI sets it yet.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sizing: BTreeMap<AccountId, MemberSize>,
+}
+
+/// A member's size in a group order: the order's quantity × `num` / `den`, exact. A size that
+/// isn't a whole number of contracts, or is zero, refuses that member's order (never rounded,
+/// decision 0002).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberSize {
+    pub num: u32,
+    pub den: u32,
+}
+
+impl MemberSize {
+    pub const ONE: MemberSize = MemberSize { num: 1, den: 1 };
+
+    /// `qty` at this size, if it is a whole number of contracts above zero.
+    pub fn of(self, qty: Qty) -> Option<Qty> {
+        if self.den == 0 {
+            return None;
+        }
+        let n = i128::from(qty.0) * i128::from(self.num);
+        let d = i128::from(self.den);
+        (n % d == 0 && n / d > 0)
+            .then(|| i64::try_from(n / d).ok().map(Qty))
+            .flatten()
+    }
+}
+
+impl AccountGroup {
+    /// A member's size (1:1 unless the group says otherwise).
+    pub fn size_of(&self, account: &AccountId) -> MemberSize {
+        self.sizing.get(account).copied().unwrap_or(MemberSize::ONE)
+    }
 }
 
 /// One member's part of a group command ([`crate::Event::GroupCommand`]): the member's own
@@ -103,7 +147,16 @@ pub fn restored(saved: Vec<AccountGroup>) -> Vec<AccountGroup> {
                 members.push(m);
             }
         }
-        out.push(AccountGroup { name, members });
+        let sizing = g
+            .sizing
+            .into_iter()
+            .filter(|(a, _)| members.contains(a))
+            .collect();
+        out.push(AccountGroup {
+            name,
+            members,
+            sizing,
+        });
     }
     out
 }
@@ -111,6 +164,17 @@ pub fn restored(saved: Vec<AccountGroup>) -> Vec<AccountGroup> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn member_sizes_are_exact_or_refused() {
+        assert_eq!(MemberSize::ONE.of(Qty(3)), Some(Qty(3)));
+        let half = MemberSize { num: 1, den: 2 };
+        assert_eq!(half.of(Qty(4)), Some(Qty(2)));
+        assert_eq!(half.of(Qty(3)), None, "never rounded");
+        assert_eq!(MemberSize { num: 10, den: 1 }.of(Qty(2)), Some(Qty(20)));
+        assert_eq!(MemberSize { num: 0, den: 1 }.of(Qty(2)), None);
+        assert_eq!(MemberSize { num: 1, den: 0 }.of(Qty(2)), None);
+    }
 
     #[test]
     fn names_are_trimmed_bounded_and_unique_ignoring_case() {
@@ -138,6 +202,7 @@ mod tests {
         let g = |n: &str, m: &[&str]| AccountGroup {
             name: n.into(),
             members: m.iter().map(|s| AccountId::new(s)).collect(),
+            ..Default::default()
         };
         let out = restored(vec![
             g(" Evals ", &["a", "b", "a"]),
