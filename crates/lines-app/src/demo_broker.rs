@@ -1,8 +1,8 @@
-//! A synthetic, read-only broker extension for screenshots (`--demo-broker`): how a broker in
-//! observe mode looks in the DOM (decision 0020). Vendor-neutral and made up: a SIM and a LIVE
-//! account, both read-only, the SIM one long 2 with a working sell limit on the recording's
-//! contract. It accepts nothing: every command on its accounts is refused by the app before
-//! sending, and its broker would count a request if one ever arrived.
+//! A synthetic broker extension for screenshots (`--demo-broker`), vendor-neutral and made up:
+//! a SIM and a LIVE account, both read-only (observe mode), the SIM one long 2 with a working
+//! sell limit on the recording's contract. With `--demo-accounts N`: N more read-only live
+//! accounts, and the SIM account tradable, to show the account list's sections. Its broker
+//! accepts nothing either way: a request that reached it would only be logged.
 
 use std::sync::Arc;
 
@@ -155,7 +155,11 @@ impl BrokerExtension for Demo {
         ]
     }
     fn plan(&self) -> Option<String> {
-        Some("Observe only: order entry disabled".to_owned())
+        Some(if self.extra > 0 {
+            "Sim orders on simulated accounts; live trading off".to_owned()
+        } else {
+            "Observe only: order entry disabled".to_owned()
+        })
     }
     fn open(&self) -> anyhow::Result<Box<dyn Broker>> {
         let mut long2 = Position::default();
