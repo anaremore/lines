@@ -33,20 +33,33 @@ pub struct MemberResult {
 /// A group name as it is kept: trimmed; refused when empty, longer than [`MAX_NAME_CHARS`] or
 /// holding a control character.
 pub fn clean_name(name: &str) -> Result<String, Reject> {
+    clean_name_of(name, "group")
+}
+
+/// A name of a `what` (a group, a paper account) as it is kept, as [`clean_name`].
+pub fn clean_name_of(name: &str, what: &str) -> Result<String, Reject> {
     let n = name.trim();
+    let article = if what.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        "an"
+    } else {
+        "a"
+    };
     if n.is_empty() {
-        return Err(Reject::new(RejectCode::Invalid, "a group needs a name"));
+        return Err(Reject::new(
+            RejectCode::Invalid,
+            format!("{article} {what} needs a name"),
+        ));
     }
     if n.chars().count() > MAX_NAME_CHARS {
         return Err(Reject::new(
             RejectCode::Invalid,
-            format!("a group name is at most {MAX_NAME_CHARS} characters"),
+            format!("{article} {what} name is at most {MAX_NAME_CHARS} characters"),
         ));
     }
     if n.chars().any(char::is_control) {
         return Err(Reject::new(
             RejectCode::Invalid,
-            "a group name can't hold control characters",
+            format!("{article} {what} name can't hold control characters"),
         ));
     }
     Ok(n.to_owned())

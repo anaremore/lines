@@ -884,6 +884,8 @@ pub fn default_accounts() -> Vec<(AccountConfig, Option<lines_trading::RuleTrack
 /// The app's trading core.
 pub struct Trading {
     handle: TradingHandle,
+    /// Removed paper accounts' ids.
+    retired: Retired,
     /// Dropped with the global at exit: stops the thread after a last save.
     _service: Arc<TradingService>,
     bridge: FeedBridge,
@@ -1316,6 +1318,7 @@ impl Trading {
                 core.restore_triggers(f.triggers);
                 // Account groups (name and members) as they were saved.
                 core.restore_groups(f.groups);
+                core.restore_retired(f.retired_accounts);
                 (core, f.paper)
             }
             None => {
@@ -1349,6 +1352,14 @@ impl Trading {
         };
         // News blackouts read the calendar the UI shows.
         core.set_econ_schedule(Some(crate::econ_ui::schedule()));
+        // A paper account added this run starts with the run's limits and the guardrails
+        // settings ask for its name, as those at start do.
+        core.set_new_paper_limits(lines_trading::RiskLimits {
+            max_order_qty: setup.max_order_flag,
+            ..Default::default()
+        });
+        core.set_join_guardrails(setup.guardrails.clone(), BTreeMap::new());
+        let retired: Retired = Arc::new(RwLock::new(core.retired().cloned().collect()));
         // Orders the broker still holds (brackets survive restarts) come back through rebuild,
         // with the account's real balance: only then are settings applied.
         core.rebuild(at);
@@ -1480,7 +1491,7 @@ impl Trading {
             cache.clone(),
             None,
             Some((bridge.clone(), handle.clone())),
-            Some(accounts.clone()),
+            Some((accounts.clone(), retired.clone())),
         );
         // The full state as the first events.
         handle.rebuild();
@@ -1600,6 +1611,7 @@ impl Trading {
             });
         }
         Trading {
+            retired,
             bridge,
             handle,
             _service: Arc::new(service),
@@ -1717,7 +1729,20 @@ impl Trading {
     /// configured) a broker account not listed yet, since brokers connect after start. It
     /// then shows as waiting and read-only until listed; the saved choice is never replaced.
     pub fn keeps_saved_account(&self, id: &AccountId) -> bool {
-        !self.venues.is_empty() || self.account(id).is_some()
+        !self.is_retired(id) && (!self.venues.is_empty() || self.account(id).is_some())
+    }
+
+    /// Whether the id is a removed paper account's.
+    pub fn is_retired(&self, id: &AccountId) -> bool {
+        self.retired
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(id)
+    }
+
+    /// The removed paper accounts' ids (panes notice one from it).
+    pub(crate) fn retired_list(&self) -> Retired {
+        self.retired.clone()
     }
 
     pub fn account(&self, id: &AccountId) -> Option<AccountInfo> {
@@ -2064,11 +2089,21 @@ fn set_aside(path: &Path, e: &anyhow::Error) -> String {
     }
 }
 
-/// The pump: core events → cache, then the touched accounts' revisions.
+/// Ids of removed paper accounts (the paper core's, restored from its file and followed from
+/// `Event::AccountRemoved`): a pane never keeps one, venues or not.
+pub type Retired = Arc<RwLock<HashSet<AccountId>>>;
+
 /// The app's account list after a paper account was added or removed (the paper core's
 /// `Event::AccountAdded` / `AccountRemoved`). A new one is listed among the paper accounts in
 /// id order (as after a restart), before any venue's.
-fn paper_account_listed(list: &RwLock<Vec<AccountInfo>>, e: &Event) {
+fn paper_account_listed(
+    list: &RwLock<Vec<AccountInfo>>,
+    retired: &RwLock<HashSet<AccountId>>,
+    e: &Event,
+) {
+    if !matches!(e, Event::AccountAdded { .. } | Event::AccountRemoved { .. }) {
+        return;
+    }
     let mut l = list.write().unwrap_or_else(|e| e.into_inner());
     match e {
         Event::AccountAdded { config: c } => {
@@ -2082,7 +2117,13 @@ fn paper_account_listed(list: &RwLock<Vec<AccountInfo>>, e: &Event) {
                 .count();
             l.insert(at, paper_info(c));
         }
-        Event::AccountRemoved { account } => l.retain(|a| a.venue.is_some() || &a.id != account),
+        Event::AccountRemoved { account } => {
+            retired
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(account.clone());
+            l.retain(|a| a.venue.is_some() || &a.id != account);
+        }
         _ => return,
     }
     drop(l);
@@ -2098,6 +2139,7 @@ fn paper_info(c: &AccountConfig) -> AccountInfo {
     }
 }
 
+/// The pump: core events → cache, then the touched accounts' revisions.
 fn spawn_pump(
     events: Receiver<Event>,
     notes: Receiver<(CommandId, Note)>,
@@ -2105,7 +2147,7 @@ fn spawn_pump(
     cache: Arc<TradeCache>,
     ids: Option<Arc<Mutex<VenueIds>>>,
     trigger_feeds: Option<(FeedBridge, TradingHandle)>,
-    paper_accounts: Option<Arc<RwLock<Vec<AccountInfo>>>>,
+    paper_accounts: Option<(Arc<RwLock<Vec<AccountInfo>>>, Retired)>,
 ) {
     // A venue's ids, translated into the shared cache's.
     let tag = ids
@@ -2118,8 +2160,8 @@ fn spawn_pump(
     let event_in = move |e: Event| {
         // A paper account added or removed: the account list follows, before the event
         // reaches the cache (a pane may pick it as soon as it is listed).
-        if let Some(list) = &paper_accounts {
-            paper_account_listed(list, &e);
+        if let Some((list, retired)) = &paper_accounts {
+            paper_account_listed(list, retired, &e);
         }
         match &ids {
             Some(m) => m.lock().unwrap_or_else(|e| e.into_inner()).event(e),
@@ -2431,7 +2473,12 @@ pub fn parse_script(
                     .ok()
                     .and_then(|k| k.checked_sub(1))
                     .and_then(|k| rules::presets().into_iter().nth(k))
-                    .ok_or_else(|| anyhow!("new-account {name}: preset {k:?}: 1 to 3"))?;
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "new-account {name}: preset {k:?}: 1 to {}",
+                            rules::presets().len()
+                        )
+                    })?;
                 out.push(Step::Command(TradeCommand::AddPaperAccount {
                     name: name.replace('_', " "),
                     starting_balance: rules.account_size,

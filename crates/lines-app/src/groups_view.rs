@@ -178,8 +178,9 @@ impl GroupPage {
         match s {
             Start::NewGroup => self.typing = Some((Field::NewGroup, String::new())),
             Start::NewAccount => {
-                self.form.get_or_insert_with(NewAccount::default);
-                self.typing = Some((Field::AccountName, String::new()));
+                // A form already open keeps what was typed in it.
+                let f = self.form.get_or_insert_with(NewAccount::default);
+                self.typing = Some((Field::AccountName, f.name.clone()));
             }
         }
     }
@@ -270,6 +271,18 @@ impl GroupPage {
                 .map(|t| t.cache.read().groups().to_vec())
                 .unwrap_or_default();
         let chosen = self.chosen(&groups).cloned();
+        // A click on the field being typed keeps typing (it never starts it over).
+        let typed = |f: Field| matches!(&self.typing, Some((x, _)) if *x == f);
+        if (a == Action::NewGroup && typed(Field::NewGroup))
+            || (a == Action::Rename && typed(Field::Rename))
+            || matches!(a, Action::Type(f) if typed(f))
+        {
+            return;
+        }
+        // Another press ends typing: what was typed is applied, never dropped unseen.
+        if !matches!(a, Action::Cancel | Action::Nothing) {
+            self.commit_typing(cx);
+        }
         match a {
             Action::Nothing => {}
             Action::Select(name) => {
@@ -323,12 +336,10 @@ impl GroupPage {
                         Field::Balance => f.balance.clone(),
                         _ => return,
                     };
-                    self.commit_typing(cx);
                     self.typing = Some((field, buf));
                 }
             }
             Action::Presets => {
-                self.commit_typing(cx);
                 let Some(f) = &self.form else { return };
                 let mut entries = vec![Entry::new("None")];
                 entries.extend(presets().into_iter().map(|p| Entry::new(p.name)));
@@ -339,7 +350,15 @@ impl GroupPage {
                 self.preset_open = Some((list, scroll));
             }
             Action::Create => {
-                self.commit_typing(cx);
+                // One at a time: a second Create while the first waits would answer "already
+                // an account" over the first's success.
+                if self
+                    .waiting
+                    .iter()
+                    .any(|(_, s)| matches!(s, Sent::Account(_)))
+                {
+                    return;
+                }
                 let Some(f) = &self.form else { return };
                 match f.command() {
                     Ok(cmd) => {
@@ -1138,7 +1157,10 @@ mod tests {
     #[test]
     fn a_toggle_adds_at_the_end_or_takes_out() {
         let (a, b) = (AccountId::new("a"), AccountId::new("b"));
-        assert_eq!(toggled(&[a.clone()], &b), vec![a.clone(), b.clone()]);
+        assert_eq!(
+            toggled(std::slice::from_ref(&a), &b),
+            vec![a.clone(), b.clone()]
+        );
         assert_eq!(toggled(&[a.clone(), b.clone()], &a), vec![b]);
     }
 

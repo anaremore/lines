@@ -3668,10 +3668,12 @@ mod tests {
                 "charts.drawing_tools_dock",
                 "trading.move_bracket",
                 PROP_OVERRIDES_KEY,
-                // Settings › Plugins' cards (each plugin's own settings, nothing of the table's).
-                PLUGINS_LIST,
+                // Settings › Accounts › Remove paper account (a command, nothing saved).
+                REMOVE_ACCOUNT_KEY,
                 // Settings › Groups' page (the trading core's groups, nothing saved here).
                 GROUPS_LIST,
+                // Settings › Plugins' cards (each plugin's own settings, nothing of the table's).
+                PLUGINS_LIST,
             ]
         );
         assert_eq!(by_key("charts.trades").map(|s| s.section), Some(S::Charts));
@@ -3709,8 +3711,8 @@ mod tests {
         assert_eq!(
             groups,
             [
-                "APP", "APP", "APP", "PANES", "PANES", "TRADING", "TRADING", "DATA", "DATA",
-                "DATA", ""
+                "APP", "APP", "APP", "PANES", "PANES", "TRADING", "TRADING", "TRADING", "DATA",
+                "DATA", "DATA", ""
             ]
         );
     }

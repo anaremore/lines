@@ -9931,6 +9931,7 @@ impl Pane for ChartView {
     }
 
     fn on_hidden_tick(&mut self) {
+        self.trade.hidden_tick();
         // A staged order never waits unseen: discarded, said once the chart is shown again.
         if let Some(n) = self.ct.discard(crate::chart_trade::DISCARDED_HIDDEN) {
             self.ct.notice = Some(n);

@@ -1310,8 +1310,6 @@ impl Broker for PaperBroker {
         true
     }
 
-    /// Back to `balance` with no positions (asked only once nothing is open on it; any order
-    /// still listed for it here is ended work and goes).
     fn open_account(&mut self, account: &AccountId, balance: Money) -> bool {
         if self.accounts.contains_key(account) {
             return false;
@@ -1327,6 +1325,8 @@ impl Broker for PaperBroker {
         self.accounts.remove(account).is_some()
     }
 
+    /// Back to `balance` with no positions (asked only once nothing is open on it; any order
+    /// still listed for it here is ended work and goes).
     fn reset_account(&mut self, _now: UtcMillis, account: &AccountId, balance: Money) -> bool {
         self.orders.retain(|_, o| &o.order.account != account);
         let a = self.accounts.entry(account.clone()).or_default();

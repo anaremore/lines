@@ -3,7 +3,11 @@
 //! A new account is the paper broker's (opened at its starting balance) and the core's (its
 //! config, a fresh rule tracker, the guardrails a new account joins with), saved with the rest.
 //! Its id is made from its name (`paper-` and the name's letters and digits, made unique), so a
-//! later rename of the display name never orphans what is saved under the id.
+//! later rename of the display name never orphans what is saved under the id. An id is never
+//! given twice: a removed account's id is retired (saved in the trading file), since its
+//! journal trades keep it. A new account starts with the limits set for new paper accounts this
+//! run ([`TradingCore::set_new_paper_limits`]) and the guardrails asked for its name
+//! ([`TradingCore::set_join_guardrails`]).
 //!
 //! Removing one is the reverse, and only of an account with nothing left to lose: flat, no
 //! order open or unresolved, no trigger armed, no strategy instance on it and no reset waiting.
@@ -55,6 +59,21 @@ pub fn account_id_for(name: &str, taken: impl Fn(&str) -> bool) -> AccountId {
 }
 
 impl TradingCore {
+    /// The limits a paper account added by command starts with (the app: `--max-order-qty`).
+    pub fn set_new_paper_limits(&mut self, limits: crate::risk::RiskLimits) {
+        self.new_paper_limits = limits;
+    }
+
+    /// Restore the ids of removed accounts (the trading file's): never given again.
+    pub fn restore_retired(&mut self, ids: impl IntoIterator<Item = AccountId>) {
+        self.retired.extend(ids);
+    }
+
+    /// The ids of removed accounts, never given again.
+    pub fn retired(&self) -> impl Iterator<Item = &AccountId> {
+        self.retired.iter()
+    }
+
     /// An account command's result (`None`: not one). Its `Event::Command` is the caller's to
     /// push.
     pub(super) fn account_command(
@@ -98,8 +117,7 @@ impl TradingCore {
         starting_balance: i64,
         rules: Option<RulePreset>,
     ) -> Result<Vec<OrderId>, Reject> {
-        let name = crate::group::clean_name(name)
-            .map_err(|r| Reject::new(r.code, r.message.replace("a group", "an account")))?;
+        let name = crate::group::clean_name_of(name, "account")?;
         if self
             .accounts
             .values()
@@ -130,9 +148,17 @@ impl TradingCore {
                 ),
             ));
         }
+        // Never an id in use, removed (its journal trades keep it) or held by the broker.
+        let at_broker: std::collections::BTreeSet<AccountId> = self
+            .broker
+            .snapshot()
+            .accounts
+            .into_iter()
+            .map(|a| a.id)
+            .collect();
         let id = account_id_for(&name, |s| {
             let id = AccountId::new(s);
-            self.accounts.contains_key(&id)
+            self.accounts.contains_key(&id) || self.retired.contains(&id) || at_broker.contains(&id)
         });
         if !self
             .broker
@@ -146,6 +172,8 @@ impl TradingCore {
         let mut cfg = AccountConfig::paper(&id.0, starting_balance);
         cfg.name = name;
         cfg.rules = rules;
+        // The limits every paper account has this run (`--max-order-qty`).
+        cfg.limits = self.new_paper_limits.clone();
         self.add_account(cfg.clone(), None);
         self.join_guardrails(&id);
         self.events.push(Event::AccountAdded { config: cfg });
@@ -193,6 +221,8 @@ impl TradingCore {
             return refuse("the paper broker still holds something on it");
         }
         self.accounts.remove(account);
+        self.retired.insert(account.clone());
+        self.news_flattened.retain(|(a, _, _)| a != account);
         self.position_brackets.retain(|(a, _), _| a != account);
         let mut left = false;
         for g in &mut self.groups {

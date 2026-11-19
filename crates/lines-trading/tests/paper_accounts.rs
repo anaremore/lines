@@ -311,3 +311,88 @@ fn the_last_account_stays() {
         .unwrap_err();
     assert_eq!(e.code, RejectCode::UnknownAccount);
 }
+
+#[test]
+fn a_removed_id_is_never_given_again_and_is_saved() {
+    let mut r = Rig::new();
+    let first = r.add("Eval 2", 50_000).unwrap();
+    r.cmd(Command::RemovePaperAccount {
+        account: first.clone(),
+    })
+    .unwrap();
+    // The same name again: a new id (the old one's journal trades keep it).
+    let again = r.add("Eval 2", 50_000).unwrap();
+    assert_ne!(again, first);
+    let file = trading_file(&r.core, &paper()).unwrap();
+    assert_eq!(file.retired_accounts, vec![first.clone()]);
+    // After a restart too.
+    let mut core = TradingCore::new(Box::new(PaperBroker::new(paper())));
+    core.add_account(AccountConfig::paper("a", 50_000), None);
+    core.restore_retired(file.retired_accounts);
+    let mut r2 = Rig {
+        core,
+        t: r.t,
+        events: Vec::new(),
+    };
+    let id = r2.add("Eval 2", 50_000).unwrap();
+    assert_ne!(id, first);
+}
+
+#[test]
+fn a_new_account_takes_the_runs_limits_and_its_guardrails() {
+    let mut r = Rig::new();
+    r.core.set_new_paper_limits(lines_trading::RiskLimits {
+        max_order_qty: Some(2),
+        ..Default::default()
+    });
+    let mut wanted = std::collections::BTreeMap::new();
+    let g = lines_trading::Guardrails {
+        max_trades_per_day: Some(3),
+        ..Default::default()
+    };
+    wanted.insert("Small".to_owned(), g.clone());
+    r.core.set_join_guardrails(wanted, Default::default());
+    let id = r.add("Small", 10_000).unwrap();
+    let (cfg, _) = r.core.accounts().find(|(c, _)| c.id == id).unwrap();
+    assert_eq!(cfg.limits.max_order_qty, Some(2));
+    assert_eq!(r.core.guardrails(&id).unwrap().active, g);
+    r.market(5999.75, 6000.0, 6000.0);
+    let big = r.cmd(Command::PlaceOrder(OrderSpec {
+        account: id,
+        contract: es(),
+        side: Side::Buy,
+        qty: Qty(3),
+        kind: OrderKind::Market,
+    }));
+    assert!(big.is_err(), "over the run's largest order");
+}
+
+#[test]
+fn a_remove_waits_for_its_strategies() {
+    use lines_trading::{HoursWindow, StrategyConfig, StrategyId, StrategyLimits, TradingHours};
+    let mut r = Rig::new();
+    let b = r.add("B", 50_000).unwrap();
+    r.cmd(Command::AddStrategy(StrategyConfig {
+        id: StrategyId(7),
+        label: "example #7".into(),
+        account: b.clone(),
+        contract: es(),
+        limits: StrategyLimits {
+            max_position: 2,
+            max_daily_loss: 1_000,
+            max_orders_per_min: 5,
+            hours: TradingHours {
+                tz: "America/New_York".into(),
+                windows: vec![HoursWindow::new("09:30", "16:00")],
+            },
+        },
+    }))
+    .unwrap();
+    let e = r
+        .cmd(Command::RemovePaperAccount { account: b.clone() })
+        .unwrap_err();
+    assert!(e.message.contains("remove its strategies"), "{}", e.message);
+    r.cmd(Command::RemoveStrategy { id: StrategyId(7) })
+        .unwrap();
+    r.cmd(Command::RemovePaperAccount { account: b }).unwrap();
+}

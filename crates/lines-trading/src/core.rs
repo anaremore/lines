@@ -16,7 +16,7 @@
 //! Orders, positions and balances are the **broker's**; the core keeps a cache updated from
 //! broker events and replaced wholesale by [`TradingCore::rebuild`] after a (re)connect.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -207,6 +207,10 @@ pub struct TradingCore {
     accounts: BTreeMap<AccountId, AccountCache>,
     /// Account groups, in the order they were created (`core/groups.rs`).
     groups: Vec<crate::group::AccountGroup>,
+    /// Ids of removed paper accounts, never given again (`core/accounts.rs`).
+    retired: BTreeSet<AccountId>,
+    /// The limits a paper account added by command starts with.
+    new_paper_limits: RiskLimits,
     orders: BTreeMap<OrderId, Order>,
     marks: HashMap<ContractKey, Mark>,
     specs: HashMap<ContractKey, ContractSpec>,
@@ -301,6 +305,8 @@ impl TradingCore {
             broker,
             accounts: BTreeMap::new(),
             groups: Vec::new(),
+            retired: BTreeSet::new(),
+            new_paper_limits: RiskLimits::default(),
             orders: BTreeMap::new(),
             marks: HashMap::new(),
             specs: HashMap::new(),
