@@ -63,6 +63,9 @@ pub struct TradeDoc {
     pub group: Option<String>,
 }
 
+/// How long a pane waits for a group command's answer before it stops looking.
+const GROUP_ANSWER_WAIT: Duration = Duration::from_secs(60);
+
 /// [`PaneTrade::switch_id`]'s prefix for a group (never an account id: those come from
 /// names as `paper-…`, or from a broker).
 pub const GROUP_SWITCH: &str = "group:";
@@ -138,7 +141,7 @@ pub struct PaneTrade {
     /// settings). `None`: one account.
     pub group: Option<(String, Vec<AccountId>)>,
     /// Group commands sent from here, waiting for their per-member results.
-    group_sent: Vec<(lines_trading::CommandId, GroupAct)>,
+    group_sent: Vec<(lines_trading::CommandId, GroupAct, Instant)>,
     /// Screenshot fixture (`pane-group NAME`): the group to take once the script made it.
     pending_group: Option<String>,
 }
@@ -325,7 +328,7 @@ impl PaneTrade {
 
     /// A group command sent from this pane: its result is said when it comes.
     pub fn group_sent(&mut self, id: lines_trading::CommandId, act: GroupAct) {
-        self.group_sent.push((id, act));
+        self.group_sent.push((id, act, Instant::now()));
     }
 
     /// The pane's group as the core has it now: members followed; a group deleted (or
@@ -354,20 +357,24 @@ impl PaneTrade {
         let Some(c) = self.cache.as_ref().and_then(|c| c.try_read()) else {
             return false;
         };
-        let now = c
+        // Cloned only when it changed (this runs every tick, hidden panes too).
+        let now = match c
             .groups()
             .iter()
             .find(|g| lines_trading::group::same_name(&g.name, name))
-            .map(|g| (g.name.clone(), g.members.clone()));
+        {
+            Some(g) if g.name == *name && g.members == *members => return false,
+            Some(g) => Some((g.name.clone(), g.members.clone())),
+            None => None,
+        };
         drop(c);
         match now {
-            Some((n, m)) if n == *name && m == *members => false,
             Some((n, m)) => {
                 // An account added to the group was never armed here: trading off, said.
                 let added = m.iter().any(|a| !members.contains(a));
-                if let Some(first) = m.first() {
-                    self.account = Some(first.clone());
-                }
+                // Its first member; none left: no account (nothing to trade).
+                self.account = m.first().cloned();
+                self.seen = u64::MAX;
                 if added && self.arming.is_armed() {
                     self.arming = Arming::new(false);
                     self.notice(format!("{n} has a new member: trading off"));
@@ -405,7 +412,11 @@ impl PaneTrade {
                 .unwrap_or_else(|| id.0.clone())
         };
         let mut said = None;
-        self.group_sent.retain(|(id, act)| {
+        self.group_sent.retain(|(id, act, at)| {
+            // An answer the cache no longer keeps (the pane hidden a long while): dropped.
+            if at.elapsed() > GROUP_ANSWER_WAIT {
+                return false;
+            }
             if let Some((group, results)) = c.group_result(*id) {
                 said = Some((false, group_words(*act, group, results, name)));
                 return false;
@@ -439,6 +450,10 @@ impl PaneTrade {
     /// account listed, with its trading switch off (it never trades another account armed)
     /// and a notice saying so.
     fn account_gone(&mut self) {
+        // On a group, its members are the group's to follow (`sync_group`).
+        if self.group.is_some() {
+            return;
+        }
         let Some((list, retired, venues)) = &self.listed else {
             return;
         };
@@ -487,6 +502,9 @@ impl PaneTrade {
             self.seen_accounts = e;
             self.account_gone();
         }
+        // A hidden armed pane on a group follows its members too (its switch still counts for
+        // a linked chart).
+        self.sync_group();
     }
 
     /// The trading state moved for this pane's account (or a local flash expired).
@@ -517,9 +535,11 @@ impl PaneTrade {
             if r != self.seen {
                 self.seen = r;
                 changed = true;
-                changed |= self.sync_group();
             }
         }
+        // Every tick, never only when a member's revision moved: a change of members alone
+        // (Settings › Groups) moves none of them.
+        changed |= self.sync_group();
         changed |= self.group_answers();
         if self
             .local_flash
@@ -1190,23 +1210,33 @@ pub fn set_group<V: TradePane>(v: &mut V, name: String, cx: &mut Context<V>) {
 /// cancel) names that order's own account already. What a group can't do yet is refused, with
 /// why: an exit added to a position, Reverse, BE.
 pub fn for_pane(pt: &PaneTrade, cmd: TradeCommand) -> Result<TradeCommand, &'static str> {
-    for_group(pt.group.as_ref().map(|(n, _)| n.as_str()), cmd)
+    for_group(
+        pt.group.as_ref().map(|(n, m)| (n.as_str(), m.as_slice())),
+        cmd,
+    )
 }
 
-/// [`for_pane`] for a pane on `group` (`None`: one account).
-pub fn for_group(group: Option<&str>, cmd: TradeCommand) -> Result<TradeCommand, &'static str> {
-    let Some(group) = group else {
+/// [`for_pane`] for a pane on `group` with the members it saw (`None`: one account). A group
+/// order names those members: the core refuses it if they changed since.
+pub fn for_group(
+    group: Option<(&str, &[AccountId])>,
+    cmd: TradeCommand,
+) -> Result<TradeCommand, &'static str> {
+    let Some((group, members)) = group else {
         return Ok(cmd);
     };
     let group = group.to_owned();
+    let members = members.to_vec();
     Ok(match cmd {
         TradeCommand::PlaceOrder(o) => TradeCommand::GroupPlace {
             group,
             order: lines_trading::GroupOrder::Order(o),
+            members,
         },
         TradeCommand::PlaceBracket(b) => TradeCommand::GroupPlace {
             group,
             order: lines_trading::GroupOrder::Bracket(b),
+            members,
         },
         TradeCommand::Flatten { contract, .. } => TradeCommand::GroupFlatten { group, contract },
         TradeCommand::CancelAll { contract, .. } => {
@@ -1900,33 +1930,35 @@ fn group_data(
                 _ => None,
             };
             data.position = Some((p.qty, p.avg_price, ticks, p.unrealised));
-            // One stop for the card only when every member holding a position has one, at
-            // one price (else none: a member's own card says where its stop is).
-            let mut stop: Option<(Price, i64)> = None;
-            let mut one = true;
-            for m in members {
-                let Some(q) = s.position(m, k).map(|p| p.qty).filter(|q| *q != 0) else {
-                    continue;
-                };
-                match card_stop(s.open_orders(m, k), q, last) {
-                    Some((px, n)) => {
-                        let e = stop.get_or_insert((px, 0));
-                        one &= e.0 == px;
-                        e.1 += n;
-                    }
-                    None => one = false,
-                }
+            data.stop = group_stop(members.iter().filter_map(|m| {
+                let q = s.position(m, k).map(|p| p.qty).filter(|q| *q != 0)?;
+                Some(card_stop(s.open_orders(m, k), q, last))
+            }));
+            // Long and short members: no one position to show (and no new order goes).
+            if p.mixed {
+                data.position = None;
             }
-            data.stop = stop.filter(|_| one);
         }
     }
     data.day_pnl = members
         .iter()
         .filter_map(|m| s.account(m).map(|a| a.day_pnl))
         .reduce(|a, b| a + b);
-    // A member past a rule: by name (each member's rules are its own).
+    // A member past a rule: by name (each member's rules are its own). First: positions that
+    // point different ways refuse every new order (`MEMBERS_DIFFER`).
     data.blocked = None;
     data.blocked_short = None;
+    if let Some(k) = contract
+        && !same_direction(
+            members
+                .iter()
+                .map(|m| s.position(m, k).map_or(0, |p| p.qty)),
+        )
+    {
+        data.blocked = Some(format!("Positions differ · {MEMBERS_DIFFER}"));
+        data.blocked_short = Some("positions differ");
+        return finish_group(data, s, members, contract, &member_name);
+    }
     for m in members {
         let Some(a) = s.account(m) else { continue };
         let words = match a.trading {
@@ -1941,6 +1973,33 @@ fn group_data(
         data.blocked_short = Some("a member limited");
         break;
     }
+    finish_group(data, s, members, contract, &member_name);
+}
+
+/// The group's card stop from each member holding a position's own (`None`: that member has
+/// none): only when every one has a stop, at one price (else none: each member's own pane says
+/// where its stop is).
+pub fn group_stop(stops: impl IntoIterator<Item = Option<(Price, i64)>>) -> Option<(Price, i64)> {
+    let mut out: Option<(Price, i64)> = None;
+    for s in stops {
+        let (px, n) = s?;
+        let e = out.get_or_insert((px, 0));
+        if e.0 != px {
+            return None;
+        }
+        e.1 += n;
+    }
+    out
+}
+
+/// The rest of a group's card: refusals named by member, unresolved and strategies summed.
+fn finish_group(
+    data: &mut BarData,
+    s: &crate::trading::TradeState,
+    members: &[AccountId],
+    contract: Option<ContractKey>,
+    member_name: &dyn Fn(&AccountId) -> String,
+) {
     let now = Instant::now();
     data.flashes = s
         .flashes_in(members, contract, now)
@@ -6364,7 +6423,8 @@ mod tests {
     #[test]
     fn a_group_pane_sends_the_groups_commands() {
         let a = AccountId::new("a");
-        let g = Some("Evals");
+        let members = [a.clone(), AccountId::new("b")];
+        let g = Some(("Evals", &members[..]));
         let spec = lines_trading::OrderSpec {
             account: a.clone(),
             contract: lines_core::ContractKey::monthly(
@@ -6383,6 +6443,7 @@ mod tests {
             Ok(TradeCommand::GroupPlace {
                 group: "Evals".into(),
                 order: lines_trading::GroupOrder::Order(spec.clone()),
+                members: members.to_vec(),
             })
         );
         let flat = for_group(
@@ -6412,6 +6473,22 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// The group's card stop: only when every member holding a position has one at one price.
+    #[test]
+    fn a_groups_stop_is_one_price_or_none() {
+        let p = |x: f64| Price((x * 100.0) as i64);
+        assert_eq!(group_stop([]), None);
+        assert_eq!(
+            group_stop([Some((p(5990.0), 1)), Some((p(5990.0), 2))]),
+            Some((p(5990.0), 3))
+        );
+        assert_eq!(
+            group_stop([Some((p(5990.0), 1)), Some((p(5970.0), 1))]),
+            None
+        );
+        assert_eq!(group_stop([Some((p(5990.0), 1)), None]), None);
     }
 
     /// A group order is built from the first member's position only while every member's

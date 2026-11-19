@@ -567,6 +567,7 @@ fn group_place(
     r.cmd(Command::GroupPlace {
         group: group.into(),
         order,
+        members: Vec::new(),
     })
 }
 
@@ -585,6 +586,7 @@ fn a_group_order_places_one_order_per_member() {
         Command::GroupPlace {
             group: "Evals".into(),
             order: GroupOrder::Order(limit_spec(2, 5990.0)),
+            members: Vec::new(),
         },
     );
     r.collect();
@@ -664,6 +666,7 @@ fn each_member_is_checked_alone() {
             Command::GroupPlace {
                 group: "Evals".into(),
                 order: GroupOrder::Order(limit_spec(1, 5990.0)),
+                members: Vec::new(),
             },
         )
         .unwrap_err();
@@ -687,6 +690,7 @@ fn a_group_bracket_is_one_bracket_per_member() {
                 take_profit: Some(px(6000.0)),
                 stop_loss: Some(px(5980.0)),
             }),
+            members: Vec::new(),
         },
     );
     r.collect();
@@ -769,4 +773,29 @@ fn an_empty_group_is_refused_and_prop_rules_stay_each_members() {
         results[1].result.as_ref().unwrap_err().code,
         RejectCode::PropRule
     );
+}
+
+/// A group order sent for the members the pane saw is refused once they changed: an account
+/// added since never gets an order nobody armed for it.
+#[test]
+fn a_group_order_for_old_members_is_refused() {
+    let mut r = Rig::new();
+    create(&mut r, "Evals", &["a"]).unwrap();
+    r.market(es(), 5999.75, 6000.25, 6000.00);
+    let order = |seen: &[&str]| Command::GroupPlace {
+        group: "Evals".into(),
+        order: GroupOrder::Order(limit_spec(1, 5990.0)),
+        members: ids(seen),
+    };
+    r.cmd(order(&["a"])).expect("as seen");
+    r.cmd(Command::SetGroupMembers {
+        group: "Evals".into(),
+        members: ids(&["a", "b"]),
+    })
+    .unwrap();
+    let e = r.cmd(order(&["a"])).unwrap_err();
+    assert!(e.message.contains("members changed"), "{}", e.message);
+    assert_eq!(r.core.open_orders(&id("b")).count(), 0, "b never got one");
+    // The members now, in any order.
+    r.cmd(order(&["b", "a"])).expect("as they are");
 }

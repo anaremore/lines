@@ -276,6 +276,12 @@ pub enum Command {
     GroupPlace {
         group: String,
         order: GroupOrder,
+        /// The members the sender saw (a pane: those it was armed with). When given, the
+        /// order is refused unless they are the group's members now (in any order): an
+        /// account added since never gets an order nobody armed for it. Optional: empty, not
+        /// checked (the API, scripts).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        members: Vec<AccountId>,
     },
     /// [`Command::Flatten`] on every member of a group, as [`Command::GroupCancelAll`].
     GroupFlatten {

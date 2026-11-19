@@ -213,6 +213,9 @@ pub struct ViewPosition {
     pub qty: i64,
     pub avg_price: Option<f64>,
     pub unrealised: lines_trading::Money,
+    /// Some accounts long and some short: `qty` is their sum, which reads as one position
+    /// that none of them holds (shown as mixed, never as that sum).
+    pub mixed: bool,
 }
 
 /// An account's guardrail state as the UI shows it: a cooldown or lockout, why, and until when.
@@ -708,6 +711,7 @@ impl TradeState {
                 qty: 0,
                 avg_price: None,
                 unrealised: lines_trading::Money::ZERO,
+                mixed: false,
             });
             v.qty += p.qty;
             v.unrealised += p.unrealised;
@@ -722,6 +726,9 @@ impl TradeState {
                     None => priced = false,
                 }
             }
+        }
+        if let Some(v) = out.as_mut() {
+            v.mixed = sides.0 && sides.1;
         }
         if let Some(v) = out.as_mut()
             && v.qty != 0
@@ -2760,10 +2767,12 @@ pub fn parse_script(
                         TradeCommand::PlaceOrder(o) => TradeCommand::GroupPlace {
                             group: g.clone(),
                             order: lines_trading::GroupOrder::Order(o),
+                            members: Vec::new(),
                         },
                         TradeCommand::PlaceBracket(b) => TradeCommand::GroupPlace {
                             group: g.clone(),
                             order: lines_trading::GroupOrder::Bracket(b),
+                            members: Vec::new(),
                         },
                         TradeCommand::Flatten { contract, .. } => TradeCommand::GroupFlatten {
                             group: g.clone(),
@@ -3494,6 +3503,8 @@ mod tests {
                     qty: Qty(2),
                     kind: OrderKind::Market,
                 }),
+                // As a pane sends it: the members it saw.
+                members: members.clone(),
             },
         );
         t.handle().advance_to(UtcMillis(open.0 + 1_000));

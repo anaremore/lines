@@ -16,7 +16,8 @@
 //! `PlaceBracket` at the member's size, handled as if alone, so each member's risk limits,
 //! prop rules, guardrails, rate limits and bracket mode check its own order; a member whose
 //! size isn't a whole number of contracts is refused (never rounded). Each member order's id
-//! is mapped to the group command's ([`TradingCore::group_command_of`]).
+//! is mapped to the group command's ([`TradingCore::group_command_of`]). A group order that
+//! names the members its sender saw is refused when they are no longer the group's.
 
 use lines_core::UtcMillis;
 
@@ -99,15 +100,29 @@ impl TradingCore {
                     Ok(Command::Flatten { account, contract })
                 })
             }
-            Command::GroupPlace { group, order } => {
-                // An order to no one never reads as placed.
-                if let Ok(i) = self.group_index(&group)
-                    && self.groups[i].members.is_empty()
-                {
-                    return Some(Err(Reject::new(
-                        RejectCode::Invalid,
-                        format!("{} has no members", self.groups[i].name),
-                    )));
+            Command::GroupPlace {
+                group,
+                order,
+                members: seen,
+            } => {
+                if let Ok(i) = self.group_index(&group) {
+                    let g = &self.groups[i];
+                    // An order to no one never reads as placed.
+                    if g.members.is_empty() {
+                        return Some(Err(Reject::new(
+                            RejectCode::Invalid,
+                            format!("{} has no members", g.name),
+                        )));
+                    }
+                    // Sent for the members the sender saw: the group's now, or nothing.
+                    let same =
+                        seen.len() == g.members.len() && seen.iter().all(|m| g.members.contains(m));
+                    if !seen.is_empty() && !same {
+                        return Some(Err(Reject::new(
+                            RejectCode::Invalid,
+                            format!("{}'s members changed: check them and send again", g.name),
+                        )));
+                    }
                 }
                 let r = self.group_each(now, env, &group, |account, size| {
                     let qty = size.of(order.qty()).ok_or_else(|| {
