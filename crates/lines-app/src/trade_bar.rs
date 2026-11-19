@@ -146,7 +146,7 @@ pub struct PaneTrade {
     group_sent: Vec<(lines_trading::CommandId, GroupAct, Instant)>,
     /// A stack's move sent from here (`move_stack`): each order's modify and account, waiting
     /// for every answer to say how it went ("Moved 1 of 2 · …").
-    stack_sent: Vec<(Vec<(lines_trading::CommandId, AccountId)>, Instant)>,
+    stack_sent: Vec<StackSent>,
     /// Screenshot fixture (`pane-group NAME`): the group to take once the script made it.
     pending_group: Option<String>,
 }
@@ -446,7 +446,7 @@ impl PaneTrade {
             }
         });
         // A stack's move: once every modify answered, one line for all of them.
-        self.stack_sent.retain(|(sent, at)| {
+        self.stack_sent.retain(|(sent, skipped, at)| {
             if at.elapsed() > GROUP_ANSWER_WAIT {
                 return false;
             }
@@ -462,7 +462,12 @@ impl PaneTrade {
                 .collect();
             match answers {
                 Some(results) => {
-                    said = Some((false, group_words(GroupAct::Move, "", &results, name)));
+                    let mut words = group_words(GroupAct::Move, "", &results, name);
+                    // Orders that finished before the drag landed: of N, never moved.
+                    if *skipped > 0 {
+                        words = stack_words_with_skipped(&words, results.len(), *skipped);
+                    }
+                    said = Some((false, words));
                     false
                 }
                 None => true,
@@ -1338,6 +1343,9 @@ pub fn send<V: TradePane>(
 pub const STACK_OTHERS: &str = "not draggable: other accounts' orders here";
 /// As [`STACK_OTHERS`], for a stack spanning several prices (zoomed out, or DOM rows grouped).
 pub const STACK_PRICES: &str = "not draggable: orders at several prices";
+/// As [`STACK_OTHERS`], for a chart tag holding several kinds (a plot too short for a tag per
+/// kind): an entry never moves with exits.
+pub const STACK_KINDS: &str = "not draggable: orders of several kinds";
 
 /// Whether a stack of orders may be dragged as one (every order moved to the new price, one
 /// modify each): only on a pane trading a group, every order its members', all at one price.
@@ -1367,20 +1375,26 @@ pub fn stack_drag_for(
     Ok(true)
 }
 
+/// "Moved n of N…" with `skipped` orders (finished before the release) added to N and said.
+pub fn stack_words_with_skipped(words: &str, sent: usize, skipped: usize) -> String {
+    let total = sent + skipped;
+    let mut out = words.replacen(&format!(" of {sent}"), &format!(" of {total}"), 1);
+    let _ = write!(out, " · {skipped} finished first (nothing to move)");
+    out
+}
+
+/// An order's held stop and target (each with its price), moving with it.
+pub type Legs = [Option<(lines_trading::OrderId, Price)>; 2];
+/// A stack's move sent: each modify and its account, how many orders had finished first, when.
+type StackSent = (Vec<(lines_trading::CommandId, AccountId)>, usize, Instant);
+
 /// A stack's modifies: one per order that moves (each its own account's, an entry's held
 /// legs with it when `with_legs`), never one for an order already there.
 pub fn stack_commands(
-    orders: Vec<(
-        lines_trading::Order,
-        [Option<(lines_trading::OrderId, Price)>; 2],
-    )>,
+    orders: Vec<(lines_trading::Order, Legs)>,
     to: Price,
     with_legs: bool,
-) -> Vec<(
-    lines_trading::Order,
-    [Option<(lines_trading::OrderId, Price)>; 2],
-    TradeCommand,
-)> {
+) -> Vec<(lines_trading::Order, Legs, TradeCommand)> {
     orders
         .into_iter()
         .filter_map(|(o, legs)| {
@@ -1408,10 +1422,7 @@ pub fn move_stack<V: TradePane>(
         return Vec::new();
     };
     let with_legs = crate::picker_view::settings(cx).move_bracket();
-    let held: Vec<(
-        lines_trading::Order,
-        [Option<(lines_trading::OrderId, Price)>; 2],
-    )> = {
+    let held: Vec<(lines_trading::Order, Legs)> = {
         let c = t.cache.read();
         orders
             .iter()
@@ -1435,6 +1446,9 @@ pub fn move_stack<V: TradePane>(
     }
     let mut ghosts = Vec::new();
     let mut sent = Vec::new();
+    // Orders gone or finished since the press (filled meanwhile): nothing to move, but counted
+    // in the "of N" (the notice says how many of the stack moved).
+    let skipped = orders.len() - stack_commands(held.clone(), to, with_legs).len();
     for (o, legs, cmd) in stack_commands(held, to, with_legs) {
         let Some(from) = dom_trade::order_price(&o) else {
             continue;
@@ -1451,8 +1465,8 @@ pub fn move_stack<V: TradePane>(
         });
         ghosts.extend(dom_trade::leg_ghosts(legs, o.id, from, to, id));
     }
-    if sent.len() > 1 {
-        v.trade().stack_sent.push((sent, Instant::now()));
+    if !sent.is_empty() && orders.len() > 1 {
+        v.trade().stack_sent.push((sent, skipped, Instant::now()));
     }
     ghosts
 }
@@ -6633,6 +6647,15 @@ mod tests {
             );
         }
         assert!(stack_commands(vec![(a, [None; 2])], Price(600_000), true).is_empty());
+    }
+
+    /// Orders that finished before the release count in "of N" and are said.
+    #[test]
+    fn a_stacks_finished_orders_count_in_its_outcome() {
+        assert_eq!(
+            stack_words_with_skipped("Moved 1 of 1", 1, 1),
+            "Moved 1 of 2 · 1 finished first (nothing to move)"
+        );
     }
 
     /// A stack's move in words: no group name, the refused member named.

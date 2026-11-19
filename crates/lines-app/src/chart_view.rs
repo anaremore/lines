@@ -2349,6 +2349,8 @@ impl ChartView {
             && k.key == "escape"
         {
             self.ct.drag = None;
+            self.ct.drag_stack.clear();
+            self.ct.stack_tag = None;
             self.ct.adding = None;
             self.ct.pos_drag = false;
             self.ct.add_from = None;
@@ -3990,6 +3992,8 @@ impl ChartView {
         if self.ct.drag.is_some() || self.ct.adding.is_some() || self.ct.pos_drag {
             if ev.pressed_button != Some(MouseButton::Left) {
                 self.ct.drag = None;
+                self.ct.drag_stack.clear();
+                self.ct.stack_tag = None;
                 self.ct.adding = None;
                 self.ct.pos_drag = false;
             } else {
@@ -4499,6 +4503,10 @@ impl ChartView {
         cx: &App,
     ) -> Option<Result<(Vec<lines_trading::OrderId>, Price), &'static str>> {
         let g = self.ct.group_of(id).copied()?;
+        // A tag of several kinds (a short plot): an entry never moves with exits.
+        if self.trade.group.is_some() && g.key == lines_core::geometry::order_tags::MIXED_KEY {
+            return Some(Err(crate::trade_bar::STACK_KINDS));
+        }
         let t = crate::trading::Trading::try_global(cx)?;
         let orders: Vec<lines_trading::Order> = {
             let c = t.cache.read();

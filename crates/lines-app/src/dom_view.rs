@@ -878,11 +878,18 @@ impl DomView {
             // Anywhere else in the pane: abort.
             if let Some(at) = self.row_at(ev.position) {
                 if self.orders.on_row(d.order, at, self.row_units()) {
-                    trade_bar::open_resize_field(self, d.order);
+                    // A stack's mark has no size of one order to type: a click on it does
+                    // nothing (moving it is the drag).
+                    if d.count > 1 {
+                        self.orders.drag_stack.clear();
+                    } else {
+                        trade_bar::open_resize_field(self, d.order);
+                    }
                 } else {
                     self.drop_order(d, cx);
                 }
             }
+            self.orders.drag_stack.clear();
             cx.notify();
         }
         if self.cols.drag.take().is_some() {
