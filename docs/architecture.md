@@ -149,6 +149,8 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 #   --settings-size WxH (the window's size, default 860x620; raised to the 640x420 minimum).
 #   --econ-calendar FILE (an economic calendar in the bundled file's format, read instead of the bundled one by
 #   the app and its trading cores: synthetic releases on synthetic data). Trading scripts: `guard news warn|block|flatten`.
+#   --econ-fred-fixture FILE (FRED's answers, a line per release: its key then YYYY-MM-DD dates, run through the refresh's
+#   mapping and cadence check onto the bundled calendar at --at, no network; conflicts with --econ-calendar).
 # --price-zoom F zooms the auto-fitted price range by F (as Ctrl+wheel), i.e. manual price scale.
 # --pan-bars N pans the charts N bars back from the newest (as a drag; stops following live).
 # Layout: --layout trading (default: chart | DOM over time & sales) or chart, or --workspace NAME

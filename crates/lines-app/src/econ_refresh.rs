@@ -8,8 +8,9 @@
 //!   [`RETRY`]. It never blocks trading: the news blackout reads whatever calendar is in use,
 //!   and a stale one refuses entries under block or flatten as before (never taken as clear).
 //! - Each refresh merges onto the build's own calendar, never onto an earlier refresh, and
-//!   the cache records which build's calendar that was (`# base <hash>`): a build whose
-//!   calendar changed (a corrected time, a new product) never uses an older build's cache.
+//!   the cache records which build's calendar that was and under which FRED mapping
+//!   (`# base <hash> mapping <n>`): a build whose calendar or mapping changed never uses an
+//!   older build's cache (dates a wrong mapping added go with it).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
@@ -71,7 +72,7 @@ pub fn load_cache() {
             econ_ui::replace(Arc::new(s));
         }
         None => tracing::info!(
-            "economic calendar: the cache is from another build, older or unreadable; bundled"
+            "economic calendar: the cache is from another build or FRED mapping, older or unreadable; bundled"
         ),
     }
 }
@@ -186,15 +187,17 @@ pub fn refresh_once(
     now: lines_core::UtcMillis,
 ) -> Result<(EconSchedule, Option<String>), String> {
     let today = base.local_date(now);
-    let got = fred::fetch(base, key, today);
-    if got.dates.is_empty() {
-        return Err(got.problem.unwrap_or_else(|| "no dates".to_owned()));
+    let (answers, failed) = fred::fetch(base, key, today);
+    if answers.is_empty() {
+        return Err(failed.unwrap_or_else(|| "no dates".to_owned()));
     }
-    let complete = got.complete(base, today);
-    let s = base
-        .refreshed(&got.dates, &fred::source_page, today, complete)
-        .map_err(|e| e.to_string())?;
-    Ok((s, got.problem.map(|p| format!("partly: {p}"))))
+    // The one path FRED's dates take into the calendar (the mapping and the cadence check).
+    let (s, refused) = merge(base, answers, today);
+    let problem = refused.or(failed);
+    if s == *base && problem.is_some() {
+        return Err(problem.unwrap_or_default());
+    }
+    Ok((s, problem.map(|p| format!("partly: {p}"))))
 }
 
 /// Start refreshing (the interactive app, once).
@@ -309,9 +312,9 @@ mod tests {
         assert!(usable_cache(&format!("{}\n{}", base_line(h), bad.to_text()), &b, h).is_some());
     }
 
-    /// The live path end to end (no network): FRED's answers as the owner got them, FOMC
-    /// every day and CPI monthly, through the mapping and the cadence check onto the bundled
-    /// calendar: no FOMC line is added, CPI's are.
+    /// The live path past the network (`refresh_once` → `merge`): FRED's answers as the owner
+    /// got them, FOMC every day and CPI monthly, through the mapping and the cadence check
+    /// onto the bundled calendar: no FOMC line is added, CPI's are.
     #[test]
     fn fred_answers_with_daily_fomc_add_no_fomc_line() {
         let b = lines_feed::econ::bundled();

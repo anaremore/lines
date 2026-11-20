@@ -30,8 +30,8 @@ pub fn bundled() -> Arc<EconSchedule> {
 }
 
 /// The calendar refresh's official source (roadmap 8b): FRED, the Federal Reserve Bank of St.
-/// Louis's API, which publishes the agencies' own release calendars (BLS, BEA and the Board's
-/// FOMC statements) as dates. No other site is read and nothing is scraped. A FRED API key
+/// Louis's API, which publishes the agencies' own release calendars (BLS, BEA) as dates
+/// (never FOMC's: see [`fred::RELEASES`]). No other site is read and nothing is scraped. A FRED API key
 /// (free, the user's own) is needed; Lines keeps it in the OS keychain.
 pub mod fred {
     use lines_core::CivilDate;
@@ -123,9 +123,10 @@ pub mod fred {
             .windows(2)
             .find(|w| w[1].days() - w[0].days() < m.min_gap_days)
         {
+            let n = w[1].days() - w[0].days();
             return Err(format!(
-                "dates {} days apart ({} and {})",
-                w[1].days() - w[0].days(),
+                "dates {n} day{} apart ({} and {})",
+                if n == 1 { "" } else { "s" },
                 w[0],
                 w[1]
             ));
@@ -243,10 +244,14 @@ pub mod fred {
         }
     }
 
+    /// FRED's answers, unchecked: each release's dates, and the first failure to get one.
+    pub type Answers = (Vec<(String, Vec<CivilDate>)>, Option<String>);
+
     /// Ask FRED for every release of `schedule` Lines takes from it (blocking; never on a UI
-    /// thread), then keep only answers that keep their cadence ([`validated`]). A release that
-    /// fails is left out and the first failure kept; nothing in it names the key.
-    pub fn fetch(schedule: &EconSchedule, api_key: &str, from: CivilDate) -> Fetched {
+    /// thread). The answers are raw: [`validated`] decides which may be used (the app's one
+    /// path, `econ_refresh::merge`). A release that fails is left out and the first failure
+    /// kept; nothing in it names the key.
+    pub fn fetch(schedule: &EconSchedule, api_key: &str, from: CivilDate) -> Answers {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .http_status_as_error(false)
@@ -292,16 +297,30 @@ pub mod fred {
                 }
             }
         }
-        let mut out = validated(schedule, answers, from);
-        if out.problem.is_none() {
-            out.problem = problem;
-        }
-        out
+        (answers, problem)
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        /// The real schedules keep their cadence: every mapped release's bundled dates pass
+        /// the check from the bundled calendar's version on (a later tightening that would
+        /// refuse a real list fails here).
+        #[test]
+        fn the_bundled_schedules_keep_their_cadence() {
+            let s = crate::econ::bundled();
+            for m in &RELEASES {
+                let dates: Vec<CivilDate> = s
+                    .events
+                    .iter()
+                    .filter(|e| s.release(e).key == m.key)
+                    .map(|e| s.local_date(e.at))
+                    .collect();
+                assert!(!dates.is_empty(), "{}", m.key);
+                assert_eq!(check(m, &dates, s.version), Ok(()), "{}", m.key);
+            }
+        }
 
         /// Every bundled release but FOMC is taken from FRED; FOMC never is (FRED's release
         /// 101 is dated every day).
@@ -332,7 +351,7 @@ pub mod fred {
             assert!(e.contains("weekend"), "{e}");
             // Weekdays only, but a day apart.
             let e = check(cpi, &[d(2026, 11, 19), d(2026, 11, 20)], today).unwrap_err();
-            assert_eq!(e, "dates 1 days apart (2026-11-19 and 2026-11-20)");
+            assert_eq!(e, "dates 1 day apart (2026-11-19 and 2026-11-20)");
             // Too many in a year, each a week apart.
             let weekly: Vec<CivilDate> = (0..20)
                 .map(|w| CivilDate::from_days(d(2026, 11, 19).days() + 7 * w))
