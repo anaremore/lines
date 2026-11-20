@@ -51,8 +51,15 @@ pub fn card(
 }
 
 /// Where the card goes (body-local, logical px): beside the point at (`x`, `y`), turned left
-/// or up where it would leave the body (`w`, `h`: the body's size; `cw`, `ch`: the card's).
-pub fn card_origin(x: f32, y: f32, (w, h): (f32, f32), (cw, ch): (f32, f32)) -> (f32, f32) {
+/// or up where it would leave the body (`w`, `h`: the body's size; `cw`, `ch`: the card's),
+/// never above `top_min` (below the strip) nor off the body.
+pub fn card_origin(
+    x: f32,
+    y: f32,
+    (w, h): (f32, f32),
+    (cw, ch): (f32, f32),
+    top_min: f32,
+) -> (f32, f32) {
     const GAP: f32 = 12.0;
     let left = if x + GAP + cw <= w {
         x + GAP
@@ -64,7 +71,10 @@ pub fn card_origin(x: f32, y: f32, (w, h): (f32, f32), (cw, ch): (f32, f32)) -> 
     } else {
         y - GAP - ch
     };
-    (left.max(0.0), top.max(0.0))
+    (
+        left.clamp(0.0, (w - cw).max(0.0)),
+        top.clamp(top_min, (h - ch).max(top_min)),
+    )
 }
 
 /// A strip or card button.
@@ -236,10 +246,13 @@ mod tests {
     fn the_card_stays_inside_the_body() {
         let body = (800.0, 400.0);
         let card = (240.0, 90.0);
-        assert_eq!(card_origin(100.0, 100.0, body, card), (112.0, 112.0));
+        assert_eq!(card_origin(100.0, 100.0, body, card, 0.0), (112.0, 112.0));
         // Near the right and bottom edges it turns left and up.
-        assert_eq!(card_origin(700.0, 380.0, body, card), (448.0, 278.0));
+        assert_eq!(card_origin(700.0, 380.0, body, card, 0.0), (448.0, 278.0));
         // Never off the top-left.
-        assert_eq!(card_origin(5.0, 5.0, (100.0, 50.0), card), (0.0, 0.0));
+        assert_eq!(card_origin(5.0, 5.0, (100.0, 50.0), card, 0.0), (0.0, 0.0));
+        // A point above the plot: below the strip, inside the body.
+        assert_eq!(card_origin(300.0, -80.0, body, card, 36.0), (312.0, 36.0));
+        assert_eq!(card_origin(900.0, 100.0, body, card, 36.0), (560.0, 112.0));
     }
 }

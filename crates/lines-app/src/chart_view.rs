@@ -3071,9 +3071,11 @@ impl ChartView {
         let Some(tool) = id.and_then(|id| maps.tool(id)).cloned() else {
             return out;
         };
+        let mut top_min = 0.0;
         if let Some(panel) = tool.panel(maps.context(), &self.draw_view()) {
             let right = self.axis_now + self.label_col;
             out.push(crate::tool_panel::strip(tool.id(), &panel, right, t, cx));
+            top_min = 40.0 * crate::zoom::get();
         }
         let Some((_, did, a, b)) = selected.filter(|s| s.0 == tool.id()) else {
             return out;
@@ -3103,7 +3105,7 @@ impl ChartView {
             f32::from(self.chart.size.width),
             f32::from(self.chart.size.height),
         );
-        let at = crate::tool_panel::card_origin(hx + off_x, hy + off_y, body, size);
+        let at = crate::tool_panel::card_origin(hx + off_x, hy + off_y, body, size, top_min);
         out.push(crate::tool_panel::card_view(&card, at, t, cx));
         out
     }
