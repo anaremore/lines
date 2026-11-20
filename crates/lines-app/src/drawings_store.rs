@@ -346,7 +346,7 @@ impl Drawings {
         }
         let (set, path, report, kept, extras, file_extra) = match &self.dir {
             None => (
-                DrawingSet::default(),
+                DrawingSet::from_drawings(restored(product, Vec::new())),
                 None,
                 None,
                 Vec::new(),
@@ -374,7 +374,7 @@ impl Drawings {
                         None => s,
                     });
                 }
-                let mut set = DrawingSet::from_drawings(items);
+                let mut set = DrawingSet::from_drawings(restored(product, items));
                 if let Some(max) = kept.iter().map(|d| d.id).max() {
                     set.reserve_ids_through(max);
                 }
@@ -396,6 +396,26 @@ impl Drawings {
         self.products.insert(product.id, p.clone());
         (p, report)
     }
+}
+
+/// `items` and, after them, the drawings each plugin tool serving `product` kept itself
+/// (`DrawTool::restore`; never in this file: they're the tool's to save). Ids follow `items`'.
+fn restored(product: &Product, mut items: Vec<Drawing>) -> Vec<Drawing> {
+    let ctx = lines_feed::levels::DrawToolContext {
+        product: product.clone(),
+        contract: None,
+    };
+    let mut next = items.iter().map(|d| d.id).max().unwrap_or(0) + 1;
+    for tool in lines_feed::levels::draw_tools_serving(product) {
+        let t = crate::draw_tools::tool_of(&*tool);
+        for (a, b) in tool.restore(&ctx) {
+            let mut d = Drawing::new(t, a, b, lines_core::drawings::Style::for_tool(t));
+            d.id = next;
+            next += 1;
+            items.push(d);
+        }
+    }
+    items
 }
 
 /// The drawings of `product` for a chart (an in-memory set when there is no global: tests).

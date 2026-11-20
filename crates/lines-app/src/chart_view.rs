@@ -2989,6 +2989,117 @@ impl ChartView {
         self.drawing_command(cmd, cx);
     }
 
+    /// What this chart shows, for a plugin tool's strip.
+    fn draw_view(&self) -> lines_feed::levels::DrawView {
+        lines_feed::levels::DrawView {
+            visible: self
+                .drawings
+                .visible()
+                .unwrap_or((UtcMillis(0), UtcMillis(0))),
+            now: self.store.try_read().and_then(|d| d.market_time),
+        }
+    }
+
+    /// A plugin tool's strip button (`crate::tool_panel`): the tool acts, and the chart does
+    /// what it asks back.
+    pub fn tool_action(
+        &mut self,
+        tool: &'static str,
+        action: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        let view = self.draw_view();
+        let maps = self.drawings.tool_maps();
+        let Some(t) = maps.tool(tool).cloned() else {
+            return;
+        };
+        use lines_feed::levels::ToolEffect;
+        match t.act(maps.context(), &view, action) {
+            ToolEffect::None => {}
+            ToolEffect::Redraw => self.drawings.tool_maps_mut().redraw(tool),
+            ToolEffect::Show { from, to } => {
+                self.drawings.tool_maps_mut().redraw(tool);
+                self.show_times(from, to);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Show `from`..`to` across the plot (as far as the chart has bars there).
+    fn show_times(&mut self, from: UtcMillis, to: UtcMillis) {
+        let Some(d) = self.store.try_read() else {
+            return;
+        };
+        let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
+        let len = axis.view.bars.len();
+        if let (Some(a), Some(b)) = (axis.index_of(from), axis.index_of(to)) {
+            self.vp.show_indices(a, b, len);
+        }
+    }
+
+    /// The point card's buttons: the selected plugin drawing's points swap (one undo step).
+    pub fn swap_points(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if self.drawings.swap_selected_points() {
+            cx.notify();
+        }
+    }
+
+    /// A plugin tool's strip (the chosen tool's, else the selected drawing's tool's) and the
+    /// selected drawing's point card, over the plot (`crate::tool_panel`).
+    fn tool_overlays(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut out = Vec::new();
+        if self.drawings.hidden {
+            return out;
+        }
+        let maps = self.drawings.tool_maps();
+        let selected = self.drawings.selected_plugin();
+        let id = match self.drawings.tool() {
+            Some(Tool::Plugin(p)) => Some(p.id),
+            _ => selected.map(|s| s.0),
+        };
+        let Some(tool) = id.and_then(|id| maps.tool(id)).cloned() else {
+            return out;
+        };
+        if let Some(panel) = tool.panel(maps.context(), &self.draw_view()) {
+            let right = self.axis_now + self.label_col;
+            out.push(crate::tool_panel::strip(tool.id(), &panel, right, t, cx));
+        }
+        let Some((_, did, a, b)) = selected.filter(|s| s.0 == tool.id()) else {
+            return out;
+        };
+        let Some(d) = self.store.try_read() else {
+            return out;
+        };
+        let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
+        let prices = crate::draw_tools::BarsPrices(&axis);
+        let point = self.drawings.card_point();
+        let Some(card) = crate::tool_panel::card(&*tool, maps.context(), (a, b), point, &prices)
+        else {
+            return out;
+        };
+        let Some(p) = self.drawings.drawn().iter().find(|p| p.id == did) else {
+            return out;
+        };
+        let (hx, hy) = p.handles[card.point.min(usize::from(p.n_handles.max(1)) - 1)];
+        let off_x = f32::from(self.plot.origin.x - self.chart.origin.x);
+        let off_y = f32::from(self.plot.origin.y - self.chart.origin.y);
+        let z = crate::zoom::get();
+        let size = (
+            crate::tool_panel::CARD_W * z,
+            (card.lines.len() as f32 * 16.0 + 46.0) * z,
+        );
+        let body = (
+            f32::from(self.chart.size.width),
+            f32::from(self.chart.size.height),
+        );
+        let at = crate::tool_panel::card_origin(hx + off_x, hy + off_y, body, size);
+        out.push(crate::tool_panel::card_view(&card, at, t, cx));
+        out
+    }
+
     /// The `ToggleOrderStrip` command.
     pub fn toggle_order_strip(&mut self, cx: &mut Context<Self>) {
         self.order_strip = !self.order_strip;
@@ -7933,11 +8044,12 @@ impl ChartView {
     }
 
     /// The pointer at plot-local (`x`, `y`) as a drawing anchor: the bar's start and a price
-    /// on the tick grid (or its O/H/L/C with the magnet).
+    /// on the tick grid (or its O/H/L/C with the magnet; a bar's high or low for a tool that
+    /// snaps to them).
     fn drawing_anchor(&self, x: f64, y: f64) -> Option<Anchor> {
         let d = self.store.try_read()?;
         let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
-        snap_anchor(
+        self.drawings.snap(
             &axis,
             &self.vp,
             self.instrument.price.tick,
@@ -11037,6 +11149,7 @@ impl Render for ChartView {
             )
             .when_some(self.legend(&t, window, cx), |d, l| d.child(l))
             .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
+            .children(self.tool_overlays(&t, cx))
             .when_some(
                 crate::order_group_view::layer(self, window, &t, cx),
                 |d, m| d.child(m),

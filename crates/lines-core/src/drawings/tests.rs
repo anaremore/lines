@@ -706,3 +706,33 @@ fn time_at_inverts_a_cut_short_last_bucket() {
     // Inside the cut-short bucket: by its own length (0.2 of an hour = 12 minutes).
     assert_eq!(axis.time_at(2.2).unwrap().0, base + 8 * h + 12 * 60_000);
 }
+
+#[test]
+fn snapping_to_a_bars_high_or_low_at_its_trade_time() {
+    use crate::ticks::{TickBars, TickReset};
+    // Fixed bars: the high or the low nearer the pointer, at the bar's start.
+    let s = series();
+    let axis = TimeAxis::new(BarsView::fixed(s.bars(), M));
+    let vp = vp();
+    let x = vp.index_to_x(100.2);
+    let near_high = snap_extreme(&axis, &vp, x, vp.price_to_y(600_100.0)).unwrap();
+    assert_eq!(near_high.price, Price(600_125));
+    assert_eq!(near_high.time, t("2026-11-05T15:40:00Z"));
+    let near_low = snap_extreme(&axis, &vp, x, vp.price_to_y(599_980.0)).unwrap();
+    assert_eq!(near_low.price, Price(599_950));
+    assert!(snap_extreme(&axis, &vp, vp.index_to_x(130.0), 100.0).is_none());
+    // Tick bars: the time of the trade that made the high or the low.
+    let t0 = t("2026-11-05T15:00:00Z").0;
+    let mut tb = TickBars::new(4, TickReset::Session, None, 64);
+    for (s, p) in [(0, 600_000), (7, 600_100), (9, 599_950), (12, 600_050)] {
+        tb.push(UtcMillis(t0 + s * 1000), Price(p), Qty(1), None);
+    }
+    let axis = TimeAxis::new(tb.view());
+    let mut vp = vp;
+    vp.right_index = 0.0;
+    let x = vp.index_to_x(0.0);
+    let hi = snap_extreme(&axis, &vp, x, vp.price_to_y(600_090.0)).unwrap();
+    assert_eq!((hi.price, hi.time), (Price(600_100), UtcMillis(t0 + 7000)));
+    let lo = snap_extreme(&axis, &vp, x, vp.price_to_y(599_960.0)).unwrap();
+    assert_eq!((lo.price, lo.time), (Price(599_950), UtcMillis(t0 + 9000)));
+}

@@ -20,14 +20,14 @@ use gpui::{Bounds, Hsla, PathBuilder, Pixels, Window, fill, point, px, size};
 use lines_core::drawings::{
     Anchor, Drawing, DrawingId, Hit, MAX_STROKE, MeasureStats, Projected, Style, TimeAxis, Tool,
     grid_price, measure, pick, project, project_levels, project_points, simplify_stroke,
-    snap_anchor,
+    snap_anchor, snap_extreme,
 };
 use lines_core::instrument::Ratio;
 use lines_core::levels::clip_segment;
 use lines_core::style::DashPattern;
 use lines_core::{PriceFormat, UtcMillis, Viewport};
 
-use crate::draw_tools::{PREVIEW, ToolMaps};
+use crate::draw_tools::{BarsPrices, NoBars, PREVIEW, ToolMaps};
 use crate::drawings_store::{MAX_NOTE, ProductDrawings};
 use crate::style_editor::{Outcome, StyleEditor};
 use crate::theme::{Theme, drawing_dash};
@@ -147,6 +147,11 @@ pub struct ChartDrawings {
     /// The plugin drawing tools serving this product and their drawings' levels
     /// (`crate::draw_tools`), updated in `prepare` when a drawing's points change.
     tools: ToolMaps,
+    /// The first and last visible bar's start (last `prepare`): a plugin tool's strip.
+    visible: Option<(UtcMillis, UtcMillis)>,
+    /// The selected plugin drawing's point its card describes (0: `a`, 1: `b`): the handle
+    /// last pressed, `b` after a placement.
+    card_point: usize,
 }
 
 impl ChartDrawings {
@@ -185,6 +190,8 @@ impl ChartDrawings {
             measure_drawn: None,
             note_drawn: None,
             plot: (0.0, 0.0),
+            visible: None,
+            card_point: 1,
         }
     }
 
@@ -222,6 +229,84 @@ impl ChartDrawings {
     /// levels layer's maps).
     pub fn tool_maps(&self) -> &ToolMaps {
         &self.tools
+    }
+
+    /// The plugin drawing tools on this chart, to change (a tool's button redraws it).
+    pub fn tool_maps_mut(&mut self) -> &mut ToolMaps {
+        &mut self.tools
+    }
+
+    /// Whether `tool` is a plugin tool whose points snap to bars' highs and lows
+    /// (`DrawSnap::HighLow`).
+    fn snaps_extremes(&self, tool: Tool) -> bool {
+        match tool {
+            Tool::Plugin(p) => self
+                .tools
+                .tool(p.id)
+                .is_some_and(|t| t.snap() == lines_feed::levels::DrawSnap::HighLow),
+            _ => false,
+        }
+    }
+
+    /// The tool whose points the pointer places or moves now: the chosen tool, else a drag's.
+    fn placing(&self) -> Option<Tool> {
+        self.tool
+            .or_else(|| self.drag.as_ref().map(|d| d.original.tool))
+    }
+
+    /// The pointer at plot-local (`x`, `y`) as an anchor for what it places or moves now: a
+    /// bar's high or low at its trade time for a tool that snaps to them, else
+    /// [`snap_anchor`]'s (the grid, or the magnet).
+    pub fn snap(
+        &self,
+        axis: &TimeAxis<'_>,
+        vp: &Viewport,
+        tick: i64,
+        magnet: bool,
+        x: f64,
+        y: f64,
+    ) -> Option<Anchor> {
+        match self.placing() {
+            Some(t) if self.snaps_extremes(t) => snap_extreme(axis, vp, x, y),
+            _ => snap_anchor(axis, vp, tick, magnet, x, y),
+        }
+    }
+
+    /// The first and last visible bar's start, as of the last frame.
+    pub fn visible(&self) -> Option<(UtcMillis, UtcMillis)> {
+        self.visible
+    }
+
+    /// The selected plugin drawing's point its card describes (0: `a`, 1: `b`).
+    pub fn card_point(&self) -> usize {
+        self.card_point
+    }
+
+    /// The selected drawing, if it is a plugin tool's: its tool id and its points.
+    pub fn selected_plugin(&self) -> Option<(&'static str, DrawingId, Anchor, Anchor)> {
+        let id = self.selected.filter(|_| !self.hidden)?;
+        let set = self.data.lock();
+        let d = set.get(id)?;
+        match d.tool {
+            Tool::Plugin(p) => Some((p.id, id, d.a, d.b)),
+            _ => None,
+        }
+    }
+
+    /// Swap the selected plugin drawing's two points (its tool names them: the point card's
+    /// buttons). One undo step.
+    pub fn swap_selected_points(&mut self) -> bool {
+        let Some(id) = self.selected.filter(|_| !self.hidden) else {
+            return false;
+        };
+        let Some(mut d) = self.data.lock().get(id).cloned() else {
+            return false;
+        };
+        if !d.tool.is_plugin() {
+            return false;
+        }
+        std::mem::swap(&mut d.a, &mut d.b);
+        self.data.change(|s| (s.edit(d), true))
     }
 
     /// The chart's contract (plugin tools draw for it).
@@ -763,9 +848,17 @@ impl ChartDrawings {
                 self.weak_press = Some((id, (x, y)));
                 false
             }
-            // The selected drawing (a handle or its body) drags.
+            // The selected drawing (a handle or its body) drags; a drawing whose points sit on
+            // bars' highs and lows moves only by its handles.
             Some((id, hit)) if Some(id) == self.selected => {
-                if let (Some(d), Some(from)) = (self.data.lock().get(id).cloned(), anchor) {
+                let d = self.data.lock().get(id).cloned();
+                if hit == Hit::Body && d.as_ref().is_some_and(|d| self.snaps_extremes(d.tool)) {
+                    return false;
+                }
+                if let Hit::Handle(i) = hit {
+                    self.card_point = i.min(1);
+                }
+                if let (Some(d), Some(from)) = (d, anchor) {
                     self.drag = Some(Drag {
                         hit,
                         original: d,
@@ -854,7 +947,15 @@ impl ChartDrawings {
 
     fn finish(&mut self, tool: Tool, a: Anchor, b: Anchor) {
         self.pending = None;
-        self.tool = None;
+        // A plugin tool may stay chosen to place several in a row.
+        let stays = match tool {
+            Tool::Plugin(p) => self.tools.tool(p.id).is_some_and(|t| t.stays_chosen()),
+            _ => false,
+        };
+        if !stays {
+            self.tool = None;
+        }
+        self.card_point = 1;
         if tool == Tool::Measure {
             self.measure = Some((a, b));
         } else {
@@ -1097,12 +1198,19 @@ impl ChartDrawings {
         self.pts.clear();
         self.pinned.clear();
         self.plot = (vp.width as f32, vp.height as f32);
+        self.visible = {
+            let n = axis.view.bars.len();
+            let r = vp.visible_range(n);
+            let last = r.end.saturating_sub(1).max(r.start);
+            axis.slot_time(r.start as i64)
+                .zip(axis.slot_time(last as i64))
+        };
         self.preview = None;
         self.measure_drawn = None;
         self.note_drawn = None;
         if self.hidden {
             // Hidden drawings draw no levels either.
-            self.tools.update(std::iter::empty(), tick);
+            self.tools.update(std::iter::empty(), tick, &NoBars);
             return;
         }
         // A brush stroke: each new sample to data space on the frame it arrived (a view that
@@ -1140,13 +1248,20 @@ impl ChartDrawings {
         }
         let pointer = self
             .pointer
-            .and_then(|(x, y)| snap_anchor(axis, vp, tick, magnet, f64::from(x), f64::from(y)));
+            .and_then(|(x, y)| self.snap(axis, vp, tick, magnet, f64::from(x), f64::from(y)));
         // A drag's drawing follows the pointer.
         self.dragged = match (&self.drag, pointer) {
             (Some(drag), Some(at)) => Some(dragged(drag, at, axis, tick)),
             _ => self.dragged.take(),
         };
         let set = self.data.lock();
+        // Plugin tools hear of their saved drawings' changes (any chart of the product).
+        self.tools.report(
+            set.items()
+                .iter()
+                .filter(|d| d.tool.is_plugin())
+                .map(|d| (d.tool, d.a, d.b)),
+        );
         // Plugin tools' levels: drawn again only for a drawing whose points moved (placed, a
         // handle dragged), and for the placement's preview. Before projecting: a plugin
         // drawing is hit-tested on the levels drawn for where it is now.
@@ -1169,7 +1284,7 @@ impl ChartDrawings {
                 (d.id, d.tool, d.a, d.b)
             })
             .chain(preview);
-        self.tools.update(plugin, tick);
+        self.tools.update(plugin, tick, &BarsPrices(axis));
         if self.drawn.capacity() < set.items().len() {
             self.drawn.reserve(set.items().len() - self.drawn.len());
         }

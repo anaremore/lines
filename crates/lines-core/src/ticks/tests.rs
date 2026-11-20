@@ -520,3 +520,19 @@ fn every_kind_resets_at_the_session_open() {
         assert_eq!(c.len(), expect, "{kind:?} continuous");
     }
 }
+
+/// Each bar knows when it made its high and its low: the first trade at each, in feed order,
+/// even when a later trade matches it.
+#[test]
+fn bars_know_when_they_made_their_high_and_low() {
+    let t0 = t("2026-11-05T15:00:00Z");
+    let at = |s: i64| UtcMillis(t0.0 + s * 1000);
+    let mut tb = TickBars::new(5, TickReset::Session, None, 100);
+    for (s, p) in [(0, 100), (1, 104), (2, 98), (3, 104), (4, 98), (5, 101)] {
+        tb.push(at(s), Price(p), Qty(1), BUY);
+    }
+    assert_eq!(tb.extreme_times(0), Some((at(1), at(2))));
+    // A one-trade bar made both at its open.
+    assert_eq!(tb.extreme_times(1), Some((at(5), at(5))));
+    assert_eq!(tb.extreme_times(2), None);
+}

@@ -16,9 +16,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lines_core::ContractKey;
+use lines_core::drawings::TimeAxis;
 use lines_core::drawings::{Anchor, DrawingId, PluginTool, Tool};
 use lines_core::levels::{LevelMap, MAX_GROUPS, MAX_KINDS, MAX_LEVELS, MAX_MARKERS};
-use lines_feed::levels::{DrawTool, DrawToolContext};
+use lines_core::{Price, UtcMillis};
+use lines_feed::levels::{DrawPrices, DrawTool, DrawToolContext};
 
 /// The id a placement's preview takes (real drawings' ids start at 1).
 pub const PREVIEW: DrawingId = 0;
@@ -51,6 +53,14 @@ struct Entry {
     /// The merged map's kinds the levels layer draws now (bit per kind index, hover-only ones
     /// included): only those are hit-tested. All until the layer says otherwise.
     drawn_kinds: u64,
+    /// The chart's bars its drawings were drawn with ([`prices_key`]; a tool that
+    /// [`DrawTool::reads_prices`] draws every drawing again when it moves).
+    prices_key: u64,
+    /// Draw every drawing again next update (the tool's own state changed: [`ToolMaps::redraw`]).
+    stale: bool,
+    /// The drawings last reported to [`DrawTool::changed`] (`None`: none seen yet; the first
+    /// set seen is the baseline, never reported).
+    sent: Option<Vec<(Anchor, Anchor)>>,
 }
 
 /// A chart's plugin tools and their drawings' maps.
@@ -77,6 +87,9 @@ impl ToolMaps {
                     merged: None,
                     rev: 0,
                     drawn_kinds: u64::MAX,
+                    prices_key: 0,
+                    stale: false,
+                    sent: None,
                 })
                 .collect()
         };
@@ -93,6 +106,51 @@ impl ToolMaps {
             let product = self.ctx.product.clone();
             *self = ToolMaps::new(DrawToolContext { product, contract });
             self.rev = next_rev();
+        }
+    }
+
+    /// The chart's market, as its tools draw for it.
+    pub fn context(&self) -> &DrawToolContext {
+        &self.ctx
+    }
+
+    /// Tool `id`, if it serves this chart.
+    pub fn tool(&self, id: &str) -> Option<&Arc<dyn DrawTool>> {
+        self.entries.iter().map(|e| &e.tool).find(|t| t.id() == id)
+    }
+
+    /// Tool `id`'s state changed ([`lines_feed::levels::ToolEffect::Redraw`]): its drawings are
+    /// drawn again at the next update.
+    pub fn redraw(&mut self, id: &str) {
+        for e in self.entries.iter_mut().filter(|e| e.tool.id() == id) {
+            e.stale = true;
+        }
+    }
+
+    /// Report each tool's saved drawings (`committed`: the product's drawings, no preview or
+    /// drag) to it when they differ from what it was last told ([`DrawTool::changed`]). The
+    /// first set a chart sees is its baseline. Allocates only on a change.
+    pub fn report<I>(&mut self, committed: I)
+    where
+        I: Iterator<Item = (Tool, Anchor, Anchor)> + Clone,
+    {
+        for e in &mut self.entries {
+            let id = e.tool.id();
+            let mine = committed
+                .clone()
+                .filter(move |(t, _, _)| matches!(t, Tool::Plugin(p) if p.id == id))
+                .map(|(_, a, b)| (a, b));
+            if e.sent
+                .as_ref()
+                .is_some_and(|s| mine.clone().eq(s.iter().copied()))
+            {
+                continue;
+            }
+            let now: Vec<(Anchor, Anchor)> = mine.collect();
+            if e.sent.is_some() {
+                e.tool.changed(&self.ctx, &now);
+            }
+            e.sent = Some(now);
         }
     }
 
@@ -157,14 +215,20 @@ impl ToolMaps {
     /// whose points changed, and merges a tool's map again only then; with nothing changed it
     /// compares and returns false without allocating. `tick`: the chart's tick (maps off the
     /// grid are refused).
-    pub fn update<I>(&mut self, drawings: I, tick: i64) -> bool
+    pub fn update<I>(&mut self, drawings: I, tick: i64, prices: &dyn ChartBarsPrices) -> bool
     where
         I: Iterator<Item = (DrawingId, Tool, Anchor, Anchor)> + Clone,
     {
         let ctx = &self.ctx;
         let mut any = false;
+        let key = prices.key();
         for e in &mut self.entries {
             let id = e.tool.id();
+            // Drawn again from scratch (no cached map reused): the tool's state changed, or the
+            // bars it reads did.
+            let force = e.stale || (e.tool.reads_prices() && e.prices_key != key);
+            e.stale = false;
+            e.prices_key = key;
             let mine = drawings
                 .clone()
                 .filter(move |(_, t, _, _)| matches!(t, Tool::Plugin(p) if p.id == id));
@@ -172,7 +236,7 @@ impl ToolMaps {
                 .clone()
                 .map(|(d, _, a, b)| (d, a, b))
                 .eq(e.cache.iter().map(|c| (c.id, c.a, c.b)));
-            if same {
+            if same && !force {
                 continue;
             }
             let mut cache = Vec::with_capacity(e.cache.len() + 1);
@@ -180,10 +244,10 @@ impl ToolMaps {
                 let old = e
                     .cache
                     .iter()
-                    .position(|c| c.id == d && c.a == a && c.b == b);
+                    .position(|c| !force && c.id == d && c.a == a && c.b == b);
                 let map = match old {
                     Some(i) => e.cache.swap_remove(i).map,
-                    None => drawn(&*e.tool, ctx, a, b, tick),
+                    None => drawn(&*e.tool, ctx, a, b, tick, prices),
                 };
                 cache.push(Cached {
                     id: d,
@@ -224,9 +288,10 @@ fn drawn(
     a: Anchor,
     b: Anchor,
     tick: i64,
+    prices: &dyn DrawPrices,
 ) -> Option<LevelMap> {
     let r = tool
-        .draw(ctx, a, b)
+        .draw_with(ctx, a, b, prices)
         .and_then(|m| checked(m, tick).map_err(|e| e.to_string()));
     match r {
         Ok(m) => Some(m),
@@ -338,6 +403,49 @@ fn merge(
         }
     }
     Some(out)
+}
+
+/// The chart's prices for its drawing tools, and a key that moves when its bars do.
+pub trait ChartBarsPrices: DrawPrices {
+    /// Moves when a bar is added or dropped (not on every trade).
+    fn key(&self) -> u64;
+}
+
+/// [`ChartBarsPrices`] over a chart's bars.
+pub struct BarsPrices<'a, 'b>(pub &'b TimeAxis<'a>);
+
+impl DrawPrices for BarsPrices<'_, '_> {
+    fn first_beyond(&self, after: UtcMillis, price: Price, above: bool) -> Option<UtcMillis> {
+        let bars = self.0.view.bars;
+        let from = bars.partition_point(|b| b.time <= after);
+        bars[from..]
+            .iter()
+            .find(|b| if above { b.high > price } else { b.low < price })
+            .map(|b| b.time)
+    }
+}
+
+impl ChartBarsPrices for BarsPrices<'_, '_> {
+    fn key(&self) -> u64 {
+        let bars = self.0.view.bars;
+        let first = bars.first().map_or(0, |b| b.time.0 as u64);
+        (bars.len() as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ first
+    }
+}
+
+/// No bars (a hidden chart).
+pub struct NoBars;
+
+impl DrawPrices for NoBars {
+    fn first_beyond(&self, _: UtcMillis, _: Price, _: bool) -> Option<UtcMillis> {
+        None
+    }
+}
+
+impl ChartBarsPrices for NoBars {
+    fn key(&self) -> u64 {
+        0
+    }
 }
 
 /// `--plugin-drawing "TOOL-ID TIME@PRICE TIME@PRICE"` (screenshots): the registered tool and

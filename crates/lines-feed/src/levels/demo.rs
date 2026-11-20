@@ -1029,3 +1029,216 @@ impl super::DrawTool for DemoSpan {
         m.build(tick).map_err(|e| e.to_string())
     }
 }
+
+pub const SWING_ID: &str = "demo-swing";
+
+/// The demo swing tool's kinds: its two points' lines and the line halfway between them.
+pub static SWING_TYPES: [LevelType; 2] = [
+    LevelType::line(
+        "swing-end",
+        "Swing end",
+        "Swing",
+        themed(OLIVE.0, Some(OLIVE.1), LineType::Solid, 1),
+    ),
+    LevelType::line(
+        "swing-half",
+        "Swing half",
+        "Swing",
+        themed(GRAY.0, Some(GRAY.1), LineType::Solid, 1),
+    ),
+];
+
+/// A synthetic swing-marking tool (`--demo-draw-tool`, tests) exercising every optional
+/// drawing-tool seam: its points snap to bars' highs and lows (`DrawSnap::HighLow`), it stays
+/// chosen, names its points A and B for the point card, draws the halfway line dashed once the
+/// chart traded back through it after B (`draw_with` prices), and has a strip: a status, a
+/// "Halves" toggle (off: no halfway lines) and "Last hour" (shows the chart's last hour).
+pub struct DemoSwing {
+    halves: std::sync::atomic::AtomicBool,
+}
+
+impl Default for DemoSwing {
+    fn default() -> Self {
+        DemoSwing {
+            halves: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+}
+
+impl DemoSwing {
+    /// The halfway price (units; may fall between ticks) and when the chart first traded
+    /// back through it after `b`.
+    fn half(
+        a: super::Anchor,
+        b: super::Anchor,
+        prices: &dyn super::DrawPrices,
+    ) -> (i64, Option<UtcMillis>) {
+        let half2 = a.price.0 + b.price.0;
+        let half = half2.div_euclid(2);
+        // Up from A to B: back through it is below; down: above.
+        let up = b.price > a.price;
+        let crossed = if up {
+            prices.first_beyond(b.time, Price(half), false)
+        } else {
+            prices.first_beyond(b.time, Price(half2 - half), true)
+        };
+        (half, crossed)
+    }
+}
+
+impl super::DrawTool for DemoSwing {
+    fn id(&self) -> &'static str {
+        SWING_ID
+    }
+    fn label(&self) -> &'static str {
+        "Swing"
+    }
+    fn icon(&self) -> &'static str {
+        "Sw"
+    }
+    fn serves(&self, product: &Product) -> bool {
+        matches!(product.symbol, "ES" | "MES")
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &SWING_TYPES
+    }
+    fn snap(&self) -> super::DrawSnap {
+        super::DrawSnap::HighLow
+    }
+    fn stays_chosen(&self) -> bool {
+        true
+    }
+    fn point_names(&self) -> Option<[&'static str; 2]> {
+        Some(["A", "B"])
+    }
+    fn reads_prices(&self) -> bool {
+        true
+    }
+    fn draw(
+        &self,
+        ctx: &super::DrawToolContext,
+        a: super::Anchor,
+        b: super::Anchor,
+    ) -> Result<LevelMap, String> {
+        self.draw_with(ctx, a, b, &super::NoPrices)
+    }
+    fn draw_with(
+        &self,
+        ctx: &super::DrawToolContext,
+        a: super::Anchor,
+        b: super::Anchor,
+        prices: &dyn super::DrawPrices,
+    ) -> Result<LevelMap, String> {
+        let tick = ctx.product.price.tick.max(1);
+        let style = |rgba: u32, dashed: bool| LevelStyle {
+            rgba,
+            weight: 1,
+            dashed,
+        };
+        let mut m = LevelMap::builder(SWING_ID, ctx.product.id, a.time.max(b.time))
+            .line(
+                "swing-end",
+                LevelValue::Tick(a.price),
+                Some("A"),
+                style(0xbbdd44ff, false),
+            )
+            .from(a.time)
+            .line(
+                "swing-end",
+                LevelValue::Tick(b.price),
+                Some("B"),
+                style(0xbbdd44ff, false),
+            )
+            .from(b.time);
+        if self.halves.load(std::sync::atomic::Ordering::Relaxed) {
+            let (half, crossed) = Self::half(a, b, prices);
+            let grid = Price(half.div_euclid(tick) * tick);
+            let label = if crossed.is_some() {
+                "½ crossed"
+            } else {
+                "½"
+            };
+            m = m
+                .line(
+                    "swing-half",
+                    LevelValue::Tick(grid),
+                    Some(label),
+                    style(0xc8c8c8ff, crossed.is_some()),
+                )
+                .from(a.time);
+        }
+        m.build(tick).map_err(|e| e.to_string())
+    }
+    fn describe(
+        &self,
+        ctx: &super::DrawToolContext,
+        a: super::Anchor,
+        b: super::Anchor,
+        point: usize,
+        prices: &dyn super::DrawPrices,
+    ) -> Vec<String> {
+        let fmt = ctx.product.price;
+        let text = |p: Price| {
+            let mut s = String::new();
+            let _ = fmt.write(p, &mut s);
+            s
+        };
+        let (me, other, name, other_name) = if point == 0 {
+            (a, b, "A", "B")
+        } else {
+            (b, a, "B", "A")
+        };
+        let (_, crossed) = Self::half(a, b, prices);
+        vec![
+            format!("{name} {}", text(me.price)),
+            format!("Pairs with {other_name} {}", text(other.price)),
+            if crossed.is_some() {
+                "Traded back through ½".to_string()
+            } else {
+                "½ not traded back through".to_string()
+            },
+        ]
+    }
+    fn panel(&self, _: &super::DrawToolContext, _: &super::DrawView) -> Option<super::ToolPanel> {
+        let on = self.halves.load(std::sync::atomic::Ordering::Relaxed);
+        Some(super::ToolPanel {
+            status: "Swing marks".to_string(),
+            actions: vec![
+                super::ToolAction {
+                    id: "halves",
+                    label: "Halves".to_string(),
+                    on: Some(on),
+                    enabled: true,
+                },
+                super::ToolAction {
+                    id: "last-hour",
+                    label: "Last hour".to_string(),
+                    on: None,
+                    enabled: true,
+                },
+            ],
+        })
+    }
+    fn act(
+        &self,
+        _: &super::DrawToolContext,
+        view: &super::DrawView,
+        action: &str,
+    ) -> super::ToolEffect {
+        match action {
+            "halves" => {
+                self.halves
+                    .fetch_xor(true, std::sync::atomic::Ordering::Relaxed);
+                super::ToolEffect::Redraw
+            }
+            "last-hour" => {
+                let to = view.now.unwrap_or(view.visible.1);
+                super::ToolEffect::Show {
+                    from: UtcMillis(to.0 - 3_600_000),
+                    to,
+                }
+            }
+            _ => super::ToolEffect::None,
+        }
+    }
+}
