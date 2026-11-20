@@ -151,14 +151,30 @@ fn rank(badge: &str) -> u8 {
     }
 }
 
-/// The header's tag: the most real account listed (LIVE, then SIM, then PAPER); `None` with
-/// nothing listed.
-pub fn header_badge(accounts: &[Listed], filter: Option<&AccountId>) -> Option<&'static str> {
-    accounts
-        .iter()
-        .filter(|(a, _, _)| filter.is_none_or(|f| f == a))
-        .map(|(_, b, _)| *b)
-        .min_by_key(|b| rank(b))
+/// The header's tag: what kind of money the pane shows, in words. On one account, that
+/// account's kind; on all accounts, the kinds of the accounts whose positions are listed, most
+/// real first ("SIM", "LIVE + SIM"), so a Sim position never sits under a LIVE tag because a
+/// live account with nothing open is connected; `None` with no position listed.
+pub fn header_badge(
+    accounts: &[Listed],
+    rows: &[Row],
+    filter: Option<&AccountId>,
+) -> Option<String> {
+    let mut kinds: Vec<&str> = rows.iter().map(|r| r.badge).collect();
+    kinds.sort_by_key(|b| rank(b));
+    kinds.dedup();
+    if !kinds.is_empty() {
+        return Some(kinds.join(" + "));
+    }
+    // One account with nothing open: its kind (an id two venues share: the most real).
+    filter.and_then(|f| {
+        accounts
+            .iter()
+            .filter(|(a, _, _)| a == f)
+            .map(|(_, b, _)| *b)
+            .min_by_key(|b| rank(b))
+            .map(str::to_owned)
+    })
 }
 
 fn row(
@@ -753,18 +769,64 @@ mod tests {
         assert!(g.may_press());
     }
 
-    /// The header's tag is the most real account listed.
+    /// The header's tag names the money shown: on all accounts, the kinds of the positions
+    /// listed (a live account with nothing open never tags a Sim position LIVE); on one
+    /// account, its kind.
     #[test]
-    fn the_header_badge_is_the_most_real_listed() {
+    fn the_header_badge_names_the_positions_shown() {
         let accounts: Vec<Listed> = vec![
             (AccountId::new("paper"), "PAPER", "Paper".into()),
-            (AccountId::new("sim"), "SIM", "Sim".into()),
+            (AccountId::new("sim12"), "SIM", "Sierra Sim12".into()),
+            (AccountId::new("live1"), "LIVE", "Sierra ******16".into()),
         ];
-        assert_eq!(header_badge(&accounts, None), Some("SIM"));
+        let row = |account: &str, badge: &'static str| Row {
+            account: AccountId::new(account),
+            name: account.into(),
+            badge,
+            contract: ContractKey::monthly(
+                lines_feed::catalog::MNQ,
+                2026,
+                lines_core::Month::new(12).unwrap(),
+            ),
+            qty: 1,
+            avg: None,
+            last: None,
+            pnl: Money::ZERO,
+            marked_at: None,
+            stop: Exit::None,
+            target: Exit::None,
+        };
+        // The owner's case: only a Sim position, live accounts connected.
+        let sim = [row("sim12", "SIM")];
+        assert_eq!(header_badge(&accounts, &sim, None).as_deref(), Some("SIM"));
+        let mixed = [
+            row("paper", "PAPER"),
+            row("live1", "LIVE"),
+            row("sim12", "SIM"),
+        ];
         assert_eq!(
-            header_badge(&accounts, Some(&AccountId::new("paper"))),
-            Some("PAPER")
+            header_badge(&accounts, &mixed, None).as_deref(),
+            Some("LIVE + SIM + PAPER")
         );
-        assert_eq!(header_badge(&[], None), None);
+        assert_eq!(header_badge(&accounts, &[], None), None, "nothing shown");
+        // One account: its positions' kind, else its own.
+        assert_eq!(
+            header_badge(&accounts, &[], Some(&AccountId::new("live1"))).as_deref(),
+            Some("LIVE")
+        );
+        // An id two venues share, filtered: its LIVE rows are never tagged SIM.
+        let clash: Vec<Listed> = vec![
+            (AccountId::new("A1"), "SIM", "a".into()),
+            (AccountId::new("A1"), "LIVE", "b".into()),
+        ];
+        let a1 = Some(AccountId::new("A1"));
+        assert_eq!(
+            header_badge(&clash, &[row("A1", "LIVE")], a1.as_ref()).as_deref(),
+            Some("LIVE")
+        );
+        assert_eq!(
+            header_badge(&clash, &[], a1.as_ref()).as_deref(),
+            Some("LIVE")
+        );
     }
 }
