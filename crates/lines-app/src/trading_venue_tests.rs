@@ -57,6 +57,7 @@ impl AccountSource for Accounts {
             connected: true,
             detail: "connected".into(),
             last_message: Some(lines_feed::now_utc()),
+            warning: None,
         })
     }
 }

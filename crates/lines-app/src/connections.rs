@@ -763,6 +763,7 @@ mod tests {
                 connected: false,
                 detail: "disconnected: connection refused".into(),
                 last_message: None,
+                warning: None,
             })
         }
     }
