@@ -116,7 +116,7 @@ cargo run -p lines-app --features screenshot -- --replay recordings/x.lfr \
 # (trend, hline, vline, rect, note, measure, ...); --select-drawing ID (with --drawings) selects that drawing.
 # --plugin-drawing "TOOL-ID TIME@PRICE TIME@PRICE" places a plugin tool's drawing on the first chart, selected (the tool must be
 # registered: --demo-draw-tool registers the synthetic `demo-span`, builds with demo-levels; an unregistered id fails the run).
-# --stage-order "buy limit 6010.00 stop 6006.00 target 6018.00" stages that order on the first chart as its menu's "… with bracket" does (nothing sent; no legs given: the bracket preset's, or the "+T"/"+S" handles); --chart-flash TEXT shows that refusal flash on it.
+# --stage-order "buy limit 6010.00 stop 6006.00 target 6018.00" stages that order on the first chart as its menu's "… with bracket" does (nothing sent; no legs given: the bracket preset's, or the "+T"/"+S" handles); --chart-flash TEXT shows that refusal flash on it. With --demo-broker: --demo-accounts N adds N read-only live accounts (its SIM account tradable: the account list's sections and scrolling); --dom-flash MESSAGE puts a broker's DENIED refusal on the DOM's header and row; --venue-warning TEXT gives the demo broker a venue warning (the panel's notice line).
 # --show-recording SECS shows the footer as if recording for SECS seconds (REC, the time, Stop recording; nothing is recorded).
 # --cursor X,Y adds a fixed pointer (logical px from the plot's top-left) to show the crosshair; --magnet snaps it to OHLC.
 # README images (docs/img/): synthetic data only (decision 0010); workspaces in docs/img/*.json:
