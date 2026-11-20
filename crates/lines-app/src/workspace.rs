@@ -5004,7 +5004,7 @@ pub(crate) fn dom_switches(cx: &App, own: Option<(gpui::WindowId, &[Tab])>) -> V
                 // Its account, or its group (a chart on a group trades only through a DOM on
                 // the same group).
                 p.switch_id(),
-                crate::trade_bar::contract_of(v.trade_store()),
+                crate::trade_bar::contract_now(v.trade_store()),
                 p.arming.is_armed(),
             )
         })
@@ -5017,7 +5017,7 @@ pub(crate) fn chart_trades(c: &crate::chart_view::ChartView, switches: &[DomSwit
     use crate::trade_bar::TradePane;
     let (Some(account), Some(contract)) = (
         c.trade_ref().switch_id(),
-        crate::trade_bar::contract_of(c.trade_store()),
+        crate::trade_bar::contract_now(c.trade_store()),
     ) else {
         return false;
     };

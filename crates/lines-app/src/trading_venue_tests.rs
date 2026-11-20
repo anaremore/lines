@@ -879,10 +879,11 @@ fn replay_prices_never_reach_venue_trades_in_the_journal() {
     assert_eq!(tr.excursion(), None);
 }
 
-/// The owner's Sierra chart (2026-11-20): orders and the position flickered every few seconds
-/// while nothing changed at the venue. A venue whose revision keeps moving (Sierra's 3 s
-/// re-reads) with the same snapshot: every state the cache holds keeps the order working and
-/// the position open, and the account's revision (what makes panes repaint) never moves.
+/// A suspect for the owner's Sierra flicker (2026-11-20), ruled out and kept as a guard (the
+/// cause was the market store's lock: `a_busy_market_store_keeps_the_orders_drawn`). A venue
+/// whose revision keeps moving (Sierra's 3 s re-reads) with the same snapshot: the cache keeps
+/// the order working and the position open, and the account's revision (what makes panes
+/// repaint) never moves.
 #[test]
 fn unchanged_venue_rereads_change_nothing_shown() {
     let shared = Arc::new(Shared {
@@ -904,28 +905,23 @@ fn unchanged_venue_rereads_change_nothing_shown() {
         s.position(&sim, es()).is_some_and(|p| p.qty == 1) && s.open_orders(&sim, es()).count() == 1
     };
     assert!(until(&t, shown), "joined");
-    // Settle the join's own publishing first.
-    std::thread::sleep(Duration::from_millis(1_200));
+    // The join's own publishing done: a re-read the watcher has acted on.
+    shared.v.lock().unwrap().rev += 1;
     t.settle();
     let rev = t.cache.revision(&sim);
-    let end = Instant::now() + Duration::from_millis(2_500);
-    let mut rereads = 0;
-    let mut looks = 0;
-    while Instant::now() < end {
-        // A re-read: the venue's revision moves, its state doesn't.
-        if looks % 20 == 0 {
-            shared.v.lock().unwrap().rev += 1;
-            rereads += 1;
-        }
-        looks += 1;
+    for reread in 0..5 {
+        // A re-read: the venue's revision moves, its state doesn't. `settle` makes the
+        // watcher look and rebuild now.
+        shared.v.lock().unwrap().rev += 1;
+        t.settle();
         assert!(
             shown(&t),
-            "the order or the position vanished on re-read {rereads}"
+            "the order or the position vanished on re-read {reread}"
         );
-        std::thread::sleep(Duration::from_millis(5));
+        assert_eq!(
+            t.cache.revision(&sim),
+            rev,
+            "an unchanged re-read repaints (re-read {reread})"
+        );
     }
-    t.settle();
-    assert!(shown(&t));
-    assert!(rereads >= 3);
-    assert_eq!(t.cache.revision(&sim), rev, "an unchanged re-read repaints");
 }

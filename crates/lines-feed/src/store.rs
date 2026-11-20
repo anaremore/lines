@@ -1055,6 +1055,31 @@ mod tests {
         ChartStore::new(es, None, caps, "test", 60_000, 1000)
     }
 
+    /// The UI's contract (`ChartStore::contract`): the store's own when its lock is free, the
+    /// last one seen while the feed holds it, and a roll seen on the next free frame.
+    #[test]
+    fn the_contract_survives_a_busy_store_and_follows_a_roll() {
+        let z6 = ContractKey::monthly(catalog::ES, 2026, Month::new(12).unwrap());
+        let h7 = ContractKey::monthly(catalog::ES, 2027, Month::new(3).unwrap());
+        let es = catalog::get(catalog::ES).unwrap();
+        let store = ChartStore::new(es, Some(z6), Capabilities::default(), "test", 60_000, 100);
+        assert_eq!(store.contract(), Some(z6));
+        {
+            let _feed = store.read();
+            assert_eq!(store.contract(), Some(z6), "busy: the last one seen");
+        }
+        // A roll while nothing looks, then a busy frame: still the last one seen.
+        store.update(|d| d.switch_contract(h7));
+        {
+            let _feed = store.read();
+            assert_eq!(store.contract(), Some(z6));
+        }
+        // The next free frame sees the roll, and keeps it through a busy one.
+        assert_eq!(store.contract(), Some(h7));
+        let _feed = store.read();
+        assert_eq!(store.contract(), Some(h7));
+    }
+
     fn print(t: i64, q: i64) -> Print {
         Print {
             time: UtcMillis(t),

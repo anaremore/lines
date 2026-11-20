@@ -818,7 +818,7 @@ impl crate::trade_bar::TradePane for ChartView {
             Ok(p) if p.grows => {
                 let (Some(account), Some(contract)) = (
                     self.trade.switch_id(),
-                    crate::trade_bar::contract_of(&self.store),
+                    crate::trade_bar::contract_now(&self.store),
                 ) else {
                     return;
                 };
@@ -4601,7 +4601,7 @@ impl ChartView {
         let issued = std::time::Instant::now();
         let (Some(account), Some(contract), Some((qty, _))) = (
             self.trade.account.clone(),
-            crate::trade_bar::contract_of(&self.store),
+            crate::trade_bar::contract_now(&self.store),
             self.ct.position,
         ) else {
             return;
