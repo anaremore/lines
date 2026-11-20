@@ -878,3 +878,50 @@ fn replay_prices_never_reach_venue_trades_in_the_journal() {
     );
     assert_eq!(tr.excursion(), None);
 }
+
+/// A suspect for the owner's Sierra flicker (2026-11-20), ruled out and kept as a guard (the
+/// cause was the market store's lock: `a_busy_market_store_keeps_the_orders_drawn`). A venue
+/// whose revision keeps moving (Sierra's 3 s re-reads) with the same snapshot: the cache keeps
+/// the order working and the position open, and the account's revision (what makes panes
+/// repaint) never moves.
+#[test]
+fn unchanged_venue_rereads_change_nothing_shown() {
+    let shared = Arc::new(Shared {
+        v: Mutex::new(Venue {
+            accounts: vec![sim_account()],
+            rev: 1,
+            ..Default::default()
+        }),
+        requests: AtomicUsize::new(0),
+    });
+    set_position(&shared, 1);
+    shared.v.lock().unwrap().snapshot.accounts[0]
+        .orders
+        .push(venue_order());
+    let t = start(&shared);
+    let sim = AccountId::new("venue-sim");
+    let shown = |t: &Trading| {
+        let s = t.cache.read();
+        s.position(&sim, es()).is_some_and(|p| p.qty == 1) && s.open_orders(&sim, es()).count() == 1
+    };
+    assert!(until(&t, shown), "joined");
+    // The join's own publishing done: a re-read the watcher has acted on.
+    shared.v.lock().unwrap().rev += 1;
+    t.settle();
+    let rev = t.cache.revision(&sim);
+    for reread in 0..5 {
+        // A re-read: the venue's revision moves, its state doesn't. `settle` makes the
+        // watcher look and rebuild now.
+        shared.v.lock().unwrap().rev += 1;
+        t.settle();
+        assert!(
+            shown(&t),
+            "the order or the position vanished on re-read {reread}"
+        );
+        assert_eq!(
+            t.cache.revision(&sim),
+            rev,
+            "an unchanged re-read repaints (re-read {reread})"
+        );
+    }
+}

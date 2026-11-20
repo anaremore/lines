@@ -813,8 +813,18 @@ pub fn size_refusal<V: TradePane>(v: &V, cmd: &lines_trading::Command, cx: &App)
     dom_trade::command_over_max(cmd, max_order_qty(v, cx))
 }
 
-/// The contract a pane trades: its store's (a product's front month, or the contract shown).
+/// The contract a pane shows and draws its trading for: its store's (a product's front month,
+/// or the contract shown), the last one seen while the feed holds the store
+/// ([`ChartStore::contract`]: a busy frame never blanks the orders). For drawing and reasons
+/// only: an order is built for [`contract_now`].
 pub fn contract_of(store: &ChartStore) -> Option<ContractKey> {
+    store.contract()
+}
+
+/// The contract an order is built or decided for: read under the store's lock now, never the
+/// remembered one (just after a roll that could be the expiring contract). `None` while the
+/// feed holds the lock: the caller refuses or waits, as for any busy market data.
+pub fn contract_now(store: &ChartStore) -> Option<ContractKey> {
     store.try_read().and_then(|d| d.contract)
 }
 
@@ -896,7 +906,23 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
     let t = Trading::try_global(cx).ok_or("trading is not running")?;
     let pt = v.trade_ref();
     let account = pt.account.clone().ok_or("no account")?;
-    let contract = contract_of(v.trade_store()).ok_or("contract unknown")?;
+    // The contract with its market, under one lock: an order is never checked against one
+    // contract's book and sent on another.
+    let (contract, best_bid, best_ask, last, tick, symbol) = v
+        .trade_store()
+        .try_read()
+        .map(|d| {
+            (
+                d.contract,
+                d.book.best_bid().map(|b| b.0).or(d.bid),
+                d.book.best_ask().map(|a| a.0).or(d.ask),
+                d.last_trade,
+                d.product.price.tick,
+                d.product.symbol,
+            )
+        })
+        .ok_or("market data busy; try again")?;
+    let contract = contract.ok_or("contract unknown")?;
     let position = {
         let c = t.cache.read();
         let position = c.position(&account, contract).map_or(0, |p| p.qty);
@@ -915,19 +941,6 @@ pub fn entry_ctx<V: TradePane>(v: &V, cx: &App) -> Result<dom_trade::EntryCtx, &
         }
         position
     };
-    let (best_bid, best_ask, last, tick, symbol) = v
-        .trade_store()
-        .try_read()
-        .map(|d| {
-            (
-                d.book.best_bid().map(|b| b.0).or(d.bid),
-                d.book.best_ask().map(|a| a.0).or(d.ask),
-                d.last_trade,
-                d.product.price.tick,
-                d.product.symbol,
-            )
-        })
-        .ok_or("market data busy; try again")?;
     let settings = crate::picker_view::settings(cx);
     Ok(dom_trade::EntryCtx {
         account,
@@ -1132,7 +1145,7 @@ fn run_with<V: TradePane>(
             if let Some(w) = why {
                 v.trade().flash(w);
             } else if let (Some(account), Some(contract)) =
-                (v.trade_ref().account.clone(), contract_of(v.trade_store()))
+                (v.trade_ref().account.clone(), contract_now(v.trade_store()))
             {
                 let c = if cmd == TradeCmd::Flatten {
                     TradeCommand::Flatten {
@@ -1628,12 +1641,13 @@ fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'s
     }
     let t = Trading::try_global(cx).ok_or("trading is not running")?;
     let account = v.trade_ref().account.clone().ok_or("no account")?;
-    let contract = contract_of(v.trade_store()).ok_or("contract unknown")?;
-    let (bid, ask, last, tick) = v
+    // The contract with its market, under one lock.
+    let (contract, bid, ask, last, tick) = v
         .trade_store()
         .try_read()
         .map(|d| {
             (
+                d.contract,
                 d.book.best_bid().map(|b| b.0).or(d.bid),
                 d.book.best_ask().map(|a| a.0).or(d.ask),
                 d.last_trade,
@@ -1641,6 +1655,7 @@ fn breakeven_for<V: TradePane>(v: &V, cx: &App) -> Result<Vec<TradeCommand>, &'s
             )
         })
         .ok_or("market data busy; try again")?;
+    let contract = contract.ok_or("contract unknown")?;
     let s = t.cache.read();
     let pos = s.position(&account, contract);
     let (qty, avg) = pos.map_or((0, None), |p| (p.qty, p.avg_price));
@@ -1969,13 +1984,19 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
     let account = pt.account.as_ref()?;
     let info = t.account(account)?;
     let contract = contract_of(v.trade_store());
-    let last = v.trade_store().try_read().and_then(|d| d.last_trade);
+    // `None`: the feed holds the store this frame (its last trade unknown, not missing).
+    let market = v.trade_store().try_read().map(|d| d.last_trade);
+    let last = market.flatten();
     let mut data = empty_data(&info, t);
     data.mode = cx
         .try_global::<crate::picker_view::AppSettings>()
         .map(|a| a.settings.pnl_display)
         .unwrap_or_default();
-    let fresh = if let Some(s) = t.cache.try_read() {
+    // A busy store counts as a busy cache: the last frame's panel, never one without its
+    // open ticks or nearest target for a frame.
+    let fresh = if market.is_some()
+        && let Some(s) = t.cache.try_read()
+    {
         if let Some(g) = s.guard(account) {
             // Time left on the core's clock (wall live, market time in replays).
             let now = t.now(v.trade_store());
@@ -2087,8 +2108,8 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
     } else {
         false
     };
-    // The cache busy (the pump applying events): the last frame's panel for this account,
-    // never one without its position, orders or exits for a frame.
+    // The cache or the store busy (the pump applying events, the feed writing): the last
+    // frame's panel for this account, never one without its position, orders or exits.
     let mut kept = pt.last_bar.borrow_mut();
     if fresh {
         *kept = Some((account.clone(), data.clone()));
@@ -6219,7 +6240,7 @@ fn no_preset<V: TradePane>(v: &V, cx: &App) -> bool {
 fn told_off<V: TradePane>(v: &V, cx: &App) -> Option<(AccountId, ContractKey)> {
     let (a, k, m) = v.trade_ref().bracket_told.as_ref()?;
     let here =
-        v.trade_ref().account.as_ref() == Some(a) && contract_of(v.trade_store()) == Some(*k);
+        v.trade_ref().account.as_ref() == Some(a) && contract_now(v.trade_store()) == Some(*k);
     (here
         && matches!(m, lines_trading::BracketMode::Position { .. })
         && position_known(v, cx) == Some(false))
@@ -6236,7 +6257,7 @@ fn want_mode<V: TradePane>(
         return None;
     }
     let account = v.trade_ref().account.clone()?;
-    let contract = contract_of(v.trade_store())?;
+    let contract = contract_now(v.trade_store())?;
     let preset = v.trade_ref().bracket.or_else(|| first_preset(v, cx))?;
     Some((
         account,
@@ -6439,7 +6460,7 @@ fn send_mode<V: TradePane>(
 /// `TradeCmd::BracketMode`: per entry ↔ one bracket for the whole position.
 fn bracket_switch<V: TradePane>(v: &mut V, cx: &mut Context<V>) {
     let (Some(account), Some(contract)) =
-        (v.trade_ref().account.clone(), contract_of(v.trade_store()))
+        (v.trade_ref().account.clone(), contract_now(v.trade_store()))
     else {
         v.trade().flash("no account or contract");
         return;

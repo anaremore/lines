@@ -965,6 +965,82 @@ mod tests {
         );
     }
 
+    /// The owner's Sierra chart (2026-11-20), the flicker's cause: on a live feed the store's
+    /// lock is held for every update, and each frame that found it busy read "no contract",
+    /// which clears every order mark and the position. The pane's contract survives a busy
+    /// store, so the orders and the position stay drawn.
+    #[test]
+    fn a_busy_market_store_keeps_the_orders_drawn() {
+        use lines_core::{ContractKey, Month, Price, Qty, UtcMillis};
+        use lines_trading::{
+            AccountId, Event, Order, OrderId, OrderKind, OrderState, PositionView, Role, Side,
+        };
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let account = AccountId::new("venue-1");
+        let order = |id: u64, price: i64| Order {
+            id: OrderId(id),
+            account: account.clone(),
+            contract: k,
+            side: Side::Sell,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(price),
+            },
+            state: OrderState::Working,
+            filled: Qty(0),
+            fill_value: 0,
+            role: Role::Single,
+            parent: None,
+            oco: None,
+            triggered: false,
+            created: UtcMillis(0),
+            updated: UtcMillis(0),
+            reduce_only: false,
+            overfill: Qty(0),
+        };
+        let cache = crate::trading::TradeCache::for_test(vec![
+            Event::Order(order(1, 601_000)),
+            Event::Order(order(2, 602_000)),
+            Event::Position(PositionView {
+                account: account.clone(),
+                contract: k,
+                qty: 1,
+                avg_price: Some(600_000.0),
+                unrealised: lines_trading::Money::ZERO,
+                marked_at: None,
+            }),
+        ]);
+        let store = lines_feed::store::ChartStore::new(
+            lines_feed::catalog::get(lines_feed::catalog::ES).unwrap(),
+            Some(k),
+            lines_core::Capabilities::default(),
+            "test",
+            60_000,
+            100,
+        );
+        let view = std::slice::from_ref(&account);
+        let mut dom = OrdersLayer::default();
+        let mut chart = crate::chart_trade::ChartTradeState::default();
+        let contract = crate::trade_bar::contract_of(&store);
+        dom.prepare(&cache, view, contract);
+        chart.prepare(&cache, view, contract);
+        assert_eq!((dom.marks.len(), chart.marks.len()), (2, 2));
+        // The feed is writing this frame.
+        let feed = store.read();
+        let contract = crate::trade_bar::contract_of(&store);
+        assert_eq!(contract, Some(k), "a busy store still names its contract");
+        dom.prepare(&cache, view, contract);
+        chart.prepare(&cache, view, contract);
+        assert_eq!(
+            (dom.marks.len(), chart.marks.len()),
+            (2, 2),
+            "orders blanked while the feed wrote"
+        );
+        assert_eq!(dom.position, Some((1, 600_000.0)));
+        assert_eq!(chart.position, Some((1, 600_000.0)));
+        drop(feed);
+    }
+
     use super::*;
 
     /// A press on a DOM mark for several orders finds every order of that kind on the row
