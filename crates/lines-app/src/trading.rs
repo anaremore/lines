@@ -1327,7 +1327,7 @@ fn spawn_watcher(
                             c
                         })
                         .collect();
-                    {
+                    let listed_changed = {
                         let mut all = accounts.write().unwrap_or_else(|e| e.into_inner());
                         // An account the venue stops listing (a disconnect) stays, read-only,
                         // with its badge: never shown as another kind or as tradable.
@@ -1350,7 +1350,8 @@ fn spawn_watcher(
                         if changed {
                             ACCOUNTS_EPOCH.fetch_add(1, Ordering::AcqRel);
                         }
-                    }
+                        changed
+                    };
                     if let Some(j) = &unmarked {
                         j.add_unmarked(known.clone());
                     }
@@ -1359,14 +1360,18 @@ fn spawn_watcher(
                     if !new.is_empty() {
                         handle.add_accounts(new);
                     }
-                    // Every change rebuilds from the broker (a reconnect lists the same
-                    // accounts again: the core already has them, the snapshot is new).
+                    // Every change re-reads the broker (a reconnect lists the same accounts
+                    // again: the core already has them, the snapshot is new). The re-read
+                    // publishes only what really changed, and panes repaint for those events:
+                    // a venue revision alone (each of Sierra's position reads) repaints nothing.
                     pending = true;
-                    cache.bump(None);
+                    if listed_changed {
+                        cache.bump(None);
+                    }
                 }
                 let now = Instant::now();
                 if rebuild_due(pending, !asked.is_empty(), last_rebuild, now) {
-                    handle.rebuild();
+                    handle.refresh();
                     last_rebuild = Some(now);
                     pending = false;
                 }
