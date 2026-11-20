@@ -30,8 +30,8 @@ pub fn bundled() -> Arc<EconSchedule> {
 }
 
 /// The calendar refresh's official source (roadmap 8b): FRED, the Federal Reserve Bank of St.
-/// Louis's API, which publishes the agencies' own release calendars (BLS, BEA and the Board's
-/// FOMC statements) as dates. No other site is read and nothing is scraped. A FRED API key
+/// Louis's API, which publishes the agencies' own release calendars (BLS, BEA) as dates
+/// (never FOMC's: see [`fred::RELEASES`]). No other site is read and nothing is scraped. A FRED API key
 /// (free, the user's own) is needed; Lines keeps it in the OS keychain.
 pub mod fred {
     use lines_core::CivilDate;
@@ -41,19 +41,136 @@ pub mod fred {
     /// Where the API lives.
     pub const API: &str = "https://api.stlouisfed.org/fred/release/dates";
 
-    /// Each bundled release's FRED release id.
-    pub const RELEASES: [(&str, u32); 6] = [
-        ("cpi", 10),
-        ("nfp", 50),
-        ("ppi", 46),
-        ("gdp", 53),
-        ("pce", 54),
-        ("fomc", 101),
+    /// A bundled release FRED gives the dates of, and the cadence a list of its dates must
+    /// keep to be taken.
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+    pub struct Mapped {
+        pub key: &'static str,
+        /// FRED's release id.
+        pub id: u32,
+        /// Fewest days between two releases.
+        pub min_gap_days: i64,
+        /// Most releases in any year from today.
+        pub max_per_year: usize,
+    }
+
+    /// Releases taken from FRED. Monthly ones: a week apart at least (an agency catching up
+    /// after a shutdown can bunch them) and 14 a year at most; GDP has an estimate most
+    /// months. **FOMC is not here:** FRED's "FOMC Press Release" (101) also carries daily
+    /// series, so its release dates are every day, not the statements (owner report,
+    /// 2026-11-19). The Fed publishes its meetings a year ahead; the bundled list is used.
+    pub const RELEASES: [Mapped; 5] = [
+        Mapped {
+            key: "cpi",
+            id: 10,
+            min_gap_days: 7,
+            max_per_year: 14,
+        },
+        Mapped {
+            key: "nfp",
+            id: 50,
+            min_gap_days: 7,
+            max_per_year: 14,
+        },
+        Mapped {
+            key: "ppi",
+            id: 46,
+            min_gap_days: 7,
+            max_per_year: 14,
+        },
+        Mapped {
+            key: "gdp",
+            id: 53,
+            min_gap_days: 7,
+            max_per_year: 15,
+        },
+        Mapped {
+            key: "pce",
+            id: 54,
+            min_gap_days: 7,
+            max_per_year: 14,
+        },
     ];
 
-    /// The release's id on FRED, if it has one.
+    /// Bumped whenever [`RELEASES`] or [`check`] change what a refresh can add: a cache built
+    /// under another mapping is discarded at start (`econ_refresh::usable_cache`), so dates a
+    /// wrong mapping added never outlive it. 2: FOMC dropped, cadence checked.
+    pub const MAPPING_VERSION: u32 = 2;
+
+    pub fn mapped(key: &str) -> Option<&'static Mapped> {
+        RELEASES.iter().find(|m| m.key == key)
+    }
+
+    /// The release's id on FRED, if Lines takes its dates from there.
     pub fn release_id(key: &str) -> Option<u32> {
-        RELEASES.iter().find(|(k, _)| *k == key).map(|&(_, id)| id)
+        mapped(key).map(|m| m.id)
+    }
+
+    /// Whether a release's dates from `today` on keep its cadence: weekdays only, at least
+    /// `min_gap_days` apart, at most `max_per_year` in the year ahead. The error says what
+    /// broke it, in words.
+    pub fn check(m: &Mapped, dates: &[CivilDate], today: CivilDate) -> Result<(), String> {
+        let mut ahead: Vec<CivilDate> = dates.iter().copied().filter(|d| *d >= today).collect();
+        ahead.sort();
+        ahead.dedup();
+        for d in &ahead {
+            // 1970-01-01 was a Thursday: 0 = Monday … 5 = Saturday, 6 = Sunday.
+            if (d.days() + 3).rem_euclid(7) >= 5 {
+                return Err(format!("a weekend date ({d})"));
+            }
+        }
+        if let Some(w) = ahead
+            .windows(2)
+            .find(|w| w[1].days() - w[0].days() < m.min_gap_days)
+        {
+            let n = w[1].days() - w[0].days();
+            return Err(format!(
+                "dates {n} day{} apart ({} and {})",
+                if n == 1 { "" } else { "s" },
+                w[0],
+                w[1]
+            ));
+        }
+        let year = ahead
+            .iter()
+            .filter(|d| d.days() - today.days() < 365)
+            .count();
+        if year > m.max_per_year {
+            return Err(format!(
+                "{year} dates in a year (at most {})",
+                m.max_per_year
+            ));
+        }
+        Ok(())
+    }
+
+    /// The answers that may be used: releases Lines takes from FRED whose dates keep their
+    /// cadence. Any other is left out (the calendar keeps its own dates for it) and the
+    /// first such problem kept.
+    pub fn validated(
+        schedule: &EconSchedule,
+        answers: Vec<(String, Vec<CivilDate>)>,
+        today: CivilDate,
+    ) -> Fetched {
+        let mut out = Fetched::default();
+        for (key, dates) in answers {
+            let Some(m) = mapped(&key) else {
+                continue;
+            };
+            match check(m, &dates, today) {
+                Ok(()) => out.dates.push((key, dates)),
+                Err(why) => {
+                    let name = schedule
+                        .releases
+                        .iter()
+                        .find(|r| r.key == key)
+                        .map_or(key.as_str(), |r| r.name.as_str());
+                    out.problem
+                        .get_or_insert_with(|| format!("{name} dates from FRED refused: {why}"));
+                }
+            }
+        }
+        out
     }
 
     /// The page a refreshed release names as its source.
@@ -110,21 +227,31 @@ pub mod fred {
     }
 
     impl Fetched {
-        /// Every release answered with a date from `today` on (a release with only past
-        /// dates said nothing about what is ahead).
+        /// Every release Lines takes from FRED answered with a date from `today` on (a
+        /// release with only past dates said nothing about what is ahead). Releases it doesn't
+        /// take (FOMC) keep the calendar's own published list.
         pub fn complete(&self, schedule: &EconSchedule, today: CivilDate) -> bool {
             self.problem.is_none()
-                && schedule.releases.iter().all(|r| {
-                    self.dates
-                        .iter()
-                        .any(|(k, d)| *k == r.key && d.iter().any(|d| *d >= today))
-                })
+                && schedule
+                    .releases
+                    .iter()
+                    .filter(|r| mapped(&r.key).is_some())
+                    .all(|r| {
+                        self.dates
+                            .iter()
+                            .any(|(k, d)| *k == r.key && d.iter().any(|d| *d >= today))
+                    })
         }
     }
 
-    /// Ask FRED for every release of `schedule` it has (blocking; never on a UI thread). A
-    /// release that fails is left out and the first failure kept; nothing in it names the key.
-    pub fn fetch(schedule: &EconSchedule, api_key: &str, from: CivilDate) -> Fetched {
+    /// FRED's answers, unchecked: each release's dates, and the first failure to get one.
+    pub type Answers = (Vec<(String, Vec<CivilDate>)>, Option<String>);
+
+    /// Ask FRED for every release of `schedule` Lines takes from it (blocking; never on a UI
+    /// thread). The answers are raw: [`validated`] decides which may be used (the app's one
+    /// path, `econ_refresh::merge`). A release that fails is left out and the first failure
+    /// kept; nothing in it names the key.
+    pub fn fetch(schedule: &EconSchedule, api_key: &str, from: CivilDate) -> Answers {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(20)))
             .http_status_as_error(false)
@@ -138,11 +265,11 @@ pub mod fred {
                 m.replace(api_key, "…")
             }
         };
-        let mut out = Fetched::default();
+        let mut answers = Vec::new();
+        let mut problem: Option<String> = None;
         for r in &schedule.releases {
+            // Releases not taken from FRED (FOMC) keep the calendar's list.
             let Some(id) = release_id(&r.key) else {
-                out.problem
-                    .get_or_insert_with(|| format!("{}: not on FRED", r.name));
                 continue;
             };
             let got = agent
@@ -163,26 +290,107 @@ pub mod fred {
                     }
                 });
             match got {
-                Ok(d) => out.dates.push((r.key.clone(), d)),
+                Ok(d) => answers.push((r.key.clone(), d)),
                 Err(m) => {
                     let m = scrub(m);
-                    out.problem
-                        .get_or_insert_with(|| format!("{}: {m}", r.name));
+                    problem.get_or_insert_with(|| format!("{}: {m}", r.name));
                 }
             }
         }
-        out
+        (answers, problem)
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
 
+        /// The real schedules keep their cadence: every mapped release's bundled dates pass
+        /// the check from the bundled calendar's version on (a later tightening that would
+        /// refuse a real list fails here).
         #[test]
-        fn every_bundled_release_has_a_fred_id() {
-            for r in &crate::econ::bundled().releases {
-                assert!(release_id(&r.key).is_some(), "{}", r.key);
+        fn the_bundled_schedules_keep_their_cadence() {
+            let s = crate::econ::bundled();
+            for m in &RELEASES {
+                let dates: Vec<CivilDate> = s
+                    .events
+                    .iter()
+                    .filter(|e| s.release(e).key == m.key)
+                    .map(|e| s.local_date(e.at))
+                    .collect();
+                assert!(!dates.is_empty(), "{}", m.key);
+                assert_eq!(check(m, &dates, s.version), Ok(()), "{}", m.key);
             }
+        }
+
+        /// Every bundled release but FOMC is taken from FRED; FOMC never is (FRED's release
+        /// 101 is dated every day).
+        #[test]
+        fn every_bundled_release_but_fomc_has_a_fred_id() {
+            for r in &crate::econ::bundled().releases {
+                assert_eq!(release_id(&r.key).is_some(), r.key != "fomc", "{}", r.key);
+            }
+            assert!(RELEASES.iter().all(|m| m.id != 101));
+        }
+
+        fn d(y: u16, m: u8, day: u8) -> CivilDate {
+            CivilDate::new(y, m, day).unwrap()
+        }
+
+        /// The owner's report: a release dated every day (weekends too) is refused whole,
+        /// says why, and leaves the refresh incomplete; a monthly list passes; dates before
+        /// today aren't judged.
+        #[test]
+        fn a_list_off_its_cadence_is_refused() {
+            let s = crate::econ::bundled();
+            let today = d(2026, 11, 19);
+            let cpi = mapped("cpi").unwrap();
+            let monthly = [d(2026, 12, 10), d(2027, 1, 13), d(2027, 2, 11)];
+            assert_eq!(check(cpi, &monthly, today), Ok(()));
+            let daily: Vec<CivilDate> = (19..=30).map(|n| d(2026, 11, n)).collect();
+            let e = check(cpi, &daily, today).unwrap_err();
+            assert!(e.contains("weekend"), "{e}");
+            // Weekdays only, but a day apart.
+            let e = check(cpi, &[d(2026, 11, 19), d(2026, 11, 20)], today).unwrap_err();
+            assert_eq!(e, "dates 1 day apart (2026-11-19 and 2026-11-20)");
+            // Too many in a year, each a week apart.
+            let weekly: Vec<CivilDate> = (0..20)
+                .map(|w| CivilDate::from_days(d(2026, 11, 19).days() + 7 * w))
+                .collect();
+            assert!(
+                check(cpi, &weekly, today)
+                    .unwrap_err()
+                    .contains("in a year")
+            );
+            // Old dates (before today) are not judged.
+            assert_eq!(
+                check(
+                    cpi,
+                    &[d(2026, 11, 14), d(2026, 11, 15), d(2026, 12, 10)],
+                    today
+                ),
+                Ok(())
+            );
+            // Through `validated`: the daily list is left out with a problem in words, FOMC
+            // answers are ignored, CPI kept; the refresh is not complete.
+            let f = validated(
+                &s,
+                vec![
+                    ("cpi".to_owned(), monthly.to_vec()),
+                    ("ppi".to_owned(), daily.clone()),
+                    ("fomc".to_owned(), daily),
+                ],
+                today,
+            );
+            assert_eq!(f.dates.len(), 1);
+            assert_eq!(f.dates[0].0, "cpi");
+            assert!(
+                f.problem
+                    .as_deref()
+                    .is_some_and(|p| p.starts_with("PPI dates from FRED refused: a weekend")),
+                "{:?}",
+                f.problem
+            );
+            assert!(!f.complete(&s, today));
         }
 
         #[test]
@@ -214,10 +422,9 @@ pub mod fred {
             let past = CivilDate::new(2026, 1, 1).unwrap();
             let next = CivilDate::new(2026, 12, 10).unwrap();
             let mut f = Fetched {
-                dates: s
-                    .releases
+                dates: RELEASES
                     .iter()
-                    .map(|r| (r.key.clone(), vec![next]))
+                    .map(|m| (m.key.to_owned(), vec![next]))
                     .collect(),
                 problem: None,
             };
