@@ -346,7 +346,7 @@ impl Drawings {
         }
         let (set, path, report, kept, extras, file_extra) = match &self.dir {
             None => (
-                DrawingSet::from_drawings(restored(product, Vec::new())),
+                DrawingSet::from_drawings(restored(product, Vec::new(), 0)),
                 None,
                 None,
                 Vec::new(),
@@ -374,7 +374,8 @@ impl Drawings {
                         None => s,
                     });
                 }
-                let mut set = DrawingSet::from_drawings(restored(product, items));
+                let above = kept.iter().map(|d| d.id).max().unwrap_or(0);
+                let mut set = DrawingSet::from_drawings(restored(product, items, above));
                 if let Some(max) = kept.iter().map(|d| d.id).max() {
                     set.reserve_ids_through(max);
                 }
@@ -399,13 +400,14 @@ impl Drawings {
 }
 
 /// `items` and, after them, the drawings each plugin tool serving `product` kept itself
-/// (`DrawTool::restore`; never in this file: they're the tool's to save). Ids follow `items`'.
-fn restored(product: &Product, mut items: Vec<Drawing>) -> Vec<Drawing> {
+/// (`DrawTool::restore`; never in this file: they're the tool's to save). Ids follow `items`'
+/// and `above` (ids the file keeps for entries this version can't use).
+fn restored(product: &Product, mut items: Vec<Drawing>, above: DrawingId) -> Vec<Drawing> {
     let ctx = lines_feed::levels::DrawToolContext {
         product: product.clone(),
         contract: None,
     };
-    let mut next = items.iter().map(|d| d.id).max().unwrap_or(0) + 1;
+    let mut next = items.iter().map(|d| d.id).max().unwrap_or(0).max(above) + 1;
     for tool in lines_feed::levels::draw_tools_serving(product) {
         let t = crate::draw_tools::tool_of(&*tool);
         for (a, b) in tool.restore(&ctx) {

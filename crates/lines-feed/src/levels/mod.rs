@@ -459,7 +459,8 @@ pub trait DrawTool: Send + Sync {
     }
     /// Drawings the tool kept for `ctx`'s product, placed on its charts when the app first
     /// shows that product (a tool that saves its own drawings: [`DrawTool::changed`]). Called
-    /// on the UI thread: read beforehand, no I/O here. Default: none.
+    /// on the UI thread: read beforehand, no I/O here. Anything it kept but doesn't return here
+    /// is never reported back by `changed`: the tool keeps it itself. Default: none.
     fn restore(&self, ctx: &DrawToolContext) -> Vec<(Anchor, Anchor)> {
         let _ = ctx;
         Vec::new()
@@ -496,16 +497,30 @@ pub enum DrawSnap {
 
 /// The chart's prices, for [`DrawTool::draw_with`] and [`DrawTool::describe`].
 pub trait DrawPrices {
-    /// When the chart first traded beyond `price` (above it with `above`, else below) in a
-    /// bar that starts after `after`'s bar. `None`: not in the chart's bars (yet).
-    fn first_beyond(&self, after: UtcMillis, price: Price, above: bool) -> Option<UtcMillis>;
+    /// The start of the first bar, after `after`'s bar and before `before`, that traded beyond
+    /// `price` (above it with `above`, else below). `None`: none in the chart's bars, which may
+    /// not cover that span: see [`DrawPrices::covered`].
+    fn first_beyond(
+        &self,
+        after: UtcMillis,
+        before: UtcMillis,
+        price: Price,
+        above: bool,
+    ) -> Option<UtcMillis>;
+    /// The time the chart's bars cover: the first bar's start to the later of the last bar's
+    /// start and the market clock. `None`: no bars. A "no" from `first_beyond` is final only
+    /// for a span inside it.
+    fn covered(&self) -> Option<(UtcMillis, UtcMillis)>;
 }
 
 /// No prices (a tool asked outside a chart, tests).
 pub struct NoPrices;
 
 impl DrawPrices for NoPrices {
-    fn first_beyond(&self, _: UtcMillis, _: Price, _: bool) -> Option<UtcMillis> {
+    fn first_beyond(&self, _: UtcMillis, _: UtcMillis, _: Price, _: bool) -> Option<UtcMillis> {
+        None
+    }
+    fn covered(&self) -> Option<(UtcMillis, UtcMillis)> {
         None
     }
 }

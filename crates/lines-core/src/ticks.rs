@@ -467,6 +467,8 @@ impl TickBars {
     }
 
     fn open_bar(&mut self, time: UtcMillis, price: Price, qty: Qty, key: i64, first: bool) {
+        // The opening trade's own time (a seconds bar's start is its slot's).
+        let traded = time;
         if self.bars.len() >= self.capacity {
             // Drop a chunk at once: moving the buffers costs O(capacity) every chunk, not
             // every bar.
@@ -504,7 +506,7 @@ impl TickBars {
         self.ends
             .push(span_end.unwrap_or(UtcMillis(time.0.saturating_add(1))));
         self.last.push(time);
-        self.extremes.push((time, time));
+        self.extremes.push((traded, traded));
         self.counts.push(1);
         self.partial.push(false);
         self.first.push(first);

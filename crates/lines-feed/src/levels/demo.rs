@@ -1078,9 +1078,9 @@ impl DemoSwing {
         // Up from A to B: back through it is below; down: above.
         let up = b.price > a.price;
         let crossed = if up {
-            prices.first_beyond(b.time, Price(half), false)
+            prices.first_beyond(b.time, UtcMillis(i64::MAX), Price(half), false)
         } else {
-            prices.first_beyond(b.time, Price(half2 - half), true)
+            prices.first_beyond(b.time, UtcMillis(i64::MAX), Price(half2 - half), true)
         };
         (half, crossed)
     }

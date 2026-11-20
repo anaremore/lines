@@ -149,6 +149,8 @@ pub struct ChartDrawings {
     tools: ToolMaps,
     /// The first and last visible bar's start (last `prepare`): a plugin tool's strip.
     visible: Option<(UtcMillis, UtcMillis)>,
+    /// The chart's market clock (plugin tools that read prices).
+    now: Option<UtcMillis>,
     /// The selected plugin drawing's point its card describes (0: `a`, 1: `b`): the handle
     /// last pressed, `b` after a placement.
     card_point: usize,
@@ -191,6 +193,7 @@ impl ChartDrawings {
             note_drawn: None,
             plot: (0.0, 0.0),
             visible: None,
+            now: None,
             card_point: 1,
         }
     }
@@ -307,6 +310,11 @@ impl ChartDrawings {
         }
         std::mem::swap(&mut d.a, &mut d.b);
         self.data.change(|s| (s.edit(d), true))
+    }
+
+    /// The chart's market clock (plugin tools that read prices).
+    pub fn set_now(&mut self, now: Option<UtcMillis>) {
+        self.now = now;
     }
 
     /// The chart's contract (plugin tools draw for it).
@@ -1210,7 +1218,7 @@ impl ChartDrawings {
         self.note_drawn = None;
         if self.hidden {
             // Hidden drawings draw no levels either.
-            self.tools.update(std::iter::empty(), tick, &NoBars);
+            self.tools.update(std::iter::empty(), tick, &NoBars, None);
             return;
         }
         // A brush stroke: each new sample to data space on the frame it arrived (a view that
@@ -1284,7 +1292,8 @@ impl ChartDrawings {
                 (d.id, d.tool, d.a, d.b)
             })
             .chain(preview);
-        self.tools.update(plugin, tick, &BarsPrices(axis));
+        self.tools
+            .update(plugin, tick, &BarsPrices(axis, self.now), self.visible);
         if self.drawn.capacity() < set.items().len() {
             self.drawn.reserve(set.items().len() - self.drawn.len());
         }

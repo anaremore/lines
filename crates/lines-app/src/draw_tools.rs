@@ -61,6 +61,10 @@ struct Entry {
     /// The drawings last reported to [`DrawTool::changed`] (`None`: none seen yet; the first
     /// set seen is the baseline, never reported).
     sent: Option<Vec<(Anchor, Anchor)>>,
+    /// The last merge left something out (the map limits): it is merged again, drawings in
+    /// view first, when which drawings are in view changes ([`in_view_key`]).
+    dropped: bool,
+    in_view: u64,
 }
 
 /// A chart's plugin tools and their drawings' maps.
@@ -90,6 +94,8 @@ impl ToolMaps {
                     prices_key: 0,
                     stale: false,
                     sent: None,
+                    dropped: false,
+                    in_view: 0,
                 })
                 .collect()
         };
@@ -215,7 +221,15 @@ impl ToolMaps {
     /// whose points changed, and merges a tool's map again only then; with nothing changed it
     /// compares and returns false without allocating. `tick`: the chart's tick (maps off the
     /// grid are refused).
-    pub fn update<I>(&mut self, drawings: I, tick: i64, prices: &dyn ChartBarsPrices) -> bool
+    /// `visible`: the chart's visible span (when a tool's drawings don't all fit one map, those
+    /// in view go first).
+    pub fn update<I>(
+        &mut self,
+        drawings: I,
+        tick: i64,
+        prices: &dyn ChartBarsPrices,
+        visible: Option<(UtcMillis, UtcMillis)>,
+    ) -> bool
     where
         I: Iterator<Item = (DrawingId, Tool, Anchor, Anchor)> + Clone,
     {
@@ -237,6 +251,18 @@ impl ToolMaps {
                 .map(|(d, _, a, b)| (d, a, b))
                 .eq(e.cache.iter().map(|c| (c.id, c.a, c.b)));
             if same && !force {
+                // Everything fit, or the same drawings are in view: nothing to do.
+                if !e.dropped || in_view_key(&e.cache, visible) == e.in_view {
+                    continue;
+                }
+                e.in_view = in_view_key(&e.cache, visible);
+                let (merged, dropped) = merge(&*e.tool, ctx, &mut e.cache, tick, visible);
+                e.dropped = dropped;
+                if merged.as_ref() != e.merged.as_deref() {
+                    e.merged = merged.map(Arc::new);
+                    e.rev = next_rev();
+                    any = true;
+                }
                 continue;
             }
             let mut cache = Vec::with_capacity(e.cache.len() + 1);
@@ -258,7 +284,9 @@ impl ToolMaps {
                 });
             }
             e.cache = cache;
-            let merged = merge(&*e.tool, ctx, &mut e.cache, tick);
+            e.in_view = in_view_key(&e.cache, visible);
+            let (merged, dropped) = merge(&*e.tool, ctx, &mut e.cache, tick, visible);
+            e.dropped = dropped;
             if merged.as_ref() != e.merged.as_deref() {
                 e.merged = merged.map(Arc::new);
                 e.rev = next_rev();
@@ -333,28 +361,47 @@ fn checked(m: LevelMap, tick: i64) -> Result<LevelMap, lines_core::levels::Level
     b.build(tick)
 }
 
+/// Whether drawing `c`'s points span any of `visible`.
+fn in_view(c: &Cached, visible: Option<(UtcMillis, UtcMillis)>) -> bool {
+    visible.is_none_or(|(lo, hi)| c.a.time.min(c.b.time) <= hi && c.a.time.max(c.b.time) >= lo)
+}
+
+/// A key of which drawings are in view (no allocation).
+fn in_view_key(parts: &[Cached], visible: Option<(UtcMillis, UtcMillis)>) -> u64 {
+    parts.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, c| {
+        let bit = u64::from(in_view(c, visible));
+        (h ^ (c.id.wrapping_mul(2) | bit)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 /// One map of every drawing's levels: kinds by slug, each drawing's levels and markers one event
 /// (pointing at one highlights that drawing; its own groups stay apart), within the map limits
-/// (what doesn't fit is left out). `None` with no drawings.
+/// (what doesn't fit is left out: drawings in `visible` go first, then the rest in order).
+/// `None` with no drawings; and whether anything was left out.
 fn merge(
     tool: &dyn DrawTool,
     ctx: &DrawToolContext,
     parts: &mut [Cached],
     tick: i64,
-) -> Option<LevelMap> {
+    visible: Option<(UtcMillis, UtcMillis)>,
+) -> (Option<LevelMap>, bool) {
     if parts.is_empty() {
-        return None;
+        return (None, false);
     }
+    let mut dropped = false;
+    let mut order: Vec<usize> = (0..parts.len()).collect();
+    order.sort_by_key(|&i| !in_view(&parts[i], visible));
     let as_of = parts
         .iter()
         .filter_map(|c| c.map.as_ref().map(|m| m.as_of))
         .max()
         .unwrap_or(lines_core::UtcMillis(0));
-    let mut out = LevelMap::builder(tool.id(), ctx.product.id, as_of)
-        .build(tick)
-        .ok()?;
+    let Ok(mut out) = LevelMap::builder(tool.id(), ctx.product.id, as_of).build(tick) else {
+        return (None, false);
+    };
     out.contract = ctx.contract;
-    for c in parts.iter_mut() {
+    for i in order {
+        let c = &mut parts[i];
         c.merged = 0;
         let Some(m) = &c.map else { continue };
         let group = |g: Option<u16>, out: &mut LevelMap| -> Option<u16> {
@@ -370,6 +417,12 @@ fn merge(
                 (out.groups.len() - 1) as u16
             })
         };
+        if m.levels.len() + out.levels.len() > MAX_LEVELS
+            || m.markers.len() + out.markers.len() > MAX_MARKERS
+            || out.groups.len() >= MAX_GROUPS
+        {
+            dropped = true;
+        }
         let mut taken = 0;
         for l in &m.levels {
             if out.levels.len() >= MAX_LEVELS {
@@ -402,7 +455,7 @@ fn merge(
             out.markers.push(k);
         }
     }
-    Some(out)
+    (Some(out), dropped)
 }
 
 /// The chart's prices for its drawing tools, and a key that moves when its bars do.
@@ -411,17 +464,29 @@ pub trait ChartBarsPrices: DrawPrices {
     fn key(&self) -> u64;
 }
 
-/// [`ChartBarsPrices`] over a chart's bars.
-pub struct BarsPrices<'a, 'b>(pub &'b TimeAxis<'a>);
+/// [`ChartBarsPrices`] over a chart's bars and its market clock.
+pub struct BarsPrices<'a, 'b>(pub &'b TimeAxis<'a>, pub Option<UtcMillis>);
 
 impl DrawPrices for BarsPrices<'_, '_> {
-    fn first_beyond(&self, after: UtcMillis, price: Price, above: bool) -> Option<UtcMillis> {
+    fn first_beyond(
+        &self,
+        after: UtcMillis,
+        before: UtcMillis,
+        price: Price,
+        above: bool,
+    ) -> Option<UtcMillis> {
         let bars = self.0.view.bars;
         let from = bars.partition_point(|b| b.time <= after);
         bars[from..]
             .iter()
+            .take_while(|b| b.time < before)
             .find(|b| if above { b.high > price } else { b.low < price })
             .map(|b| b.time)
+    }
+    fn covered(&self) -> Option<(UtcMillis, UtcMillis)> {
+        let bars = self.0.view.bars;
+        let (first, last) = (bars.first()?, bars.last()?);
+        Some((first.time, self.1.map_or(last.time, |n| n.max(last.time))))
     }
 }
 
@@ -437,7 +502,10 @@ impl ChartBarsPrices for BarsPrices<'_, '_> {
 pub struct NoBars;
 
 impl DrawPrices for NoBars {
-    fn first_beyond(&self, _: UtcMillis, _: Price, _: bool) -> Option<UtcMillis> {
+    fn first_beyond(&self, _: UtcMillis, _: UtcMillis, _: Price, _: bool) -> Option<UtcMillis> {
+        None
+    }
+    fn covered(&self) -> Option<(UtcMillis, UtcMillis)> {
         None
     }
 }

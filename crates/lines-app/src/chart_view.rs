@@ -3034,6 +3034,14 @@ impl ChartView {
         };
         let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
         let len = axis.view.bars.len();
+        // Only a span the chart has bars in (outside them the axis extrapolates).
+        let (Some(first), Some(last)) = (axis.view.bars.first(), axis.view.bars.last()) else {
+            return;
+        };
+        if to < first.time || from > last.time {
+            return;
+        }
+        let (from, to) = (from.max(first.time), to.min(last.time));
         if let (Some(a), Some(b)) = (axis.index_of(from), axis.index_of(to)) {
             self.vp.show_indices(a, b, len);
         }
@@ -3074,7 +3082,7 @@ impl ChartView {
             return out;
         };
         let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
-        let prices = crate::draw_tools::BarsPrices(&axis);
+        let prices = crate::draw_tools::BarsPrices(&axis, d.market_time);
         let point = self.drawings.card_point();
         let Some(card) = crate::tool_panel::card(&*tool, maps.context(), (a, b), point, &prices)
         else {
@@ -5328,6 +5336,7 @@ impl ChartView {
             }
             self.drawings.set_pointer(self.hover);
             self.drawings.set_contract(d.contract);
+            self.drawings.set_now(d.market_time);
             // Plugin drawings are hit-tested on the levels drawn now (none with studies hidden).
             let (draws, levels) = (self.visibility.draws_studies(), &self.levels);
             self.drawings

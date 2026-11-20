@@ -502,7 +502,9 @@ fn merged_maps_keep_kinds_and_refuse_off_grid_levels() {
             merged: 0,
         },
     ];
-    let m = merge(&Pair, &ctx, &mut parts, tick).unwrap();
+    let (m, dropped) = merge(&Pair, &ctx, &mut parts, tick, None);
+    let m = m.unwrap();
+    assert!(!dropped);
     assert_eq!(
         (parts[0].merged, parts[1].merged),
         (3, 3),
@@ -520,7 +522,7 @@ fn merged_maps_keep_kinds_and_refuse_off_grid_levels() {
     assert_eq!(m.levels.len(), 6);
     assert_eq!(m.levels[3].kind, 0);
     assert_eq!(m.groups, vec!["d1".to_owned(), "d2".to_owned()]);
-    assert!(merge(&Pair, &ctx, &mut [], tick).is_none());
+    assert!(merge(&Pair, &ctx, &mut [], tick, None).0.is_none());
     if tick > 1 {
         // A tool whose own build skipped the grid check: refused here.
         let mut off = drawn(
@@ -971,7 +973,11 @@ impl DrawTool for Mark {
         MARK_DRAWS.fetch_add(1, Ordering::Relaxed);
         let half = Price((a.price.0 + b.price.0) / 2);
         let up = b.price > a.price;
-        *MARK_CROSSED.lock().unwrap() = Some(prices.first_beyond(b.time, half, !up).is_some());
+        *MARK_CROSSED.lock().unwrap() = Some(
+            prices
+                .first_beyond(b.time, UtcMillis(i64::MAX), half, !up)
+                .is_some(),
+        );
         let style = LevelStyle {
             rgba: 0x8888ccff,
             weight: 1,
@@ -1231,4 +1237,44 @@ fn the_point_card_describes_the_point() {
     assert_eq!(c.point, 1);
     assert_eq!(c.lines, vec![format!("point 1 at {}", 650 * tick)]);
     assert!(crate::tool_panel::card(&Pair, &ctx, (a, b), 0, none).is_none());
+}
+
+/// More drawings than one map holds: those in view are merged first, so marking a new session
+/// never loses its drawings to older ones; with none in view the first ones fit.
+#[test]
+fn over_the_limits_the_drawings_in_view_are_kept() {
+    let _s = serial();
+    let p = zn();
+    let tick = p.price.tick;
+    let ctx = DrawToolContext {
+        product: p.clone(),
+        contract: None,
+    };
+    let at = |t: i64, ticks: i64| Anchor {
+        time: UtcMillis(t * M),
+        price: Price(ticks * tick),
+    };
+    // Three levels each: 400 drawings don't fit MAX_LEVELS.
+    let mut parts: Vec<Cached> = (0..400)
+        .map(|i| {
+            let (a, b) = (at(2 * i, 600), at(2 * i + 1, 610));
+            Cached {
+                id: i as DrawingId + 1,
+                a,
+                b,
+                map: drawn(&Pair, &ctx, a, b, tick, &lines_feed::levels::NoPrices),
+                merged: 0,
+            }
+        })
+        .collect();
+    let (_, dropped) = merge(&Pair, &ctx, &mut parts, tick, None);
+    assert!(dropped);
+    assert_eq!(parts[0].merged, 3);
+    assert_eq!(parts[399].merged, 0, "the last left out");
+    let view = Some((UtcMillis(798 * M), UtcMillis(799 * M)));
+    let (m, dropped) = merge(&Pair, &ctx, &mut parts, tick, view);
+    assert!(dropped);
+    assert_eq!(parts[399].merged, 3, "in view: first in");
+    assert!(m.unwrap().groups.contains(&"d400".to_owned()));
+    assert_ne!(in_view_key(&parts, None), in_view_key(&parts, view));
 }
