@@ -332,6 +332,16 @@ impl DownloadWindow {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
+        // The UI zoom is app-wide: its keys work here too.
+        if let Some(
+            c @ (crate::commands::Command::ZoomIn
+            | crate::commands::Command::ZoomOut
+            | crate::commands::Command::ZoomReset),
+        ) = crate::commands::command_for(&ev.keystroke)
+        {
+            cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
+            return;
+        }
         let k = &ev.keystroke;
         let m = k.modifiers;
         match k.key.as_str() {

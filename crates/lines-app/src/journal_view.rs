@@ -2001,7 +2001,8 @@ impl JournalView {
         use crate::journal_tags::Field;
         let ed = self.tags.as_ref()?;
         let t = self.theme;
-        const WIDTH: f32 = 300.0;
+        // At the UI zoom, as its text is.
+        let width = crate::zoom::f(300.0);
         // Under the selected row's Tags cell, inside the table (pane px from the table's corner).
         let (bw, bh) = (f(self.bounds.size.width), f(self.bounds.size.height));
         let row = self
@@ -2012,7 +2013,7 @@ impl JournalView {
             .cols
             .cell(JournalCol::Tags.index(), 0.0)
             .map_or(0.0, |(x, _)| x)
-            .min((bw - WIDTH - 8.0).max(0.0))
+            .min((bw - width - 8.0).max(0.0))
             .max(0.0);
         let below = header_row_h() + (row + 1) as f32 * row_h() + 2.0;
         // Room for the panel under the row, else above it.
@@ -2168,7 +2169,7 @@ impl JournalView {
             .absolute()
             .left(px(x))
             .top(px(y))
-            .w(px(WIDTH))
+            .w(px(width))
             .flex()
             .flex_col()
             .gap_2()

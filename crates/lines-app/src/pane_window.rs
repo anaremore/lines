@@ -615,6 +615,31 @@ pub fn placement_of(id: PaneId, cx: &App) -> Option<Placement> {
 
 /// Every pane window and the size it was opened at (screenshots).
 #[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
+/// After a UI zoom change: a popped-out DOM grows to the trading panel's least size at the
+/// zoom now (`window_size::grow_to_zoom`), as its minimum was at the zoom it opened with.
+pub fn zoom_changed(cx: &mut App) {
+    let dom: Vec<WindowHandle<PaneWindow>> = all(cx)
+        .into_iter()
+        .map(|(h, _)| h)
+        .filter(|h| {
+            h.read(cx)
+                .is_ok_and(|w| w.handle.kind() == crate::layout::PaneKind::Dom)
+        })
+        .collect();
+    for h in dom {
+        let _ = h.update(cx, |_, window, cx| {
+            crate::window_size::grow_to_zoom(
+                window,
+                (
+                    crate::trade_bar::MIN_DOM_WIDTH,
+                    crate::trade_bar::MIN_DOM_PANE_H,
+                ),
+                cx,
+            );
+        });
+    }
+}
+
 pub fn all(cx: &App) -> Vec<(WindowHandle<PaneWindow>, (f32, f32))> {
     cx.global::<Workspace>()
         .pane_windows

@@ -632,14 +632,33 @@ fn capture(
                 }
             });
         }
-        // A zoom raised while they are open grows them as in the app.
-        let grow = |s: (f32, f32), base: (f32, f32)| {
-            crate::window_size::grown(s, base, crate::zoom::get(), None).unwrap_or(s)
+        // A zoom raised while they are open grew them as in the app: shot at the size each
+        // window now has, or (a hidden window reports none of its own) the size it grew to.
+        let size_of = |cx: &mut AsyncApp, hw: AnyWindowHandle, s: (f32, f32), base| {
+            if ui_zoom_to.is_none() {
+                return s;
+            }
+            let got = cx
+                .update_window(hw, |_, window, _| {
+                    let v = window.viewport_size();
+                    (f32::from(v.width), f32::from(v.height))
+                })
+                .unwrap_or((0.0, 0.0));
+            if got.0 >= 1.0 && got.1 >= 1.0 {
+                got
+            } else {
+                let zoom = cx.update(|_| crate::zoom::get());
+                crate::window_size::grown(s, base, zoom, None).unwrap_or(s)
+            }
         };
-        let settings_size =
-            cx.update(|_| settings_size.map(|s| grow(s, crate::settings_view::SIZE)));
-        let download_window =
-            cx.update(|_| download_window.map(|(hw, s)| (hw, grow(s, crate::download_view::SIZE))));
+        let settings_size = match (settings_size, &settings_window) {
+            (Some(s), Some(Some(hw))) => Some(size_of(cx, *hw, s, crate::settings_view::SIZE)),
+            (s, _) => s,
+        };
+        let download_window = match download_window {
+            Some((Some(hw), s)) => Some((Some(hw), size_of(cx, hw, s, crate::download_view::SIZE))),
+            other => other,
+        };
         let mut wrote = vec![shoot(cx, handle.into(), (w, h), &out, scale).await];
         if let Some((hw, size)) = download_window {
             let stem = out
