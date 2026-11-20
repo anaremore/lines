@@ -602,7 +602,10 @@ fn capture(
             .map(|f| (f.at, lines_core::Price(f.price.0 + 100)));
         demo.attach(lines_trading::StrategyId(3), &fills, skip);
     }
-    let settings_size = settings_shot.as_ref().map(|s| s.size);
+    // Opened at the UI zoom then (`crate::window_size`): shot at that size.
+    let settings_size = settings_shot
+        .as_ref()
+        .map(|s| crate::window_size::scaled(s.size, crate::zoom::get(), None));
     let settings_window = settings_shot.map(|s| {
         crate::settings_view::open_for_screenshot(
             &s.section,
@@ -612,8 +615,12 @@ fn capture(
             cx,
         )
     });
-    let download_window =
-        download.map(|(state, size)| (crate::download_view::shot::open(&state, size, cx), size));
+    let download_window = download.map(|(state, size)| {
+        (
+            crate::download_view::shot::open(&state, size, cx),
+            crate::window_size::scaled(size, crate::zoom::get(), None),
+        )
+    });
     cx.spawn(async move |cx| {
         if let Some(pct) = ui_zoom_to {
             // A frame at the first zoom (what it measures is kept), then the change as
@@ -625,6 +632,14 @@ fn capture(
                 }
             });
         }
+        // A zoom raised while they are open grows them as in the app.
+        let grow = |s: (f32, f32), base: (f32, f32)| {
+            crate::window_size::grown(s, base, crate::zoom::get(), None).unwrap_or(s)
+        };
+        let settings_size =
+            cx.update(|_| settings_size.map(|s| grow(s, crate::settings_view::SIZE)));
+        let download_window =
+            cx.update(|_| download_window.map(|(hw, s)| (hw, grow(s, crate::download_view::SIZE))));
         let mut wrote = vec![shoot(cx, handle.into(), (w, h), &out, scale).await];
         if let Some((hw, size)) = download_window {
             let stem = out

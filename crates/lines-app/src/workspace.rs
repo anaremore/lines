@@ -5199,7 +5199,16 @@ pub fn open_window(
             ..Default::default()
         }),
         icon: crate::window_icon(),
-        window_min_size: Some(size(px(MIN_WINDOW_W), px(MIN_WINDOW_H))),
+        // The least that holds a tab bar, a footer and two DOM panes, at the UI zoom it
+        // opens with (`crate::window_size`).
+        window_min_size: Some({
+            let (w, h) = crate::window_size::scaled(
+                (MIN_WINDOW_W, MIN_WINDOW_H),
+                crate::zoom::get(),
+                crate::window_size::primary_work_area(cx),
+            );
+            size(px(w), px(h))
+        }),
         ..Default::default()
     });
     let handle = cx.open_window(opts, move |window, cx| {
@@ -5494,6 +5503,9 @@ pub(crate) fn set_ui_zoom(pct: u16, cx: &mut App) {
 /// new size shows itself, and a notice is the footer's warning item ("!"), where every step
 /// stayed listed for its few seconds ("! 110% · 125% · 150%").
 pub(crate) fn applied_ui_zoom(cx: &mut App) {
+    // Secondary windows sized at 100 % grow to fit the new zoom (`crate::window_size`).
+    crate::settings_view::zoom_changed(cx);
+    crate::download_view::zoom_changed(cx);
     cx.refresh_windows();
 }
 
