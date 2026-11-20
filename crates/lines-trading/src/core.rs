@@ -2914,8 +2914,21 @@ impl TradingCore {
     // ---- rebuild ----------------------------------------------------------------------
 
     /// Replace the cache with the broker's state (after a (re)connect or restart). Orders the
-    /// broker doesn't know any more are cancelled in the cache; local state never wins.
+    /// broker doesn't know any more are cancelled in the cache; local state never wins. Every
+    /// order, position and account is published again (a new subscriber gets the full state).
     pub fn rebuild(&mut self, now: UtcMillis) {
+        self.rebuild_from_broker(now, false);
+    }
+
+    /// [`TradingCore::rebuild`] for a periodic re-read of a venue (the app, whenever the venue's
+    /// state moves): the same reconciliation, but only real changes are published. An order,
+    /// position or account the broker reports as it was emits nothing, so panes don't repaint
+    /// (or flash) for a re-read that changed nothing.
+    pub fn refresh(&mut self, now: UtcMillis) {
+        self.rebuild_from_broker(now, true);
+    }
+
+    fn rebuild_from_broker(&mut self, now: UtcMillis, quiet: bool) {
         // A broker reporting external fills: what it already has queued first (fills before
         // the positions they made), so a fill is never both in a rebuilt position and applied
         // after it.
@@ -2932,10 +2945,30 @@ impl TradingCore {
             .collect();
         let mut open = 0;
         let mut seen: Vec<OrderId> = Vec::new();
+        // What a quiet refresh compares with: the positions and balances before it, and the
+        // accounts something really changed on.
+        let positions_before: BTreeMap<(AccountId, ContractKey), Position> = self
+            .accounts
+            .iter()
+            .flat_map(|(a, c)| {
+                c.positions
+                    .iter()
+                    .map(move |(k, p)| ((a.clone(), *k), p.clone()))
+            })
+            .collect();
+        let mut changed: BTreeSet<AccountId> = BTreeSet::new();
         for ba in &snap.accounts {
+            // A new trade date starts from the balance before this report (a quiet refresh may
+            // not reach `account_changed`, which rolls it too).
+            if self.accounts.contains_key(&ba.id) {
+                self.roll_day(now, &ba.id);
+            }
             let Some(a) = self.accounts.get_mut(&ba.id) else {
                 continue;
             };
+            if a.balance != ba.balance {
+                changed.insert(ba.id.clone());
+            }
             a.balance = ba.balance;
             if let Some((day, open)) = a.restore_day.take() {
                 a.tracker.day = Some(day);
@@ -2954,6 +2987,17 @@ impl TradingCore {
                 if external && known.is_none() {
                     self.adopted.insert(o.id);
                 }
+                // The same order as before, its times aside (a broker stamps each report).
+                let same = self.orders.get(&o.id).is_some_and(|c| {
+                    let mut x = o.clone();
+                    x.created = c.created;
+                    x.updated = c.updated;
+                    x == *c
+                });
+                if quiet && same {
+                    continue;
+                }
+                changed.insert(o.account.clone());
                 self.orders.insert(o.id, o.clone());
                 self.events.push(Event::Order(o.clone()));
                 // The broker filled more than the cache knew (executions missed while
@@ -3005,23 +3049,28 @@ impl TradingCore {
                 };
                 o.updated = now;
                 let o = o.clone();
+                changed.insert(o.account.clone());
                 self.events.push(Event::Order(o));
             }
         }
         self.cancels_rebuilt();
-        // The groups too, as the rest of the state: a subscriber that missed their last
-        // change (the app's cache after a restart) has them again.
-        if !self.groups.is_empty() {
-            self.publish_groups();
+        if !quiet {
+            // The groups too, as the rest of the state: a subscriber that missed their last
+            // change (the app's cache after a restart) has them again.
+            if !self.groups.is_empty() {
+                self.publish_groups();
+            }
+            self.events.push(Event::Rebuilt {
+                accounts: snap.accounts.len(),
+                open_orders: open,
+            });
         }
-        self.events.push(Event::Rebuilt {
-            accounts: snap.accounts.len(),
-            open_orders: open,
-        });
         self.triggers_restore();
         // What the rebuilt positions say first (flat, flipped), then the full state.
         self.triggers_step(now);
-        self.triggers_publish();
+        if !quiet {
+            self.triggers_publish();
+        }
         let ids: Vec<AccountId> = self.accounts.keys().cloned().collect();
         for a in ids {
             let mut contracts: Vec<ContractKey> =
@@ -3032,10 +3081,20 @@ impl TradingCore {
                 }
             }
             for k in contracts {
+                let now_held = self.accounts[&a].positions.get(&k);
+                let was = positions_before.get(&(a.clone(), k));
+                // Flat either way (no entry, or an empty one) is the same.
+                let moved = now_held.filter(|p| p.qty() != 0) != was.filter(|p| p.qty() != 0);
+                if quiet && !moved {
+                    continue;
+                }
+                changed.insert(a.clone());
                 self.spec(k);
                 self.position_event(&a, k);
             }
-            self.account_changed(now, &a);
+            if !quiet || changed.contains(&a) {
+                self.account_changed(now, &a);
+            }
         }
     }
 }

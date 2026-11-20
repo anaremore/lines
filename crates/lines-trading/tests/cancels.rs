@@ -963,3 +963,44 @@ fn a_refused_cancel_on_an_acked_order_leaves_it_alive() {
     assert!(matches!(r.state(ended), OrderState::Rejected { .. }));
     assert_eq!(r.failures().len(), 1);
 }
+
+/// A venue re-read that changes nothing (the app's `refresh`, on each of the venue's state
+/// changes) publishes nothing: no order, position or account event, so no pane repaints or
+/// flashes its orders. A full `rebuild` still publishes everything (a new subscriber's start).
+#[test]
+fn a_refresh_that_changes_nothing_publishes_nothing() {
+    let mut r = Rig::new();
+    r.long(2);
+    for p in [599_000, 598_975, 598_950] {
+        r.cmd(Command::PlaceOrder(OrderSpec {
+            account: acct(),
+            contract: es(),
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit { price: Price(p) },
+        }))
+        .unwrap();
+    }
+    r.wait(LAT * 3);
+    r.events.clear();
+    for _ in 0..20 {
+        r.t += 3_000;
+        r.core.refresh(r.now());
+        r.collect();
+    }
+    let published: Vec<&Event> = r
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Order(_) | Event::Position(_) | Event::Account(_)))
+        .collect();
+    assert!(published.is_empty(), "{published:?}");
+    assert_eq!(r.core.open_orders(&acct()).count(), 3);
+    r.rebuild();
+    let orders = r
+        .events
+        .iter()
+        .filter(|e| matches!(e, Event::Order(_)))
+        .count();
+    assert!(orders >= 3, "a full rebuild publishes every order");
+    assert!(r.events.iter().any(|e| matches!(e, Event::Position(_))));
+}

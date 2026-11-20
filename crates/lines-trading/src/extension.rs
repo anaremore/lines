@@ -51,6 +51,9 @@ pub struct VenueStatus {
     pub detail: String,
     /// When the venue last sent anything (staleness).
     pub last_message: Option<lines_core::UtcMillis>,
+    /// Something at the venue that changes what Lines' orders do there (a setting to turn
+    /// off), in a few words: shown in the panel's notice line, not only on the narrow chip.
+    pub warning: Option<String>,
 }
 
 /// The accounts an extension offers right now (they can change while connected).

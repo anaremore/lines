@@ -82,6 +82,9 @@ pub enum GroupAct {
 
 /// One pane's trading state.
 pub struct PaneTrade {
+    /// The panel's data last gathered under the cache lock (`gather`), with its account:
+    /// shown again while the cache is busy.
+    last_bar: std::cell::RefCell<Option<(AccountId, BarData)>>,
     pub account: Option<AccountId>,
     pub bracket: Option<BracketPreset>,
     pub arming: Arming,
@@ -287,6 +290,7 @@ impl PaneTrade {
             account.or_else(|| trading.and_then(Trading::default_account))
         };
         PaneTrade {
+            last_bar: std::cell::RefCell::new(None),
             account,
             bracket: saved.and_then(|s| s.bracket),
             // Sticky: restored as saved (new panes: disabled).
@@ -1862,6 +1866,7 @@ pub fn qty_key<V: TradePane>(v: &mut V, key: &str, cx: &mut Context<V>) -> bool 
 // ---- rendering ---------------------------------------------------------------------------
 
 /// What the panel shows, gathered under the cache lock (never waited for).
+#[derive(Clone)]
 struct BarData {
     account_name: String,
     /// PAPER, SIM or LIVE.
@@ -1885,6 +1890,8 @@ struct BarData {
     rules: Vec<(&'static str, Money, Money)>,
     /// The account's trading state, as words, when it isn't active.
     blocked: Option<String>,
+    /// The account's venue warns about a setting that changes Lines' orders there.
+    venue_warning: Option<String>,
     /// Short form of `blocked` for the switch's badge.
     blocked_short: Option<&'static str>,
     /// The guardrail lockout in force, as words (`guard_line`), and its state.
@@ -1936,6 +1943,7 @@ fn empty_data(info: &crate::trading::AccountInfo, t: &Trading) -> BarData {
         badge: info.badge,
         read_only: info.read_only.clone(),
         venue: info.venue.and_then(|i| venue_words(t, i)),
+        venue_warning: info.venue.and_then(|i| t.venue_warning(i)),
         position: None,
         stop: None,
         target: None,
@@ -1967,7 +1975,7 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         .try_global::<crate::picker_view::AppSettings>()
         .map(|a| a.settings.pnl_display)
         .unwrap_or_default();
-    if let Some(s) = t.cache.try_read() {
+    let fresh = if let Some(s) = t.cache.try_read() {
         if let Some(g) = s.guard(account) {
             // Time left on the core's clock (wall live, market time in replays).
             let now = t.now(v.trade_store());
@@ -2075,7 +2083,21 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         if let Some((name, members)) = &pt.group {
             group_data(&mut data, &s, t, name, members, contract, last, product);
         }
+        true
+    } else {
+        false
+    };
+    // The cache busy (the pump applying events): the last frame's panel for this account,
+    // never one without its position, orders or exits for a frame.
+    let mut kept = pt.last_bar.borrow_mut();
+    if fresh {
+        *kept = Some((account.clone(), data.clone()));
+    } else if let Some((a, prev)) = kept.as_ref()
+        && a == account
+    {
+        data = prev.clone();
     }
+    drop(kept);
     if let Some(m) = pt.local_flash() {
         data.flashes.push((pt.local_flash_label, m.to_owned()));
     }
@@ -2458,6 +2480,44 @@ pub fn status_parts(text: &str) -> impl Iterator<Item = (&str, bool)> {
                 .map(move |(m, q)| (q.trim(), k > 0 && m == 0))
         })
         .filter(|(p, _)| !p.is_empty())
+}
+
+/// A refusal line ([`flash_line`]) as (price, reason, `+N more`): the price and the count
+/// shown whole, the reason as one piece (it may be cut with an ellipsis, never dropped).
+pub fn flash_split(text: &str) -> (Option<&str>, &str, Option<&str>) {
+    let (main, more) = match text.rfind("  +") {
+        Some(i) if text[i..].ends_with(" more") => (&text[..i], Some(text[i..].trim())),
+        _ => (text, None),
+    };
+    match main.split_once(": ") {
+        Some((p, r))
+            if !p.is_empty()
+                && p.bytes()
+                    .all(|b| b.is_ascii_digit() || b == b'.' || b == b'\'' || b == b'-') =>
+        {
+            (Some(p), r, more)
+        }
+        _ => (None, main, more),
+    }
+}
+
+/// A refusal line on one line: its price, its reason (cut with an ellipsis when the header is
+/// narrow, so a long reason is never hidden whole), and `+N more`.
+fn flash_items(text: &str, color: gpui::Hsla) -> gpui::Div {
+    let (price, reason, more) = flash_split(text);
+    div()
+        .flex()
+        .flex_row()
+        .gap_x_1()
+        .min_w_0()
+        .h(crate::zoom::ui(ITEMS_LINE_H))
+        .items_center()
+        .overflow_hidden()
+        .whitespace_nowrap()
+        .text_color(color)
+        .children(price.map(|p| div().flex_shrink_0().child(format!("{p}:"))))
+        .child(div().min_w_0().truncate().child(reason.to_owned()))
+        .children(more.map(|m| div().flex_shrink_0().child(m.to_owned())))
 }
 
 /// `text` as whole items on one line of text (centred in its slot by the caller): an item
@@ -3982,7 +4042,7 @@ pub fn dom_bar<V: TradePane>(
                             .font_weight(FontWeight::BOLD)
                             .child(label),
                     )
-                    .child(whole_items(&f, t.text_main, false)),
+                    .child(flash_items(&f, t.text_main)),
             ),
             (None, Some((_, g)), _) => status.child(lock_strip(
                 g,
@@ -3996,6 +4056,19 @@ pub fn dom_bar<V: TradePane>(
                 narrow,
                 t,
             )),
+            // The venue changes Lines' orders (a setting there): said here, where it's seen.
+            // (A news blackout's strip, which locks entries, comes first.)
+            (None, None, None)
+                if d.venue_warning.is_some()
+                    && !d.news.as_ref().is_some_and(|(warns, _)| *warns) =>
+            {
+                status.child(lock_strip(
+                    d.venue_warning.as_deref().expect("checked"),
+                    "",
+                    narrow,
+                    t,
+                ))
+            }
             // The calendar: a blackout (or a calendar that can't answer) as a strip; a
             // release coming as a quiet line, unless the panel needs the line for why
             // orders are denied.
@@ -5613,6 +5686,8 @@ fn account_chip<V: TradePane>(
 /// "… · disconnected: why"; `true` when it needs attention.
 fn venue_words(t: &Trading, venue: usize) -> Option<(String, bool)> {
     let (label, status) = t.venue_status(venue)?;
+    // The short name ("Sierra"): the chip is narrow, and the connection's words matter more.
+    let label = t.venue_short(venue).unwrap_or(label);
     let Some(s) = status else {
         return Some((label, false));
     };
@@ -7465,6 +7540,25 @@ mod tests {
 
     /// Review round 3: a narrow panel cut the lockout mid-number ("limit of 10" for 1,000,
     /// "· 1" for 12 min left). Status text is laid out as whole items instead.
+    /// A refusal line keeps its reason as one piece (cut, never dropped): the owner's header
+    /// read "DENIED 26747.25: Sierra:" with the reason hidden.
+    #[test]
+    fn a_refusal_line_keeps_its_reason_whole() {
+        assert_eq!(
+            flash_split("26747.25: Broker: account report unreadable"),
+            (Some("26747.25"), "Broker: account report unreadable", None)
+        );
+        assert_eq!(
+            flash_split("27047.00: Broker: bracket needs target and stop  +2 more"),
+            (
+                Some("27047.00"),
+                "Broker: bracket needs target and stop",
+                Some("+2 more")
+            )
+        );
+        assert_eq!(flash_split("no account"), (None, "no account", None));
+    }
+
     #[test]
     fn status_text_splits_into_whole_items() {
         let parts = |t| status_parts(t).collect::<Vec<_>>();
