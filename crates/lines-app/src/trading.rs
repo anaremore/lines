@@ -782,7 +782,29 @@ pub struct TradeCache {
     global: AtomicU64,
 }
 
+/// What a pane draws from the trading cache this frame: `fresh` read under the lock (`None`:
+/// the lock was busy, the pump applying events), else the last frame's copy. A busy lock never
+/// blanks what was drawn (the owner's Sierra chart, 2026-11-20: orders and the position
+/// flashed off with every re-read).
+pub fn fresh_or_last<T: Clone>(fresh: Option<Option<T>>, last: &mut Option<T>) -> Option<T> {
+    if let Some(v) = fresh {
+        *last = v;
+    }
+    last.clone()
+}
+
 impl TradeCache {
+    /// Tests: a cache holding what `events` leave (as the pump applies them).
+    #[cfg(test)]
+    pub(crate) fn for_test(events: Vec<Event>) -> TradeCache {
+        let c = TradeCache::new(&[]);
+        let now = Instant::now();
+        for e in events {
+            c.read().apply(e, now);
+        }
+        c
+    }
+
     fn new(accounts: &[AccountInfo]) -> TradeCache {
         TradeCache {
             state: Mutex::default(),
@@ -1245,7 +1267,7 @@ fn rebuild_due(pending: bool, asked: bool, last: Option<Instant>, now: Instant) 
 
 /// What the account chip shows of a venue's status: connected, detail, and how stale (in
 /// 5 s steps, 0 while fresh). The watcher repaints when it changes.
-fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64)> {
+fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64, Option<String>)> {
     let s = s.as_ref()?;
     let silent = s
         .last_message
@@ -1255,7 +1277,7 @@ fn status_key(s: &Option<VenueStatus>) -> Option<(bool, String, i64)> {
     } else {
         0
     };
-    Some((s.connected, s.detail.clone(), stale))
+    Some((s.connected, s.detail.clone(), stale, s.warning.clone()))
 }
 
 /// The UI's view of a venue's accounts.
@@ -1327,7 +1349,7 @@ fn spawn_watcher(
                             c
                         })
                         .collect();
-                    {
+                    let listed_changed = {
                         let mut all = accounts.write().unwrap_or_else(|e| e.into_inner());
                         // An account the venue stops listing (a disconnect) stays, read-only,
                         // with its badge: never shown as another kind or as tradable.
@@ -1350,7 +1372,8 @@ fn spawn_watcher(
                         if changed {
                             ACCOUNTS_EPOCH.fetch_add(1, Ordering::AcqRel);
                         }
-                    }
+                        changed
+                    };
                     if let Some(j) = &unmarked {
                         j.add_unmarked(known.clone());
                     }
@@ -1359,14 +1382,18 @@ fn spawn_watcher(
                     if !new.is_empty() {
                         handle.add_accounts(new);
                     }
-                    // Every change rebuilds from the broker (a reconnect lists the same
-                    // accounts again: the core already has them, the snapshot is new).
+                    // Every change re-reads the broker (a reconnect lists the same accounts
+                    // again: the core already has them, the snapshot is new). The re-read
+                    // publishes only what really changed, and panes repaint for those events:
+                    // a venue revision alone (each of Sierra's position reads) repaints nothing.
                     pending = true;
-                    cache.bump(None);
+                    if listed_changed {
+                        cache.bump(None);
+                    }
                 }
                 let now = Instant::now();
                 if rebuild_due(pending, !asked.is_empty(), last_rebuild, now) {
-                    handle.rebuild();
+                    handle.refresh();
                     last_rebuild = Some(now);
                     pending = false;
                 }
@@ -1890,6 +1917,16 @@ impl Trading {
             .cloned()
     }
 
+    /// A venue's warning ([`VenueStatus::warning`]), as the watcher last read it.
+    pub fn venue_warning(&self, venue: usize) -> Option<String> {
+        let v = self.venues.get(venue)?;
+        v.status
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .and_then(|s| s.warning.clone())
+    }
+
     /// A venue's short name (the account list's section headers).
     pub fn venue_short(&self, venue: usize) -> Option<String> {
         self.venues.get(venue).map(|v| v.short.clone())
@@ -1968,6 +2005,27 @@ impl Trading {
         self.journal.sync();
         self.settled
             .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Screenshots: a DENIED refusal on `account` and `contract` at `price`, as a broker's
+    /// refusal before sending reads (`--dom-flash`).
+    #[cfg(feature = "screenshot")]
+    pub fn screenshot_deny(
+        &self,
+        account: AccountId,
+        contract: ContractKey,
+        price: Price,
+        message: String,
+    ) {
+        self.cache.read().flashes.push_back(Flash {
+            kind: FlashKind::Denied,
+            account: account.clone(),
+            contract: Some(contract),
+            price: Some(price),
+            message,
+            at: Instant::now(),
+        });
+        self.cache.bump(Some(&account));
     }
 
     /// Wait (bounded, 5 s) until every venue's accounts are listed and its core has rebuilt

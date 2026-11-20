@@ -828,7 +828,7 @@ pub fn position_row(avg_price: f64, tick: i64, units: i64) -> i64 {
 /// full message stays in the header). Known reasons by their wording, else the message's
 /// first word, at most 9 characters.
 pub fn short_reason(message: &str) -> &str {
-    const KNOWN: [(&str, &str); 19] = [
+    const KNOWN: [(&str, &str); 24] = [
         // First: whatever else it mentions, the cancel is what failed.
         ("cancel refused", "no cancel"),
         ("no answer to", "no cancel"),
@@ -848,8 +848,24 @@ pub fn short_reason(message: &str) -> &str {
         ("liquidity", "no liq"),
         ("entries locked", "disabled"),
         ("filled first", "stayed"),
+        // A broker's own refusals before sending (connectors' short reasons).
+        ("not a sim account", "not Sim"),
+        ("live trading off", "live off"),
+        ("not connected", "offline"),
+        ("report unreadable", "unreadable"),
+        ("order entry off", "entry off"),
         ("filled", "filled"),
     ];
+    // A source's name leading the reason ("Broker: account report unreadable"): tag the
+    // reason, not the name.
+    if let Some((head, rest)) = message.split_once(": ")
+        && !head.is_empty()
+        && !head.contains(' ')
+        && head.chars().all(char::is_alphabetic)
+        && !rest.trim().is_empty()
+    {
+        return short_reason(rest);
+    }
     let lower = message.to_ascii_lowercase();
     for (needle, short) in KNOWN {
         if lower.contains(needle) {
@@ -1950,6 +1966,26 @@ mod tests {
         p.qty = Qty(3);
         p.filled = Qty(1);
         assert_eq!(text(&p), "T1/3");
+    }
+
+    /// A reason led by its source's name ("Broker: …") is tagged by the reason, never by the
+    /// name alone (the owner's Sierra denial read "Sierra:" on its row).
+    #[test]
+    fn a_source_prefix_isnt_the_tag() {
+        assert_eq!(short_reason("Broker: market is closed"), "closed");
+        // Not a lone name: unchanged.
+        assert_eq!(
+            short_reason("still working: no answer to 3 cancels"),
+            "no cancel"
+        );
+        assert_eq!(short_reason("Broker:"), "Broker:");
+        assert_eq!(short_reason("Broker: not a Sim account"), "not Sim");
+        assert_eq!(short_reason("Broker: live trading off"), "live off");
+        assert_eq!(short_reason("Broker: not connected yet"), "offline");
+        assert_eq!(
+            short_reason("Broker: account report unreadable"),
+            "unreadable"
+        );
     }
 
     #[test]

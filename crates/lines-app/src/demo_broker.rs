@@ -40,6 +40,8 @@ fn caps() -> BrokerCaps {
 /// (the account list's sections and scrolling).
 struct Accounts {
     extra: usize,
+    /// The venue's warning (`--venue-warning`).
+    warning: Option<String>,
 }
 
 /// The id of the `n`th extra account (from 1).
@@ -84,6 +86,7 @@ impl AccountSource for Accounts {
             connected: true,
             detail: "connected".into(),
             last_message: None,
+            warning: self.warning.clone(),
         })
     }
 }
@@ -118,6 +121,7 @@ impl Broker for DemoBroker {
 
 struct Demo {
     extra: usize,
+    warning: Option<String>,
     contract: ContractKey,
     last: Price,
     tick: i64,
@@ -180,7 +184,10 @@ impl BrokerExtension for Demo {
         caps()
     }
     fn accounts(&self) -> Arc<dyn AccountSource> {
-        Arc::new(Accounts { extra: self.extra })
+        Arc::new(Accounts {
+            extra: self.extra,
+            warning: self.warning.clone(),
+        })
     }
     /// A local venue's settings, as an observe-only broker describes them (Settings ›
     /// Connections evidence).
@@ -279,9 +286,11 @@ pub fn extension(
     at: UtcMillis,
     extra: usize,
     fills: bool,
+    warning: Option<String>,
 ) -> Arc<dyn BrokerExtension> {
     Arc::new(Demo {
         extra,
+        warning,
         contract,
         last,
         tick,

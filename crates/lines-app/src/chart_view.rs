@@ -647,6 +647,8 @@ pub struct ChartView {
     zone_epoch: u64,
     rates: Rates,
     paint_time_ewma_us: f64,
+    /// The position last drawn, kept while the trading cache is busy (never blanked).
+    drawn_position: Option<(i64, f64, lines_trading::Money, PnlDisplay)>,
     /// Show `rates` in the header (workspace preference, read at render).
     perf_stats: bool,
     /// The rates changed since the last paint (redraw once a second while shown).
@@ -1022,6 +1024,7 @@ impl ChartView {
                 paints_per_sec: 0.0,
             },
             paint_time_ewma_us: 0.0,
+            drawn_position: None,
             perf_stats: false,
             rates_changed: false,
             latency_hud: false,
@@ -5283,19 +5286,38 @@ impl ChartView {
     }
 
     /// The chart's open position in its account (side and quantity signed, average price,
-    /// open P&L, the P&L display mode), copied for this frame; `None` when flat, without an
-    /// account, or while the trading cache is busy.
-    fn position_for_draw(&self, cx: &App) -> Option<(i64, f64, lines_trading::Money, PnlDisplay)> {
-        let trading = crate::trading::Trading::try_global(cx)?;
-        let contract = crate::trade_bar::contract_of(&self.store)?;
+    /// open P&L, the P&L display mode), copied for this frame; `None` when flat or without an
+    /// account. While the trading cache is busy: the last frame's (never blanked).
+    fn position_for_draw(
+        &mut self,
+        cx: &App,
+    ) -> Option<(i64, f64, lines_trading::Money, PnlDisplay)> {
+        let fresh = self.position_now(cx);
+        crate::trading::fresh_or_last(fresh, &mut self.drawn_position)
+    }
+
+    /// [`ChartView::position_for_draw`] read now: `None` when the cache is busy.
+    #[allow(clippy::type_complexity)]
+    fn position_now(
+        &self,
+        cx: &App,
+    ) -> Option<Option<(i64, f64, lines_trading::Money, PnlDisplay)>> {
+        let Some(trading) = crate::trading::Trading::try_global(cx) else {
+            return Some(None);
+        };
+        let Some(contract) = crate::trade_bar::contract_of(&self.store) else {
+            return Some(None);
+        };
         let s = trading.cache.try_read()?;
         // Its account's, or its group's members' together.
-        let p = s.position_in(self.trade.view(), contract)?;
+        let Some(p) = s.position_in(self.trade.view(), contract) else {
+            return Some(None);
+        };
         let mode = cx
             .try_global::<crate::picker_view::AppSettings>()
             .map(|a| a.settings.pnl_display)
             .unwrap_or_default();
-        Some((p.qty, p.avg_price?, p.unrealised, mode))
+        Some(p.avg_price.map(|avg| (p.qty, avg, p.unrealised, mode)))
     }
 
     /// The position line's tag at plot-local `y`: `LONG 2 @ 6000.25` and, unless P&L is off,
