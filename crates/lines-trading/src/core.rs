@@ -2958,6 +2958,11 @@ impl TradingCore {
             .collect();
         let mut changed: BTreeSet<AccountId> = BTreeSet::new();
         for ba in &snap.accounts {
+            // A new trade date starts from the balance before this report (a quiet refresh may
+            // not reach `account_changed`, which rolls it too).
+            if self.accounts.contains_key(&ba.id) {
+                self.roll_day(now, &ba.id);
+            }
             let Some(a) = self.accounts.get_mut(&ba.id) else {
                 continue;
             };
