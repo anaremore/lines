@@ -804,14 +804,21 @@ fn compact_size(size: &str) -> String {
     }
 }
 
-/// After a UI zoom change: an open Download days window grows to fit
-/// (`window_size::grow_to_zoom`).
+/// After a UI zoom change: an open Download days window takes its size at the new zoom
+/// (`window_size::fit_to_zoom`).
 pub fn zoom_changed(cx: &mut App) {
     if let Some(h) = cx.try_global::<DownloadWindowGlobal>().and_then(|g| g.0) {
         let _ = h.update(cx, |_, window, cx| {
-            crate::window_size::grow_to_zoom(window, SIZE, cx);
+            crate::window_size::fit_to_zoom(window, MIN_SIZE, cx);
         });
     }
+}
+
+/// The open Download days window's size as last given (screenshots).
+#[cfg(feature = "screenshot")]
+pub fn fitted(cx: &App) -> Option<(f32, f32)> {
+    let h = cx.try_global::<DownloadWindowGlobal>().and_then(|g| g.0)?;
+    crate::window_size::applied(h.window_id())
 }
 
 /// The window's options: a normal window, or hidden (screenshots, tests). `size` and
@@ -894,8 +901,15 @@ fn open_with(
         })
         .ok()?;
     cx.set_global(DownloadWindowGlobal(Some(h)));
+    // Its size in 100 % units from here (`window_size::Fit`).
+    let shown = cx
+        .try_global::<Workspace>()
+        .is_some_and(|w| w.env.track_visibility);
+    crate::window_size::remember(h.window_id(), crate::window_size::opening(size, shown, cx));
+    let id = h.window_id();
     let _ = h.update(cx, |_, window, cx| {
-        window.on_window_should_close(cx, |window, cx| {
+        window.on_window_should_close(cx, move |window, cx| {
+            crate::window_size::forget(id);
             // Closing is "Cancel remaining": the day in flight, maybe already billed, finishes
             // and is stored on the job's thread; no other day starts. (The view is reached
             // through the window: this runs inside its update.)

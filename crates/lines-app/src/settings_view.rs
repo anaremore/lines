@@ -298,13 +298,21 @@ pub const SIZE: (f32, f32) = (860.0, 620.0);
 /// every section's rows stay readable.
 pub const MIN_SIZE: (f32, f32) = (640.0, 420.0);
 
-/// After a UI zoom change: an open Settings window grows to fit (`window_size::grow_to_zoom`).
+/// After a UI zoom change: an open Settings window takes its size at the new zoom
+/// (`window_size::fit_to_zoom`: up or down, the trader's size kept relative to the zoom).
 pub fn zoom_changed(cx: &mut App) {
     if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
         let _ = h.update(cx, |_, window, cx| {
-            crate::window_size::grow_to_zoom(window, SIZE, cx);
+            crate::window_size::fit_to_zoom(window, MIN_SIZE, cx);
         });
     }
+}
+
+/// The open Settings window's size as last given (screenshots).
+#[cfg(feature = "screenshot")]
+pub fn fitted(cx: &App) -> Option<(f32, f32)> {
+    let h = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0)?;
+    crate::window_size::applied(h.window_id())
 }
 /// A row's label and description never get narrower than this (logical px): a control that
 /// doesn't fit beside them moves to its own line below, and a choice's chips wrap.
@@ -706,9 +714,12 @@ fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
         return;
     };
     cx.set_global(SettingsWindowGlobal(Some(h)));
+    crate::window_size::remember(h.window_id(), crate::window_size::opening(size, watch, cx));
+    let id = h.window_id();
     let _ = h.update(cx, |_, window, cx| {
-        window.on_window_should_close(cx, |_, cx| {
+        window.on_window_should_close(cx, move |_, cx| {
             cx.set_global(SettingsWindowGlobal(None));
+            crate::window_size::forget(id);
             true
         });
     });
