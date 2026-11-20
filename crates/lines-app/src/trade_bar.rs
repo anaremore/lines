@@ -815,7 +815,7 @@ pub fn size_refusal<V: TradePane>(v: &V, cmd: &lines_trading::Command, cx: &App)
 
 /// The contract a pane trades: its store's (a product's front month, or the contract shown).
 pub fn contract_of(store: &ChartStore) -> Option<ContractKey> {
-    store.try_read().and_then(|d| d.contract)
+    store.contract()
 }
 
 /// Why dragging order `o` to `to` is refused before anything is sent, as a rejected drag

@@ -707,6 +707,9 @@ const MAX_RETIRED: usize = 4;
 #[derive(Debug)]
 pub struct ChartStore {
     data: Mutex<ChartData>,
+    /// The contract last seen under the data lock ([`ChartStore::contract`]): what the UI
+    /// uses while the feed holds the lock, so a busy frame never reads as "no contract".
+    contract_seen: Mutex<Option<ContractKey>>,
     revision: AtomicU64,
     /// Like `revision`, but not moved by depth that left the best bid/offer alone.
     chart_revision: AtomicU64,
@@ -766,6 +769,7 @@ impl ChartStore {
             recording: Default::default(),
             market_ms: AtomicI64::new(i64::MIN),
             frame_ms: AtomicI64::new(i64::MIN),
+            contract_seen: Mutex::new(contract),
             data: Mutex::new(ChartData::new(
                 product,
                 contract,
@@ -994,6 +998,18 @@ impl ChartStore {
     #[inline]
     pub fn try_read(&self) -> Option<MutexGuard<'_, ChartData>> {
         self.data.try_lock()
+    }
+
+    /// UI side, never blocks: the store's contract, or while the feed holds the lock the one
+    /// last seen (the owner's Sierra chart, 2026-11-20: every frame that found the lock busy
+    /// read "no contract" and drew no orders, position or trade panel: a flicker on a busy
+    /// feed). A roll shows on the next frame that gets the lock.
+    pub fn contract(&self) -> Option<ContractKey> {
+        let mut seen = self.contract_seen.lock();
+        if let Some(d) = self.data.try_lock() {
+            *seen = d.contract;
+        }
+        *seen
     }
 
     /// Blocking read, for tests and non-UI callers.
