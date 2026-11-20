@@ -813,6 +813,12 @@ struct Cli {
     /// bundled one, for the app and its trading cores (synthetic releases on synthetic data).
     #[arg(long, requires = "screenshot")]
     econ_calendar: Option<PathBuf>,
+    /// Screenshot: FRED's answers from this file (a line per release: its key, then its
+    /// YYYY-MM-DD dates) go through the refresh's mapping and cadence check onto the bundled
+    /// calendar at `--at`, as a refresh then would; no network.
+    #[cfg(feature = "screenshot")]
+    #[arg(long, requires = "screenshot", conflicts_with = "econ_calendar")]
+    econ_fred_fixture: Option<PathBuf>,
     /// Screenshot: a synthetic read-only broker (observe mode) with a SIM and a LIVE account;
     /// the panes trade its SIM account, long 2 with a working order on the recording's contract.
     #[arg(long, requires = "screenshot")]
@@ -1971,6 +1977,10 @@ where
     }
     // --help/--version print and exit 0; usage errors print and exit 2, as before.
     let cli = parse_cli(args, &ext).unwrap_or_else(|e| e.exit());
+    #[cfg(feature = "screenshot")]
+    if let Some(path) = &cli.econ_fred_fixture {
+        econ_refresh::apply_fixture(path, cli.at.unwrap_or_else(lines_feed::now_utc))?;
+    }
     if let Some(path) = &cli.econ_calendar {
         econ_ui::set_override_from(path)?;
     }
