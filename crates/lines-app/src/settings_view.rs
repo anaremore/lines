@@ -714,7 +714,19 @@ fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
         return;
     };
     cx.set_global(SettingsWindowGlobal(Some(h)));
-    crate::window_size::remember(h.window_id(), crate::window_size::opening(size, watch, cx));
+    // Its size in 100 % units from here (`window_size::Fit`), and the minimum the OS holds it
+    // to (a hidden window has none).
+    let floor = if watch {
+        crate::window_size::opening(MIN_SIZE, true, cx)
+    } else {
+        (0.0, 0.0)
+    };
+    crate::window_size::remember(
+        h.window_id(),
+        crate::window_size::opening(size, watch, cx),
+        Some(size),
+        floor,
+    );
     let id = h.window_id();
     let _ = h.update(cx, |_, window, cx| {
         window.on_window_should_close(cx, move |_, cx| {

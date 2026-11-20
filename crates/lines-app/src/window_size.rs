@@ -31,16 +31,32 @@ pub struct Fit {
     applied: (f32, f32),
     /// The zoom `applied` is for.
     zoom: f32,
+    /// The least content size the OS allows it (its minimum, fixed when it opened, in px):
+    /// never asked for less, so what is asked for is what it gets.
+    floor: (f32, f32),
 }
 
 impl Fit {
-    /// A window that opened with `content` at `zoom`.
+    /// A window that opened with `content` at `zoom` (its 100 % size: that over the zoom).
     pub fn new(content: (f32, f32), zoom: f32) -> Fit {
         Fit {
             base: (content.0 / zoom, content.1 / zoom),
             applied: content,
             zoom,
+            floor: (0.0, 0.0),
         }
+    }
+
+    /// Its 100 % size is `base` (the opening size may have been held back by the screen).
+    pub fn with_base(mut self, base: (f32, f32)) -> Fit {
+        self.base = base;
+        self
+    }
+
+    /// The OS keeps it at least `floor` (px; its minimum when it opened).
+    pub fn with_floor(mut self, floor: (f32, f32)) -> Fit {
+        self.floor = floor;
+        self
     }
 
     pub fn applied(&self) -> (f32, f32) {
@@ -51,8 +67,9 @@ impl Fit {
     /// (its size now; `None` when the window can't say, a hidden one). A `cur` other than
     /// what was last applied is the trader's resize: it becomes the 100 % size (divided by
     /// the zoom it was made at). The new size is the 100 % size times the zoom, never below
-    /// `min` (at 100 %) times the zoom; growing, never past `room` (the content the work area
-    /// has room for from where the window sits; never shrunk by it either).
+    /// `min` (at 100 %) times the zoom nor the OS's minimum (`floor`); growing, never past
+    /// `room` (the content the work area has room for from where the window sits; never
+    /// shrunk by it either).
     pub fn rezoom(
         &mut self,
         cur: Option<(f32, f32)>,
@@ -65,8 +82,8 @@ impl Fit {
         if moved(cur.0, self.applied.0) || moved(cur.1, self.applied.1) {
             self.base = (cur.0 / self.zoom, cur.1 / self.zoom);
         }
-        let side = |base: f32, min: f32, cur: f32, room: Option<f32>| {
-            let want = (base * zoom).max(min * zoom);
+        let side = |base: f32, min: f32, floor: f32, cur: f32, room: Option<f32>| {
+            let want = (base * zoom).max(min * zoom).max(floor);
             match room {
                 // Growing: no further than the work area has room for (a window already past
                 // it isn't shrunk for that).
@@ -75,8 +92,8 @@ impl Fit {
             }
         };
         let to = (
-            side(self.base.0, min.0, cur.0, room.map(|r| r.0)),
-            side(self.base.1, min.1, cur.1, room.map(|r| r.1)),
+            side(self.base.0, min.0, self.floor.0, cur.0, room.map(|r| r.0)),
+            side(self.base.1, min.1, self.floor.1, cur.1, room.map(|r| r.1)),
         );
         self.zoom = zoom;
         self.applied = to;
@@ -87,11 +104,23 @@ impl Fit {
 /// Each open window's [`Fit`], by window.
 static FITS: std::sync::Mutex<Vec<(gpui::WindowId, Fit)>> = std::sync::Mutex::new(Vec::new());
 
-/// A window opened with `content` at the zoom now: remember it for [`fit_to_zoom`].
-pub fn remember(id: gpui::WindowId, content: (f32, f32)) {
+/// A window opened with `content` at the zoom now: remember it for [`fit_to_zoom`]. `base`:
+/// its 100 % size if known (the opening size may have been held back by the screen; else
+/// the opening size over the zoom); `floor`: the minimum it was opened with (px, none for
+/// a hidden window).
+pub fn remember(
+    id: gpui::WindowId,
+    content: (f32, f32),
+    base: Option<(f32, f32)>,
+    floor: (f32, f32),
+) {
+    let mut fit = Fit::new(content, crate::zoom::get()).with_floor(floor);
+    if let Some(b) = base {
+        fit = fit.with_base(b);
+    }
     let mut f = FITS.lock().unwrap_or_else(|e| e.into_inner());
     f.retain(|(w, _)| *w != id);
-    f.push((id, Fit::new(content, crate::zoom::get())));
+    f.push((id, fit));
 }
 
 /// A window closed.
@@ -179,13 +208,8 @@ pub fn fit_to_zoom(window: &mut Window, min: (f32, f32), cx: &App) -> Option<(f3
     };
     let fit = &mut fits[i].1;
     if fixed {
-        // Kept, at the new zoom: a restored window comes back to the size for the zoom then.
-        let z = crate::zoom::get();
-        *fit = Fit {
-            base: fit.base,
-            applied: cur.unwrap_or(fit.applied),
-            zoom: z,
-        };
+        // Left as it is: restored, it is back at the size last given, and the next change
+        // takes it from its 100 % size.
         return None;
     }
     let to = fit.rezoom(cur, crate::zoom::get(), min, room)?;
@@ -297,6 +321,38 @@ mod tests {
         assert_eq!(
             f.rezoom(None, 1.0, (400.0, 340.0), None),
             Some((620.0, 460.0))
+        );
+    }
+
+    /// The OS's minimum (fixed at opening, 150 %): zooming out below it asks for no less, so
+    /// it isn't taken for the trader's resize and the way back is exact.
+    #[test]
+    fn the_os_minimum_never_reads_as_a_resize() {
+        let floor = (640.0 * 1.5, 420.0 * 1.5);
+        let mut f = Fit::new((1290.0, 930.0), 1.5).with_floor(floor);
+        let mut cur = (1290.0, 930.0);
+        for z in [1.1, 1.25, 1.0, 1.5] {
+            if let Some(to) = f.rezoom(Some(cur), z, MIN, None) {
+                cur = to;
+            }
+        }
+        assert_eq!(cur, (1290.0, 930.0));
+        // At 110 % the width stays at the OS minimum, asked for as such.
+        let mut f = Fit::new((1290.0, 930.0), 1.5).with_floor(floor);
+        assert_eq!(
+            f.rezoom(Some((1290.0, 930.0)), 1.1, MIN, None),
+            Some((960.0, 682.0))
+        );
+    }
+
+    /// Opened at 150 % on a small screen (held back to 1290 × 728): its 100 % size is still
+    /// 860 × 620, so at 100 % it is that, not the held-back size over the zoom.
+    #[test]
+    fn a_held_back_opening_keeps_its_real_size() {
+        let mut f = Fit::new((1290.0, 728.0), 1.5).with_base((860.0, 620.0));
+        assert_eq!(
+            f.rezoom(Some((1290.0, 728.0)), 1.0, MIN, None),
+            Some((860.0, 620.0))
         );
     }
 

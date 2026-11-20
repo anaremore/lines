@@ -905,7 +905,17 @@ fn open_with(
     let shown = cx
         .try_global::<Workspace>()
         .is_some_and(|w| w.env.track_visibility);
-    crate::window_size::remember(h.window_id(), crate::window_size::opening(size, shown, cx));
+    let floor = if shown {
+        crate::window_size::opening(MIN_SIZE, true, cx)
+    } else {
+        (0.0, 0.0)
+    };
+    crate::window_size::remember(
+        h.window_id(),
+        crate::window_size::opening(size, shown, cx),
+        Some(size),
+        floor,
+    );
     let id = h.window_id();
     let _ = h.update(cx, |_, window, cx| {
         window.on_window_should_close(cx, move |window, cx| {
