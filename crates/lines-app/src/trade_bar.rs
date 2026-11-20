@@ -82,6 +82,9 @@ pub enum GroupAct {
 
 /// One pane's trading state.
 pub struct PaneTrade {
+    /// The panel's data last gathered under the cache lock (`gather`), with its account:
+    /// shown again while the cache is busy.
+    last_bar: std::cell::RefCell<Option<(AccountId, BarData)>>,
     pub account: Option<AccountId>,
     pub bracket: Option<BracketPreset>,
     pub arming: Arming,
@@ -287,6 +290,7 @@ impl PaneTrade {
             account.or_else(|| trading.and_then(Trading::default_account))
         };
         PaneTrade {
+            last_bar: std::cell::RefCell::new(None),
             account,
             bracket: saved.and_then(|s| s.bracket),
             // Sticky: restored as saved (new panes: disabled).
@@ -1862,6 +1866,7 @@ pub fn qty_key<V: TradePane>(v: &mut V, key: &str, cx: &mut Context<V>) -> bool 
 // ---- rendering ---------------------------------------------------------------------------
 
 /// What the panel shows, gathered under the cache lock (never waited for).
+#[derive(Clone)]
 struct BarData {
     account_name: String,
     /// PAPER, SIM or LIVE.
@@ -1970,7 +1975,7 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         .try_global::<crate::picker_view::AppSettings>()
         .map(|a| a.settings.pnl_display)
         .unwrap_or_default();
-    if let Some(s) = t.cache.try_read() {
+    let fresh = if let Some(s) = t.cache.try_read() {
         if let Some(g) = s.guard(account) {
             // Time left on the core's clock (wall live, market time in replays).
             let now = t.now(v.trade_store());
@@ -2078,7 +2083,21 @@ fn gather<V: TradePane>(v: &V, product: &Product, cx: &App) -> Option<BarData> {
         if let Some((name, members)) = &pt.group {
             group_data(&mut data, &s, t, name, members, contract, last, product);
         }
+        true
+    } else {
+        false
+    };
+    // The cache busy (the pump applying events): the last frame's panel for this account,
+    // never one without its position, orders or exits for a frame.
+    let mut kept = pt.last_bar.borrow_mut();
+    if fresh {
+        *kept = Some((account.clone(), data.clone()));
+    } else if let Some((a, prev)) = kept.as_ref()
+        && a == account
+    {
+        data = prev.clone();
     }
+    drop(kept);
     if let Some(m) = pt.local_flash() {
         data.flashes.push((pt.local_flash_label, m.to_owned()));
     }

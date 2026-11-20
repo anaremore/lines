@@ -782,7 +782,29 @@ pub struct TradeCache {
     global: AtomicU64,
 }
 
+/// What a pane draws from the trading cache this frame: `fresh` read under the lock (`None`:
+/// the lock was busy, the pump applying events), else the last frame's copy. A busy lock never
+/// blanks what was drawn (the owner's Sierra chart, 2026-11-20: orders and the position
+/// flashed off with every re-read).
+pub fn fresh_or_last<T: Clone>(fresh: Option<Option<T>>, last: &mut Option<T>) -> Option<T> {
+    if let Some(v) = fresh {
+        *last = v;
+    }
+    last.clone()
+}
+
 impl TradeCache {
+    /// Tests: a cache holding what `events` leave (as the pump applies them).
+    #[cfg(test)]
+    pub(crate) fn for_test(events: Vec<Event>) -> TradeCache {
+        let c = TradeCache::new(&[]);
+        let now = Instant::now();
+        for e in events {
+            c.read().apply(e, now);
+        }
+        c
+    }
+
     fn new(accounts: &[AccountInfo]) -> TradeCache {
         TradeCache {
             state: Mutex::default(),

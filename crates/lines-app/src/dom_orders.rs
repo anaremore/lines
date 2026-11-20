@@ -884,6 +884,87 @@ fn outline(window: &mut Window, b: Bounds<Pixels>, c: Hsla, hair: f32, dashed: b
 
 #[cfg(test)]
 mod tests {
+    /// The owner's Sierra chart (2026-11-20): orders flashed off while the pump held the trading
+    /// cache. A frame that finds the cache busy keeps drawing the last frame's orders and
+    /// position, on the DOM and on the chart, and the panel keeps its last data.
+    #[test]
+    fn a_busy_cache_keeps_the_last_frames_orders() {
+        use lines_core::{ContractKey, Month, Price, Qty, UtcMillis};
+        use lines_trading::{
+            AccountId, Event, Order, OrderId, OrderKind, OrderState, PositionView, Role, Side,
+        };
+        let k = ContractKey::monthly(lines_feed::catalog::ES, 2026, Month::new(12).unwrap());
+        let account = AccountId::new("venue-1");
+        let order = |id: u64, price: i64| Order {
+            id: OrderId(id),
+            account: account.clone(),
+            contract: k,
+            side: Side::Buy,
+            qty: Qty(1),
+            kind: OrderKind::Limit {
+                price: Price(price),
+            },
+            state: OrderState::Working,
+            filled: Qty(0),
+            fill_value: 0,
+            role: Role::Single,
+            parent: None,
+            oco: None,
+            triggered: false,
+            created: UtcMillis(0),
+            updated: UtcMillis(0),
+            reduce_only: false,
+            overfill: Qty(0),
+        };
+        let cache = crate::trading::TradeCache::for_test(vec![
+            Event::Order(order(1, 600_000)),
+            Event::Order(order(2, 599_975)),
+            Event::Order(order(3, 599_950)),
+            Event::Position(PositionView {
+                account: account.clone(),
+                contract: k,
+                qty: 1,
+                avg_price: Some(600_100.0),
+                unrealised: lines_trading::Money::ZERO,
+                marked_at: None,
+            }),
+        ]);
+        let view = std::slice::from_ref(&account);
+        let mut dom = OrdersLayer::default();
+        let mut chart = crate::chart_trade::ChartTradeState::default();
+        dom.prepare(&cache, view, Some(k));
+        chart.prepare(&cache, view, Some(k));
+        assert_eq!((dom.marks.len(), chart.marks.len()), (3, 3));
+        // The pump holds the cache for this frame.
+        let held = cache.read();
+        dom.prepare(&cache, view, Some(k));
+        chart.prepare(&cache, view, Some(k));
+        assert_eq!(
+            (dom.marks.len(), chart.marks.len()),
+            (3, 3),
+            "never blanked"
+        );
+        assert_eq!(dom.position, Some((1, 600_100.0)));
+        assert_eq!(chart.position, Some((1, 600_100.0)));
+        drop(held);
+        // The chart's position line and the panel use the same rule: the last copy while busy.
+        let mut last = None;
+        assert_eq!(
+            crate::trading::fresh_or_last(Some(Some(7)), &mut last),
+            Some(7)
+        );
+        assert_eq!(
+            crate::trading::fresh_or_last(None, &mut last),
+            Some(7),
+            "busy"
+        );
+        assert_eq!(
+            crate::trading::fresh_or_last(Some(None), &mut last),
+            None,
+            "flat"
+        );
+    }
+
     use super::*;
 
     /// A press on a DOM mark for several orders finds every order of that kind on the row
