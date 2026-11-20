@@ -116,6 +116,7 @@ mod trade_marks;
 mod trading;
 mod update;
 mod versioned;
+mod window_size;
 mod workspace;
 mod wsdoc;
 mod zipw;

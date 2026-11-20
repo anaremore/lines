@@ -291,10 +291,21 @@ pub struct SettingsWindow {
     target_shape: Option<(usize, usize, Option<usize>, (gpui::Pixels, gpui::Pixels))>,
 }
 
-/// The window's size (logical px).
+/// The window's size (logical px at 100 %: it opens at this times the UI zoom, within the
+/// work area, and grows with a zoom raised while open; `crate::window_size`).
 pub const SIZE: (f32, f32) = (860.0, 620.0);
-/// The smallest the window can be made (logical px): every section's rows stay readable.
+/// The smallest the window can be made (logical px at 100 %, times the zoom it opens with):
+/// every section's rows stay readable.
 pub const MIN_SIZE: (f32, f32) = (640.0, 420.0);
+
+/// After a UI zoom change: an open Settings window grows to fit (`window_size::grow_to_zoom`).
+pub fn zoom_changed(cx: &mut App) {
+    if let Some(h) = cx.try_global::<SettingsWindowGlobal>().and_then(|g| g.0) {
+        let _ = h.update(cx, |_, window, cx| {
+            crate::window_size::grow_to_zoom(window, SIZE, cx);
+        });
+    }
+}
 /// A row's label and description never get narrower than this (logical px): a control that
 /// doesn't fit beside them moves to its own line below, and a choice's chips wrap.
 pub const LABEL_MIN_W: f32 = 240.0;
@@ -640,7 +651,12 @@ fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
         return;
     };
     let theme = ws.env.theme.get();
+    // At the UI zoom, within the work area (`crate::window_size`).
+    let zoom = crate::zoom::get();
     let options = if ws.env.track_visibility {
+        let work = crate::window_size::primary_work_area(cx);
+        let open = crate::window_size::scaled(size, zoom, work);
+        let min = crate::window_size::scaled(MIN_SIZE, zoom, work);
         WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("Lines · Settings".into()),
@@ -648,15 +664,18 @@ fn open_sized(at: Option<usize>, size: (f32, f32), cx: &mut App) {
             }),
             window_bounds: Some(gpui::WindowBounds::Windowed(gpui::Bounds::centered(
                 None,
-                gpui::size(px(size.0), px(size.1)),
+                gpui::size(px(open.0), px(open.1)),
                 cx,
             ))),
-            window_min_size: Some(gpui::size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
+            window_min_size: Some(gpui::size(px(min.0), px(min.1))),
             icon: crate::window_icon(),
             ..Default::default()
         }
     } else {
-        crate::workspace::hidden_window("Lines (settings)", size)
+        crate::workspace::hidden_window(
+            "Lines (settings)",
+            crate::window_size::scaled(size, zoom, None),
+        )
     };
     let facts = gather_facts(cx);
     // A shown window follows the core while idle (hidden ones, screenshots and tests, repaint

@@ -332,6 +332,16 @@ impl DownloadWindow {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
+        // The UI zoom is app-wide: its keys work here too.
+        if let Some(
+            c @ (crate::commands::Command::ZoomIn
+            | crate::commands::Command::ZoomOut
+            | crate::commands::Command::ZoomReset),
+        ) = crate::commands::command_for(&ev.keystroke)
+        {
+            cx.defer(move |cx| crate::workspace::zoom_command(c, cx));
+            return;
+        }
         let k = &ev.keystroke;
         let m = k.modifiers;
         match k.key.as_str() {
@@ -794,9 +804,25 @@ fn compact_size(size: &str) -> String {
     }
 }
 
-/// The window's options: a normal window, or hidden (screenshots, tests).
+/// After a UI zoom change: an open Download days window grows to fit
+/// (`window_size::grow_to_zoom`).
+pub fn zoom_changed(cx: &mut App) {
+    if let Some(h) = cx.try_global::<DownloadWindowGlobal>().and_then(|g| g.0) {
+        let _ = h.update(cx, |_, window, cx| {
+            crate::window_size::grow_to_zoom(window, SIZE, cx);
+        });
+    }
+}
+
+/// The window's options: a normal window, or hidden (screenshots, tests). `size` and
+/// [`MIN_SIZE`] are at 100 %: the window opens at them times the UI zoom, within the work
+/// area (`crate::window_size`).
 fn options(ws: &Workspace, size: (f32, f32), cx: &App) -> WindowOptions {
+    let zoom = crate::zoom::get();
     if ws.env.track_visibility {
+        let work = crate::window_size::primary_work_area(cx);
+        let size = crate::window_size::scaled(size, zoom, work);
+        let min = crate::window_size::scaled(MIN_SIZE, zoom, work);
         WindowOptions {
             titlebar: Some(TitlebarOptions {
                 title: Some("Lines · Download days".into()),
@@ -807,12 +833,15 @@ fn options(ws: &Workspace, size: (f32, f32), cx: &App) -> WindowOptions {
                 gpui::size(px(size.0), px(size.1)),
                 cx,
             ))),
-            window_min_size: Some(gpui::size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
+            window_min_size: Some(gpui::size(px(min.0), px(min.1))),
             icon: crate::window_icon(),
             ..Default::default()
         }
     } else {
-        crate::workspace::hidden_window("Lines (download days)", size)
+        crate::workspace::hidden_window(
+            "Lines (download days)",
+            crate::window_size::scaled(size, zoom, None),
+        )
     }
 }
 
