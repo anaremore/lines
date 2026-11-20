@@ -548,6 +548,7 @@ pub fn open(id: PaneId, handle: PaneHandle, place: Option<&Placement>, cx: &mut 
     }
     let env = cx.global::<Workspace>().env.clone();
     let opened = place.map_or((360.0, 640.0), |p| (p.w, p.h));
+    let dom = handle.kind() == crate::layout::PaneKind::Dom;
     let options = if env.track_visibility {
         let (bounds, display) = workspace::window_options(place, cx);
         WindowOptions {
@@ -573,6 +574,17 @@ pub fn open(id: PaneId, handle: PaneHandle, place: Option<&Placement>, cx: &mut 
     let h = cx.open_window(options, move |window, cx| {
         cx.new(|cx| PaneWindow::new(id, handle, opened, window, cx))
     })?;
+    // Its size in 100 % units from here (`window_size::Fit`), and a DOM's minimum the OS
+    // holds it to.
+    let floor = if env.track_visibility && dom {
+        (
+            crate::zoom::f(crate::trade_bar::MIN_DOM_WIDTH),
+            crate::zoom::f(crate::trade_bar::MIN_DOM_PANE_H),
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    crate::window_size::remember(h.window_id(), opened, None, floor);
     cx.global_mut::<Workspace>().pane_windows.push(h);
     // Closing the window re-attaches the pane: it is never lost that way.
     let _ = h.update(cx, |_, window, cx| {
@@ -580,6 +592,7 @@ pub fn open(id: PaneId, handle: PaneHandle, place: Option<&Placement>, cx: &mut 
             cx.global_mut::<Workspace>()
                 .pane_windows
                 .retain(|w| w.window_id() != h.window_id());
+            crate::window_size::forget(h.window_id());
             cx.defer(move |cx| reattach_pane(id, cx));
             true
         });
@@ -601,6 +614,7 @@ pub fn close(id: PaneId, cx: &mut App) {
     cx.global_mut::<Workspace>()
         .pane_windows
         .retain(|w| w.window_id() != h.window_id());
+    crate::window_size::forget(h.window_id());
     let _ = h.update(cx, |_, window, _| window.remove_window());
 }
 
@@ -613,38 +627,47 @@ pub fn placement_of(id: PaneId, cx: &App) -> Option<Placement> {
     })
 }
 
-/// Every pane window and the size it was opened at (screenshots).
-#[cfg_attr(not(feature = "screenshot"), allow(dead_code))]
-/// After a UI zoom change: a popped-out DOM grows to the trading panel's least size at the
-/// zoom now (`window_size::grow_to_zoom`), as its minimum was at the zoom it opened with.
+/// After a UI zoom change: every popped-out pane takes its size at the new zoom
+/// (`window_size::fit_to_zoom`: up or down, the trader's size kept relative to the zoom); a
+/// DOM never below the trading panel's least size at that zoom.
 pub fn zoom_changed(cx: &mut App) {
-    let dom: Vec<WindowHandle<PaneWindow>> = all(cx)
+    let wins: Vec<(WindowHandle<PaneWindow>, (f32, f32))> = all(cx)
         .into_iter()
-        .map(|(h, _)| h)
-        .filter(|h| {
-            h.read(cx)
-                .is_ok_and(|w| w.handle.kind() == crate::layout::PaneKind::Dom)
-        })
-        .collect();
-    for h in dom {
-        let _ = h.update(cx, |_, window, cx| {
-            crate::window_size::grow_to_zoom(
-                window,
+        .filter_map(|(h, _)| {
+            let kind = h.read(cx).ok()?.handle.kind();
+            let min = if kind == crate::layout::PaneKind::Dom {
                 (
                     crate::trade_bar::MIN_DOM_WIDTH,
                     crate::trade_bar::MIN_DOM_PANE_H,
-                ),
-                cx,
-            );
+                )
+            } else {
+                (0.0, 0.0)
+            };
+            Some((h, min))
+        })
+        .collect();
+    for (h, min) in wins {
+        let _ = h.update(cx, |_, window, cx| {
+            crate::window_size::fit_to_zoom(window, min, cx);
         });
     }
 }
 
+/// Every pane window and its size: the one last given (a zoom change since), else the one it
+/// opened at (screenshots, zoom changes).
 pub fn all(cx: &App) -> Vec<(WindowHandle<PaneWindow>, (f32, f32))> {
     cx.global::<Workspace>()
         .pane_windows
         .iter()
-        .filter_map(|w| w.read(cx).ok().map(|pw| (*w, pw.opened)))
+        // The size last given (a zoom change since), else the one it opened at.
+        .filter_map(|w| {
+            w.read(cx).ok().map(|pw| {
+                (
+                    *w,
+                    crate::window_size::applied(w.window_id()).unwrap_or(pw.opened),
+                )
+            })
+        })
         .collect()
 }
 
