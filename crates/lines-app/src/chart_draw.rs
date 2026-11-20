@@ -1292,8 +1292,12 @@ impl ChartDrawings {
                 (d.id, d.tool, d.a, d.b)
             })
             .chain(preview);
+        let view = self.visible.map(|visible| lines_feed::levels::DrawView {
+            visible,
+            now: self.now,
+        });
         self.tools
-            .update(plugin, tick, &BarsPrices(axis, self.now), self.visible);
+            .update(plugin, tick, &BarsPrices(axis, self.now), view);
         if self.drawn.capacity() < set.items().len() {
             self.drawn.reserve(set.items().len() - self.drawn.len());
         }

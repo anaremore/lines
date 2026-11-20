@@ -477,6 +477,19 @@ pub trait DrawTool: Send + Sync {
         let _ = (ctx, view);
         None
     }
+    /// Levels or points the tool shows besides its drawings (e.g. reference points for the
+    /// span on screen), merged first into its map. Asked when [`DrawTool::overlay_key`]
+    /// changes. Pure, no I/O (read beforehand, on the tool's own thread). Default: none.
+    fn overlay(&self, ctx: &DrawToolContext, view: &DrawView) -> Option<LevelMap> {
+        let _ = (ctx, view);
+        None
+    }
+    /// Changes whenever [`DrawTool::overlay`] would show something else. Asked every frame:
+    /// cheap, no allocation. Default: never.
+    fn overlay_key(&self, ctx: &DrawToolContext, view: &DrawView) -> u64 {
+        let _ = (ctx, view);
+        0
+    }
     /// The strip's button `action` was pressed. Default: nothing.
     fn act(&self, ctx: &DrawToolContext, view: &DrawView, action: &str) -> ToolEffect {
         let _ = (ctx, view, action);

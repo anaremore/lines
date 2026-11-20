@@ -20,7 +20,7 @@ use lines_core::drawings::TimeAxis;
 use lines_core::drawings::{Anchor, DrawingId, PluginTool, Tool};
 use lines_core::levels::{LevelMap, MAX_GROUPS, MAX_KINDS, MAX_LEVELS, MAX_MARKERS};
 use lines_core::{Price, UtcMillis};
-use lines_feed::levels::{DrawPrices, DrawTool, DrawToolContext};
+use lines_feed::levels::{DrawPrices, DrawTool, DrawToolContext, DrawView};
 
 /// The id a placement's preview takes (real drawings' ids start at 1).
 pub const PREVIEW: DrawingId = 0;
@@ -65,6 +65,9 @@ struct Entry {
     /// view first, when which drawings are in view changes ([`in_view_key`]).
     dropped: bool,
     in_view: u64,
+    /// The tool's overlay ([`DrawTool::overlay`]) and the key it was asked at.
+    overlay: Option<LevelMap>,
+    overlay_key: Option<u64>,
 }
 
 /// A chart's plugin tools and their drawings' maps.
@@ -96,6 +99,8 @@ impl ToolMaps {
                     sent: None,
                     dropped: false,
                     in_view: 0,
+                    overlay: None,
+                    overlay_key: None,
                 })
                 .collect()
         };
@@ -221,14 +226,14 @@ impl ToolMaps {
     /// whose points changed, and merges a tool's map again only then; with nothing changed it
     /// compares and returns false without allocating. `tick`: the chart's tick (maps off the
     /// grid are refused).
-    /// `visible`: the chart's visible span (when a tool's drawings don't all fit one map, those
-    /// in view go first).
+    /// `view`: what the chart shows (a tool's overlay; when a tool's drawings don't all fit one
+    /// map, those in view go first).
     pub fn update<I>(
         &mut self,
         drawings: I,
         tick: i64,
         prices: &dyn ChartBarsPrices,
-        visible: Option<(UtcMillis, UtcMillis)>,
+        view: Option<DrawView>,
     ) -> bool
     where
         I: Iterator<Item = (DrawingId, Tool, Anchor, Anchor)> + Clone,
@@ -236,8 +241,18 @@ impl ToolMaps {
         let ctx = &self.ctx;
         let mut any = false;
         let key = prices.key();
+        let visible = view.map(|v| v.visible);
         for e in &mut self.entries {
             let id = e.tool.id();
+            // The overlay, asked again when its key moves (none without a view: hidden).
+            let ok = view.map(|v| e.tool.overlay_key(ctx, &v));
+            let overlay_moved = ok != e.overlay_key;
+            if overlay_moved {
+                e.overlay_key = ok;
+                e.overlay = view
+                    .and_then(|v| e.tool.overlay(ctx, &v))
+                    .and_then(|m| checked(m, tick).ok());
+            }
             // Drawn again from scratch (no cached map reused): the tool's state changed, or the
             // bars it reads did.
             let force = e.stale || (e.tool.reads_prices() && e.prices_key != key);
@@ -251,12 +266,20 @@ impl ToolMaps {
                 .map(|(d, _, a, b)| (d, a, b))
                 .eq(e.cache.iter().map(|c| (c.id, c.a, c.b)));
             if same && !force {
-                // Everything fit, or the same drawings are in view: nothing to do.
-                if !e.dropped || in_view_key(&e.cache, visible) == e.in_view {
+                // Everything fit (or the same drawings are in view), the overlay unmoved:
+                // nothing to do.
+                if !overlay_moved && (!e.dropped || in_view_key(&e.cache, visible) == e.in_view) {
                     continue;
                 }
                 e.in_view = in_view_key(&e.cache, visible);
-                let (merged, dropped) = merge(&*e.tool, ctx, &mut e.cache, tick, visible);
+                let (merged, dropped) = merge(
+                    &*e.tool,
+                    ctx,
+                    &mut e.cache,
+                    tick,
+                    visible,
+                    e.overlay.as_ref(),
+                );
                 e.dropped = dropped;
                 if merged.as_ref() != e.merged.as_deref() {
                     e.merged = merged.map(Arc::new);
@@ -285,7 +308,14 @@ impl ToolMaps {
             }
             e.cache = cache;
             e.in_view = in_view_key(&e.cache, visible);
-            let (merged, dropped) = merge(&*e.tool, ctx, &mut e.cache, tick, visible);
+            let (merged, dropped) = merge(
+                &*e.tool,
+                ctx,
+                &mut e.cache,
+                tick,
+                visible,
+                e.overlay.as_ref(),
+            );
             e.dropped = dropped;
             if merged.as_ref() != e.merged.as_deref() {
                 e.merged = merged.map(Arc::new);
@@ -374,18 +404,76 @@ fn in_view_key(parts: &[Cached], visible: Option<(UtcMillis, UtcMillis)>) -> u64
     })
 }
 
-/// One map of every drawing's levels: kinds by slug, each drawing's levels and markers one event
-/// (pointing at one highlights that drawing; its own groups stay apart), within the map limits
-/// (what doesn't fit is left out: drawings in `visible` go first, then the rest in order).
-/// `None` with no drawings; and whether anything was left out.
+/// The group the tool's overlay ([`DrawTool::overlay`]) takes in the merged map (no drawing's).
+const OVERLAY_GROUP: &str = "overlay";
+
+/// Add map `m` to `out` within the limits, its groups named `name(g)`: how many of its levels
+/// (from the first) were taken, and whether anything didn't fit.
+fn merge_one(
+    out: &mut LevelMap,
+    m: &LevelMap,
+    name: impl Fn(Option<u16>) -> String,
+) -> (usize, bool) {
+    let group = |g: Option<u16>, out: &mut LevelMap| -> Option<u16> {
+        let name = name(g);
+        if let Some(i) = out.groups.iter().position(|x| *x == name) {
+            return Some(i as u16);
+        }
+        (out.groups.len() < MAX_GROUPS).then(|| {
+            out.groups.push(name);
+            (out.groups.len() - 1) as u16
+        })
+    };
+    let dropped = m.levels.len() + out.levels.len() > MAX_LEVELS
+        || m.markers.len() + out.markers.len() > MAX_MARKERS
+        || out.groups.len() >= MAX_GROUPS;
+    let mut taken = 0;
+    for l in &m.levels {
+        if out.levels.len() >= MAX_LEVELS {
+            break;
+        }
+        taken += 1;
+        let Some(slug) = m.kinds.get(usize::from(l.kind)) else {
+            continue;
+        };
+        let kind = match out.kinds.iter().position(|k| k == slug) {
+            Some(i) => i as u16,
+            None if out.kinds.len() < MAX_KINDS => {
+                out.kinds.push(slug.clone());
+                (out.kinds.len() - 1) as u16
+            }
+            None => continue,
+        };
+        let mut l = l.clone();
+        l.kind = kind;
+        l.group = group(l.group, out);
+        out.levels.push(l);
+    }
+    for k in &m.markers {
+        if out.markers.len() >= MAX_MARKERS {
+            break;
+        }
+        let mut k = k.clone();
+        k.group = group(k.group, out);
+        out.markers.push(k);
+    }
+    (taken, dropped)
+}
+
+/// One map of the tool's overlay and every drawing's levels: kinds by slug, each drawing's
+/// levels and markers one event (pointing at one highlights that drawing; its own groups stay
+/// apart), within the map limits (what doesn't fit is left out: the overlay first, then the
+/// drawings in `visible`, then the rest in order). `None` with neither; and whether anything
+/// was left out.
 fn merge(
     tool: &dyn DrawTool,
     ctx: &DrawToolContext,
     parts: &mut [Cached],
     tick: i64,
     visible: Option<(UtcMillis, UtcMillis)>,
+    overlay: Option<&LevelMap>,
 ) -> (Option<LevelMap>, bool) {
-    if parts.is_empty() {
+    if parts.is_empty() && overlay.is_none() {
         return (None, false);
     }
     let mut dropped = false;
@@ -394,66 +482,31 @@ fn merge(
     let as_of = parts
         .iter()
         .filter_map(|c| c.map.as_ref().map(|m| m.as_of))
+        .chain(overlay.map(|m| m.as_of))
         .max()
         .unwrap_or(lines_core::UtcMillis(0));
     let Ok(mut out) = LevelMap::builder(tool.id(), ctx.product.id, as_of).build(tick) else {
         return (None, false);
     };
     out.contract = ctx.contract;
+    if let Some(m) = overlay {
+        dropped |= merge_one(&mut out, m, |g| match g {
+            Some(g) => format!("{OVERLAY_GROUP}/{g}"),
+            None => OVERLAY_GROUP.to_owned(),
+        })
+        .1;
+    }
     for i in order {
         let c = &mut parts[i];
         c.merged = 0;
         let Some(m) = &c.map else { continue };
-        let group = |g: Option<u16>, out: &mut LevelMap| -> Option<u16> {
-            let name = match g {
-                Some(g) => format!("d{}/{g}", c.id),
-                None => format!("d{}", c.id),
-            };
-            if let Some(i) = out.groups.iter().position(|x| *x == name) {
-                return Some(i as u16);
-            }
-            (out.groups.len() < MAX_GROUPS).then(|| {
-                out.groups.push(name);
-                (out.groups.len() - 1) as u16
-            })
-        };
-        if m.levels.len() + out.levels.len() > MAX_LEVELS
-            || m.markers.len() + out.markers.len() > MAX_MARKERS
-            || out.groups.len() >= MAX_GROUPS
-        {
-            dropped = true;
-        }
-        let mut taken = 0;
-        for l in &m.levels {
-            if out.levels.len() >= MAX_LEVELS {
-                break;
-            }
-            taken += 1;
-            let Some(slug) = m.kinds.get(usize::from(l.kind)) else {
-                continue;
-            };
-            let kind = match out.kinds.iter().position(|k| k == slug) {
-                Some(i) => i as u16,
-                None if out.kinds.len() < MAX_KINDS => {
-                    out.kinds.push(slug.clone());
-                    (out.kinds.len() - 1) as u16
-                }
-                None => continue,
-            };
-            let mut l = l.clone();
-            l.kind = kind;
-            l.group = group(l.group, &mut out);
-            out.levels.push(l);
-        }
+        let id = c.id;
+        let (taken, d) = merge_one(&mut out, m, |g| match g {
+            Some(g) => format!("d{id}/{g}"),
+            None => format!("d{id}"),
+        });
         c.merged = taken;
-        for k in &m.markers {
-            if out.markers.len() >= MAX_MARKERS {
-                break;
-            }
-            let mut k = k.clone();
-            k.group = group(k.group, &mut out);
-            out.markers.push(k);
-        }
+        dropped |= d;
     }
     (Some(out), dropped)
 }

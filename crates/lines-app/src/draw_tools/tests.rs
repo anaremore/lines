@@ -502,7 +502,7 @@ fn merged_maps_keep_kinds_and_refuse_off_grid_levels() {
             merged: 0,
         },
     ];
-    let (m, dropped) = merge(&Pair, &ctx, &mut parts, tick, None);
+    let (m, dropped) = merge(&Pair, &ctx, &mut parts, tick, None, None);
     let m = m.unwrap();
     assert!(!dropped);
     assert_eq!(
@@ -522,7 +522,7 @@ fn merged_maps_keep_kinds_and_refuse_off_grid_levels() {
     assert_eq!(m.levels.len(), 6);
     assert_eq!(m.levels[3].kind, 0);
     assert_eq!(m.groups, vec!["d1".to_owned(), "d2".to_owned()]);
-    assert!(merge(&Pair, &ctx, &mut [], tick, None).0.is_none());
+    assert!(merge(&Pair, &ctx, &mut [], tick, None, None).0.is_none());
     if tick > 1 {
         // A tool whose own build skipped the grid check: refused here.
         let mut off = drawn(
@@ -929,6 +929,8 @@ static CHANGED: Mutex<Vec<Vec<(Anchor, Anchor)>>> = Mutex::new(Vec::new());
 /// How many times it drew, and whether the last drawing saw price come back through its half.
 static MARK_DRAWS: AtomicUsize = AtomicUsize::new(0);
 static MARK_CROSSED: Mutex<Option<bool>> = Mutex::new(None);
+/// Its overlay: a hollow point at this many ticks (0: none).
+static OVERLAY_AT: AtomicUsize = AtomicUsize::new(0);
 
 struct Mark;
 
@@ -1003,6 +1005,27 @@ impl DrawTool for Mark {
     fn restore(&self, _: &DrawToolContext) -> Vec<(Anchor, Anchor)> {
         RESTORE.lock().unwrap().clone()
     }
+    fn overlay(
+        &self,
+        ctx: &DrawToolContext,
+        view: &lines_feed::levels::DrawView,
+    ) -> Option<LevelMap> {
+        let at = OVERLAY_AT.load(Ordering::Relaxed) as i64;
+        (at > 0).then(|| {
+            LevelMap::builder(MARK_ID, ctx.product.id, view.visible.0)
+                .marker(
+                    view.visible.0,
+                    LevelValue::Tick(Price(at * ctx.product.price.tick)),
+                    Some("C"),
+                )
+                .hollow()
+                .build(ctx.product.price.tick)
+                .unwrap()
+        })
+    }
+    fn overlay_key(&self, _: &DrawToolContext, _: &lines_feed::levels::DrawView) -> u64 {
+        OVERLAY_AT.load(Ordering::Relaxed) as u64
+    }
     fn changed(&self, _: &DrawToolContext, drawings: &[(Anchor, Anchor)]) {
         CHANGED.lock().unwrap().push(drawings.to_vec());
     }
@@ -1023,6 +1046,7 @@ fn mark_serial() -> std::sync::MutexGuard<'static, ()> {
     CHANGED.lock().unwrap().clear();
     MARK_DRAWS.store(0, Ordering::Relaxed);
     *MARK_CROSSED.lock().unwrap() = None;
+    OVERLAY_AT.store(0, Ordering::Relaxed);
     g
 }
 
@@ -1267,14 +1291,37 @@ fn over_the_limits_the_drawings_in_view_are_kept() {
             }
         })
         .collect();
-    let (_, dropped) = merge(&Pair, &ctx, &mut parts, tick, None);
+    let (_, dropped) = merge(&Pair, &ctx, &mut parts, tick, None, None);
     assert!(dropped);
     assert_eq!(parts[0].merged, 3);
     assert_eq!(parts[399].merged, 0, "the last left out");
     let view = Some((UtcMillis(798 * M), UtcMillis(799 * M)));
-    let (m, dropped) = merge(&Pair, &ctx, &mut parts, tick, view);
+    let (m, dropped) = merge(&Pair, &ctx, &mut parts, tick, view, None);
     assert!(dropped);
     assert_eq!(parts[399].merged, 3, "in view: first in");
     assert!(m.unwrap().groups.contains(&"d400".to_owned()));
     assert_ne!(in_view_key(&parts, None), in_view_key(&parts, view));
+}
+
+/// A tool's overlay is drawn with no drawings at all, asked again only when its key moves,
+/// and goes when the tool has none.
+#[test]
+fn a_tools_overlay_is_drawn_and_follows_its_key() {
+    let _s = mark_serial();
+    let bars = hg_bars(&[(600, 550), (650, 560)]);
+    let vp = hg_vp(bars.len());
+    let mut d = ChartDrawings::new(ProductDrawings::ephemeral(hg(), Vec::new()));
+    hg_frame(&mut d, &bars, &vp);
+    assert!(d.tool_maps().map(MARK_ID).is_none(), "nothing to draw");
+    OVERLAY_AT.store(600, Ordering::Relaxed);
+    hg_frame(&mut d, &bars, &vp);
+    let m = d.tool_maps().map(MARK_ID).cloned().unwrap();
+    assert_eq!(m.markers.len(), 1);
+    assert!(m.markers[0].hollow);
+    let rev = d.tool_maps().revision();
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(d.tool_maps().revision(), rev, "same key: not merged again");
+    OVERLAY_AT.store(0, Ordering::Relaxed);
+    hg_frame(&mut d, &bars, &vp);
+    assert!(d.tool_maps().map(MARK_ID).is_none());
 }
