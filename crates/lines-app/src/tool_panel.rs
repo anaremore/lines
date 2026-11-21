@@ -50,6 +50,17 @@ pub fn card(
     })
 }
 
+/// Estimated card height (logical px, scaled by `zoom`), accounting for line wrapping in
+/// [`CARD_W`].
+pub fn card_height(lines: &[String], zoom: f32) -> f32 {
+    // At 11–12 px inside `CARD_W - 16` (224 px), ~32 chars fit on one line.
+    let rows: usize = lines
+        .iter()
+        .map(|l| l.chars().count().max(1).div_ceil(32))
+        .sum();
+    (rows as f32 * 16.0 + 48.0) * zoom
+}
+
 /// Where the card goes (body-local, logical px): beside the point at (`x`, `y`), turned left
 /// or up where it would leave the body (`w`, `h`: the body's size; `cw`, `ch`: the card's),
 /// never above `top_min` (below the strip) nor off the body.
@@ -101,6 +112,7 @@ fn button(
         .items_center()
         .rounded(z(3.0))
         .border_1()
+        .when(!enabled, |d| d.border_dashed())
         .border_color(edge)
         .bg(bg)
         .text_color(fg)
@@ -109,11 +121,13 @@ fn button(
         .when(enabled, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
 }
 
-/// The strip: `panel`'s status and buttons, right-aligned `right` px from the body's right edge.
+/// The strip: `panel`'s status and buttons, right-aligned `right` px from the body's right edge,
+/// wrapped inside `max_w` so a narrow pane never pushes it off the left edge.
 pub fn strip(
     tool: &'static str,
     panel: &ToolPanel,
     right: f32,
+    max_w: f32,
     t: &Theme,
     cx: &mut Context<ChartView>,
 ) -> AnyElement {
@@ -121,9 +135,12 @@ pub fn strip(
     let mut row = div()
         .absolute()
         .top(z(6.0))
-        .right(px(right + 6.0))
+        .right(px(right + crate::zoom::f(6.0)))
+        .when(max_w > 0.0, |d| d.max_w(px(max_w)))
         .flex()
         .flex_row()
+        .flex_wrap()
+        .justify_end()
         .items_center()
         .gap(z(6.0))
         .px(z(6.0))
@@ -254,5 +271,18 @@ mod tests {
         // A point above the plot: below the strip, inside the body.
         assert_eq!(card_origin(300.0, -80.0, body, card, 36.0), (312.0, 36.0));
         assert_eq!(card_origin(900.0, 100.0, body, card, 36.0), (560.0, 112.0));
+    }
+
+    #[test]
+    fn card_height_accounts_for_wrapped_lines() {
+        let short = vec!["A 7218.00".into(), "Valid".into()];
+        let long = vec![
+            "Move #1 · E 7078.00 · 10:00:00 CT".into(),
+            "Snapped to bar low · pairs with A 7218.00".into(),
+            "Invalidated: crossed back through ½ (7148.00) at 11:00:00 CT · kept as an example"
+                .into(),
+        ];
+        assert!(card_height(&long, 1.0) > card_height(&short, 1.0) + 40.0);
+        assert_eq!(card_height(&long, 1.5), card_height(&long, 1.0) * 1.5);
     }
 }

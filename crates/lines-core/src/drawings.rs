@@ -600,10 +600,19 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
         }
         Tool::Plugin(_) => {
             // Its two points (handles) and the connector between them; its levels are the
-            // levels layer's ([`project_levels`] places them for hit-testing). Never culled
-            // here: its levels run on to the right of its points, so the caller keeps it while
-            // the connector or any of its levels is on the plot.
-            let (x0, x1) = (xa?, xb?);
+            // levels layer's ([`project_levels`] places them for hit-testing). Anchors inside
+            // a bar project onto that bar's centre (matching `levels::start_x` and
+            // `levels::marker_xy`), so handles, dots and level starts line up on trade-built
+            // bars whose anchors hold exact trade times. Never culled here: its levels run on
+            // to the right of its points, so the caller keeps it while the connector or any
+            // of its levels is on the plot.
+            let bar_x = |t: UtcMillis| {
+                axis.view
+                    .bar_at(t)
+                    .map(|i| vp.index_to_x(i as f64) as f32)
+                    .or_else(|| axis.x_of(vp, t))
+            };
+            let (x0, x1) = (bar_x(d.a.time)?, bar_x(d.b.time)?);
             out.handles = [(x0, ya), (x1, yb)];
             out.n_handles = 2;
             out.p0 = (x0, ya);

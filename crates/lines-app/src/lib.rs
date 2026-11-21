@@ -2675,6 +2675,9 @@ where
         });
     writer.flush(Duration::from_secs(3));
     journal.flush(Duration::from_secs(3));
+    for tool in lines_feed::levels::draw_tools() {
+        tool.flush();
+    }
     // A restart to update (or a rollback) applies and starts the new executable now that this
     // one saved. `run` returning has dropped the app and its globals, so the `TradingService`s
     // the `Trading` global held have joined the trading core after its last paper save:

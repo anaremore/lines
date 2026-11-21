@@ -296,8 +296,26 @@ impl ChartDrawings {
         }
     }
 
+    /// The selected plugin drawing's projected handle for its point card (plot-local px), as
+    /// of the last `prepare`.
+    pub fn selected_plugin_handle(&self) -> Option<(f32, f32)> {
+        let (_, id, _, _) = self.selected_plugin()?;
+        let p = self.drawn.iter().find(|p| p.id == id)?;
+        let i = self.card_point.min(usize::from(p.n_handles.max(1)) - 1);
+        Some(p.handles[i])
+    }
+
+    /// Whether any serving plugin tool's overlay key moved since the last frame.
+    pub fn overlay_changed(&self) -> bool {
+        let view = self.visible.map(|visible| lines_feed::levels::DrawView {
+            visible,
+            now: self.now,
+        });
+        self.tools.overlay_changed(view)
+    }
+
     /// Swap the selected plugin drawing's two points (its tool names them: the point card's
-    /// buttons). One undo step.
+    /// buttons). One undo step. Keeps the card on the same physical point (now the other role).
     pub fn swap_selected_points(&mut self) -> bool {
         let Some(id) = self.selected.filter(|_| !self.hidden) else {
             return false;
@@ -309,7 +327,12 @@ impl ChartDrawings {
             return false;
         }
         std::mem::swap(&mut d.a, &mut d.b);
-        self.data.change(|s| (s.edit(d), true))
+        if self.data.change(|s| (s.edit(d), true)) {
+            self.card_point = 1 - self.card_point.min(1);
+            true
+        } else {
+            false
+        }
     }
 
     /// The chart's market clock (plugin tools that read prices).
@@ -835,7 +858,10 @@ impl ChartDrawings {
                     self.add(Drawing::new(tool, at, at, self.default_style(tool)));
                     self.tool = None;
                 }
-                (_, None) => self.pending = Some((at, (x, y))),
+                (_, None) => {
+                    self.selected = None;
+                    self.pending = Some((at, (x, y)));
+                }
                 (_, Some((first, _))) => self.finish(tool, first, at),
             }
             return true;
@@ -1263,16 +1289,10 @@ impl ChartDrawings {
             _ => self.dragged.take(),
         };
         let set = self.data.lock();
-        // Plugin tools hear of their saved drawings' changes (any chart of the product).
-        self.tools.report(
-            set.items()
-                .iter()
-                .filter(|d| d.tool.is_plugin())
-                .map(|d| (d.tool, d.a, d.b)),
-        );
         // Plugin tools' levels: drawn again only for a drawing whose points moved (placed, a
-        // handle dragged), and for the placement's preview. Before projecting: a plugin
-        // drawing is hit-tested on the levels drawn for where it is now.
+        // handle dragged), and for the placement's preview. Before `report` so a tool that reads
+        // prices has judged any newly placed or swapped drawing before `changed` saves it, and
+        // before projecting so hit-testing sees the levels drawn for where it is now.
         let preview = match (self.tool, self.pending, pointer) {
             (Some(t @ Tool::Plugin(_)), Some((first, _)), Some(at)) => {
                 Some((PREVIEW, t, first, at))
@@ -1298,6 +1318,13 @@ impl ChartDrawings {
         });
         self.tools
             .update(plugin, tick, &BarsPrices(axis, self.now), view);
+        // Plugin tools hear of their saved drawings' changes (any chart of the product).
+        self.tools.report(
+            set.items()
+                .iter()
+                .filter(|d| d.tool.is_plugin())
+                .map(|d| (d.tool, d.a, d.b)),
+        );
         if self.drawn.capacity() < set.items().len() {
             self.drawn.reserve(set.items().len() - self.drawn.len());
         }

@@ -1325,3 +1325,141 @@ fn a_tools_overlay_is_drawn_and_follows_its_key() {
     hg_frame(&mut d, &bars, &vp);
     assert!(d.tool_maps().map(MARK_ID).is_none());
 }
+
+/// Swapping a drawing's points keeps the point card on the same physical point (flips
+/// `card_point`), and starting a new placement clears the prior selection so the old card
+/// doesn't linger while placing the next drawing.
+#[test]
+fn swap_flips_card_point_and_new_placement_clears_selection() {
+    let _s = mark_serial();
+    let bars = hg_bars(&[(600, 550), (650, 560), (640, 520), (600, 580)]);
+    let vp = hg_vp(bars.len());
+    let tick = hg().price.tick;
+    let mut d = ChartDrawings::new(ProductDrawings::ephemeral(hg(), Vec::new()));
+    hg_frame(&mut d, &bars, &vp);
+    d.set_tool(mark());
+    let a = Anchor {
+        time: bars[0].time,
+        price: Price(550 * tick),
+    };
+    let b = Anchor {
+        time: bars[1].time,
+        price: Price(650 * tick),
+    };
+    d.place(mark(), a, b);
+    assert_eq!(d.card_point(), 1);
+    assert!(d.swap_selected_points());
+    assert_eq!(
+        d.card_point(),
+        0,
+        "card stays on the same physical point, now role 0"
+    );
+    assert!(d.swap_selected_points());
+    assert_eq!(d.card_point(), 1);
+    // Starting the next placement with a stays-chosen tool drops the old selection.
+    assert!(d.selected.is_some());
+    assert!(d.on_down(100.0, 100.0, false, Some(a)));
+    assert!(d.selected.is_none());
+}
+
+/// `update` (judging prices) runs before `report` (`changed`), so a tool that reads prices has
+/// its verdict ready on the very first `changed` notification; `overlay_changed` reports an
+/// async overlay update on an idle chart.
+#[test]
+fn update_precedes_report_and_overlay_changed_detects_async_updates() {
+    let _s = mark_serial();
+    let tick = hg().price.tick;
+    let bars = hg_bars(&[(600, 550), (650, 560), (640, 520), (600, 580)]);
+    let vp = hg_vp(bars.len());
+    let mut d = ChartDrawings::new(ProductDrawings::ephemeral(hg(), Vec::new()));
+    hg_frame(&mut d, &bars, &vp);
+    assert!(!d.overlay_changed());
+    // Place a move whose bar 2 crosses its midpoint: `draw_with` runs before `changed`.
+    let a = Anchor {
+        time: bars[0].time,
+        price: Price(550 * tick),
+    };
+    let b = Anchor {
+        time: bars[1].time,
+        price: Price(650 * tick),
+    };
+    d.place(mark(), a, b);
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(*MARK_CROSSED.lock().unwrap(), Some(true));
+    assert_eq!(CHANGED.lock().unwrap().len(), 1);
+    // Async overlay update moves `overlay_key` -> `overlay_changed` wakes an idle chart.
+    OVERLAY_AT.store(610, Ordering::Relaxed);
+    assert!(d.overlay_changed());
+    hg_frame(&mut d, &bars, &vp);
+    assert!(!d.overlay_changed());
+}
+
+/// Over the map limits, an earlier drawing whose ruler levels extend into the visible range
+/// stays prioritized as in-view even when its two anchors sit before the visible window.
+#[test]
+fn over_the_limits_keeps_drawings_whose_levels_span_view() {
+    let _s = serial();
+    let p = zn();
+    let tick = p.price.tick;
+    let ctx = DrawToolContext {
+        product: p.clone(),
+        contract: None,
+    };
+    let at = |t: i64, ticks: i64| Anchor {
+        time: UtcMillis(t * M),
+        price: Price(ticks * tick),
+    };
+    let mut parts: Vec<Cached> = (0..400)
+        .map(|i| {
+            let (a, b) = (at(2 * i, 600), at(2 * i + 1, 610));
+            let mut map = drawn(&Pair, &ctx, a, b, tick, &lines_feed::levels::NoPrices).unwrap();
+            let to = if i == 399 {
+                UtcMillis(2_100 * M)
+            } else {
+                UtcMillis((2 * i + 2) * M)
+            };
+            for l in &mut map.levels {
+                l.to = Some(to);
+            }
+            Cached {
+                id: i as DrawingId + 1,
+                a,
+                b,
+                map: Some(map),
+                merged: 0,
+            }
+        })
+        .collect();
+    // Viewing afternoon bars well after drawing 399's anchors: its bounded ruler (`to: 2100*M`)
+    // spans the view while earlier sessions' rulers ended earlier, so drawing 399 is kept first.
+    let view = Some((UtcMillis(2_000 * M), UtcMillis(2_100 * M)));
+    assert_eq!(view_rank(&parts[0], view), 2);
+    assert_eq!(view_rank(&parts[399], view), 1);
+    let (_, dropped) = merge(&Pair, &ctx, &mut parts, tick, view, None);
+    assert!(dropped);
+    assert_eq!(parts[399].merged, 3, "spanning session ruler kept first");
+}
+
+/// `BarsPrices::covered` only claims coverage on trade-built bars (never coarse time bars),
+/// and never lets a far-future market clock stretch coverage past an open session's last bar.
+#[test]
+fn bars_prices_covered_requires_trade_bars_and_respects_open_session() {
+    use lines_core::ticks::{TickBars, TickReset};
+    let bars = hg_bars(&[(600, 550), (650, 560), (640, 580)]);
+    let axis = TimeAxis::new(BarsView::fixed(&bars, M));
+    let coarse = BarsPrices(&axis, Some(UtcMillis(i64::MAX)));
+    assert!(
+        coarse.covered().is_none(),
+        "time bars must not claim to settle sub-bar crosses"
+    );
+    let t0 = 1_800_000_000_000i64;
+    let mut tb = TickBars::new(2, TickReset::Session, None, 64);
+    tb.push(UtcMillis(t0), Price(600_000), Qty(1), None);
+    tb.push(UtcMillis(t0 + 1_000), Price(600_100), Qty(1), None);
+    tb.push(UtcMillis(t0 + 2_000), Price(600_050), Qty(1), None);
+    tb.push(UtcMillis(t0 + 3_000), Price(600_075), Qty(1), None);
+    let axis = TimeAxis::new(tb.view());
+    // Forming/done bar with no session close: clock far ahead does not extend `hi`.
+    let open = BarsPrices(&axis, Some(UtcMillis(t0 + 5 * 3_600_000)));
+    assert_eq!(open.covered(), Some((UtcMillis(t0), UtcMillis(t0 + 2_000))));
+}

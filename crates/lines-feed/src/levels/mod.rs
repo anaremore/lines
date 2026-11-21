@@ -495,6 +495,9 @@ pub trait DrawTool: Send + Sync {
         let _ = (ctx, view, action);
         ToolEffect::None
     }
+    /// Drain any queued saves before the app exits (a tool that saves its own drawings on a
+    /// background thread). Default: nothing.
+    fn flush(&self) {}
 }
 
 /// Where a drawing tool's points snap.

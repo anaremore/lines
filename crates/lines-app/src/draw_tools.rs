@@ -138,6 +138,15 @@ impl ToolMaps {
         }
     }
 
+    /// Whether any serving tool's overlay key moved since the last frame (an async overlay
+    /// finished reading, or a live overlay is due to refresh). Allocation-free.
+    pub fn overlay_changed(&self, view: Option<DrawView>) -> bool {
+        let ctx = &self.ctx;
+        self.entries
+            .iter()
+            .any(|e| view.map(|v| e.tool.overlay_key(ctx, &v)) != e.overlay_key)
+    }
+
     /// Report each tool's saved drawings (`committed`: the product's drawings, no preview or
     /// drag) to it when they differ from what it was last told ([`DrawTool::changed`]). The
     /// first set a chart sees is its baseline. Allocates only on a change.
@@ -391,16 +400,31 @@ fn checked(m: LevelMap, tick: i64) -> Result<LevelMap, lines_core::levels::Level
     b.build(tick)
 }
 
-/// Whether drawing `c`'s points span any of `visible`.
-fn in_view(c: &Cached, visible: Option<(UtcMillis, UtcMillis)>) -> bool {
-    visible.is_none_or(|(lo, hi)| c.a.time.min(c.b.time) <= hi && c.a.time.max(c.b.time) >= lo)
+/// Merge priority for `c` against `visible` (lower is kept first when over the map limits):
+/// `0` when its points overlap `visible`, `1` when a bounded level (`to: Some(_)`) spans
+/// `visible` (e.g. a morning session ruler extending to session close), `2` otherwise.
+fn view_rank(c: &Cached, visible: Option<(UtcMillis, UtcMillis)>) -> u8 {
+    let Some((lo, hi)) = visible else {
+        return 0;
+    };
+    if c.a.time.min(c.b.time) <= hi && c.a.time.max(c.b.time) >= lo {
+        return 0;
+    }
+    if c.map.as_ref().is_some_and(|m| {
+        m.levels
+            .iter()
+            .any(|l| l.to.is_some_and(|t| t >= lo) && l.from.is_none_or(|f| f <= hi))
+    }) {
+        return 1;
+    }
+    2
 }
 
 /// A key of which drawings are in view (no allocation).
 fn in_view_key(parts: &[Cached], visible: Option<(UtcMillis, UtcMillis)>) -> u64 {
     parts.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, c| {
-        let bit = u64::from(in_view(c, visible));
-        (h ^ (c.id.wrapping_mul(2) | bit)).wrapping_mul(0x0100_0000_01b3)
+        let rank = u64::from(view_rank(c, visible));
+        (h ^ (c.id.wrapping_mul(4) | rank)).wrapping_mul(0x0100_0000_01b3)
     })
 }
 
@@ -478,7 +502,7 @@ fn merge(
     }
     let mut dropped = false;
     let mut order: Vec<usize> = (0..parts.len()).collect();
-    order.sort_by_key(|&i| !in_view(&parts[i], visible));
+    order.sort_by_key(|&i| view_rank(&parts[i], visible));
     let as_of = parts
         .iter()
         .filter_map(|c| c.map.as_ref().map(|m| m.as_of))
@@ -537,9 +561,17 @@ impl DrawPrices for BarsPrices<'_, '_> {
             .map(|b| b.time)
     }
     fn covered(&self) -> Option<(UtcMillis, UtcMillis)> {
+        // Only trade-built bars (e.g. tick bars) can settle a sub-bar `after` time: on coarse
+        // time bars (1m, 15m, 1h, 1D), `first_beyond` skips the entire bucket holding `after`.
+        let tb = self.0.view.trades?;
         let bars = self.0.view.bars;
         let (first, last) = (bars.first()?, bars.last()?);
-        Some((first.time, self.1.map_or(last.time, |n| n.max(last.time))))
+        let hi = if tb.is_partial_at(bars.len() - 1, self.1) {
+            self.1.map_or(last.time, |n| n.max(last.time))
+        } else {
+            last.time
+        };
+        Some((first.time, hi))
     }
 }
 
