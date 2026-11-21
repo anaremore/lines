@@ -1203,6 +1203,9 @@ pub struct Placed {
     /// A line ended by being reached ([`Level::ended`]) whose end bar is on the plot: that
     /// bar's centre (px from the plot's left), where its mark goes ([`end_mark_x`]).
     pub end_mark: Option<f32>,
+    /// A line whose end ([`Level::to`]) is at a bar before the newest: drawn to there, but
+    /// over, so it takes no label (an axis tag would read as a current level).
+    pub over: bool,
 }
 
 impl Placed {
@@ -1255,6 +1258,7 @@ pub fn place(
             x0: 0.0,
             x1: vp.width as f32,
             end_mark: None,
+            over: false,
         });
     }
 }
