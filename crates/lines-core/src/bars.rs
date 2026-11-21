@@ -69,10 +69,14 @@ pub struct BarSeries {
     period_ms: i64,
     bars: Vec<Bar>,
     max_len: usize,
+    /// `max_len` as made, before any [`BarSeries::extend_back`].
+    base_len: usize,
     /// Bumped on every mutation. The UI compares it to decide whether to redraw.
     revision: u64,
     /// Number of bars ever removed from the front (lets views keep a stable index anchor).
     trimmed: u64,
+    /// Number of bars ever put in front by [`BarSeries::extend_back`] (likewise).
+    prepended: u64,
     /// The earliest bar time each recent revision touched (a ring of the last
     /// [`CHANGE_LOG`] mutations), so derived views (higher timeframes) recompute only from
     /// there: [`BarSeries::changed_since`].
@@ -111,8 +115,10 @@ impl BarSeries {
             // trim() lets len reach max_len + slack + 1 before draining; reserve exactly that.
             bars: Vec::with_capacity(max_len + max_len / 4 + 2),
             max_len,
+            base_len: max_len,
             revision: 0,
             trimmed: 0,
+            prepended: 0,
             changes: [(0, 0); CHANGE_LOG],
             change_head: 0,
         }
@@ -150,6 +156,12 @@ impl BarSeries {
         self.max_len
     }
 
+    /// The size it was made with, before older history grew it ([`BarSeries::extend_back`]):
+    /// a new series for the same chart (another contract) starts there again.
+    pub fn base_len(&self) -> usize {
+        self.base_len
+    }
+
     pub fn period_ms(&self) -> i64 {
         self.period_ms
     }
@@ -174,6 +186,11 @@ impl BarSeries {
     }
     pub fn trimmed(&self) -> u64 {
         self.trimmed
+    }
+    /// Bars put in front by [`BarSeries::extend_back`] so far (a chart keeps its view still
+    /// with it, as with [`BarSeries::trimmed`]).
+    pub fn prepended(&self) -> u64 {
+        self.prepended
     }
 
     pub fn clear(&mut self) {
@@ -274,6 +291,41 @@ impl BarSeries {
         self.revision += 1;
         self.note_change(oldest.0);
         self.trim();
+    }
+
+    /// Older history loaded on demand (a chart scrolled back past its oldest bar): complete
+    /// bars older than the oldest held go in front, sorted, one per time, and the series grows
+    /// to hold them: `max_len` and the buffer by as many, so nothing held is trimmed for them
+    /// (unlike [`BarSeries::prepend_older`], which stays within the reserved buffer). A series
+    /// never extended keeps its size. Allocates: call it off the paint path. Returns how many
+    /// bars went in.
+    pub fn extend_back(&mut self, older: &[Bar]) -> usize {
+        let first = self.bars.first().map(|b| b.time);
+        let mut take: Vec<Bar> = older
+            .iter()
+            .filter(|b| {
+                first.is_none_or(|f| b.time < f) && b.time == b.time.floor_to(self.period_ms)
+            })
+            .copied()
+            .collect();
+        take.sort_by_key(|b| b.time);
+        take.dedup_by_key(|b| b.time);
+        let n = take.len();
+        let Some(oldest) = take.first().map(|b| b.time) else {
+            return 0;
+        };
+        self.max_len += n;
+        // The capacity `new` reserves for the new size (`trim` lets len reach max_len + slack
+        // + 1).
+        let want = self.max_len + self.max_len / 4 + 2;
+        if want > self.bars.capacity() {
+            self.bars.reserve_exact(want - self.bars.len());
+        }
+        self.bars.splice(0..0, take);
+        self.prepended += n as u64;
+        self.revision += 1;
+        self.note_change(oldest.0);
+        n
     }
 
     /// Index of the bar containing `time`, or where it would be inserted.
@@ -417,6 +469,40 @@ mod tests {
 
     /// prepend_older keeps the series' buffer: no reallocation, onto an empty series and with
     /// more older bars than the series holds.
+    #[test]
+    fn extend_back_grows_the_series_and_keeps_every_bar() {
+        let bar = |m: i64| Bar::from_trade(t(m * M), Price(90), Qty(1));
+        let mut s = BarSeries::new(M, 8);
+        for m in 100..108 {
+            s.apply_trade(t(m * M), Price(100), Qty(1));
+        }
+        let (rev, cap) = (s.revision(), s.capacity());
+        // 20 older bars (and one already held, and a misaligned one: skipped).
+        let mut older: Vec<Bar> = (80..100).map(bar).collect();
+        older.push(bar(100));
+        older.push(Bar::from_trade(t(50 * M + 1), Price(90), Qty(1)));
+        assert_eq!(s.extend_back(&older), 20);
+        assert_eq!((s.len(), s.max_len(), s.prepended()), (28, 28, 20));
+        assert!(s.capacity() >= 28 + 28 / 4 + 2 && s.capacity() > cap);
+        assert!(s.revision() > rev);
+        assert_eq!(s.changed_since(rev), Changed::From(t(80 * M)));
+        let times: Vec<i64> = s.bars().iter().map(|b| b.time.0 / M).collect();
+        assert_eq!((times[0], times[27]), (80, 107));
+        assert!(times.windows(2).all(|w| w[0] < w[1]));
+        // New bars at the end keep the older ones (the series grew) and don't reallocate.
+        let cap = s.capacity();
+        for m in 108..113 {
+            s.apply_trade(t(m * M), Price(100), Qty(1));
+        }
+        assert_eq!(
+            (s.bars()[0].time, s.trimmed(), s.capacity()),
+            (t(80 * M), 0, cap)
+        );
+        // Nothing older: nothing changes.
+        assert_eq!(s.extend_back(&[bar(200)]), 0);
+        assert_eq!(s.prepended(), 20);
+    }
+
     #[test]
     fn prepend_older_keeps_the_reserved_capacity() {
         let bar = |m: i64| Bar::from_trade(t(m * M), Price(90), Qty(1));

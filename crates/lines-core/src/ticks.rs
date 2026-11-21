@@ -184,6 +184,11 @@ pub struct TickBars {
     trimmed: u64,
     revision: u64,
     trades: u64,
+    /// Bars put in front by [`TickBars::prepend`] so far (a chart keeps its view still).
+    prepended: u64,
+    /// Where full order flow begins once older bars (price and volume only) were put in
+    /// front: the first bar held before the first [`TickBars::prepend`].
+    full_from: Option<UtcMillis>,
 }
 
 impl TickBars {
@@ -230,7 +235,86 @@ impl TickBars {
             trimmed: 0,
             revision: 0,
             trades: 0,
+            prepended: 0,
+            full_from: None,
         }
+    }
+
+    /// An empty builder of the same kind, reset, calendar and scale, holding at most
+    /// `capacity` bars: for older bars to [`TickBars::prepend`].
+    pub fn empty_like(&self, capacity: usize) -> TickBars {
+        TickBars::with_kind(self.kind, self.reset, self.cal, self.scale, capacity)
+    }
+
+    /// Bars put in front by [`TickBars::prepend`] so far.
+    pub fn prepended(&self) -> u64 {
+        self.prepended
+    }
+
+    /// Where full order flow (per-price levels: footprints) begins, once older bars were put
+    /// in front; `None` while every bar has it.
+    pub fn full_from(&self) -> Option<UtcMillis> {
+        self.full_from
+    }
+
+    /// Older history loaded on demand: `older`'s bars (built by an [`TickBars::empty_like`]
+    /// builder from trades before these bars) go in front, **price and volume only** (their
+    /// per-price levels are dropped: no footprint for them; [`TickBars::full_from`] says where
+    /// it begins), and the capacity grows by as many, so nothing held is dropped for them.
+    /// Refused (0) when the kinds differ, when `older` isn't wholly before these bars, or with
+    /// session resets when the oldest bar held doesn't start its session (the seam would split
+    /// a bar). Allocates: call it off the paint path. Returns how many bars went in.
+    pub fn prepend(&mut self, mut older: TickBars) -> usize {
+        let n = older.bars.len();
+        if n == 0 || older.kind != self.kind || older.reset != self.reset {
+            return 0;
+        }
+        if let Some(first) = self.bars.first() {
+            let older_end = older.last.last().copied().unwrap_or(UtcMillis(i64::MIN));
+            if older_end >= first.time
+                || (self.reset == TickReset::Session && !self.starts_session(0))
+            {
+                return 0;
+            }
+            self.full_from.get_or_insert(first.time);
+        }
+        self.capacity += n;
+        for v in [&mut older.levels] {
+            // Price and volume only: no list kept per bar.
+            for l in v.iter_mut() {
+                *l = Vec::new();
+            }
+        }
+        // Room for the new capacity in every buffer (`reserve_exact` takes the room beyond
+        // the length), so later pushes never reallocate.
+        let cap = self.capacity;
+        self.bars.reserve_exact(cap.saturating_sub(self.bars.len()));
+        self.ends.reserve_exact(cap.saturating_sub(self.ends.len()));
+        self.last.reserve_exact(cap.saturating_sub(self.last.len()));
+        self.counts
+            .reserve_exact(cap.saturating_sub(self.counts.len()));
+        self.partial
+            .reserve_exact(cap.saturating_sub(self.partial.len()));
+        self.first
+            .reserve_exact(cap.saturating_sub(self.first.len()));
+        self.levels
+            .reserve_exact(cap.saturating_sub(self.levels.len()));
+        self.bars.splice(0..0, older.bars);
+        self.ends.splice(0..0, older.ends);
+        self.last.splice(0..0, older.last);
+        self.counts.splice(0..0, older.counts);
+        self.partial.splice(0..0, older.partial);
+        self.first.splice(0..0, older.first);
+        self.levels.splice(0..0, older.levels);
+        if self.bar_session == i64::MIN {
+            // Nothing was held: the older bars' state carries on.
+            self.session = older.session;
+            self.bar_session = older.bar_session;
+            self.bar_close = older.bar_close;
+        }
+        self.prepended += n as u64;
+        self.revision += 1;
+        n
     }
 
     pub fn kind(&self) -> BarKind {
@@ -515,7 +599,8 @@ impl TickBars {
         self.partial.drain(..k);
         self.first.drain(..k);
         for mut l in self.levels.drain(..k) {
-            if self.spare.len() < self.spare.capacity() {
+            // An older bar's empty list (price and volume only) isn't worth keeping.
+            if l.capacity() > 0 && self.spare.len() < self.spare.capacity() {
                 l.clear();
                 self.spare.push(l);
             }

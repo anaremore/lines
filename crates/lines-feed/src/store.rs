@@ -233,6 +233,8 @@ pub struct ChartData {
     /// Where tick bars are rebuilt from when a chart switches to one mid-feed (the replay's
     /// file, or the local store), if anywhere.
     pub tick_source: Option<TickSource>,
+    /// Older history loaded on demand, per series ([`crate::older`]).
+    pub older: crate::older::OlderStates,
     /// How many times a replay jumped back on this store (`ChartData::rewind`): panes that
     /// keep their own copy of what the store showed (the DOM trail) start over when it moves.
     pub rewinds: u64,
@@ -278,6 +280,7 @@ impl ChartData {
             chart_epoch: 0,
             latency: None,
             orderflow_loading: false,
+            older: crate::older::OlderStates::default(),
             counted: crate::disk::Ranges::default(),
             live_run: None,
             stored_through: None,
@@ -630,8 +633,10 @@ impl ChartData {
             return;
         }
         let period = self.series.period_ms();
-        let cap = self.series.max_len();
+        // Older history loaded for the old contract doesn't size the new one.
+        let cap = self.series.base_len();
         let old = std::mem::replace(&mut self.series, BarSeries::new(period, cap));
+        self.older = crate::older::OlderStates::default();
         if let Some(prev) = self.contract
             && !old.is_empty()
         {
@@ -669,7 +674,7 @@ impl ChartData {
             self.capabilities,
             self.provider,
             self.series.period_ms(),
-            self.series.max_len(),
+            self.series.base_len(),
         );
         fresh.retired = std::mem::take(&mut self.retired);
         fresh.depth_note = self.depth_note.take();

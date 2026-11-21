@@ -469,6 +469,12 @@ impl Derived {
         self.trimmed
     }
 
+    /// Bars it holds without reallocating (reserved for its source series' capacity; a
+    /// source grown by older history needs a new one, made off the paint path).
+    pub fn capacity(&self) -> usize {
+        self.bars.capacity()
+    }
+
     /// Whether bar `i` was cut short by a session break.
     pub fn is_partial(&self, i: usize) -> bool {
         self.partial.get(i).copied().unwrap_or(false)
