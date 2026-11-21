@@ -1699,6 +1699,7 @@ fn labels_never_overlap_at_150_percent() {
             rank: 1,
             x0: 0.0,
             x1: 800.0,
+            end_mark: None,
         })
         .collect();
     let mut seen = vec![LabelSeen::New; 8];
@@ -2104,9 +2105,16 @@ fn event_lines_start_at_their_bars() {
     let boxed = layer
         .placed(ev)
         .iter()
-        .find(|p| prior.levels[p.index as usize].to.is_some())
+        .find(|p| {
+            let l = &prior.levels[p.index as usize];
+            l.to.is_some() && matches!(l.shape, LevelShape::Zone { .. })
+        })
         .copied()
         .expect("the box");
+    // The target was reached at 21:37 (`Level::ended`), after these bars: to the edge here.
+    let target = placed_named(&layer, ev, "Target 6024");
+    assert_eq!(target.x1, 800.0);
+    assert!(prior.levels[target.index as usize].ended);
     // Its bars' whole slots: half a bar either side of their centres.
     assert_eq!((boxed.x0, boxed.x1), (x(8.0) - 5.0, x(16.0) + 5.0));
     // The run's line from V's bar (21:12: bar 22).

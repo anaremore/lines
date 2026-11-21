@@ -337,6 +337,33 @@ fn faded(c: Hsla, f: f32) -> Faded {
     c.opacity(c.a * f)
 }
 
+/// Half the ✕ that ends a line reached at its `to` ([`Level::ended`]), logical px, beyond its
+/// stroke width.
+const END_MARK_ARM: f32 = 3.0;
+
+/// A small ✕ centred at (`x`, `y`) in window px: two diagonals of `w`-square dots, one per device
+/// pixel step (crisp at any scale, and no path: nothing allocated).
+fn end_mark(window: &mut Window, x: f32, y: f32, c: Hsla, w: f32, scale: f32) {
+    if c.a <= 0.0 {
+        return;
+    }
+    let steps = ((END_MARK_ARM + w) * scale).round() as i32;
+    let (x, y) = (snap(f64::from(x), scale), snap(f64::from(y), scale));
+    for i in -steps..=steps {
+        let d = i as f32 / scale;
+        // The centre once.
+        for dy in [d, -d].into_iter().take(if i == 0 { 1 } else { 2 }) {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(x + d - w * 0.5), px(y + dy - w * 0.5)),
+                    size(px(w), px(w)),
+                ),
+                c,
+            ));
+        }
+    }
+}
+
 /// A marker's color (a theme token, chosen by the helpers below).
 pub(crate) type MarkerInk = Hsla;
 
@@ -1511,7 +1538,7 @@ impl LevelsLayer {
     /// plot, isn't drawn and shows no label), and each marker's place. After [`Self::place`],
     /// once the time axis is final. No allocation.
     fn time_extents(&mut self, bars: &BarsView<'_>, vp: &Viewport) {
-        use lines_core::levels::{extent_x, marker_xy};
+        use lines_core::levels::{end_mark_x, extent_x, marker_xy};
         for s in &mut self.slots {
             s.markers.clear();
             let Some(map) = s.map.as_ref() else { continue };
@@ -1526,6 +1553,7 @@ impl LevelsLayer {
                         p.label_y = None;
                     }
                 }
+                p.end_mark = end_mark_x(bars, vp, l);
             }
             if !self.config.source_shown(s.handle.source()) || s.status == LevelStatus::Missing {
                 continue;
@@ -2346,6 +2374,17 @@ impl LevelsLayer {
             line(window, p.top, st, p.x0, p.x1);
             if zone {
                 line(window, p.bottom, st, p.x0, p.x1);
+            } else if let (Some(x), true) = (p.end_mark, p.x0 <= p.x1) {
+                // Ended by being reached: a small ✕ at its end bar (only when that bar is on
+                // the plot: never at the edge for an end off screen or still to come).
+                end_mark(
+                    window,
+                    ox + x,
+                    oy + p.top,
+                    st.color,
+                    st.width.max(hair),
+                    scale,
+                );
             }
         });
     }
