@@ -32,6 +32,29 @@ fn demo() -> LevelMap {
         .unwrap()
 }
 
+/// A line can say it ended by being reached ([`Level::ended`]): only after its `to`.
+#[test]
+fn a_line_ends_where_it_was_reached() {
+    let b = || LevelMap::builder("demo", ES, t("2026-11-05T14:00:00"));
+    let m = b()
+        .line("p", LevelValue::Tick(Price(600_000)), None, style())
+        .from(t("2026-11-05T10:00:00"))
+        .to(t("2026-11-05T12:00:00"))
+        .ended()
+        .line("p", LevelValue::Tick(Price(600_025)), None, style())
+        .build(TICK)
+        .unwrap();
+    assert!(m.levels[0].ended && !m.levels[1].ended);
+    // No end to mark: refused.
+    assert_eq!(
+        b().line("p", LevelValue::Tick(Price(600_000)), None, style())
+            .ended()
+            .build(TICK)
+            .unwrap_err(),
+        LevelError::Misplaced("ended")
+    );
+}
+
 #[test]
 fn builder_validates_and_indexes_kinds() {
     let m = demo();
@@ -122,6 +145,7 @@ fn placement_filters_kinds_and_skips_off_screen_levels() {
         style: style(),
         meta: LevelMeta::default(),
         from: None,
+        ended: false,
         to: None,
         group: None,
     });

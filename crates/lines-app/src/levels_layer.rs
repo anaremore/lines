@@ -337,6 +337,32 @@ fn faded(c: Hsla, f: f32) -> Faded {
     c.opacity(c.a * f)
 }
 
+/// Half the ✕ that ends a line reached at its `to` ([`Level::ended`]), logical px, beyond its
+/// stroke width.
+const END_MARK_ARM: f32 = 3.0;
+
+/// A small ✕ centred at (`x`, `y`) in window px: two diagonals of `w`-square dots, one per device
+/// pixel step (crisp at any scale, and no path: nothing allocated).
+fn end_mark(window: &mut Window, x: f32, y: f32, c: Hsla, w: f32, scale: f32) {
+    if c.a <= 0.0 {
+        return;
+    }
+    let steps = ((END_MARK_ARM + w) * scale).round() as i32;
+    let (x, y) = (snap(f64::from(x), scale), snap(f64::from(y), scale));
+    for i in -steps..=steps {
+        let d = i as f32 / scale;
+        for dy in [d, -d] {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(x + d - w * 0.5), px(y + dy - w * 0.5)),
+                    size(px(w), px(w)),
+                ),
+                c,
+            ));
+        }
+    }
+}
+
 /// A marker's color (a theme token, chosen by the helpers below).
 pub(crate) type MarkerInk = Hsla;
 
@@ -2346,6 +2372,16 @@ impl LevelsLayer {
             line(window, p.top, st, p.x0, p.x1);
             if zone {
                 line(window, p.bottom, st, p.x0, p.x1);
+            } else if l.ended && l.to.is_some() && p.x0 <= p.x1 && p.x1 <= pw {
+                // Ended by being reached: a small ✕ at its end bar (on the plot only).
+                end_mark(
+                    window,
+                    ox + p.x1,
+                    oy + p.top,
+                    st.color,
+                    st.width.max(hair),
+                    scale,
+                );
             }
         });
     }

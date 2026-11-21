@@ -124,6 +124,9 @@ pub struct Level {
     /// When it ends (a time-bounded zone: from–to, low–high): drawn up to that bar; `None`: to
     /// the plot's right edge.
     pub to: Option<UtcMillis>,
+    /// A line that ended by being reached (traded at or through): a small ✕ marks its end at
+    /// `to`'s bar. Only for a line with a `to`; a zone ignores it.
+    pub ended: bool,
     /// The event it belongs to (an index into [`LevelMap::groups`]): pointing at any member
     /// highlights them all.
     pub group: Option<u16>,
@@ -553,6 +556,7 @@ impl LevelMapBuilder {
             meta,
             from: None,
             to: None,
+            ended: false,
             group: None,
         });
         self.last = Last::Level;
@@ -587,6 +591,16 @@ impl LevelMapBuilder {
         match (self.last, self.map.levels.last_mut()) {
             (Last::Level, Some(l)) => l.to = Some(t),
             _ => self.fail(LevelError::Misplaced("to")),
+        }
+        self
+    }
+
+    /// The last level added ended by being reached at its `to` ([`Level::ended`]): its end is
+    /// marked. Call after [`Self::to`].
+    pub fn ended(mut self) -> Self {
+        match (self.last, self.map.levels.last_mut()) {
+            (Last::Level, Some(l)) if l.to.is_some() => l.ended = true,
+            _ => self.fail(LevelError::Misplaced("ended")),
         }
         self
     }
