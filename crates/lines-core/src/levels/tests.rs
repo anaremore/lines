@@ -1028,6 +1028,7 @@ fn labels_place_by_priority_first() {
         x0: 0.0,
         x1: 800.0,
         end_mark: None,
+        over: false,
     };
     let low = LabelPriority::Low.rank();
     let normal = LabelPriority::Normal.rank();

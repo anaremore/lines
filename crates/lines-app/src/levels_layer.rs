@@ -1538,7 +1538,7 @@ impl LevelsLayer {
     /// plot, isn't drawn and shows no label), and each marker's place. After [`Self::place`],
     /// once the time axis is final. No allocation.
     fn time_extents(&mut self, bars: &BarsView<'_>, vp: &Viewport) {
-        use lines_core::levels::{end_mark_x, extent_x, marker_xy};
+        use lines_core::levels::{end_mark_x, end_x, extent_x, marker_xy};
         for s in &mut self.slots {
             s.markers.clear();
             let Some(map) = s.map.as_ref() else { continue };
@@ -1554,6 +1554,12 @@ impl LevelsLayer {
                     }
                 }
                 p.end_mark = end_mark_x(bars, vp, l);
+                // A line that ended at an earlier bar (`end_x` gives the plot's width only for
+                // one still going): drawn, no label.
+                p.over = matches!(l.shape, LevelShape::Line(_))
+                    && l.to
+                        .and_then(|t| end_x(bars, vp, t))
+                        .is_some_and(|x| x < vp.width as f32);
             }
             if !self.config.source_shown(s.handle.source()) || s.status == LevelStatus::Missing {
                 continue;
@@ -1849,7 +1855,8 @@ impl LevelsLayer {
             self.seen_all.extend_from_slice(&s.seen);
             self.drawn_all.resize(self.seen_all.len(), true);
             for p in &s.placed {
-                if p.x0 > p.x1 {
+                // Not drawn, or a line over before the newest bar: no label.
+                if p.x0 > p.x1 || p.over {
                     self.drawn_all[(base + p.index) as usize] = false;
                 }
             }
