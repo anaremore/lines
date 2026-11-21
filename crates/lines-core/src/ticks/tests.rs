@@ -520,3 +520,69 @@ fn every_kind_resets_at_the_session_open() {
         assert_eq!(c.len(), expect, "{kind:?} continuous");
     }
 }
+
+/// Older history on demand: an older session's bars go in front, price and volume only (no
+/// levels), the capacity grows (nothing held is dropped), and `full_from` says where the
+/// order flow begins. A seam inside a session, or older bars that overlap, are refused.
+#[test]
+fn older_bars_go_in_front_without_levels() {
+    let cal = Some(cme());
+    // Session of 11-05 (opens 11-04 17:00 CT = 23:00Z) and of 11-06.
+    let day1 = t("2026-11-05T15:00:00Z");
+    let day2 = t("2026-11-06T15:00:00Z");
+    let mut held = TickBars::new(2, TickReset::Session, cal, 4);
+    for k in 0..6 {
+        held.push(
+            UtcMillis(day2.0 + k * 1000),
+            Price(600_000 + k * 25),
+            Qty(1),
+            BUY,
+        );
+    }
+    assert_eq!(held.len(), 3);
+    assert!(held.starts_session(0));
+    let mut older = held.empty_like(16);
+    for k in 0..8 {
+        older.push(
+            UtcMillis(day1.0 + k * 1000),
+            Price(590_000 + k * 25),
+            Qty(2),
+            SELL,
+        );
+    }
+    let rev = held.revision();
+    assert_eq!(held.prepend(older), 4);
+    assert_eq!((held.len(), held.prepended()), (7, 4));
+    assert!(held.revision() > rev);
+    assert_eq!(held.full_from(), Some(day2));
+    assert_eq!(held.bars()[0].time, day1);
+    assert_eq!(held.bars()[4].time, day2);
+    assert_eq!(
+        held.levels(0).count(),
+        0,
+        "older bars: price and volume only"
+    );
+    assert!(held.levels(4).count() > 0, "held bars keep their levels");
+    assert_eq!(held.bars()[0].volume, Qty(4));
+    // Grown: new bars at the end drop nothing.
+    for k in 6..14 {
+        held.push(UtcMillis(day2.0 + k * 1000), Price(600_000), Qty(1), BUY);
+    }
+    assert_eq!((held.trimmed(), held.bars()[0].time), (0, day1));
+    // Refused: overlapping, another kind, or a seam inside a session.
+    let mut late = held.empty_like(16);
+    late.push(UtcMillis(day2.0 + 500), Price(600_000), Qty(1), BUY);
+    assert_eq!(held.prepend(late), 0);
+    let mut mid = TickBars::new(2, TickReset::Session, cal, 16);
+    mid.push(UtcMillis(day2.0), Price(600_000), Qty(1), BUY);
+    mid.push(UtcMillis(day2.0 + 1), Price(600_000), Qty(1), BUY);
+    let mut mid_session = mid.empty_like(16);
+    mid.drop_front(1); // its oldest bar no longer starts the session
+    mid.push(UtcMillis(day2.0 + 2), Price(600_000), Qty(1), BUY);
+    mid_session.push(UtcMillis(day1.0), Price(590_000), Qty(1), BUY);
+    if !mid.starts_session(0) {
+        assert_eq!(mid.prepend(mid_session), 0);
+    }
+    let other = TickBars::new(3, TickReset::Session, cal, 16);
+    assert_eq!(held.prepend(other), 0);
+}
