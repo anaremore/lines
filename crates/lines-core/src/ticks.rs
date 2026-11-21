@@ -285,21 +285,20 @@ impl TickBars {
                 *l = Vec::new();
             }
         }
-        let grow = |len: usize, cap: usize| (len + n).saturating_sub(cap);
-        self.bars
-            .reserve_exact(grow(self.bars.len(), self.bars.capacity()));
-        self.ends
-            .reserve_exact(grow(self.ends.len(), self.ends.capacity()));
-        self.last
-            .reserve_exact(grow(self.last.len(), self.last.capacity()));
+        // Room for the new capacity in every buffer (`reserve_exact` takes the room beyond
+        // the length), so later pushes never reallocate.
+        let cap = self.capacity;
+        self.bars.reserve_exact(cap.saturating_sub(self.bars.len()));
+        self.ends.reserve_exact(cap.saturating_sub(self.ends.len()));
+        self.last.reserve_exact(cap.saturating_sub(self.last.len()));
         self.counts
-            .reserve_exact(grow(self.counts.len(), self.counts.capacity()));
+            .reserve_exact(cap.saturating_sub(self.counts.len()));
         self.partial
-            .reserve_exact(grow(self.partial.len(), self.partial.capacity()));
+            .reserve_exact(cap.saturating_sub(self.partial.len()));
         self.first
-            .reserve_exact(grow(self.first.len(), self.first.capacity()));
+            .reserve_exact(cap.saturating_sub(self.first.len()));
         self.levels
-            .reserve_exact(grow(self.levels.len(), self.levels.capacity()));
+            .reserve_exact(cap.saturating_sub(self.levels.len()));
         self.bars.splice(0..0, older.bars);
         self.ends.splice(0..0, older.ends);
         self.last.splice(0..0, older.last);
@@ -600,7 +599,8 @@ impl TickBars {
         self.partial.drain(..k);
         self.first.drain(..k);
         for mut l in self.levels.drain(..k) {
-            if self.spare.len() < self.spare.capacity() {
+            // An older bar's empty list (price and volume only) isn't worth keeping.
+            if l.capacity() > 0 && self.spare.len() < self.spare.capacity() {
                 l.clear();
                 self.spare.push(l);
             }

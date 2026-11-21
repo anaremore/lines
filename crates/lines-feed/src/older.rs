@@ -26,9 +26,9 @@ use crate::ticks::{TickKey, TickSource};
 /// Stored sessions read per step.
 pub const SESSIONS_PER_STEP: usize = 5;
 
-/// Older bars a step builds before landing, at most (a step's trade-built bars; far more than
-/// five sessions make).
-const MAX_STEP_BARS: usize = 1 << 21;
+/// 1-minute bars a step's builder holds per session read (a session is at most 1,440 minutes;
+/// a little more never hurts).
+const MINUTES_PER_SESSION: usize = 1_500;
 
 /// What older history a series has.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
@@ -81,6 +81,11 @@ impl OlderStates {
         }
     }
 
+    /// A new builder for `what` (a trade-built series made again): it starts over.
+    pub(crate) fn reset(&mut self, what: OlderFor) {
+        self.set(what, Older::Idle);
+    }
+
     fn set(&mut self, what: OlderFor, state: Older) {
         match what {
             OlderFor::Minutes => self.minutes = state,
@@ -131,54 +136,107 @@ impl ChartStore {
 }
 
 fn step_on(store: &Weak<ChartStore>, what: OlderFor) {
-    let Some(s) = store.upgrade() else { return };
-    let state = match step(&s, what, SESSIONS_PER_STEP) {
-        Ok(state) => state,
-        Err(e) => {
-            tracing::warn!("older history: {e}");
-            Older::Exhausted
+    if let Err(e) = step_weak(store, what, SESSIONS_PER_STEP) {
+        tracing::warn!("older history: {e}");
+        if let Some(s) = store.upgrade() {
+            s.update_derived(|d| {
+                if d.older.get(what) == Older::Loading {
+                    d.older.set(what, Older::Exhausted);
+                }
+            });
         }
-    };
-    s.update_derived(|d| d.older.set(what, state));
+    }
 }
 
-/// One step, on the calling thread: what the series' state becomes (the bars landed).
-pub fn step(store: &ChartStore, what: OlderFor, sessions: usize) -> anyhow::Result<Older> {
-    // What to read: the store's directory, and the oldest bar to go back from.
-    let (dir, product, oldest, builder) = {
+/// One step, on the calling thread (tests; the helper thread holds only a `Weak`): reads,
+/// lands and sets the series' state. The state it was left in.
+pub fn step(store: &Arc<ChartStore>, what: OlderFor, sessions: usize) -> anyhow::Result<Older> {
+    // Started as `load_older` starts one.
+    store.update_derived(|d| d.older.set(what, Older::Loading));
+    step_weak(&Arc::downgrade(store), what, sessions)?;
+    Ok(store.read().older.get(what))
+}
+
+/// What a step started from: the store's contract and rewinds (a step that lands after either
+/// changed is stale and changes nothing), its directory, product and oldest bar.
+struct From {
+    contract: Option<lines_core::ContractKey>,
+    rewinds: u64,
+    dir: ContractDir,
+    product: lines_core::Product,
+    oldest: UtcMillis,
+}
+
+fn step_weak(weak: &Weak<ChartStore>, what: OlderFor, sessions: usize) -> anyhow::Result<()> {
+    let Some(store) = weak.upgrade() else {
+        return Ok(());
+    };
+    // What to read, and the builder to read into (sized from what is held).
+    let begun = {
         let d = store.read();
         let Some(TickSource::Stored(dir)) = d.tick_source.clone() else {
-            return Ok(Older::Unavailable);
+            drop(d);
+            store.update_derived(|d| d.older.set(what, Older::Unavailable));
+            return Ok(());
         };
         let (oldest, builder) = match what {
             OlderFor::Minutes => (d.series.bars().first().map(|b| b.time), None),
-            OlderFor::Trades(k) => {
-                let Some(b) = d.ticks.bars(k) else {
-                    return Ok(Older::Idle);
-                };
-                (
-                    b.bars().first().map(|x| x.time),
-                    Some(b.empty_like(MAX_STEP_BARS)),
-                )
-            }
+            OlderFor::Trades(k) => match d.ticks.bars(k) {
+                // Rebuilding: try again later.
+                None => (None, Some(None)),
+                Some(b) => {
+                    let per_session = b.len() / sessions_held(b);
+                    let cap = (per_session * 2 * sessions.max(1)).max(4096);
+                    (
+                        b.bars().first().map(|x| x.time),
+                        Some(Some(b.empty_like(cap))),
+                    )
+                }
+            },
         };
-        let Some(oldest) = oldest else {
-            return Ok(Older::Exhausted);
-        };
-        (dir, d.product.clone(), oldest, builder)
+        oldest.map(|oldest| {
+            (
+                From {
+                    contract: d.contract,
+                    rewinds: d.rewinds,
+                    dir,
+                    product: d.product.clone(),
+                    oldest,
+                },
+                builder,
+                d.series.period_ms(),
+            )
+        })
     };
-    let Some((first, last)) = days_before(&dir, &product, oldest, what, sessions) else {
-        return Ok(Older::Exhausted);
+    drop(store);
+    let Some((from, builder, period_ms)) = begun else {
+        // Nothing held (or a trade-built series rebuilding): idle, the chart asks again.
+        let idle = matches!(what, OlderFor::Trades(_));
+        return land(weak, &FromLess, what, |_| None, idle);
     };
-    let covered = dir.trade_coverage();
+    if matches!(builder, Some(None)) {
+        return land(weak, &FromLess, what, |_| None, true);
+    }
+    let Some((first, last)) = days_before(&from.dir, &from.product, from.oldest, what, sessions)
+    else {
+        return land(weak, &from, what, |_| Some(0), false);
+    };
+    let covered = from.dir.trade_coverage();
+    let oldest = from.oldest;
     let keep = |_: (i64, i64), t: i64| t < oldest.0 && covered.contains(t);
-    let mut cancelled = || false;
-    let n = match builder {
+    let mut cancelled = || weak.strong_count() == 0;
+    let days = from
+        .dir
+        .dates()
+        .iter()
+        .filter(|d| **d >= first && **d <= last)
+        .count();
+    match builder {
         None => {
-            let mut series = BarSeries::new(store.read().series.period_ms(), MAX_STEP_BARS);
+            let mut series = BarSeries::new(period_ms, days.max(1) * MINUTES_PER_SESSION);
             crate::ticks::read_stored_trades(
-                &dir,
-                &product,
+                &from.dir,
+                &from.product,
                 (first, Some(last)),
                 keep,
                 |p| {
@@ -187,16 +245,18 @@ pub fn step(store: &ChartStore, what: OlderFor, sessions: usize) -> anyhow::Resu
                 },
                 &mut cancelled,
             )?;
-            if series.is_empty() {
-                0
-            } else {
-                store.update_derived(|d: &mut ChartData| d.series.extend_back(series.bars()))
-            }
+            land(
+                weak,
+                &from,
+                what,
+                |d| Some(d.series.extend_back(series.bars())),
+                false,
+            )
         }
-        Some(mut older) => {
+        Some(Some(mut older)) => {
             crate::ticks::read_stored_trades(
-                &dir,
-                &product,
+                &from.dir,
+                &from.product,
                 (first, Some(last)),
                 keep,
                 |p| {
@@ -208,16 +268,75 @@ pub fn step(store: &ChartStore, what: OlderFor, sessions: usize) -> anyhow::Resu
             let OlderFor::Trades(k) = what else {
                 unreachable!("a builder only for trade-built bars")
             };
-            if older.is_empty() {
-                0
-            } else {
-                store.update_derived(|d| d.ticks.prepend_older(k, older))
-            }
+            let mut older = Some(older);
+            land(
+                weak,
+                &from,
+                what,
+                |d| match older.take() {
+                    Some(o) if !o.is_empty() => d.ticks.prepend_older(k, o),
+                    _ => Some(0),
+                },
+                false,
+            )
         }
+        Some(None) => unreachable!("handled above"),
+    }
+}
+
+/// A step that read nothing (no contract check needed).
+struct FromLess;
+
+/// Something a landing checks: the contract and rewinds the step began with.
+trait Began {
+    fn current(&self, d: &ChartData) -> bool;
+}
+
+impl Began for From {
+    fn current(&self, d: &ChartData) -> bool {
+        d.contract == self.contract && d.rewinds == self.rewinds
+    }
+}
+
+impl Began for FromLess {
+    fn current(&self, _: &ChartData) -> bool {
+        true
+    }
+}
+
+/// Land a step under one lock: only if the store is still on the contract (and rewind) it
+/// began with and the series still waits for it; `apply` puts the bars in (`None`: its builder
+/// is rebuilding: idle, asked again; `Some(0)`: nothing older joins on: exhausted). A stale
+/// step changes nothing (the new contract's state is its own).
+fn land(
+    weak: &Weak<ChartStore>,
+    began: &dyn Began,
+    what: OlderFor,
+    apply: impl FnOnce(&mut ChartData) -> Option<usize>,
+    idle_if_none: bool,
+) -> anyhow::Result<()> {
+    let Some(store) = weak.upgrade() else {
+        return Ok(());
     };
-    // Bars landed: the chart may ask again from the new oldest bar. None (no stored day before
-    // it, or none with covered trades): nothing older can be joined on.
-    Ok(if n > 0 { Older::Idle } else { Older::Exhausted })
+    store.update_derived(|d| {
+        if !began.current(d) || d.older.get(what) != Older::Loading {
+            return;
+        }
+        let state = match apply(d) {
+            None if idle_if_none => Older::Idle,
+            None => Older::Exhausted,
+            // Bars landed: the chart may ask again from the new oldest bar.
+            Some(n) if n > 0 => Older::Idle,
+            Some(_) => Older::Exhausted,
+        };
+        d.older.set(what, state);
+    });
+    Ok(())
+}
+
+/// Sessions a builder's bars span (each bar that starts a session; at least one).
+fn sessions_held(b: &lines_core::TickBars) -> usize {
+    (0..b.len()).filter(|&i| b.starts_session(i)).count().max(1)
 }
 
 /// The stored trade dates a step reads, oldest and newest: up to `sessions` before `oldest`'s
@@ -288,7 +407,14 @@ mod tests {
             }
             w.commit().unwrap();
         }
-        let store = ChartStore::new(es.clone(), k, Capabilities::default(), "test", 60_000, 100);
+        let store = Arc::new(ChartStore::new(
+            es.clone(),
+            k,
+            Capabilities::default(),
+            "test",
+            60_000,
+            100,
+        ));
         store.update(|d| {
             d.tick_source = Some(TickSource::Stored(ContractDir::new(&root, "test", &es, k)));
             for m in 0..60 {
@@ -310,11 +436,58 @@ mod tests {
         assert!(store.read().series.max_len() >= 240);
         assert_eq!(store.read().series.base_len(), 100);
         // No store directory: nothing to load.
-        let bare = ChartStore::new(es, k, Capabilities::default(), "test", 60_000, 100);
+        let bare = Arc::new(ChartStore::new(
+            es.clone(),
+            k,
+            Capabilities::default(),
+            "test",
+            60_000,
+            100,
+        ));
         assert_eq!(
             step(&bare, OlderFor::Minutes, 2).unwrap(),
             Older::Unavailable
         );
         assert_eq!(Older::Loading.label(), Some("loading older history"));
+    }
+
+    /// A step that lands after the store switched contracts (or rewound) is stale: the new
+    /// contract's bars and its older-history state are untouched.
+    #[test]
+    fn a_stale_step_changes_nothing() {
+        let es = catalog::get(catalog::ES).unwrap();
+        let dec = ContractKey::monthly(es.id, 2026, Month::new(12).unwrap());
+        let mar = ContractKey::monthly(es.id, 2027, Month::new(3).unwrap());
+        let store = Arc::new(ChartStore::new(
+            es.clone(),
+            Some(dec),
+            Capabilities::default(),
+            "test",
+            60_000,
+            100,
+        ));
+        store.update(|d| d.older.set(OlderFor::Minutes, Older::Loading));
+        let began = From {
+            contract: Some(dec),
+            rewinds: 0,
+            dir: ContractDir::new(std::path::Path::new("unused"), "test", &es, Some(dec)),
+            product: es.clone(),
+            oldest: UtcMillis(0),
+        };
+        store.update(|d| d.switch_contract(mar));
+        let old_bar = lines_core::Bar::from_trade(UtcMillis(0), Price(1), Qty(1));
+        land(
+            &Arc::downgrade(&store),
+            &began,
+            OlderFor::Minutes,
+            |d| Some(d.series.extend_back(&[old_bar])),
+            false,
+        )
+        .unwrap();
+        assert!(
+            store.read().series.is_empty(),
+            "the old contract's bars stay out"
+        );
+        assert_eq!(store.read().older.get(OlderFor::Minutes), Older::Idle);
     }
 }

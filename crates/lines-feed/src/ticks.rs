@@ -353,16 +353,13 @@ impl TickSet {
         self.slot(key).map_or(0, |s| s.bars.prepended())
     }
 
-    /// Older bars in front of `key`'s builder (none while it rebuilds): how many went in.
-    pub(crate) fn prepend_older(&mut self, key: TickKey, older: TickBars) -> usize {
-        match self
-            .slots
+    /// Older bars in front of `key`'s builder: how many went in (`None` while it rebuilds or
+    /// isn't held: asked again later).
+    pub(crate) fn prepend_older(&mut self, key: TickKey, older: TickBars) -> Option<usize> {
+        self.slots
             .iter_mut()
             .find(|s| s.key == key && s.pending.is_none())
-        {
-            Some(s) => s.bars.prepend(older),
-            None => 0,
-        }
+            .map(|s| s.bars.prepend(older))
     }
 
     /// Whether `key`'s bars begin after trading that `series` (the 1-minute bars) shows in
@@ -574,13 +571,17 @@ impl ChartStore {
                 };
             }
             let cal = crate::catalog::sessions(d.product.id);
+            // The series' size as made: older history loaded for the 1-minute bars doesn't
+            // size a new builder.
             let mut bars = TickBars::with_kind(
                 key.kind,
                 key.reset,
                 cal,
                 BarScale::of(&d.product),
-                d.series.max_len(),
+                d.series.base_len(),
             );
+            // A new builder: its older history starts over.
+            d.older.reset(crate::older::OlderFor::Trades(key));
             let tape = tape_prints(&d);
             let all_in_tape = d.counted_n <= tape.len() as u64;
             let mut pending = None;

@@ -573,16 +573,20 @@ fn older_bars_go_in_front_without_levels() {
     let mut late = held.empty_like(16);
     late.push(UtcMillis(day2.0 + 500), Price(600_000), Qty(1), BUY);
     assert_eq!(held.prepend(late), 0);
-    let mut mid = TickBars::new(2, TickReset::Session, cal, 16);
-    mid.push(UtcMillis(day2.0), Price(600_000), Qty(1), BUY);
-    mid.push(UtcMillis(day2.0 + 1), Price(600_000), Qty(1), BUY);
-    let mut mid_session = mid.empty_like(16);
-    mid.drop_front(1); // its oldest bar no longer starts the session
-    mid.push(UtcMillis(day2.0 + 2), Price(600_000), Qty(1), BUY);
-    mid_session.push(UtcMillis(day1.0), Price(590_000), Qty(1), BUY);
-    if !mid.starts_session(0) {
-        assert_eq!(mid.prepend(mid_session), 0);
+    // A held series whose oldest bar doesn't start its session (its first bars dropped).
+    let mut mid = TickBars::new(1, TickReset::Session, cal, 16);
+    for k in 0..3 {
+        mid.push(UtcMillis(day2.0 + k * 1000), Price(600_000), Qty(1), BUY);
     }
-    let other = TickBars::new(3, TickReset::Session, cal, 16);
-    assert_eq!(held.prepend(other), 0);
+    mid.drop_front(1);
+    assert!(!mid.starts_session(0));
+    let mut before = mid.empty_like(16);
+    before.push(UtcMillis(day1.0), Price(590_000), Qty(1), BUY);
+    assert_eq!(mid.prepend(before), 0, "a seam inside a session");
+    // Another kind (with bars): refused.
+    let mut other = TickBars::new(3, TickReset::Session, cal, 16);
+    other.push(UtcMillis(day1.0), Price(590_000), Qty(1), BUY);
+    assert_eq!(held.prepend(other), 0, "another kind");
+    // Every buffer has room for the grown capacity: later pushes don't reallocate.
+    assert!(held.bars.capacity() >= held.capacity && held.levels.capacity() >= held.capacity);
 }

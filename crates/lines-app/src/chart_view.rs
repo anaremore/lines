@@ -5012,7 +5012,11 @@ impl ChartView {
                 );
             }
             // A higher timeframe: bring its bars up to date (only what changed).
-            if let Some(dv) = &mut self.derived {
+            // (Not while older history has outgrown its buffer: the tick gives it room, never
+            // paint.)
+            if let Some(dv) = &mut self.derived
+                && d.series.len() <= dv.capacity()
+            {
                 dv.update(&d.series, lines_feed::catalog::sessions(d.product.id));
             }
             let view = bars_view(&self.derived, self.tick_key(), &d);
