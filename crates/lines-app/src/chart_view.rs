@@ -2523,9 +2523,18 @@ impl ChartView {
 
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let feed = crate::sources::retarget(&self.feed, target, cx)?;
-        self.apply_feed(feed.clone());
+        self.switched_own(feed.clone(), cx);
         cx.emit(FeedChanged(feed));
         Ok(())
+    }
+
+    /// This chart's own switch (its picker): the new feed and the new product's drawings and
+    /// plugin drawing tools. (Linked panes take the switch through `set_feed`; the workspace
+    /// never sends it back to the pane that switched.)
+    fn switched_own(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
+        self.apply_feed(feed);
+        self.drawings
+            .set_data(crate::drawings_store::for_product(&self.instrument, cx));
     }
 
     fn apply_feed(&mut self, feed: PaneFeed) {
@@ -11857,6 +11866,26 @@ mod symbol_studies_tests {
     /// The legend's actions act on the set the chart uses (decision 0039): on a symbol's,
     /// removing or hiding changes every chart of it and the Undo names the symbol; Undo puts
     /// it back exactly, on every chart; on separate studies only that chart changes.
+    /// A chart switched by its own picker draws the new product's drawings and offers the new
+    /// product's plugin drawing tools (it once kept the old product's: an MES chart switched
+    /// to NQ never offered a tool serving NQ only).
+    #[gpui::test]
+    fn a_chart_switched_by_its_picker_takes_the_new_products_drawings(cx: &mut TestAppContext) {
+        let _serial = serial();
+        cx.update(|cx| cx.set_global(crate::picker_view::AppSettings::ephemeral()));
+        let a = chart(catalog::MES, cx);
+        let product = |a: &Entity<ChartView>, cx: &mut TestAppContext| {
+            a.read_with(cx, |c, _| c.drawings.tool_maps().context().product.id)
+        };
+        assert_eq!(product(&a, cx), catalog::MES);
+        a.update(cx, |c, cx| c.switched_own(feed(catalog::NQ), cx));
+        assert_eq!(product(&a, cx), catalog::NQ);
+        assert_eq!(
+            a.read_with(cx, |c, _| c.drawings.data().product.id),
+            catalog::NQ
+        );
+    }
+
     #[gpui::test]
     fn legend_actions_act_on_the_charts_set(cx: &mut TestAppContext) {
         let _serial = serial();
