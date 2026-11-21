@@ -2367,3 +2367,17 @@ fn hover_only_levels_never_outlive_their_highlight() {
     assert!(!layer.needs_layout());
     assert!(placed_named(&layer, ev, "A 6005").label_y.is_some());
 }
+
+/// Marker labels close together (one event's A beside another's E1): a later label steps
+/// below each plate it would cover; one clear of them stays where it is.
+#[test]
+fn a_marker_label_steps_below_one_it_would_cover() {
+    let a = [100.0, 50.0, 120.0, 62.0];
+    let b = [100.0, 63.0, 130.0, 75.0];
+    assert_eq!(clear_of(&[], 105.0, 20.0, 55.0, 12.0), 55.0);
+    assert_eq!(clear_of(&[a], 105.0, 20.0, 55.0, 12.0), 63.0);
+    assert_eq!(clear_of(&[a, b], 105.0, 20.0, 55.0, 12.0), 76.0);
+    // Beside it, or below it: untouched.
+    assert_eq!(clear_of(&[a], 121.0, 20.0, 55.0, 12.0), 55.0);
+    assert_eq!(clear_of(&[a], 105.0, 20.0, 62.0, 12.0), 62.0);
+}
