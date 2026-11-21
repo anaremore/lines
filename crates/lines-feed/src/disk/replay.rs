@@ -59,6 +59,10 @@ pub fn header(path: &Path) -> Result<Header> {
     })
 }
 
+/// Silence between one stored day's last block and the next day's first beyond which the
+/// book is not carried over (µs).
+const DAY_GAP_US: i64 = 60_000_000;
+
 pub struct SegmentReplay {
     files: VecDeque<PathBuf>,
     reader: Option<SegmentReader>,
@@ -68,10 +72,14 @@ pub struct SegmentReplay {
     first_us: Option<i64>,
     pending: Option<(i64, Frame)>,
     clock: Option<UtcMillis>,
-    /// A day after the first was just opened: its first block starts with a book clear.
+    /// A day after the first was just opened: its first block may follow a gap.
     new_day: bool,
     /// Days opened so far.
     opened: usize,
+    /// The newest block's time handed out (µs).
+    last_us: Option<i64>,
+    /// A new day's first block, held back while the book clear before it goes out.
+    held: Option<(i64, Frame)>,
     /// The replay bar's control: it paces frames instead of `speed`.
     control: Option<std::sync::Arc<crate::replay_control::ReplayControl>>,
 }
@@ -101,6 +109,8 @@ impl SegmentReplay {
             clock: None,
             new_day: false,
             opened: 0,
+            last_us: None,
+            held: None,
             control: None,
         };
         // Like a recording: before any frame, the clock reads the first stored time.
@@ -124,6 +134,9 @@ impl SegmentReplay {
 
     /// The next stored block as a frame, with its time in microseconds (no pacing).
     pub(crate) fn next_frame(&mut self) -> Result<Option<(i64, Frame)>> {
+        if let Some(f) = self.held.take() {
+            return Ok(Some(f));
+        }
         loop {
             if self.reader.is_none() {
                 let Some(p) = self.files.pop_front() else {
@@ -147,18 +160,26 @@ impl SegmentReplay {
                         self.reader = None;
                         return Ok(None);
                     }
-                    if std::mem::take(&mut self.new_day) {
-                        // Days are stored apart (one may hold quotes, the next only imported
-                        // trades): a day never shows the book its previous day ended with.
-                        let mut events = Vec::with_capacity(9 + b.events.len());
+                    let gap = self
+                        .last_us
+                        .is_some_and(|l| b.time_us.saturating_sub(l) > DAY_GAP_US);
+                    self.last_us = Some(b.time_us);
+                    let frame = (b.time_us, Frame::binary(b.events));
+                    if std::mem::take(&mut self.new_day) && gap {
+                        // A day after a gap (the daily halt, or one stored apart: quotes
+                        // before, imported trades only after) never shows the book the day
+                        // before ended with. Its own frame, so the day's first quotes apply
+                        // after it; a day running on without a gap (a 24-hour market's
+                        // midnight) keeps its book.
+                        self.held = Some(frame);
+                        let mut clear = Vec::with_capacity(9);
                         crate::native::encode(
                             &crate::native::NativeEvent::BookClear { time_us: b.time_us },
-                            &mut events,
+                            &mut clear,
                         );
-                        events.extend_from_slice(&b.events);
-                        return Ok(Some((b.time_us, Frame::binary(events))));
+                        return Ok(Some((b.time_us, Frame::binary(clear))));
                     }
-                    return Ok(Some((b.time_us, Frame::binary(b.events))));
+                    return Ok(Some(frame));
                 }
                 Err(End::Corrupt) => {
                     tracing::warn!("stored segment damaged; continuing with the next day");
@@ -242,8 +263,9 @@ mod tests {
         v
     }
 
-    /// A day after the first starts with a book clear, so a day holding only trades (an
-    /// imported one) never shows the quotes its previous day ended with.
+    /// A day after a gap starts with a book clear of its own, so a day holding only trades (an
+    /// imported one) never shows the quotes its previous day ended with, and a day's first
+    /// quotes still apply; a day following on without a gap keeps its book.
     #[test]
     fn each_later_day_starts_with_no_book() {
         let root = lines_core::scratch::Scratch::new("replay-new-day");
@@ -259,7 +281,14 @@ mod tests {
             aggressor: native::Aggressor::Buy,
         };
         day(&root, 5, &[bbo, trade(2_000)]);
-        day(&root, 6, &[trade(90_000_000_000), trade(90_000_000_001)]);
+        let bbo2 = NativeEvent::Bbo {
+            time_us: 90_000_000_000,
+            bid: Some(Price(500_100)),
+            ask: Some(Price(500_125)),
+        };
+        day(&root, 6, &[bbo2, trade(90_000_000_001)]);
+        // A day following on within a minute (a 24-hour market's midnight): no clear.
+        day(&root, 7, &[trade(90_000_000_002)]);
         let mut r = SegmentReplay::open(&root, 0.0, None).unwrap();
         let mut got = Vec::new();
         while let Some((_, f)) = r.next_unpaced().unwrap() {
@@ -270,13 +299,12 @@ mod tests {
             vec![
                 vec![bbo],
                 vec![trade(2_000)],
-                vec![
-                    NativeEvent::BookClear {
-                        time_us: 90_000_000_000
-                    },
-                    trade(90_000_000_000)
-                ],
+                vec![NativeEvent::BookClear {
+                    time_us: 90_000_000_000
+                }],
+                vec![bbo2],
                 vec![trade(90_000_000_001)],
+                vec![trade(90_000_000_002)],
             ]
         );
     }
