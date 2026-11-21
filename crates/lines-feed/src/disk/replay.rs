@@ -68,6 +68,10 @@ pub struct SegmentReplay {
     first_us: Option<i64>,
     pending: Option<(i64, Frame)>,
     clock: Option<UtcMillis>,
+    /// A day after the first was just opened: its first block starts with a book clear.
+    new_day: bool,
+    /// Days opened so far.
+    opened: usize,
     /// The replay bar's control: it paces frames instead of `speed`.
     control: Option<std::sync::Arc<crate::replay_control::ReplayControl>>,
 }
@@ -95,6 +99,8 @@ impl SegmentReplay {
             first_us: None,
             pending: None,
             clock: None,
+            new_day: false,
+            opened: 0,
             control: None,
         };
         // Like a recording: before any frame, the clock reads the first stored time.
@@ -127,6 +133,8 @@ impl SegmentReplay {
                     SegmentReader::open(&p)
                         .with_context(|| format!("open stored segment {}", p.display()))?,
                 );
+                self.new_day = self.opened > 0;
+                self.opened += 1;
             }
             let r = self.reader.as_mut().expect("set above");
             match r.next_block()? {
@@ -138,6 +146,17 @@ impl SegmentReplay {
                         self.files.clear();
                         self.reader = None;
                         return Ok(None);
+                    }
+                    if std::mem::take(&mut self.new_day) {
+                        // Days are stored apart (one may hold quotes, the next only imported
+                        // trades): a day never shows the book its previous day ended with.
+                        let mut events = Vec::with_capacity(9 + b.events.len());
+                        crate::native::encode(
+                            &crate::native::NativeEvent::BookClear { time_us: b.time_us },
+                            &mut events,
+                        );
+                        events.extend_from_slice(&b.events);
+                        return Ok(Some((b.time_us, Frame::binary(events))));
                     }
                     return Ok(Some((b.time_us, Frame::binary(b.events))));
                 }
@@ -183,5 +202,82 @@ impl Transport for SegmentReplay {
 
     fn clock(&self) -> Option<UtcMillis> {
         self.clock
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::disk::segment::{FlushPolicy, SegmentHeader, SegmentWriter};
+    use crate::native::{self, NativeEvent};
+    use lines_core::{CivilDate, ContractKey, Month, Price, ProductId, Qty};
+
+    fn day(dir: &Path, d: u8, events: &[NativeEvent]) {
+        let date = CivilDate::new(2026, 11, d).unwrap();
+        let h = SegmentHeader {
+            created_wall_ms: 1,
+            source: "test".into(),
+            encoding: crate::native::PROTOCOL.into(),
+            product: "ES".into(),
+            contract: Some(ContractKey::monthly(
+                ProductId(1),
+                2026,
+                Month::new(12).unwrap(),
+            )),
+            date,
+        };
+        let path = dir.join(format!("{date}.{}", super::super::SEGMENT_EXT));
+        let (mut w, _) = SegmentWriter::open(&path, &h, FlushPolicy::default()).unwrap();
+        for e in events {
+            let mut b = Vec::new();
+            native::encode(e, &mut b);
+            w.append(e.time_us(), &b).unwrap();
+        }
+        w.close().unwrap();
+    }
+
+    fn decoded(f: &Frame) -> Vec<NativeEvent> {
+        let mut v = Vec::new();
+        native::decode(&f.data, &mut v).unwrap();
+        v
+    }
+
+    /// A day after the first starts with a book clear, so a day holding only trades (an
+    /// imported one) never shows the quotes its previous day ended with.
+    #[test]
+    fn each_later_day_starts_with_no_book() {
+        let root = lines_core::scratch::Scratch::new("replay-new-day");
+        let bbo = NativeEvent::Bbo {
+            time_us: 1_000,
+            bid: Some(Price(500_000)),
+            ask: Some(Price(500_025)),
+        };
+        let trade = |time_us| NativeEvent::Trade {
+            time_us,
+            price: Price(500_000),
+            qty: Qty(1),
+            aggressor: native::Aggressor::Buy,
+        };
+        day(&root, 5, &[bbo, trade(2_000)]);
+        day(&root, 6, &[trade(90_000_000_000), trade(90_000_000_001)]);
+        let mut r = SegmentReplay::open(&root, 0.0, None).unwrap();
+        let mut got = Vec::new();
+        while let Some((_, f)) = r.next_unpaced().unwrap() {
+            got.push(decoded(&f));
+        }
+        assert_eq!(
+            got,
+            vec![
+                vec![bbo],
+                vec![trade(2_000)],
+                vec![
+                    NativeEvent::BookClear {
+                        time_us: 90_000_000_000
+                    },
+                    trade(90_000_000_000)
+                ],
+                vec![trade(90_000_000_001)],
+            ]
+        );
     }
 }
