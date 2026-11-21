@@ -409,6 +409,188 @@ pub trait DrawTool: Send + Sync {
     /// The levels for points `a` (placed first) and `b`. Lines start at their own `from` times;
     /// they run to the plot's right edge. `Err`: nothing drawn, the reason shown nowhere but the log.
     fn draw(&self, ctx: &DrawToolContext, a: Anchor, b: Anchor) -> Result<LevelMap, String>;
+
+    // ---- optional (defaults keep a plain two-point tool) ----
+
+    /// Where its points snap (default: as any drawing's, the bar's start and the grid or the
+    /// magnet).
+    fn snap(&self) -> DrawSnap {
+        DrawSnap::Bar
+    }
+    /// Whether the tool stays chosen after a drawing is placed, for placing several in a row
+    /// (Esc or the button ends it). Default: no.
+    fn stays_chosen(&self) -> bool {
+        false
+    }
+    /// Its two points' names, in placing order, for the point card ("A", "E"). Default: none
+    /// (no card).
+    fn point_names(&self) -> Option<[&'static str; 2]> {
+        None
+    }
+    /// Whether [`DrawTool::draw_with`] reads the chart's prices: its drawings are then drawn
+    /// again when the chart gains a bar (not on every trade).
+    fn reads_prices(&self) -> bool {
+        false
+    }
+    /// [`DrawTool::draw`] with the chart's prices after the points (e.g. whether price came
+    /// back through a level). Pure as `draw`. Default: `draw`.
+    fn draw_with(
+        &self,
+        ctx: &DrawToolContext,
+        a: Anchor,
+        b: Anchor,
+        prices: &dyn DrawPrices,
+    ) -> Result<LevelMap, String> {
+        let _ = prices;
+        self.draw(ctx, a, b)
+    }
+    /// The point card's lines for point `point` (0: `a`, 1: `b`) of the drawing `a`–`b` (shown
+    /// when one is selected, if [`DrawTool::point_names`] gives names). Pure. Default: none.
+    fn describe(
+        &self,
+        ctx: &DrawToolContext,
+        a: Anchor,
+        b: Anchor,
+        point: usize,
+        prices: &dyn DrawPrices,
+    ) -> Vec<String> {
+        let _ = (ctx, a, b, point, prices);
+        Vec::new()
+    }
+    /// Drawings the tool kept for `ctx`'s product, placed on its charts when the app first
+    /// shows that product (a tool that saves its own drawings: [`DrawTool::changed`]). Called
+    /// on the UI thread: read beforehand, no I/O here. Anything it kept but doesn't return here
+    /// is never reported back by `changed`: the tool keeps it itself. Default: none.
+    fn restore(&self, ctx: &DrawToolContext) -> Vec<(Anchor, Anchor)> {
+        let _ = ctx;
+        Vec::new()
+    }
+    /// Its drawings on `ctx`'s product changed (placed, moved, deleted, undone): all of them
+    /// now, in drawing order. Called on the UI thread: hand saving to the tool's own thread.
+    /// Default: nothing (drawings live for the run).
+    fn changed(&self, ctx: &DrawToolContext, drawings: &[(Anchor, Anchor)]) {
+        let _ = (ctx, drawings);
+    }
+    /// A strip of status and buttons on the chart while the tool is chosen or one of its
+    /// drawings is selected (`None`: no strip). `view`: what the chart shows. Pure, cheap.
+    fn panel(&self, ctx: &DrawToolContext, view: &DrawView) -> Option<ToolPanel> {
+        let _ = (ctx, view);
+        None
+    }
+    /// Levels or points the tool shows besides its drawings (e.g. reference points for the
+    /// span on screen), merged first into its map. Asked when [`DrawTool::overlay_key`]
+    /// changes. Pure, no I/O (read beforehand, on the tool's own thread). Default: none.
+    fn overlay(&self, ctx: &DrawToolContext, view: &DrawView) -> Option<LevelMap> {
+        let _ = (ctx, view);
+        None
+    }
+    /// Changes whenever [`DrawTool::overlay`] would show something else. Asked every frame:
+    /// cheap, no allocation. Default: never.
+    fn overlay_key(&self, ctx: &DrawToolContext, view: &DrawView) -> u64 {
+        let _ = (ctx, view);
+        0
+    }
+    /// The strip's button `action` was pressed. `prices`: the chart's (e.g. to skip a span it
+    /// has no bars in). Default: nothing.
+    fn act(
+        &self,
+        ctx: &DrawToolContext,
+        view: &DrawView,
+        prices: &dyn DrawPrices,
+        action: &str,
+    ) -> ToolEffect {
+        let _ = (ctx, view, prices, action);
+        ToolEffect::None
+    }
+    /// Drain any queued saves before the app exits (a tool that saves its own drawings on a
+    /// background thread). Default: nothing.
+    fn flush(&self) {}
+}
+
+/// Where a drawing tool's points snap.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum DrawSnap {
+    /// As any drawing's: the bar's start, a grid price (or the bar's O/H/L/C with the magnet).
+    #[default]
+    Bar,
+    /// The high or the low of the bar under the pointer (the nearer), at the time the bar
+    /// traded it where the chart's bars are built from trades (else the bar's start).
+    HighLow,
+}
+
+/// The chart's prices, for [`DrawTool::draw_with`] and [`DrawTool::describe`].
+pub trait DrawPrices {
+    /// The start of the first bar, after `after`'s bar and before `before`, that traded beyond
+    /// `price` (above it with `above`, else below). `None`: none in the chart's bars, which may
+    /// not cover that span: see [`DrawPrices::covered`].
+    fn first_beyond(
+        &self,
+        after: UtcMillis,
+        before: UtcMillis,
+        price: Price,
+        above: bool,
+    ) -> Option<UtcMillis>;
+    /// The time the chart's bars cover: the first bar's start to the later of the last bar's
+    /// start and the market clock. `None`: no bars. A "no" from `first_beyond` is final only
+    /// for a span inside it.
+    fn covered(&self) -> Option<(UtcMillis, UtcMillis)>;
+    /// Whether the chart has a bar starting in `from..to`. Default: no.
+    fn has_bars(&self, from: UtcMillis, to: UtcMillis) -> bool {
+        let _ = (from, to);
+        false
+    }
+}
+
+/// No prices (a tool asked outside a chart, tests).
+pub struct NoPrices;
+
+impl DrawPrices for NoPrices {
+    fn first_beyond(&self, _: UtcMillis, _: UtcMillis, _: Price, _: bool) -> Option<UtcMillis> {
+        None
+    }
+    fn covered(&self) -> Option<(UtcMillis, UtcMillis)> {
+        None
+    }
+}
+
+/// What a chart shows, for a tool's strip ([`DrawTool::panel`]).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct DrawView {
+    /// The first and last visible bar's start.
+    pub visible: (UtcMillis, UtcMillis),
+    /// The chart's market clock (the replay's in a replay).
+    pub now: Option<UtcMillis>,
+}
+
+/// A tool's strip: a status text and buttons, left to right.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ToolPanel {
+    pub status: String,
+    pub actions: Vec<ToolAction>,
+}
+
+/// One button in a tool's strip.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolAction {
+    /// Passed back to [`DrawTool::act`].
+    pub id: &'static str,
+    pub label: String,
+    /// A toggle's state (`None`: a plain button).
+    pub on: Option<bool>,
+    pub enabled: bool,
+}
+
+/// What a tool's button asks the chart to do.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ToolEffect {
+    None,
+    /// Draw its drawings again (its state changed).
+    Redraw,
+    /// Scroll the chart to show `from`..`to` (another session), and draw again.
+    Show {
+        from: UtcMillis,
+        to: UtcMillis,
+    },
 }
 
 /// Whether `id` is a usable source id: 1-32 lowercase letters, digits and `-`.

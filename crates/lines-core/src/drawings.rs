@@ -439,6 +439,39 @@ pub fn snap_anchor(
     Some(Anchor { time, price })
 }
 
+/// Snap a pointer at plot-local (`x`, `y`) to the high or the low of the bar under it,
+/// whichever is nearer the pointer, at the time that bar traded it: the first trade at that
+/// price where the bars are built from trades (tick, volume, range bars), else the bar's start.
+/// A drawing tool that marks swings uses it (`DrawSnap::HighLow`). `None` off the bars.
+pub fn snap_extreme(axis: &TimeAxis<'_>, vp: &Viewport, x: f64, y: f64) -> Option<Anchor> {
+    let slot = (vp.x_to_index(x) + 0.5).floor() as i64;
+    let bar = axis.bar(slot)?;
+    let raw = vp.y_to_price(y);
+    let high = (bar.high.0 as f64 - raw).abs() <= (raw - bar.low.0 as f64).abs();
+    let times = axis.view.trades.and_then(|tb| {
+        // The trade data is the view's own bars' only when they are the same bars.
+        (tb.len() == axis.view.bars.len()).then(|| tb.extreme_times(slot as usize))?
+    });
+    Some(match (high, times) {
+        (true, Some((t, _))) => Anchor {
+            time: t,
+            price: bar.high,
+        },
+        (false, Some((_, t))) => Anchor {
+            time: t,
+            price: bar.low,
+        },
+        (true, None) => Anchor {
+            time: bar.time,
+            price: bar.high,
+        },
+        (false, None) => Anchor {
+            time: bar.time,
+            price: bar.low,
+        },
+    })
+}
+
 /// The tick-grid price nearest `raw` (units).
 pub fn grid_price(raw: f64, tick: i64) -> Price {
     let t = tick.max(1) as f64;
@@ -567,10 +600,19 @@ pub fn project(d: &Drawing, axis: &TimeAxis<'_>, vp: &Viewport) -> Option<Projec
         }
         Tool::Plugin(_) => {
             // Its two points (handles) and the connector between them; its levels are the
-            // levels layer's ([`project_levels`] places them for hit-testing). Never culled
-            // here: its levels run on to the right of its points, so the caller keeps it while
-            // the connector or any of its levels is on the plot.
-            let (x0, x1) = (xa?, xb?);
+            // levels layer's ([`project_levels`] places them for hit-testing). Anchors inside
+            // a bar project onto that bar's centre (matching `levels::start_x` and
+            // `levels::marker_xy`), so handles, dots and level starts line up on trade-built
+            // bars whose anchors hold exact trade times. Never culled here: its levels run on
+            // to the right of its points, so the caller keeps it while the connector or any
+            // of its levels is on the plot.
+            let bar_x = |t: UtcMillis| {
+                axis.view
+                    .bar_at(t)
+                    .map(|i| vp.index_to_x(i as f64) as f32)
+                    .or_else(|| axis.x_of(vp, t))
+            };
+            let (x0, x1) = (bar_x(d.a.time)?, bar_x(d.b.time)?);
             out.handles = [(x0, ya), (x1, yb)];
             out.n_handles = 2;
             out.p0 = (x0, ya);

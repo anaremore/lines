@@ -468,8 +468,24 @@ fn merged_maps_keep_kinds_and_refuse_off_grid_levels() {
         time: UtcMillis(t),
         price: Price(ticks * tick),
     };
-    let one = drawn(&Pair, &ctx, at(1, 600), at(2, 610), tick).unwrap();
-    let two = drawn(&Pair, &ctx, at(3, 620), at(4, 630), tick).unwrap();
+    let one = drawn(
+        &Pair,
+        &ctx,
+        at(1, 600),
+        at(2, 610),
+        tick,
+        &lines_feed::levels::NoPrices,
+    )
+    .unwrap();
+    let two = drawn(
+        &Pair,
+        &ctx,
+        at(3, 620),
+        at(4, 630),
+        tick,
+        &lines_feed::levels::NoPrices,
+    )
+    .unwrap();
     let mut parts = [
         Cached {
             id: 1,
@@ -486,7 +502,9 @@ fn merged_maps_keep_kinds_and_refuse_off_grid_levels() {
             merged: 0,
         },
     ];
-    let m = merge(&Pair, &ctx, &mut parts, tick).unwrap();
+    let (m, dropped) = merge(&Pair, &ctx, &mut parts, tick, None, None);
+    let m = m.unwrap();
+    assert!(!dropped);
     assert_eq!(
         (parts[0].merged, parts[1].merged),
         (3, 3),
@@ -504,10 +522,18 @@ fn merged_maps_keep_kinds_and_refuse_off_grid_levels() {
     assert_eq!(m.levels.len(), 6);
     assert_eq!(m.levels[3].kind, 0);
     assert_eq!(m.groups, vec!["d1".to_owned(), "d2".to_owned()]);
-    assert!(merge(&Pair, &ctx, &mut [], tick).is_none());
+    assert!(merge(&Pair, &ctx, &mut [], tick, None, None).0.is_none());
     if tick > 1 {
         // A tool whose own build skipped the grid check: refused here.
-        let mut off = drawn(&Pair, &ctx, at(1, 600), at(2, 610), tick).unwrap();
+        let mut off = drawn(
+            &Pair,
+            &ctx,
+            at(1, 600),
+            at(2, 610),
+            tick,
+            &lines_feed::levels::NoPrices,
+        )
+        .unwrap();
         off.levels[0].shape = LevelShape::Line(LevelValue::Tick(Price(600 * tick + 1)));
         assert!(checked(off, tick).is_err());
     }
@@ -889,4 +915,564 @@ fn a_chart_with_a_plugin_drawing_saves_none_of_it(cx: &mut gpui::TestAppContext)
     assert!(!json.contains(ID) && !json.contains("Pair"), "{json}");
     let file = DrawingsFile::from_drawings(&zn(), &items, &HashMap::new());
     assert!(file.drawings.is_empty());
+}
+
+// ---- optional seams: snapping to highs and lows, prices, saving, the strip and card ----
+
+/// A second dummy (HG only, so no other test's chart lists it) that uses every optional seam.
+const MARK_ID: &str = "test-mark";
+static MARK_TYPES: [LevelType; 1] = [LevelType::line("mark", "Mark", "Mark", TypeStyle::OWN)];
+/// What `restore` gives.
+static RESTORE: Mutex<Vec<(Anchor, Anchor)>> = Mutex::new(Vec::new());
+/// Every `changed` call's drawings.
+static CHANGED: Mutex<Vec<Vec<(Anchor, Anchor)>>> = Mutex::new(Vec::new());
+/// How many times it drew, and whether the last drawing saw price come back through its half.
+static MARK_DRAWS: AtomicUsize = AtomicUsize::new(0);
+static MARK_CROSSED: Mutex<Option<bool>> = Mutex::new(None);
+/// Its overlay: a hollow point at this many ticks (0: none).
+static OVERLAY_AT: AtomicUsize = AtomicUsize::new(0);
+
+struct Mark;
+
+impl DrawTool for Mark {
+    fn id(&self) -> &'static str {
+        MARK_ID
+    }
+    fn label(&self) -> &'static str {
+        "Mark"
+    }
+    fn icon(&self) -> &'static str {
+        "Mk"
+    }
+    fn serves(&self, product: &Product) -> bool {
+        product.id == catalog::HG
+    }
+    fn types(&self) -> &'static [LevelType] {
+        &MARK_TYPES
+    }
+    fn snap(&self) -> lines_feed::levels::DrawSnap {
+        lines_feed::levels::DrawSnap::HighLow
+    }
+    fn stays_chosen(&self) -> bool {
+        true
+    }
+    fn point_names(&self) -> Option<[&'static str; 2]> {
+        Some(["A", "E"])
+    }
+    fn reads_prices(&self) -> bool {
+        true
+    }
+    fn draw(&self, ctx: &DrawToolContext, a: Anchor, b: Anchor) -> Result<LevelMap, String> {
+        self.draw_with(ctx, a, b, &lines_feed::levels::NoPrices)
+    }
+    fn draw_with(
+        &self,
+        ctx: &DrawToolContext,
+        a: Anchor,
+        b: Anchor,
+        prices: &dyn DrawPrices,
+    ) -> Result<LevelMap, String> {
+        MARK_DRAWS.fetch_add(1, Ordering::Relaxed);
+        let half = Price((a.price.0 + b.price.0) / 2);
+        let up = b.price > a.price;
+        *MARK_CROSSED.lock().unwrap() = Some(
+            prices
+                .first_beyond(b.time, UtcMillis(i64::MAX), half, !up)
+                .is_some(),
+        );
+        let style = LevelStyle {
+            rgba: 0x8888ccff,
+            weight: 1,
+            dashed: false,
+        };
+        LevelMap::builder(MARK_ID, ctx.product.id, a.time)
+            .line("mark", LevelValue::Tick(a.price), Some("A"), style)
+            .from(a.time)
+            .build(ctx.product.price.tick)
+            .map_err(|e| e.to_string())
+    }
+    fn describe(
+        &self,
+        _: &DrawToolContext,
+        a: Anchor,
+        b: Anchor,
+        point: usize,
+        _: &dyn DrawPrices,
+    ) -> Vec<String> {
+        let p = if point == 0 { a } else { b };
+        vec![format!("point {point} at {}", p.price.0)]
+    }
+    fn restore(&self, _: &DrawToolContext) -> Vec<(Anchor, Anchor)> {
+        RESTORE.lock().unwrap().clone()
+    }
+    fn overlay(
+        &self,
+        ctx: &DrawToolContext,
+        view: &lines_feed::levels::DrawView,
+    ) -> Option<LevelMap> {
+        let at = OVERLAY_AT.load(Ordering::Relaxed) as i64;
+        (at > 0).then(|| {
+            LevelMap::builder(MARK_ID, ctx.product.id, view.visible.0)
+                .marker(
+                    view.visible.0,
+                    LevelValue::Tick(Price(at * ctx.product.price.tick)),
+                    Some("C"),
+                )
+                .hollow()
+                .build(ctx.product.price.tick)
+                .unwrap()
+        })
+    }
+    fn overlay_key(&self, _: &DrawToolContext, _: &lines_feed::levels::DrawView) -> u64 {
+        OVERLAY_AT.load(Ordering::Relaxed) as u64
+    }
+    fn changed(&self, _: &DrawToolContext, drawings: &[(Anchor, Anchor)]) {
+        CHANGED.lock().unwrap().push(drawings.to_vec());
+    }
+}
+
+fn hg() -> Product {
+    catalog::get(catalog::HG).unwrap()
+}
+
+fn mark() -> Tool {
+    tool_of(&Mark)
+}
+
+fn mark_serial() -> std::sync::MutexGuard<'static, ()> {
+    let g = serial();
+    lines_feed::levels::register_draw_tool(Arc::new(Mark)).unwrap();
+    RESTORE.lock().unwrap().clear();
+    CHANGED.lock().unwrap().clear();
+    MARK_DRAWS.store(0, Ordering::Relaxed);
+    *MARK_CROSSED.lock().unwrap() = None;
+    OVERLAY_AT.store(0, Ordering::Relaxed);
+    g
+}
+
+/// One-minute HG bars, one per `(high, low)` in ticks.
+fn hg_bars(rows: &[(i64, i64)]) -> Vec<Bar> {
+    let tick = hg().price.tick;
+    rows.iter()
+        .enumerate()
+        .map(|(i, &(hi, lo))| Bar {
+            time: UtcMillis(1_800_000_000_000 + i as i64 * M),
+            open: Price(lo * tick),
+            high: Price(hi * tick),
+            low: Price(lo * tick),
+            close: Price(hi * tick),
+            volume: Qty(1),
+        })
+        .collect()
+}
+
+fn hg_vp(n: usize) -> Viewport {
+    let tick = hg().price.tick;
+    let mut vp = Viewport::default();
+    vp.set_size(800.0, 400.0);
+    vp.bar_px = 20.0;
+    vp.right_index = n as f64 - 1.0;
+    vp.price_lo = (500 * tick) as f64;
+    vp.price_hi = (700 * tick) as f64;
+    vp
+}
+
+fn hg_frame(d: &mut ChartDrawings, bars: &[Bar], vp: &Viewport) {
+    let axis = TimeAxis::new(BarsView::fixed(bars, M));
+    let fmt = hg().price;
+    d.prepare(&axis, vp, fmt.tick, false, &fmt, Ratio::new(1, 1));
+}
+
+/// A tool that snaps to highs and lows places its points on the bar's high or low (the nearer
+/// one) and stays chosen after a placement; other tools snap as before.
+#[test]
+fn points_snap_to_highs_and_lows_and_the_tool_stays_chosen() {
+    let _s = mark_serial();
+    let bars = hg_bars(&[(600, 550), (650, 560), (640, 520), (600, 580)]);
+    let vp = hg_vp(bars.len());
+    let tick = hg().price.tick;
+    let mut d = ChartDrawings::new(ProductDrawings::ephemeral(hg(), Vec::new()));
+    hg_frame(&mut d, &bars, &vp);
+    d.set_tool(mark());
+    let axis = TimeAxis::new(BarsView::fixed(&bars, M));
+    let at = |i: f64, p: i64| {
+        let (x, y) = (vp.index_to_x(i), vp.price_to_y((p * tick) as f64));
+        (x as f32, y as f32)
+    };
+    // Near bar 1's high (650), then bar 2's low (520).
+    let (x1, y1) = at(1.0, 640);
+    let a = d
+        .snap(&axis, &vp, tick, false, x1.into(), y1.into())
+        .unwrap();
+    assert_eq!(a.price, Price(650 * tick));
+    assert!(d.on_down(x1, y1, false, Some(a)));
+    d.on_up(x1, y1, Some(a));
+    let (x2, y2) = at(2.0, 530);
+    let b = d
+        .snap(&axis, &vp, tick, false, x2.into(), y2.into())
+        .unwrap();
+    assert_eq!(b.price, Price(520 * tick));
+    assert!(d.on_down(x2, y2, false, Some(b)));
+    d.on_up(x2, y2, Some(b));
+    let items = d.data().lock().items().to_vec();
+    assert_eq!(items.len(), 1);
+    assert_eq!((items[0].a, items[0].b), (a, b));
+    assert_eq!(d.tool(), Some(mark()), "stays chosen for the next one");
+    assert_eq!(
+        d.card_point(),
+        1,
+        "the card starts on the point just placed"
+    );
+    // Another tool snaps as before (the grid), on the same chart.
+    d.set_tool(Tool::HLine);
+    let g = d
+        .snap(&axis, &vp, tick, false, x1.into(), y1.into())
+        .unwrap();
+    assert_eq!(g.price, Price(640 * tick));
+}
+
+/// A tool that reads prices learns whether the chart traded back through a price after a
+/// point, and draws again when the chart's bars change (not every frame).
+#[test]
+fn a_tool_reading_prices_draws_again_when_the_bars_change() {
+    let _s = mark_serial();
+    let tick = hg().price.tick;
+    let mut bars = hg_bars(&[(600, 550), (650, 560), (640, 520), (600, 580)]);
+    let vp = hg_vp(8);
+    let mut d = ChartDrawings::new(ProductDrawings::ephemeral(hg(), Vec::new()));
+    // A move up from 550 (bar 0) to 650 (bar 1): its half is 600.
+    let a = Anchor {
+        time: bars[0].time,
+        price: Price(550 * tick),
+    };
+    let b = Anchor {
+        time: bars[1].time,
+        price: Price(650 * tick),
+    };
+    d.place(mark(), a, b);
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(
+        *MARK_CROSSED.lock().unwrap(),
+        Some(true),
+        "bar 2's low 520 < 600"
+    );
+    let n = MARK_DRAWS.load(Ordering::Relaxed);
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(
+        MARK_DRAWS.load(Ordering::Relaxed),
+        n,
+        "same bars: not drawn again"
+    );
+    // A chart whose bars after B never come back to 600: not crossed.
+    bars.truncate(2);
+    bars.push(hg_bars(&[(0, 0), (0, 0), (700, 610)])[2]);
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(
+        MARK_DRAWS.load(Ordering::Relaxed),
+        n + 1,
+        "bars changed: drawn again"
+    );
+    assert_eq!(*MARK_CROSSED.lock().unwrap(), Some(false));
+}
+
+/// A tool's kept drawings are placed when the product is first shown, never written to the
+/// drawings file, and every later change of them is reported to it (the set a chart first
+/// sees is its baseline, not a change).
+#[test]
+fn a_tool_restores_its_drawings_and_hears_of_changes() {
+    let _s = mark_serial();
+    let tick = hg().price.tick;
+    let p = |m: i64, t: i64| Anchor {
+        time: UtcMillis(1_800_000_000_000 + m * M),
+        price: Price(t * tick),
+    };
+    RESTORE.lock().unwrap().push((p(0, 550), p(1, 650)));
+    let mut all = crate::drawings_store::Drawings::new(None, None);
+    let (data, _) = all.product(&hg());
+    let items = data.lock().items().to_vec();
+    assert_eq!(items.len(), 1);
+    assert_eq!(
+        (items[0].tool, items[0].a, items[0].b),
+        (mark(), p(0, 550), p(1, 650))
+    );
+    assert!(
+        DrawingsFile::from_drawings(&hg(), &items, &HashMap::new())
+            .drawings
+            .is_empty(),
+        "the tool's to save, not the drawings file's"
+    );
+    let bars = hg_bars(&[(600, 550), (650, 560), (640, 520), (600, 580)]);
+    let vp = hg_vp(bars.len());
+    let mut d = ChartDrawings::new(data);
+    hg_frame(&mut d, &bars, &vp);
+    assert!(
+        CHANGED.lock().unwrap().is_empty(),
+        "the first set is the baseline"
+    );
+    d.place(mark(), p(2, 520), p(3, 600));
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(
+        CHANGED.lock().unwrap().last().cloned(),
+        Some(vec![(p(0, 550), p(1, 650)), (p(2, 520), p(3, 600))])
+    );
+    // Swapping the selected drawing's points (the card's other name) is a change too.
+    assert!(d.swap_selected_points());
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(
+        CHANGED.lock().unwrap().last().cloned(),
+        Some(vec![(p(0, 550), p(1, 650)), (p(3, 600), p(2, 520))])
+    );
+    assert!(d.delete_selected());
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(
+        CHANGED.lock().unwrap().last().cloned(),
+        Some(vec![(p(0, 550), p(1, 650))])
+    );
+    let n = CHANGED.lock().unwrap().len();
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(
+        CHANGED.lock().unwrap().len(),
+        n,
+        "nothing changed: nothing reported"
+    );
+}
+
+/// The point card: the tool's lines for the point and its names; none for a tool that names
+/// no points.
+#[test]
+fn the_point_card_describes_the_point() {
+    let _s = mark_serial();
+    let tick = hg().price.tick;
+    let ctx = DrawToolContext {
+        product: hg(),
+        contract: None,
+    };
+    let a = Anchor {
+        time: UtcMillis(0),
+        price: Price(550 * tick),
+    };
+    let b = Anchor {
+        time: UtcMillis(M),
+        price: Price(650 * tick),
+    };
+    let none = &lines_feed::levels::NoPrices;
+    let c = crate::tool_panel::card(&Mark, &ctx, (a, b), 1, none).unwrap();
+    assert_eq!(c.names, ["A", "E"]);
+    assert_eq!(c.point, 1);
+    assert_eq!(c.lines, vec![format!("point 1 at {}", 650 * tick)]);
+    assert!(crate::tool_panel::card(&Pair, &ctx, (a, b), 0, none).is_none());
+}
+
+/// More drawings than one map holds: those in view are merged first, so marking a new session
+/// never loses its drawings to older ones; with none in view the first ones fit.
+#[test]
+fn over_the_limits_the_drawings_in_view_are_kept() {
+    let _s = serial();
+    let p = zn();
+    let tick = p.price.tick;
+    let ctx = DrawToolContext {
+        product: p.clone(),
+        contract: None,
+    };
+    let at = |t: i64, ticks: i64| Anchor {
+        time: UtcMillis(t * M),
+        price: Price(ticks * tick),
+    };
+    // Three levels each: 400 drawings don't fit MAX_LEVELS.
+    let mut parts: Vec<Cached> = (0..400)
+        .map(|i| {
+            let (a, b) = (at(2 * i, 600), at(2 * i + 1, 610));
+            Cached {
+                id: i as DrawingId + 1,
+                a,
+                b,
+                map: drawn(&Pair, &ctx, a, b, tick, &lines_feed::levels::NoPrices),
+                merged: 0,
+            }
+        })
+        .collect();
+    let (_, dropped) = merge(&Pair, &ctx, &mut parts, tick, None, None);
+    assert!(dropped);
+    assert_eq!(parts[0].merged, 3);
+    assert_eq!(parts[399].merged, 0, "the last left out");
+    let view = Some((UtcMillis(798 * M), UtcMillis(799 * M)));
+    let (m, dropped) = merge(&Pair, &ctx, &mut parts, tick, view, None);
+    assert!(dropped);
+    assert_eq!(parts[399].merged, 3, "in view: first in");
+    assert!(m.unwrap().groups.contains(&"d400".to_owned()));
+    assert_ne!(in_view_key(&parts, None), in_view_key(&parts, view));
+}
+
+/// A tool's overlay is drawn with no drawings at all, asked again only when its key moves,
+/// and goes when the tool has none.
+#[test]
+fn a_tools_overlay_is_drawn_and_follows_its_key() {
+    let _s = mark_serial();
+    let bars = hg_bars(&[(600, 550), (650, 560)]);
+    let vp = hg_vp(bars.len());
+    let mut d = ChartDrawings::new(ProductDrawings::ephemeral(hg(), Vec::new()));
+    hg_frame(&mut d, &bars, &vp);
+    assert!(d.tool_maps().map(MARK_ID).is_none(), "nothing to draw");
+    OVERLAY_AT.store(600, Ordering::Relaxed);
+    hg_frame(&mut d, &bars, &vp);
+    let m = d.tool_maps().map(MARK_ID).cloned().unwrap();
+    assert_eq!(m.markers.len(), 1);
+    assert!(m.markers[0].hollow);
+    let rev = d.tool_maps().revision();
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(d.tool_maps().revision(), rev, "same key: not merged again");
+    OVERLAY_AT.store(0, Ordering::Relaxed);
+    hg_frame(&mut d, &bars, &vp);
+    assert!(d.tool_maps().map(MARK_ID).is_none());
+}
+
+/// Swapping a drawing's points keeps the point card on the same physical point (flips
+/// `card_point`), and starting a new placement clears the prior selection so the old card
+/// doesn't linger while placing the next drawing.
+#[test]
+fn swap_flips_card_point_and_new_placement_clears_selection() {
+    let _s = mark_serial();
+    let bars = hg_bars(&[(600, 550), (650, 560), (640, 520), (600, 580)]);
+    let vp = hg_vp(bars.len());
+    let tick = hg().price.tick;
+    let mut d = ChartDrawings::new(ProductDrawings::ephemeral(hg(), Vec::new()));
+    hg_frame(&mut d, &bars, &vp);
+    d.set_tool(mark());
+    let a = Anchor {
+        time: bars[0].time,
+        price: Price(550 * tick),
+    };
+    let b = Anchor {
+        time: bars[1].time,
+        price: Price(650 * tick),
+    };
+    d.place(mark(), a, b);
+    assert_eq!(d.card_point(), 1);
+    assert!(d.swap_selected_points());
+    assert_eq!(
+        d.card_point(),
+        0,
+        "card stays on the same physical point, now role 0"
+    );
+    assert!(d.swap_selected_points());
+    assert_eq!(d.card_point(), 1);
+    // Starting the next placement with a stays-chosen tool drops the old selection.
+    assert!(d.selected.is_some());
+    assert!(d.on_down(100.0, 100.0, false, Some(a)));
+    assert!(d.selected.is_none());
+}
+
+/// `update` (judging prices) runs before `report` (`changed`), so a tool that reads prices has
+/// its verdict ready on the very first `changed` notification; `overlay_changed` reports an
+/// async overlay update on an idle chart.
+#[test]
+fn update_precedes_report_and_overlay_changed_detects_async_updates() {
+    let _s = mark_serial();
+    let tick = hg().price.tick;
+    let bars = hg_bars(&[(600, 550), (650, 560), (640, 520), (600, 580)]);
+    let vp = hg_vp(bars.len());
+    let mut d = ChartDrawings::new(ProductDrawings::ephemeral(hg(), Vec::new()));
+    hg_frame(&mut d, &bars, &vp);
+    assert!(!d.overlay_changed());
+    // Place a move whose bar 2 crosses its midpoint: `draw_with` runs before `changed`.
+    let a = Anchor {
+        time: bars[0].time,
+        price: Price(550 * tick),
+    };
+    let b = Anchor {
+        time: bars[1].time,
+        price: Price(650 * tick),
+    };
+    d.place(mark(), a, b);
+    hg_frame(&mut d, &bars, &vp);
+    assert_eq!(*MARK_CROSSED.lock().unwrap(), Some(true));
+    assert_eq!(CHANGED.lock().unwrap().len(), 1);
+    // Async overlay update moves `overlay_key` -> `overlay_changed` wakes an idle chart.
+    OVERLAY_AT.store(610, Ordering::Relaxed);
+    assert!(d.overlay_changed());
+    hg_frame(&mut d, &bars, &vp);
+    assert!(!d.overlay_changed());
+}
+
+/// Over the map limits, an earlier drawing whose ruler levels extend into the visible range
+/// stays prioritized as in-view even when its two anchors sit before the visible window.
+#[test]
+fn over_the_limits_keeps_drawings_whose_levels_span_view() {
+    let _s = serial();
+    let p = zn();
+    let tick = p.price.tick;
+    let ctx = DrawToolContext {
+        product: p.clone(),
+        contract: None,
+    };
+    let at = |t: i64, ticks: i64| Anchor {
+        time: UtcMillis(t * M),
+        price: Price(ticks * tick),
+    };
+    let mut parts: Vec<Cached> = (0..400)
+        .map(|i| {
+            let (a, b) = (at(2 * i, 600), at(2 * i + 1, 610));
+            let mut map = drawn(&Pair, &ctx, a, b, tick, &lines_feed::levels::NoPrices).unwrap();
+            let to = if i == 399 {
+                UtcMillis(2_100 * M)
+            } else {
+                UtcMillis((2 * i + 2) * M)
+            };
+            for l in &mut map.levels {
+                l.to = Some(to);
+            }
+            Cached {
+                id: i as DrawingId + 1,
+                a,
+                b,
+                map: Some(map),
+                merged: 0,
+            }
+        })
+        .collect();
+    // Viewing afternoon bars well after drawing 399's anchors: its bounded ruler (`to: 2100*M`)
+    // spans the view while earlier sessions' rulers ended earlier, so drawing 399 is kept first.
+    let view = Some((UtcMillis(2_000 * M), UtcMillis(2_100 * M)));
+    assert_eq!(view_rank(&parts[0], view), 2);
+    assert_eq!(view_rank(&parts[399], view), 1);
+    let (_, dropped) = merge(&Pair, &ctx, &mut parts, tick, view, None);
+    assert!(dropped);
+    assert_eq!(parts[399].merged, 3, "spanning session ruler kept first");
+}
+
+/// `BarsPrices::covered` only claims coverage on trade-built bars (never coarse time bars),
+/// and never lets a far-future market clock stretch coverage past an open session's last bar.
+#[test]
+fn bars_prices_covered_requires_trade_bars_and_respects_open_session() {
+    use lines_core::ticks::{TickBars, TickReset};
+    let bars = hg_bars(&[(600, 550), (650, 560), (640, 580)]);
+    let axis = TimeAxis::new(BarsView::fixed(&bars, M));
+    let coarse = BarsPrices(&axis, Some(UtcMillis(i64::MAX)));
+    assert!(
+        coarse.covered().is_none(),
+        "time bars must not claim to settle sub-bar crosses"
+    );
+    let t0 = 1_800_000_000_000i64;
+    let mut tb = TickBars::new(2, TickReset::Session, None, 64);
+    tb.push(UtcMillis(t0), Price(600_000), Qty(1), None);
+    tb.push(UtcMillis(t0 + 1_000), Price(600_100), Qty(1), None);
+    tb.push(UtcMillis(t0 + 2_000), Price(600_050), Qty(1), None);
+    tb.push(UtcMillis(t0 + 3_000), Price(600_075), Qty(1), None);
+    let axis = TimeAxis::new(tb.view());
+    // Forming/done bar with no session close: clock far ahead does not extend `hi`.
+    let open = BarsPrices(&axis, Some(UtcMillis(t0 + 5 * 3_600_000)));
+    assert_eq!(open.covered(), Some((UtcMillis(t0), UtcMillis(t0 + 2_000))));
+}
+
+/// Whether the chart has a bar starting in a span (a tool skips spans it has none in).
+#[test]
+fn bars_prices_say_whether_a_span_has_bars() {
+    let bars = hg_bars(&[(600, 550), (650, 560)]);
+    let axis = TimeAxis::new(BarsView::fixed(&bars, M));
+    let p = BarsPrices(&axis, None);
+    let t0 = bars[0].time;
+    assert!(p.has_bars(t0, UtcMillis(t0.0 + 1)));
+    assert!(p.has_bars(UtcMillis(t0.0 - M), UtcMillis(t0.0 + 2 * M)));
+    assert!(!p.has_bars(UtcMillis(t0.0 + 2 * M), UtcMillis(t0.0 + 9 * M)));
+    assert!(!p.has_bars(UtcMillis(t0.0 - 9 * M), t0));
 }

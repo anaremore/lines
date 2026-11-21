@@ -128,6 +128,21 @@ impl Viewport {
         first..end.max(first)
     }
 
+    /// Show bars `first..=last` (indices) across the plot, with a little room each side; the
+    /// price fit takes over (a drawing tool's "show this session").
+    pub fn show_indices(&mut self, first: f64, last: f64, len: usize) {
+        if !(first.is_finite() && last.is_finite()) || self.width <= 0.0 {
+            return;
+        }
+        let span = (last - first).abs().max(1.0);
+        let margin = span * 0.03 + 1.0;
+        self.bar_px = (self.width / (span + 2.0 * margin)).clamp(MIN_BAR_PX, MAX_BAR_PX);
+        self.right_index = first.max(last) + margin;
+        self.auto_price = true;
+        self.clamp(len);
+        self.update_follow(len);
+    }
+
     /// Drag by (dx, dy) logical pixels: content follows the pointer.
     pub fn pan(&mut self, dx: f64, dy: f64, len: usize) {
         self.right_index -= dx / self.bar_px;

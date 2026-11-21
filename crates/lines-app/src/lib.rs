@@ -110,6 +110,7 @@ mod tabstrip;
 mod tape_view;
 mod text;
 mod theme;
+mod tool_panel;
 mod tooltip;
 mod trade_bar;
 mod trade_marks;
@@ -966,9 +967,10 @@ struct Cli {
     #[cfg(feature = "demo-levels")]
     #[arg(long)]
     demo_event: bool,
-    /// Also register a synthetic two-point drawing tool for ES/MES charts (`Span`: lines at
-    /// both points, the midpoint, a box between them), as a plugin's would be (builds with
-    /// `demo-levels`).
+    /// Also register synthetic two-point drawing tools for ES/MES charts, as a plugin's would
+    /// be (builds with `demo-levels`): `Span` (lines at both points, the midpoint, a box between
+    /// them) and `Swing` (points on bars' highs and lows, a half line marked once price came
+    /// back through it, a point card and a strip of buttons).
     #[cfg(feature = "demo-levels")]
     #[arg(long)]
     demo_draw_tool: bool,
@@ -2111,6 +2113,9 @@ where
     #[cfg(feature = "demo-levels")]
     if cli.demo_draw_tool {
         lines_feed::levels::register_draw_tool(Arc::new(lines_feed::levels::demo::DemoSpan))?;
+        lines_feed::levels::register_draw_tool(Arc::new(
+            lines_feed::levels::demo::DemoSwing::default(),
+        ))?;
     }
     if let Some(spec) = &cli.plugin_drawing {
         let id = spec.split_whitespace().next().unwrap_or_default();
@@ -2670,6 +2675,9 @@ where
         });
     writer.flush(Duration::from_secs(3));
     journal.flush(Duration::from_secs(3));
+    for tool in lines_feed::levels::draw_tools() {
+        tool.flush();
+    }
     // A restart to update (or a rollback) applies and starts the new executable now that this
     // one saved. `run` returning has dropped the app and its globals, so the `TradingService`s
     // the `Trading` global held have joined the trading core after its last paper save:
