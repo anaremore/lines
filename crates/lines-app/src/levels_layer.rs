@@ -351,7 +351,8 @@ fn end_mark(window: &mut Window, x: f32, y: f32, c: Hsla, w: f32, scale: f32) {
     let (x, y) = (snap(f64::from(x), scale), snap(f64::from(y), scale));
     for i in -steps..=steps {
         let d = i as f32 / scale;
-        for dy in [d, -d] {
+        // The centre once.
+        for dy in [d, -d].into_iter().take(if i == 0 { 1 } else { 2 }) {
             window.paint_quad(fill(
                 Bounds::new(
                     point(px(x + d - w * 0.5), px(y + dy - w * 0.5)),
@@ -1537,7 +1538,7 @@ impl LevelsLayer {
     /// plot, isn't drawn and shows no label), and each marker's place. After [`Self::place`],
     /// once the time axis is final. No allocation.
     fn time_extents(&mut self, bars: &BarsView<'_>, vp: &Viewport) {
-        use lines_core::levels::{extent_x, marker_xy};
+        use lines_core::levels::{end_mark_x, extent_x, marker_xy};
         for s in &mut self.slots {
             s.markers.clear();
             let Some(map) = s.map.as_ref() else { continue };
@@ -1552,6 +1553,7 @@ impl LevelsLayer {
                         p.label_y = None;
                     }
                 }
+                p.end_mark = end_mark_x(bars, vp, l);
             }
             if !self.config.source_shown(s.handle.source()) || s.status == LevelStatus::Missing {
                 continue;
@@ -2372,11 +2374,12 @@ impl LevelsLayer {
             line(window, p.top, st, p.x0, p.x1);
             if zone {
                 line(window, p.bottom, st, p.x0, p.x1);
-            } else if l.ended && l.to.is_some() && p.x0 <= p.x1 && p.x1 <= pw {
-                // Ended by being reached: a small ✕ at its end bar (on the plot only).
+            } else if let (Some(x), true) = (p.end_mark, p.x0 <= p.x1) {
+                // Ended by being reached: a small ✕ at its end bar (only when that bar is on
+                // the plot: never at the edge for an end off screen or still to come).
                 end_mark(
                     window,
-                    ox + p.x1,
+                    ox + x,
                     oy + p.top,
                     st.color,
                     st.width.max(hair),

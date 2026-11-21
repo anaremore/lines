@@ -1200,6 +1200,9 @@ pub struct Placed {
     /// its bar ([`start_x`], [`end_x`]; the layer sets them).
     pub x0: f32,
     pub x1: f32,
+    /// A line ended by being reached ([`Level::ended`]) whose end bar is on the plot: that
+    /// bar's centre (px from the plot's left), where its mark goes ([`end_mark_x`]).
+    pub end_mark: Option<f32>,
 }
 
 impl Placed {
@@ -1251,6 +1254,7 @@ pub fn place(
             rank: LabelPriority::Normal.rank(),
             x0: 0.0,
             x1: vp.width as f32,
+            end_mark: None,
         });
     }
 }
@@ -1294,6 +1298,22 @@ pub fn end_x(bars: &crate::timeframe::BarsView<'_>, vp: &Viewport, to: UtcMillis
         return None;
     }
     Some(x.min(vp.width as f32))
+}
+
+/// Where a line ended by being reached ([`Level::ended`]) gets its mark: its end bar's centre
+/// (px from the plot's left), only when that bar is held and on the plot. `None` for a line not
+/// marked ended, one whose end is after the newest bar (still going, as far as the chart
+/// knows: a replay before the touch), and one whose end bar is scrolled off either side. No
+/// allocation.
+pub fn end_mark_x(bars: &crate::timeframe::BarsView<'_>, vp: &Viewport, l: &Level) -> Option<f32> {
+    let to =
+        l.to.filter(|_| l.ended && matches!(l.shape, LevelShape::Line(_)))?;
+    let i = bars.bars.partition_point(|b| b.time <= to).checked_sub(1)?;
+    if to >= bars.end(i) && i + 1 == bars.len() {
+        return None;
+    }
+    let x = vp.index_to_x(i as f64) as f32;
+    (x >= 0.0 && x <= vp.width as f32).then_some(x)
 }
 
 /// Where level `l` is drawn across the plot, `(x0, x1)` (px from its left): from its start

@@ -1699,6 +1699,7 @@ fn labels_never_overlap_at_150_percent() {
             rank: 1,
             x0: 0.0,
             x1: 800.0,
+            end_mark: None,
         })
         .collect();
     let mut seen = vec![LabelSeen::New; 8];

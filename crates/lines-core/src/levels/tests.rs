@@ -1027,6 +1027,7 @@ fn labels_place_by_priority_first() {
         rank,
         x0: 0.0,
         x1: 800.0,
+        end_mark: None,
     };
     let low = LabelPriority::Low.rank();
     let normal = LabelPriority::Normal.rank();
@@ -1106,6 +1107,21 @@ fn a_level_starts_at_its_bar_never_earlier() {
     assert_eq!(end_x(&view, &v, t("2026-11-05T14:03:10")), Some(x(3.0)));
     assert_eq!(end_x(&view, &v, t("2026-11-05T16:00:00")), Some(800.0));
     assert_eq!(end_x(&view, &v, t("2026-11-05T13:00:00")), None);
+    // The end mark: an ended line's end bar, only when that bar is on the plot; never at the
+    // edge for an end after the last bar (still going) or scrolled off.
+    let mut l = demo().levels[0].clone();
+    l.to = Some(t("2026-11-05T14:03:10"));
+    assert_eq!(end_mark_x(&view, &v, &l), None, "not marked ended");
+    l.ended = true;
+    assert_eq!(end_mark_x(&view, &v, &l), Some(x(3.0)));
+    l.to = Some(t("2026-11-05T16:00:00"));
+    assert_eq!(end_mark_x(&view, &v, &l), None, "after the last bar");
+    l.to = Some(t("2026-11-05T14:08:10"));
+    assert_eq!(
+        end_mark_x(&view, &back, &l),
+        None,
+        "end bar right of the plot"
+    );
 }
 
 /// A marker sits at its bar's centre and its price; a time outside the bars loaded has none.
