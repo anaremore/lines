@@ -3025,7 +3025,15 @@ impl ChartView {
             return;
         };
         use lines_feed::levels::ToolEffect;
-        match t.act(maps.context(), &view, action) {
+        let effect = match self.store.try_read() {
+            Some(d) => {
+                let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
+                let prices = crate::draw_tools::BarsPrices(&axis, d.market_time);
+                t.act(maps.context(), &view, &prices, action)
+            }
+            None => t.act(maps.context(), &view, &lines_feed::levels::NoPrices, action),
+        };
+        match effect {
             ToolEffect::None => {}
             ToolEffect::Redraw => self.drawings.tool_maps_mut().redraw(tool),
             ToolEffect::Show { from, to } => {

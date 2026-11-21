@@ -1223,6 +1223,7 @@ impl super::DrawTool for DemoSwing {
         &self,
         _: &super::DrawToolContext,
         view: &super::DrawView,
+        _: &dyn super::DrawPrices,
         action: &str,
     ) -> super::ToolEffect {
         match action {

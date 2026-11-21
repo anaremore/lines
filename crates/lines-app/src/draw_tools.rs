@@ -573,6 +573,11 @@ impl DrawPrices for BarsPrices<'_, '_> {
         };
         Some((first.time, hi))
     }
+    fn has_bars(&self, from: UtcMillis, to: UtcMillis) -> bool {
+        let bars = self.0.view.bars;
+        let i = bars.partition_point(|b| b.time < from);
+        bars.get(i).is_some_and(|b| b.time < to)
+    }
 }
 
 impl ChartBarsPrices for BarsPrices<'_, '_> {

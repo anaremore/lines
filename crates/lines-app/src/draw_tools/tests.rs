@@ -1463,3 +1463,16 @@ fn bars_prices_covered_requires_trade_bars_and_respects_open_session() {
     let open = BarsPrices(&axis, Some(UtcMillis(t0 + 5 * 3_600_000)));
     assert_eq!(open.covered(), Some((UtcMillis(t0), UtcMillis(t0 + 2_000))));
 }
+
+/// Whether the chart has a bar starting in a span (a tool skips spans it has none in).
+#[test]
+fn bars_prices_say_whether_a_span_has_bars() {
+    let bars = hg_bars(&[(600, 550), (650, 560)]);
+    let axis = TimeAxis::new(BarsView::fixed(&bars, M));
+    let p = BarsPrices(&axis, None);
+    let t0 = bars[0].time;
+    assert!(p.has_bars(t0, UtcMillis(t0.0 + 1)));
+    assert!(p.has_bars(UtcMillis(t0.0 - M), UtcMillis(t0.0 + 2 * M)));
+    assert!(!p.has_bars(UtcMillis(t0.0 + 2 * M), UtcMillis(t0.0 + 9 * M)));
+    assert!(!p.has_bars(UtcMillis(t0.0 - 9 * M), t0));
+}

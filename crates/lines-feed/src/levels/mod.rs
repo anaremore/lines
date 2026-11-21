@@ -490,9 +490,16 @@ pub trait DrawTool: Send + Sync {
         let _ = (ctx, view);
         0
     }
-    /// The strip's button `action` was pressed. Default: nothing.
-    fn act(&self, ctx: &DrawToolContext, view: &DrawView, action: &str) -> ToolEffect {
-        let _ = (ctx, view, action);
+    /// The strip's button `action` was pressed. `prices`: the chart's (e.g. to skip a span it
+    /// has no bars in). Default: nothing.
+    fn act(
+        &self,
+        ctx: &DrawToolContext,
+        view: &DrawView,
+        prices: &dyn DrawPrices,
+        action: &str,
+    ) -> ToolEffect {
+        let _ = (ctx, view, prices, action);
         ToolEffect::None
     }
     /// Drain any queued saves before the app exits (a tool that saves its own drawings on a
@@ -527,6 +534,11 @@ pub trait DrawPrices {
     /// start and the market clock. `None`: no bars. A "no" from `first_beyond` is final only
     /// for a span inside it.
     fn covered(&self) -> Option<(UtcMillis, UtcMillis)>;
+    /// Whether the chart has a bar starting in `from..to`. Default: no.
+    fn has_bars(&self, from: UtcMillis, to: UtcMillis) -> bool {
+        let _ = (from, to);
+        false
+    }
 }
 
 /// No prices (a tool asked outside a chart, tests).
