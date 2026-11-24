@@ -1,0 +1,39 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Narrow on purpose: security fixes, a weekly lockfile refresh and grouped monthly Actions digests. Every other update waits on the Dependency Dashboard. Pinned toolchain and GPUI stay manual (CLAUDE.md, Pinned versions).",
+  "extends": ["config:recommended"],
+  "timezone": "America/Chicago",
+  "labels": ["dependencies"],
+  "automerge": false,
+  "prConcurrentLimit": 3,
+  "osvVulnerabilityAlerts": true,
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "dependencyDashboardApproval": false,
+    "labels": ["dependencies", "security"]
+  },
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on monday"],
+    "commitMessageAction": "Refresh",
+    "commitMessageTopic": "Cargo.lock"
+  },
+  "packageRules": [
+    {
+      "description": "Version bumps of Cargo dependencies: only when approved on the Dependency Dashboard.",
+      "matchManagers": ["cargo"],
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Pinned together with the Zed commit; bumped by hand only.",
+      "matchPackageNames": ["gpui", "gpui_platform", "embed-resource", "rust"],
+      "enabled": false
+    },
+    {
+      "description": "GitHub Actions stay pinned by digest; one grouped PR a month.",
+      "matchManagers": ["github-actions"],
+      "groupName": "GitHub Actions",
+      "schedule": ["before 6am on the first day of the month"]
+    }
+  ]
+}
