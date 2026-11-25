@@ -40,6 +40,9 @@ static CALLS: Mutex<Vec<(Anchor, Anchor)>> = Mutex::new(Vec::new());
 /// Refuse points whose first price is this (`Err`: nothing drawn).
 static REFUSE: AtomicUsize = AtomicUsize::new(0);
 
+/// Non-zero: the "A" line ends at the second point (a bounded ruler) instead of running on.
+static END_A: AtomicUsize = AtomicUsize::new(0);
+
 struct Pair;
 
 impl DrawTool for Pair {
@@ -70,9 +73,15 @@ impl DrawTool for Pair {
         };
         // A line from each point to the plot's right edge, and the box between them.
         let (lo, hi) = (a.price.min(b.price), a.price.max(b.price));
-        LevelMap::builder(ID, ctx.product.id, a.time)
+        let builder = LevelMap::builder(ID, ctx.product.id, a.time)
             .line("pair-a", LevelValue::Tick(a.price), Some("A"), style)
-            .from(a.time)
+            .from(a.time);
+        let builder = if END_A.load(Ordering::Relaxed) != 0 {
+            builder.to(b.time)
+        } else {
+            builder
+        };
+        builder
             .line("pair-b", LevelValue::Tick(b.price), Some("B"), style)
             .from(b.time)
             .zone(
@@ -96,6 +105,7 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
     lines_feed::levels::register_draw_tool(Arc::new(Pair)).unwrap();
     CALLS.lock().unwrap().clear();
     REFUSE.store(0, Ordering::Relaxed);
+    END_A.store(0, Ordering::Relaxed);
     g
 }
 
@@ -426,6 +436,31 @@ fn the_levels_go_to_the_levels_layer_under_the_tools_id() {
     layer.set_tool_maps(r.d.tool_maps());
     layer.snapshot(None);
     assert!(layer.sources().is_empty());
+}
+
+/// A drawing's line that ends at an earlier bar keeps its label: it describes the drawing,
+/// not a level still in play (a level source's ended line loses its label).
+#[test]
+fn a_tool_line_ended_before_the_newest_bar_keeps_its_label() {
+    let _s = serial();
+    END_A.store(1, Ordering::Relaxed);
+    let mut r = Rig::new();
+    let (a, b) = (
+        r.anchor(100.0, 100.0).unwrap(),
+        r.anchor(200.0, 150.0).unwrap(),
+    );
+    r.d.place(pair(), a, b);
+    r.frame(0.0, 0.0);
+    let mut layer = LevelsLayer::new(LevelsConfig::default());
+    r.layer_kinds(&mut layer);
+    assert_eq!(layer.map(0).unwrap().levels[0].to, Some(b.time));
+    layer.columns(BarsView::fixed(&r.bars, M), &r.vp);
+    let p = layer.placed(0).iter().find(|p| p.index == 0).unwrap();
+    assert!(
+        p.x1 < r.vp.width as f32,
+        "ends before the plot's right edge"
+    );
+    assert!(!p.over, "a drawing's ended line keeps its label");
 }
 
 /// Plugin drawings are never saved: the drawings file leaves them out (a built-in drawing

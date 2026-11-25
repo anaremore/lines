@@ -1563,6 +1563,9 @@ impl LevelsLayer {
         for s in &mut self.slots {
             s.markers.clear();
             let Some(map) = s.map.as_ref() else { continue };
+            // A drawing tool's lines describe the drawing, not a level still in play: ended at
+            // an earlier bar, they keep their labels.
+            let tool = s.handle.is_tool();
             for p in &mut s.placed {
                 let l = &map.levels[p.index as usize];
                 // A time-bounded zone spans its bars' whole slots (`extent_x`).
@@ -1577,7 +1580,8 @@ impl LevelsLayer {
                 p.end_mark = end_mark_x(bars, vp, l);
                 // A line that ended at an earlier bar (`end_x` gives the plot's width only for
                 // one still going): drawn, no label.
-                p.over = matches!(l.shape, LevelShape::Line(_))
+                p.over = !tool
+                    && matches!(l.shape, LevelShape::Line(_))
                     && l.to
                         .and_then(|t| end_x(bars, vp, t))
                         .is_some_and(|x| x < vp.width as f32);

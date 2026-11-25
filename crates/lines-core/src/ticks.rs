@@ -491,6 +491,8 @@ impl TickBars {
         self.session = None;
         self.bar_session = i64::MIN;
         self.bar_close = i64::MAX;
+        // The new contract's bars all carry order flow until older history goes in front.
+        self.full_from = None;
         self.revision += 1;
     }
 

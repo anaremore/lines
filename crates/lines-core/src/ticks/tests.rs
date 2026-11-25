@@ -614,4 +614,7 @@ fn older_bars_go_in_front_without_levels() {
     assert_eq!(held.prepend(other), 0, "another kind");
     // Every buffer has room for the grown capacity: later pushes don't reallocate.
     assert!(held.bars.capacity() >= held.capacity && held.levels.capacity() >= held.capacity);
+    // A contract switch: the new bars all carry order flow again.
+    held.clear();
+    assert_eq!(held.full_from(), None);
 }
