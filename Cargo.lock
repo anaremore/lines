@@ -1180,7 +1180,7 @@ dependencies = [
 
 [[package]]
 name = "cqg-proto"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "prost",
  "prost-build",
@@ -1922,9 +1922,9 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -3225,7 +3225,7 @@ checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
 
 [[package]]
 name = "lines-app"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "anyhow",
  "clap",
@@ -3259,14 +3259,14 @@ dependencies = [
 
 [[package]]
 name = "lines-core"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "jiff",
 ]
 
 [[package]]
 name = "lines-databento"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "anyhow",
  "clap",
@@ -3284,7 +3284,7 @@ dependencies = [
 
 [[package]]
 name = "lines-feed"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "anyhow",
  "bytes",
@@ -3307,11 +3307,11 @@ dependencies = [
 
 [[package]]
 name = "lines-fonts"
-version = "0.3.29"
+version = "0.3.31"
 
 [[package]]
 name = "lines-fuzz"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "bytes",
  "cqg-proto",
@@ -3324,11 +3324,11 @@ dependencies = [
 
 [[package]]
 name = "lines-icons"
-version = "0.3.29"
+version = "0.3.31"
 
 [[package]]
 name = "lines-indicators"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "lines-core",
  "serde",
@@ -3337,7 +3337,7 @@ dependencies = [
 
 [[package]]
 name = "lines-sierra"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "anyhow",
  "clap",
@@ -3350,7 +3350,7 @@ dependencies = [
 
 [[package]]
 name = "lines-strategy"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "anyhow",
  "lines-core",
@@ -3363,7 +3363,7 @@ dependencies = [
 
 [[package]]
 name = "lines-trading"
-version = "0.3.29"
+version = "0.3.31"
 dependencies = [
  "anyhow",
  "jiff",
@@ -6666,9 +6666,9 @@ dependencies = [
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

@@ -258,6 +258,19 @@ pub fn write_from(
     zone.write_label(t, out)
 }
 
+/// "order flow from 11-05 09:32 ET": where full order flow (footprints) begins on a chart
+/// whose older bars were loaded on demand, price and volume only ([`crate::older`]), as
+/// [`write_from`] writes it. Allocation-free.
+pub fn write_order_flow_from(
+    t: UtcMillis,
+    zone: &lines_core::display_tz::DisplayTz,
+    out: &mut impl std::fmt::Write,
+) -> std::fmt::Result {
+    let (_, mo, d, h, m, _) = zone.civil(t);
+    write!(out, "order flow from {mo:02}-{d:02} {h:02}:{m:02} ")?;
+    zone.write_label(t, out)
+}
+
 impl TickSet {
     /// One counted trade, into every builder.
     pub(crate) fn push(&mut self, p: Print) {
@@ -333,6 +346,20 @@ impl TickSet {
     /// Bars dropped from the front of `key`'s series so far.
     pub fn trimmed(&self, key: TickKey) -> u64 {
         self.slot(key).map_or(0, |s| s.bars.trimmed())
+    }
+
+    /// Bars put in front of `key`'s series so far ([`crate::older`]).
+    pub fn prepended(&self, key: TickKey) -> u64 {
+        self.slot(key).map_or(0, |s| s.bars.prepended())
+    }
+
+    /// Older bars in front of `key`'s builder: how many went in (`None` while it rebuilds or
+    /// isn't held: asked again later).
+    pub(crate) fn prepend_older(&mut self, key: TickKey, older: TickBars) -> Option<usize> {
+        self.slots
+            .iter_mut()
+            .find(|s| s.key == key && s.pending.is_none())
+            .map(|s| s.bars.prepend(older))
     }
 
     /// Whether `key`'s bars begin after trading that `series` (the 1-minute bars) shows in
@@ -544,13 +571,17 @@ impl ChartStore {
                 };
             }
             let cal = crate::catalog::sessions(d.product.id);
+            // The series' size as made: older history loaded for the 1-minute bars doesn't
+            // size a new builder.
             let mut bars = TickBars::with_kind(
                 key.kind,
                 key.reset,
                 cal,
                 BarScale::of(&d.product),
-                d.series.max_len(),
+                d.series.base_len(),
             );
+            // A new builder: its older history starts over.
+            d.older.reset(crate::older::OlderFor::Trades(key));
             let tape = tape_prints(&d);
             let all_in_tape = d.counted_n <= tape.len() as u64;
             let mut pending = None;
@@ -982,6 +1013,18 @@ enum Pass {
     /// `each` asked to stop.
     Stopped,
     Cancelled,
+}
+
+/// [`read_stored`] for older history ([`crate::older`]), never cancelled from outside.
+pub(crate) fn read_stored_trades(
+    dir: &ContractDir,
+    product: &Product,
+    dates: (CivilDate, Option<CivilDate>),
+    keep: impl FnMut((i64, i64), i64) -> bool,
+    each: impl FnMut(Print) -> bool,
+    cancelled: &mut impl FnMut() -> bool,
+) -> anyhow::Result<()> {
+    read_stored(dir, product, dates, keep, each, cancelled).map(|_| ())
 }
 
 /// The stored trades of `dir`'s trade dates from `first` (to `last`, if given), oldest date

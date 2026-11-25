@@ -168,6 +168,8 @@ enum LabelKind {
     Time,
     /// A time gridline's `HH:MM:SS` (steps under a minute; its own kind for the label cache).
     TimeSeconds,
+    /// Where full order flow begins on a trade-built chart with older bars loaded on demand.
+    OrderFlowFrom,
     /// A time gridline's date (`MM-DD`), and date with time.
     Date,
     DateTime,
@@ -711,6 +713,16 @@ pub struct ChartView {
     tick_marks: Vec<u8>,
     /// "tick bars from HH:MM": the first bar's time and plot-local x, when it is on screen.
     tick_from: Option<(UtcMillis, f32)>,
+    /// Where full order flow begins, when older trade-built bars (price and volume only)
+    /// were loaded in front, and its x: labelled there.
+    order_flow_from: Option<(UtcMillis, f32)>,
+    /// The view reached the oldest bar held (set in paint): the next tick asks the store for
+    /// older history (`lines_feed::older`).
+    wants_older: bool,
+    /// Bars the shown series had put in front when last painted (`u64::MAX`: none yet), and
+    /// the time under the plot's middle then: older bars landing keep that time in place.
+    older_seen: u64,
+    view_time: Option<(UtcMillis, f64)>,
     /// After a timeframe change: put the bar holding this time at this plot-local x.
     tf_anchor: Option<(UtcMillis, f64)>,
     /// The timeframe list (header chip, pane menu), while open.
@@ -1068,6 +1080,10 @@ impl ChartView {
             cross_tick: None,
             tick_marks: Vec::new(),
             tick_from: None,
+            order_flow_from: None,
+            wants_older: false,
+            older_seen: u64::MAX,
+            view_time: None,
             tf_anchor: None,
             tf_menu: fixture.timeframe_menu,
             tf_entry: None,
@@ -2606,6 +2622,7 @@ impl ChartView {
             .then(|| Derived::new(tf, capacity));
         // Indices change: re-baseline the trim count on the next paint.
         self.series_trimmed = u64::MAX;
+        self.older_seen = u64::MAX;
         // Time labels are cached by bar time; their text depends on the timeframe.
         self.labels.clear();
         self.readout = None;
@@ -5191,7 +5208,11 @@ impl ChartView {
                 );
             }
             // A higher timeframe: bring its bars up to date (only what changed).
-            if let Some(dv) = &mut self.derived {
+            // (Not while older history has outgrown its buffer: the tick gives it room, never
+            // paint.)
+            if let Some(dv) = &mut self.derived
+                && d.series.len() <= dv.capacity()
+            {
                 dv.update(&d.series, lines_feed::catalog::sessions(d.product.id));
             }
             let view = bars_view(&self.derived, self.tick_key(), &d);
@@ -5205,6 +5226,17 @@ impl ChartView {
             self.last_trade = d.last_trade;
             let fmt = self.instrument.price;
             let bars = view.bars;
+            // Older history landed in front: the time in the plot's middle stays in place.
+            let prepended = match self.tick_key() {
+                Some(k) => d.ticks.prepended(k),
+                None => d.series.prepended(),
+            };
+            if prepended != self.older_seen {
+                if self.older_seen != u64::MAX && self.tf_anchor.is_none() {
+                    self.tf_anchor = self.view_time;
+                }
+                self.older_seen = prepended;
+            }
             keep_view(
                 &mut self.vp,
                 &mut self.series_trimmed,
@@ -5214,6 +5246,14 @@ impl ChartView {
                 self.drag.is_some(),
             );
             self.vp.on_data(bars, fmt.tick);
+            // The time in the plot's middle, for the next frame; and whether the view reached
+            // the oldest bar (the next tick asks for older history; never from paint).
+            self.view_time = (!bars.is_empty()).then(|| {
+                let x = self.vp.width * 0.5;
+                let i = (self.vp.x_to_index(x).floor().max(0.0) as usize).min(bars.len() - 1);
+                (bars[i].time, x)
+            });
+            self.wants_older = !bars.is_empty() && self.vp.x_to_index(0.0) < 0.5;
             if self.visibility.draws_studies()
                 && self.footprint.config().shown()
                 && self.vp.auto_price
@@ -5262,6 +5302,7 @@ impl ChartView {
             // "tick bars from" label goes.
             self.tick_marks.clear();
             self.tick_from = None;
+            self.order_flow_from = None;
             // The feed's clock: a closed session's last bar is partial, not forming.
             let now = self.store.feed_clock();
             if let (Some(tb), Some(key)) = (view.trades, self.tick_key()) {
@@ -5279,6 +5320,15 @@ impl ChartView {
                         m |= MARK_SESSION;
                     }
                     self.tick_marks.push(m);
+                }
+                // Older bars loaded on demand (price and volume only): where full order flow
+                // begins, at its bar.
+                if let Some(t) = tb.full_from() {
+                    let i = bars.partition_point(|b| b.time < t);
+                    let x = slot_x(&self.vp, i as f64, scale);
+                    if i < bars.len() && x >= 0.0 && f64::from(x) < self.vp.width {
+                        self.order_flow_from = Some((t, x));
+                    }
                 }
                 if let lines_feed::ticks::TickStatus::From(t) =
                     d.ticks.status(key, &d.series, &d.product)
@@ -6895,6 +6945,9 @@ impl ChartView {
             // The profile's tag: in the plot's corner, unless the labels have a column.
             if labels && self.label_col <= 0.0 {
                 self.profile.paint_label(plot, None, &t, window, cx);
+            }
+            if let Some((from, x)) = self.order_flow_from {
+                self.draw_from_label(LabelKind::OrderFlowFrom, from, x, (ox, oy), ph, window, cx);
             }
             if let Some((from, x)) = self.tick_from {
                 self.draw_tick_from(from, x, (ox, oy), ph, window, cx);
@@ -9486,6 +9539,22 @@ impl ChartView {
         &mut self,
         from: UtcMillis,
         x: f32,
+        at: (f32, f32),
+        ph: f32,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.draw_from_label(LabelKind::TickFrom, from, x, at, ph, window, cx);
+    }
+
+    /// A "tick bars from …" (`TickFrom`) or "order flow from …" (`OrderFlowFrom`) label at
+    /// `x`, at the plot's foot.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_from_label(
+        &mut self,
+        kind: LabelKind,
+        from: UtcMillis,
+        x: f32,
         (ox, oy): (f32, f32),
         ph: f32,
         window: &mut Window,
@@ -9494,12 +9563,14 @@ impl ChartView {
         let t = self.theme;
         let zone = self.zone.clone();
         let text = |s: &mut FixedStr<32>| {
-            let _ = lines_feed::ticks::write_from(from, &zone, s);
+            let _ = match kind {
+                LabelKind::OrderFlowFrom => {
+                    lines_feed::ticks::write_order_flow_from(from, &zone, s)
+                }
+                _ => lines_feed::ticks::write_from(from, &zone, s),
+            };
         };
-        let w = f32::from(
-            self.label(LabelKind::TickFrom, from.0, t.text_dim, window, text)
-                .width,
-        );
+        let w = f32::from(self.label(kind, from.0, t.text_dim, window, text).width);
         let scale = window.scale_factor();
         let pw = f32::from(self.plot.size.width);
         let box_h = label_px() * 1.6;
@@ -9738,6 +9809,14 @@ impl ChartView {
         }
         if let Some(h) = d.history.label() {
             let _ = write!(right, "  ·  {h}");
+        }
+        // Older history loaded on demand (scrolled back past the oldest bar).
+        let older = self.tick_key().map_or(
+            lines_feed::older::OlderFor::Minutes,
+            lines_feed::older::OlderFor::Trades,
+        );
+        if let Some(o) = d.older.get(older).label() {
+            let _ = write!(right, "  ·  {o}");
         }
         // Tick bars being rebuilt say so here; bars that begin late say so at their first bar
         // in the plot (here too while there are none yet).
@@ -10351,6 +10430,23 @@ impl Pane for ChartView {
         if self.perf_stats && !self.frozen {
             self.rates_changed |= self.update_rates();
         }
+        // The view reached the oldest bar: older stored days, on a helper thread (visible
+        // charts only: a hidden one doesn't tick here).
+        if std::mem::take(&mut self.wants_older) && !self.frozen {
+            let what = self.tick_key().map_or(
+                lines_feed::older::OlderFor::Minutes,
+                lines_feed::older::OlderFor::Trades,
+            );
+            self.store.load_older(what);
+        }
+        // Older history grew the 1-minute series: a higher timeframe's bars get room for it
+        // here (allocating), never in paint.
+        if let Some(dv) = &self.derived
+            && let Some(cap) = self.store.try_read().map(|d| d.series.capacity())
+            && cap > dv.capacity()
+        {
+            self.derived = Some(Derived::new(self.timeframe, cap));
+        }
         // The latency HUD refreshes once a second (render rebuilds its text).
         if self.latency_hud
             && !self.frozen
@@ -10790,6 +10886,44 @@ fn keep_view(
 /// B1: a switch to tick bars that rebuild keeps the pointer's time in place. While the
 /// rebuild shows no bars the anchor waits; the landed series (which already trimmed bars) is
 /// not taken as a trim of the old one.
+/// Older history on demand: a chart scrolled to its oldest bar asks for more (`wants_older`);
+/// when 500 older bars land in front, the time in the plot's middle stays where it was (the
+/// paint's `view_time` becomes the anchor), and the view is no longer at the oldest bar.
+#[cfg(test)]
+#[test]
+fn older_bars_landing_in_front_keep_the_view_still() {
+    let minute = |i: i64| Bar {
+        time: UtcMillis(1_800_000_000_000 + i * 60_000),
+        open: Price(1),
+        high: Price(2),
+        low: Price(1),
+        close: Price(2),
+        volume: lines_core::Qty(1),
+    };
+    let held: Vec<Bar> = (500..1500).map(minute).collect();
+    let mut vp = Viewport::default();
+    vp.set_size(800.0, 600.0);
+    vp.follow_live = false;
+    // Scrolled back so the oldest bar is at the plot's left edge.
+    vp.right_index = 800.0 / vp.bar_px;
+    let (mut baseline, mut anchor) = (0, None);
+    keep_view(&mut vp, &mut baseline, &mut anchor, Some(0), &held, false);
+    assert!(vp.x_to_index(0.0) < 0.5, "at the oldest bar: asks for more");
+    let x = vp.width * 0.5;
+    let mid = held[vp.x_to_index(x).floor() as usize].time;
+    let view_time = Some((mid, x));
+    // 500 older bars land in front: the prepend count moved, so the anchor is the time seen.
+    let all: Vec<Bar> = (0..1500).map(minute).collect();
+    anchor = view_time;
+    keep_view(&mut vp, &mut baseline, &mut anchor, Some(0), &all, false);
+    assert_eq!(
+        all[vp.x_to_index(x).floor() as usize].time,
+        mid,
+        "same time, same place"
+    );
+    assert!(vp.x_to_index(0.0) > 400.0, "older bars now to the left");
+}
+
 #[cfg(test)]
 #[test]
 fn a_rebuilding_switch_keeps_the_pointers_time() {

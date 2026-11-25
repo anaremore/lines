@@ -844,6 +844,7 @@ impl LevelSource for DemoEvent {
             )
             .from(a_at)
             .group(EVENT_GROUP)
+            // Reached at 16:37 ET: it ends there, marked (`Level::ended`).
             .line(
                 "ev-target",
                 tick(602_400),
@@ -851,6 +852,8 @@ impl LevelSource for DemoEvent {
                 style(0xa87719ff, false),
             )
             .from(a_at)
+            .to(t("2026-11-05T21:37:00")?)
+            .ended()
             .group(EVENT_GROUP)
             .zone(
                 "ev-box",

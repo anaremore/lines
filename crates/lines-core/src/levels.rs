@@ -124,6 +124,9 @@ pub struct Level {
     /// When it ends (a time-bounded zone: from–to, low–high): drawn up to that bar; `None`: to
     /// the plot's right edge.
     pub to: Option<UtcMillis>,
+    /// A line that ended by being reached (traded at or through): a small ✕ marks its end at
+    /// `to`'s bar. Only for a line with a `to`; a zone ignores it.
+    pub ended: bool,
     /// The event it belongs to (an index into [`LevelMap::groups`]): pointing at any member
     /// highlights them all.
     pub group: Option<u16>,
@@ -553,6 +556,7 @@ impl LevelMapBuilder {
             meta,
             from: None,
             to: None,
+            ended: false,
             group: None,
         });
         self.last = Last::Level;
@@ -587,6 +591,16 @@ impl LevelMapBuilder {
         match (self.last, self.map.levels.last_mut()) {
             (Last::Level, Some(l)) => l.to = Some(t),
             _ => self.fail(LevelError::Misplaced("to")),
+        }
+        self
+    }
+
+    /// The last level added ended by being reached at its `to` ([`Level::ended`]): its end is
+    /// marked. Call after [`Self::to`].
+    pub fn ended(mut self) -> Self {
+        match (self.last, self.map.levels.last_mut()) {
+            (Last::Level, Some(l)) if l.to.is_some() => l.ended = true,
+            _ => self.fail(LevelError::Misplaced("ended")),
         }
         self
     }
@@ -1186,6 +1200,12 @@ pub struct Placed {
     /// its bar ([`start_x`], [`end_x`]; the layer sets them).
     pub x0: f32,
     pub x1: f32,
+    /// A line ended by being reached ([`Level::ended`]) whose end bar is on the plot: that
+    /// bar's centre (px from the plot's left), where its mark goes ([`end_mark_x`]).
+    pub end_mark: Option<f32>,
+    /// A line whose end ([`Level::to`]) is at a bar before the newest: drawn to there, but
+    /// over, so it takes no label (an axis tag would read as a current level).
+    pub over: bool,
 }
 
 impl Placed {
@@ -1237,6 +1257,8 @@ pub fn place(
             rank: LabelPriority::Normal.rank(),
             x0: 0.0,
             x1: vp.width as f32,
+            end_mark: None,
+            over: false,
         });
     }
 }
@@ -1280,6 +1302,22 @@ pub fn end_x(bars: &crate::timeframe::BarsView<'_>, vp: &Viewport, to: UtcMillis
         return None;
     }
     Some(x.min(vp.width as f32))
+}
+
+/// Where a line ended by being reached ([`Level::ended`]) gets its mark: its end bar's centre
+/// (px from the plot's left), only when that bar is held and on the plot. `None` for a line not
+/// marked ended, one whose end is after the newest bar (still going, as far as the chart
+/// knows: a replay before the touch), and one whose end bar is scrolled off either side. No
+/// allocation.
+pub fn end_mark_x(bars: &crate::timeframe::BarsView<'_>, vp: &Viewport, l: &Level) -> Option<f32> {
+    let to =
+        l.to.filter(|_| l.ended && matches!(l.shape, LevelShape::Line(_)))?;
+    let i = bars.bars.partition_point(|b| b.time <= to).checked_sub(1)?;
+    if to >= bars.end(i) && i + 1 == bars.len() {
+        return None;
+    }
+    let x = vp.index_to_x(i as f64) as f32;
+    (x >= 0.0 && x <= vp.width as f32).then_some(x)
 }
 
 /// Where level `l` is drawn across the plot, `(x0, x1)` (px from its left): from its start

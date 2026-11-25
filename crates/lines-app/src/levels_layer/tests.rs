@@ -1699,6 +1699,8 @@ fn labels_never_overlap_at_150_percent() {
             rank: 1,
             x0: 0.0,
             x1: 800.0,
+            end_mark: None,
+            over: false,
         })
         .collect();
     let mut seen = vec![LabelSeen::New; 8];
@@ -2104,9 +2106,16 @@ fn event_lines_start_at_their_bars() {
     let boxed = layer
         .placed(ev)
         .iter()
-        .find(|p| prior.levels[p.index as usize].to.is_some())
+        .find(|p| {
+            let l = &prior.levels[p.index as usize];
+            l.to.is_some() && matches!(l.shape, LevelShape::Zone { .. })
+        })
         .copied()
         .expect("the box");
+    // The target was reached at 21:37 (`Level::ended`), after these bars: to the edge here.
+    let target = placed_named(&layer, ev, "Target 6024");
+    assert_eq!(target.x1, 800.0);
+    assert!(prior.levels[target.index as usize].ended);
     // Its bars' whole slots: half a bar either side of their centres.
     assert_eq!((boxed.x0, boxed.x1), (x(8.0) - 5.0, x(16.0) + 5.0));
     // The run's line from V's bar (21:12: bar 22).
@@ -2357,4 +2366,18 @@ fn hover_only_levels_never_outlive_their_highlight() {
     layer.columns(BarsView::fixed(&bars, 60_000), &v);
     assert!(!layer.needs_layout());
     assert!(placed_named(&layer, ev, "A 6005").label_y.is_some());
+}
+
+/// Marker labels close together (one event's A beside another's E1): a later label steps
+/// below each plate it would cover; one clear of them stays where it is.
+#[test]
+fn a_marker_label_steps_below_one_it_would_cover() {
+    let a = [100.0, 50.0, 120.0, 62.0];
+    let b = [100.0, 63.0, 130.0, 75.0];
+    assert_eq!(clear_of(&[], 105.0, 20.0, 55.0, 12.0), 55.0);
+    assert_eq!(clear_of(&[a], 105.0, 20.0, 55.0, 12.0), 63.0);
+    assert_eq!(clear_of(&[a, b], 105.0, 20.0, 55.0, 12.0), 76.0);
+    // Beside it, or below it: untouched.
+    assert_eq!(clear_of(&[a], 121.0, 20.0, 55.0, 12.0), 55.0);
+    assert_eq!(clear_of(&[a], 105.0, 20.0, 62.0, 12.0), 62.0);
 }

@@ -295,6 +295,23 @@ fn group_dim(hot: Option<Hot>, si: usize, g: Option<u16>) -> f32 {
     }
 }
 
+/// The top of a marker label's plate (`left`, `w` wide, `h` tall, wanted at `top`) clear of
+/// the plates already painted (`taken`: left, top, right, bottom): each one it would cover
+/// moves it below that plate, a few times at most (then it overlaps). No allocation.
+fn clear_of(taken: &[[f32; 4]], left: f32, w: f32, top: f32, h: f32) -> f32 {
+    let mut y = top;
+    for _ in 0..4 {
+        let hit = taken
+            .iter()
+            .find(|p| left < p[2] && left + w > p[0] && y < p[3] && y + h > p[1]);
+        match hit {
+            Some(p) => y = p[3] + 1.0,
+            None => break,
+        }
+    }
+    y
+}
+
 /// Where a highlighted event's label at `y` (`box_h` tall) goes when the crosshair's price
 /// tag (centre `cy`, `ch` tall) would cover it: the nearest row beside the tag, on the label's
 /// own side first (above when at or above the tag's centre), then the other, that keeps clear
@@ -335,6 +352,33 @@ type Faded = Hsla;
 /// `c` at `f` of its alpha.
 fn faded(c: Hsla, f: f32) -> Faded {
     c.opacity(c.a * f)
+}
+
+/// Half the ✕ that ends a line reached at its `to` ([`Level::ended`]), logical px, beyond its
+/// stroke width.
+const END_MARK_ARM: f32 = 3.0;
+
+/// A small ✕ centred at (`x`, `y`) in window px: two diagonals of `w`-square dots, one per device
+/// pixel step (crisp at any scale, and no path: nothing allocated).
+fn end_mark(window: &mut Window, x: f32, y: f32, c: Hsla, w: f32, scale: f32) {
+    if c.a <= 0.0 {
+        return;
+    }
+    let steps = ((END_MARK_ARM + w) * scale).round() as i32;
+    let (x, y) = (snap(f64::from(x), scale), snap(f64::from(y), scale));
+    for i in -steps..=steps {
+        let d = i as f32 / scale;
+        // The centre once.
+        for dy in [d, -d].into_iter().take(if i == 0 { 1 } else { 2 }) {
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(x + d - w * 0.5), px(y + dy - w * 0.5)),
+                    size(px(w), px(w)),
+                ),
+                c,
+            ));
+        }
+    }
 }
 
 /// A marker's color (a theme token, chosen by the helpers below).
@@ -1033,6 +1077,9 @@ pub struct LevelsLayer {
     /// Each label row drawn this frame (centre y): a highlighted event's label stepping beside
     /// the crosshair's tag keeps clear of them ([`beside_cross`]). Grown with the maps.
     rows: Vec<f32>,
+    /// The marker label plates painted this frame (screen px: left, top, right, bottom), so a
+    /// label that would cover one steps below it ([`clear_of`]). Fixed capacity.
+    plates: Vec<[f32; 4]>,
     /// Every source's placed levels this frame, joined for one label layout (`place`): each
     /// level's index offset by its source's place in `seen_all`. Capacity kept, so steady
     /// frames don't allocate.
@@ -1115,6 +1162,7 @@ impl LevelsLayer {
             last_y: None,
             chips: Vec::new(),
             rows: Vec::new(),
+            plates: Vec::with_capacity(lines_core::levels::MAX_MARKERS),
             joint: Vec::new(),
             seen_all: Vec::new(),
             drawn_all: Vec::new(),
@@ -1511,7 +1559,7 @@ impl LevelsLayer {
     /// plot, isn't drawn and shows no label), and each marker's place. After [`Self::place`],
     /// once the time axis is final. No allocation.
     fn time_extents(&mut self, bars: &BarsView<'_>, vp: &Viewport) {
-        use lines_core::levels::{extent_x, marker_xy};
+        use lines_core::levels::{end_mark_x, end_x, extent_x, marker_xy};
         for s in &mut self.slots {
             s.markers.clear();
             let Some(map) = s.map.as_ref() else { continue };
@@ -1526,6 +1574,13 @@ impl LevelsLayer {
                         p.label_y = None;
                     }
                 }
+                p.end_mark = end_mark_x(bars, vp, l);
+                // A line that ended at an earlier bar (`end_x` gives the plot's width only for
+                // one still going): drawn, no label.
+                p.over = matches!(l.shape, LevelShape::Line(_))
+                    && l.to
+                        .and_then(|t| end_x(bars, vp, t))
+                        .is_some_and(|x| x < vp.width as f32);
             }
             if !self.config.source_shown(s.handle.source()) || s.status == LevelStatus::Missing {
                 continue;
@@ -1821,7 +1876,8 @@ impl LevelsLayer {
             self.seen_all.extend_from_slice(&s.seen);
             self.drawn_all.resize(self.seen_all.len(), true);
             for p in &s.placed {
-                if p.x0 > p.x1 {
+                // Not drawn, or a line over before the newest bar: no label.
+                if p.x0 > p.x1 || p.over {
                     self.drawn_all[(base + p.index) as usize] = false;
                 }
             }
@@ -1932,6 +1988,7 @@ impl LevelsLayer {
         let ink = marker_ink(theme);
         let text = marker_text(theme);
         let plate = theme.legend_box();
+        self.plates.clear();
         for si in 0..self.slots.len() {
             let Some(map) = self.slots[si].map.clone() else {
                 continue;
@@ -2013,13 +2070,17 @@ impl LevelsLayer {
                 // Dimmed with its label (outside the highlighted event, or stale): a dimmed
                 // label is set back, not meant to be read over the bars.
                 let pad = crate::zoom::f(2.0);
-                let (lx, ly) = (ox + x + r + pad * 2.0, oy + y + r - label_px() * 0.2);
                 let lh = label_px() * 1.3;
+                let w = f32::from(line.width) + pad * 2.0;
+                let lx = ox + x + r + pad * 2.0;
+                // Two markers close together (an event's A beside another's E1): the later
+                // label steps below the earlier one's plate instead of covering it.
+                let ly = clear_of(&self.plates, lx - pad, w, oy + y + r - label_px() * 0.2, lh);
+                if self.plates.len() < self.plates.capacity() {
+                    self.plates.push([lx - pad, ly, lx - pad + w, ly + lh]);
+                }
                 window.paint_quad(fill(
-                    Bounds::new(
-                        point(px(lx - pad), px(ly)),
-                        size(px(f32::from(line.width) + pad * 2.0), px(lh)),
-                    ),
+                    Bounds::new(point(px(lx - pad), px(ly)), size(px(w), px(lh))),
                     plate.opacity(plate.a * a),
                 ));
                 let _ = line.paint(
@@ -2346,6 +2407,17 @@ impl LevelsLayer {
             line(window, p.top, st, p.x0, p.x1);
             if zone {
                 line(window, p.bottom, st, p.x0, p.x1);
+            } else if let (Some(x), true) = (p.end_mark, p.x0 <= p.x1) {
+                // Ended by being reached: a small ✕ at its end bar (only when that bar is on
+                // the plot: never at the edge for an end off screen or still to come).
+                end_mark(
+                    window,
+                    ox + x,
+                    oy + p.top,
+                    st.color,
+                    st.width.max(hair),
+                    scale,
+                );
             }
         });
     }
