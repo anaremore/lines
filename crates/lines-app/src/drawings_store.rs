@@ -374,9 +374,10 @@ impl Drawings {
                         None => s,
                     });
                 }
-                let above = kept.iter().map(|d| d.id).max().unwrap_or(0);
-                let mut set = DrawingSet::from_drawings(restored(product, items, above));
-                if let Some(max) = kept.iter().map(|d| d.id).max() {
+                let max_kept = kept.iter().map(|d| d.id).max();
+                let mut set =
+                    DrawingSet::from_drawings(restored(product, items, max_kept.unwrap_or(0)));
+                if let Some(max) = max_kept {
                     set.reserve_ids_through(max);
                 }
                 (

@@ -448,7 +448,7 @@ fn merge_one(
             (out.groups.len() - 1) as u16
         })
     };
-    let dropped = m.levels.len() + out.levels.len() > MAX_LEVELS
+    let mut dropped = m.levels.len() + out.levels.len() > MAX_LEVELS
         || m.markers.len() + out.markers.len() > MAX_MARKERS
         || out.groups.len() >= MAX_GROUPS;
     let mut taken = 0;
@@ -466,11 +466,17 @@ fn merge_one(
                 out.kinds.push(slug.clone());
                 (out.kinds.len() - 1) as u16
             }
-            None => continue,
+            None => {
+                dropped = true;
+                continue;
+            }
         };
         let mut l = l.clone();
         l.kind = kind;
         l.group = group(l.group, out);
+        if l.group.is_none() {
+            dropped = true;
+        }
         out.levels.push(l);
     }
     for k in &m.markers {
@@ -479,6 +485,9 @@ fn merge_one(
         }
         let mut k = k.clone();
         k.group = group(k.group, out);
+        if k.group.is_none() {
+            dropped = true;
+        }
         out.markers.push(k);
     }
     (taken, dropped)

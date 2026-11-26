@@ -3110,21 +3110,14 @@ impl ChartView {
         maps.tool(id).cloned()
     }
 
-    /// Whether a plugin tool strip is rendered at the top-right of the plot this frame.
-    fn has_tool_strip(&self) -> bool {
-        let Some(tool) = self.active_plugin_tool() else {
-            return false;
-        };
-        tool.panel(self.drawings.tool_maps().context(), &self.draw_view())
-            .is_some()
-    }
-
     /// A plugin tool's strip (the chosen tool's, else the selected drawing's tool's) and the
-    /// selected drawing's point card, over the plot (`crate::tool_panel`).
-    fn tool_overlays(&self, t: &Theme, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// selected drawing's point card, over the plot (`crate::tool_panel`). Also reports whether
+    /// a strip is rendered this frame (so the drawing-mode banner steps to the bottom without
+    /// asking the tool for its panel a second time).
+    fn tool_overlays(&self, t: &Theme, cx: &mut Context<Self>) -> (Vec<AnyElement>, bool) {
         let mut out = Vec::new();
         let Some(tool) = self.active_plugin_tool() else {
-            return out;
+            return (out, false);
         };
         let maps = self.drawings.tool_maps();
         let selected = self.drawings.selected_plugin();
@@ -3132,7 +3125,9 @@ impl ChartView {
         let plot_w = f32::from(self.plot.size.width);
         let plot_h = f32::from(self.plot.size.height);
         let mut top_min = 0.0;
+        let mut has_strip = false;
         if let Some(panel) = tool.panel(maps.context(), &self.draw_view()) {
+            has_strip = true;
             let right = self.axis_now + self.label_col;
             let max_w = (plot_w - 12.0 * z).max(0.0);
             out.push(crate::tool_panel::strip(
@@ -3161,20 +3156,20 @@ impl ChartView {
             top_min = (rows * 34.0 + 8.0) * z;
         }
         let Some((_, did, a, b)) = selected.filter(|s| s.0 == tool.id()) else {
-            return out;
+            return (out, has_strip);
         };
         let Some(d) = self.store.try_read() else {
-            return out;
+            return (out, has_strip);
         };
         let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
         let prices = crate::draw_tools::BarsPrices(&axis, d.market_time);
         let point = self.drawings.card_point();
         let Some(card) = crate::tool_panel::card(&*tool, maps.context(), (a, b), point, &prices)
         else {
-            return out;
+            return (out, has_strip);
         };
         let Some(p) = self.drawings.drawn().iter().find(|p| p.id == did) else {
-            return out;
+            return (out, has_strip);
         };
         let (hx, hy) = p.handles[card.point.min(usize::from(p.n_handles.max(1)) - 1)];
         let off_x = f32::from(self.plot.origin.x - self.chart.origin.x);
@@ -3199,7 +3194,7 @@ impl ChartView {
             t,
             cx,
         ));
-        out
+        (out, has_strip)
     }
 
     /// The `ToggleOrderStrip` command.
@@ -9334,7 +9329,7 @@ impl ChartView {
     }
 
     /// The banner for drawing mode, a temporary measure or the delete-all confirmation.
-    fn drawing_banner(&self, t: &Theme) -> Option<AnyElement> {
+    fn drawing_banner(&self, t: &Theme, has_tool_strip: bool) -> Option<AnyElement> {
         let d = &self.drawings;
         let text = if d.confirm_clear {
             clear_drawings_question(d.count(), self.instrument.symbol)
@@ -9356,7 +9351,7 @@ impl ChartView {
         };
         // When a plugin tool strip sits at top-right, place the drawing-mode banner at the
         // bottom of the plot so the two never overlap.
-        let at_bottom = !d.confirm_clear && self.has_tool_strip();
+        let at_bottom = !d.confirm_clear && has_tool_strip;
         let bottom_inset = if f32::from(self.plot.size.height) > 0.0 {
             let chart_bottom = f32::from(self.chart.origin.y + self.chart.size.height);
             let plot_bottom = f32::from(self.plot.origin.y + self.plot.size.height);
@@ -11385,10 +11380,12 @@ impl Render for ChartView {
                     },
                 )
                 .size_full(),
-            )
+            );
+        let (tool_overlays, has_tool_strip) = self.tool_overlays(&t, cx);
+        let body = body
             .when_some(self.legend(&t, window, cx), |d, l| d.child(l))
             .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
-            .children(self.tool_overlays(&t, cx))
+            .children(tool_overlays)
             .when_some(
                 crate::order_group_view::layer(self, window, &t, cx),
                 |d, m| d.child(m),
@@ -11431,7 +11428,7 @@ impl Render for ChartView {
             .when_some(self.dropper_layer(&t), |d, e| d.child(e))
             .when_some(overlay, |d, overlay| d.child(overlay))
             .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
-            .when_some(self.drawing_banner(&t), |d, b| d.child(b))
+            .when_some(self.drawing_banner(&t, has_tool_strip), |d, b| d.child(b))
             .when_some(self.strategy_mark_tip(&t), |d, b| d.child(b))
             .when_some(self.trade_mark_tip(&t), |d, b| d.child(b));
         let root = div().size_full().flex().flex_col().bg(t.bg).child(header);
