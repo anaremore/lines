@@ -1908,12 +1908,6 @@ impl ChartView {
         }
     }
 
-    /// Add a study layer (volume profile, …), painted above earlier layers.
-    #[allow(dead_code)] // the seam for the volume profile milestone
-    pub fn add_layer(&mut self, layer: Box<dyn ChartLayer>) {
-        self.layers.push(layer);
-    }
-
     /// Rebuild the latency HUD's text (render time; at most once a second unless frozen).
     fn refresh_hud(&mut self, cx: &App) {
         use crate::latency_hud::{Measure, Snapshot};

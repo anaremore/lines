@@ -569,9 +569,7 @@ fn chart_show(c: &ChartMenu) -> MenuItem {
         for p in crate::levels_layer::LabelPlace::ALL {
             sub.push(pick(p.label(), Command::LevelLabelPlace(p), place == p));
         }
-        // TODO(level-styles, workspaces thread 4c0a): open the per-type level style panel once it
-        // merges. Until then the studies menu, which lists each source's types with their
-        // switches.
+        // Opens the studies menu, which lists each level source's types, switches and styles.
         sub.push(row("Level types…", Command::Studies));
     }
     sub.push(toggle("Studies", Command::ToggleStudies, c.studies_shown));
