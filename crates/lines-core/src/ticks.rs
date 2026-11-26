@@ -167,6 +167,8 @@ pub struct TickBars {
     ends: Vec<UtcMillis>,
     /// Each bar's last trade time.
     last: Vec<UtcMillis>,
+    /// Each bar's high's and low's times: the first trade (feed order) at that price.
+    extremes: Vec<(UtcMillis, UtcMillis)>,
     counts: Vec<u32>,
     /// Closed by a session reset short of its size.
     partial: Vec<bool>,
@@ -224,6 +226,7 @@ impl TickBars {
             bars: Vec::with_capacity(capacity),
             ends: Vec::with_capacity(capacity),
             last: Vec::with_capacity(capacity),
+            extremes: Vec::with_capacity(capacity),
             counts: Vec::with_capacity(capacity),
             partial: Vec::with_capacity(capacity),
             first: Vec::with_capacity(capacity),
@@ -291,6 +294,8 @@ impl TickBars {
         self.bars.reserve_exact(cap.saturating_sub(self.bars.len()));
         self.ends.reserve_exact(cap.saturating_sub(self.ends.len()));
         self.last.reserve_exact(cap.saturating_sub(self.last.len()));
+        self.extremes
+            .reserve_exact(cap.saturating_sub(self.extremes.len()));
         self.counts
             .reserve_exact(cap.saturating_sub(self.counts.len()));
         self.partial
@@ -302,6 +307,7 @@ impl TickBars {
         self.bars.splice(0..0, older.bars);
         self.ends.splice(0..0, older.ends);
         self.last.splice(0..0, older.last);
+        self.extremes.splice(0..0, older.extremes);
         self.counts.splice(0..0, older.counts);
         self.partial.splice(0..0, older.partial);
         self.first.splice(0..0, older.first);
@@ -360,6 +366,11 @@ impl TickBars {
     /// Bar `i`'s last trade time.
     pub fn last_trade(&self, i: usize) -> Option<UtcMillis> {
         self.last.get(i).copied()
+    }
+
+    /// Bar `i`'s high's and low's trade times: the first trade (in feed order) at each.
+    pub fn extreme_times(&self, i: usize) -> Option<(UtcMillis, UtcMillis)> {
+        self.extremes.get(i).copied()
     }
 
     /// Whether bar `i` was closed by a session reset short of its size.
@@ -480,6 +491,8 @@ impl TickBars {
         self.session = None;
         self.bar_session = i64::MIN;
         self.bar_close = i64::MAX;
+        // The new contract's bars all carry order flow until older history goes in front.
+        self.full_from = None;
         self.revision += 1;
     }
 
@@ -519,6 +532,12 @@ impl TickBars {
             }
             let i = self.bars.len() - 1;
             let b = &mut self.bars[i];
+            if price > b.high {
+                self.extremes[i].0 = time;
+            }
+            if price < b.low {
+                self.extremes[i].1 = time;
+            }
             b.high = b.high.max(price);
             b.low = b.low.min(price);
             b.close = price;
@@ -537,6 +556,8 @@ impl TickBars {
     }
 
     fn open_bar(&mut self, time: UtcMillis, price: Price, qty: Qty, key: i64, first: bool) {
+        // The opening trade's own time (a seconds bar's start is its slot's).
+        let traded = time;
         if self.bars.len() >= self.capacity {
             // Drop a chunk at once: moving the buffers costs O(capacity) every chunk, not
             // every bar.
@@ -574,6 +595,7 @@ impl TickBars {
         self.ends
             .push(span_end.unwrap_or(UtcMillis(time.0.saturating_add(1))));
         self.last.push(time);
+        self.extremes.push((traded, traded));
         self.counts.push(1);
         self.partial.push(false);
         self.first.push(first);
@@ -595,6 +617,7 @@ impl TickBars {
         self.bars.drain(..k);
         self.ends.drain(..k);
         self.last.drain(..k);
+        self.extremes.drain(..k);
         self.counts.drain(..k);
         self.partial.drain(..k);
         self.first.drain(..k);
@@ -659,6 +682,7 @@ impl TickBars {
             && self.bars == other.bars
             && self.ends == other.ends
             && self.last == other.last
+            && self.extremes == other.extremes
             && self.counts == other.counts
             && self.partial == other.partial
             && self.first == other.first

@@ -5727,6 +5727,9 @@ pub fn install(cx: &mut App) {
             if let Some(j) = journal {
                 j.flush(Duration::from_secs(3));
             }
+            for tool in lines_feed::levels::draw_tools() {
+                tool.flush();
+            }
         }
     })
     .detach();

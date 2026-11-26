@@ -521,6 +521,22 @@ fn every_kind_resets_at_the_session_open() {
     }
 }
 
+/// Each bar knows when it made its high and its low: the first trade at each, in feed order,
+/// even when a later trade matches it.
+#[test]
+fn bars_know_when_they_made_their_high_and_low() {
+    let t0 = t("2026-11-05T15:00:00Z");
+    let at = |s: i64| UtcMillis(t0.0 + s * 1000);
+    let mut tb = TickBars::new(5, TickReset::Session, None, 100);
+    for (s, p) in [(0, 100), (1, 104), (2, 98), (3, 104), (4, 98), (5, 101)] {
+        tb.push(at(s), Price(p), Qty(1), BUY);
+    }
+    assert_eq!(tb.extreme_times(0), Some((at(1), at(2))));
+    // A one-trade bar made both at its open.
+    assert_eq!(tb.extreme_times(1), Some((at(5), at(5))));
+    assert_eq!(tb.extreme_times(2), None);
+}
+
 /// Older history on demand: an older session's bars go in front, price and volume only (no
 /// levels), the capacity grows (nothing held is dropped), and `full_from` says where the
 /// order flow begins. A seam inside a session, or older bars that overlap, are refused.
@@ -564,6 +580,15 @@ fn older_bars_go_in_front_without_levels() {
     );
     assert!(held.levels(4).count() > 0, "held bars keep their levels");
     assert_eq!(held.bars()[0].volume, Qty(4));
+    // Each bar keeps its own high/low times across the seam.
+    assert_eq!(
+        held.extreme_times(0).map(|e| e.0),
+        Some(UtcMillis(day1.0 + 1000))
+    );
+    assert_eq!(
+        held.extreme_times(4).map(|e| e.0),
+        Some(UtcMillis(day2.0 + 1000))
+    );
     // Grown: new bars at the end drop nothing.
     for k in 6..14 {
         held.push(UtcMillis(day2.0 + k * 1000), Price(600_000), Qty(1), BUY);
@@ -589,4 +614,7 @@ fn older_bars_go_in_front_without_levels() {
     assert_eq!(held.prepend(other), 0, "another kind");
     // Every buffer has room for the grown capacity: later pushes don't reallocate.
     assert!(held.bars.capacity() >= held.capacity && held.levels.capacity() >= held.capacity);
+    // A contract switch: the new bars all carry order flow again.
+    held.clear();
+    assert_eq!(held.full_from(), None);
 }

@@ -2539,9 +2539,18 @@ impl ChartView {
 
     fn switch_to(&mut self, target: Target, cx: &mut Context<Self>) -> anyhow::Result<()> {
         let feed = crate::sources::retarget(&self.feed, target, cx)?;
-        self.apply_feed(feed.clone());
+        self.switched_own(feed.clone(), cx);
         cx.emit(FeedChanged(feed));
         Ok(())
+    }
+
+    /// This chart's own switch (its picker): the new feed and the new product's drawings and
+    /// plugin drawing tools. (Linked panes take the switch through `set_feed`; the workspace
+    /// never sends it back to the pane that switched.)
+    fn switched_own(&mut self, feed: PaneFeed, cx: &mut Context<Self>) {
+        self.apply_feed(feed);
+        self.drawings
+            .set_data(crate::drawings_store::for_product(&self.instrument, cx));
     }
 
     fn apply_feed(&mut self, feed: PaneFeed) {
@@ -3004,6 +3013,188 @@ impl ChartView {
     pub fn toolbar_command(&mut self, cmd: DrawCmd, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus, cx);
         self.drawing_command(cmd, cx);
+    }
+
+    /// What this chart shows, for a plugin tool's strip.
+    fn draw_view(&self) -> lines_feed::levels::DrawView {
+        lines_feed::levels::DrawView {
+            visible: self
+                .drawings
+                .visible()
+                .unwrap_or((UtcMillis(0), UtcMillis(0))),
+            now: self.store.try_read().and_then(|d| d.market_time),
+        }
+    }
+
+    /// A plugin tool's strip button (`crate::tool_panel`): the tool acts, and the chart does
+    /// what it asks back.
+    pub fn tool_action(
+        &mut self,
+        tool: &'static str,
+        action: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        window.focus(&self.focus, cx);
+        let view = self.draw_view();
+        let maps = self.drawings.tool_maps();
+        let Some(t) = maps.tool(tool).cloned() else {
+            return;
+        };
+        use lines_feed::levels::ToolEffect;
+        let effect = match self.store.try_read() {
+            Some(d) => {
+                let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
+                let prices = crate::draw_tools::BarsPrices(&axis, d.market_time);
+                t.act(maps.context(), &view, &prices, action)
+            }
+            None => t.act(maps.context(), &view, &lines_feed::levels::NoPrices, action),
+        };
+        match effect {
+            ToolEffect::None => {}
+            ToolEffect::Redraw => self.drawings.tool_maps_mut().redraw(tool),
+            ToolEffect::Show { from, to } => {
+                self.drawings.tool_maps_mut().redraw(tool);
+                self.show_times(from, to);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Show `from`..`to` across the plot (as far as the chart has bars there).
+    fn show_times(&mut self, from: UtcMillis, to: UtcMillis) {
+        let Some(d) = self.store.try_read() else {
+            return;
+        };
+        let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
+        let bars = axis.view.bars;
+        let len = bars.len();
+        // Only a span the chart actually has bars in (in a gap between sessions, both ends
+        // collapse to the same index and would zoom all the way in on one bar).
+        let (Some(first), Some(last)) = (bars.first(), bars.last()) else {
+            return;
+        };
+        if to < first.time || from > last.time {
+            return;
+        }
+        let i0 = bars.partition_point(|b| b.time < from);
+        let i1 = bars.partition_point(|b| b.time <= to);
+        if i0 >= i1 {
+            return;
+        }
+        let (from, to) = (from.max(first.time), to.min(last.time));
+        if let (Some(a), Some(b)) = (axis.index_of(from), axis.index_of(to)) {
+            self.vp.show_indices(a, b, len);
+        }
+    }
+
+    /// The point card's buttons: the selected plugin drawing's points swap (one undo step).
+    pub fn swap_points(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus, cx);
+        if self.drawings.swap_selected_points() {
+            cx.notify();
+        }
+    }
+
+    /// The plugin tool whose strip/card is shown now (the chosen tool, else the selected
+    /// drawing's tool).
+    fn active_plugin_tool(&self) -> Option<Arc<dyn lines_feed::levels::DrawTool>> {
+        if self.drawings.hidden {
+            return None;
+        }
+        let maps = self.drawings.tool_maps();
+        let id = match self.drawings.tool() {
+            Some(Tool::Plugin(p)) => Some(p.id),
+            _ => self.drawings.selected_plugin().map(|s| s.0),
+        }?;
+        maps.tool(id).cloned()
+    }
+
+    /// A plugin tool's strip (the chosen tool's, else the selected drawing's tool's) and the
+    /// selected drawing's point card, over the plot (`crate::tool_panel`). Also reports whether
+    /// a strip is rendered this frame (so the drawing-mode banner steps to the bottom without
+    /// asking the tool for its panel a second time).
+    fn tool_overlays(&self, t: &Theme, cx: &mut Context<Self>) -> (Vec<AnyElement>, bool) {
+        let mut out = Vec::new();
+        let Some(tool) = self.active_plugin_tool() else {
+            return (out, false);
+        };
+        let maps = self.drawings.tool_maps();
+        let selected = self.drawings.selected_plugin();
+        let z = crate::zoom::get();
+        let plot_w = f32::from(self.plot.size.width);
+        let plot_h = f32::from(self.plot.size.height);
+        let mut top_min = 0.0;
+        let mut has_strip = false;
+        if let Some(panel) = tool.panel(maps.context(), &self.draw_view()) {
+            has_strip = true;
+            let right = self.axis_now + self.label_col;
+            let max_w = (plot_w - 12.0 * z).max(0.0);
+            out.push(crate::tool_panel::strip(
+                tool.id(),
+                &panel,
+                right,
+                max_w,
+                t,
+                cx,
+            ));
+            // Reserve room for one strip row, or two when the strip is likely wrapped on a narrow
+            // plot (keeps the point card below the strip).
+            let est_w = (panel.status.chars().count() as f32 * 7.0
+                + panel
+                    .actions
+                    .iter()
+                    .map(|a| a.label.chars().count() as f32 * 7.5 + 32.0)
+                    .sum::<f32>()
+                + 24.0)
+                * z;
+            let rows = if max_w > 0.0 && est_w > max_w {
+                2.0
+            } else {
+                1.0
+            };
+            top_min = (rows * 34.0 + 8.0) * z;
+        }
+        let Some((_, did, a, b)) = selected.filter(|s| s.0 == tool.id()) else {
+            return (out, has_strip);
+        };
+        let Some(d) = self.store.try_read() else {
+            return (out, has_strip);
+        };
+        let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
+        let prices = crate::draw_tools::BarsPrices(&axis, d.market_time);
+        let point = self.drawings.card_point();
+        let Some(card) = crate::tool_panel::card(&*tool, maps.context(), (a, b), point, &prices)
+        else {
+            return (out, has_strip);
+        };
+        let Some(p) = self.drawings.drawn().iter().find(|p| p.id == did) else {
+            return (out, has_strip);
+        };
+        let (hx, hy) = p.handles[card.point.min(usize::from(p.n_handles.max(1)) - 1)];
+        let off_x = f32::from(self.plot.origin.x - self.chart.origin.x);
+        let off_y = f32::from(self.plot.origin.y - self.chart.origin.y);
+        let size = (
+            crate::tool_panel::CARD_W * z,
+            crate::tool_panel::card_height(&card.lines, z),
+        );
+        // Place the card inside the plot itself (never over the price or time axes).
+        let plot_bounds = if plot_w > 0.0 && plot_h > 0.0 {
+            (plot_w, plot_h)
+        } else {
+            (
+                f32::from(self.chart.size.width),
+                f32::from(self.chart.size.height),
+            )
+        };
+        let (cx0, cy0) = crate::tool_panel::card_origin(hx, hy, plot_bounds, size, top_min);
+        out.push(crate::tool_panel::card_view(
+            &card,
+            (cx0 + off_x, cy0 + off_y),
+            t,
+            cx,
+        ));
+        (out, has_strip)
     }
 
     /// The `ToggleOrderStrip` command.
@@ -5267,11 +5458,14 @@ impl ChartView {
             }
             self.drawings.set_pointer(self.hover);
             self.drawings.set_contract(d.contract);
+            self.drawings.set_now(d.market_time);
             // Plugin drawings are hit-tested on the levels drawn now (none with studies hidden).
             let (draws, levels) = (self.visibility.draws_studies(), &self.levels);
             self.drawings
                 .set_drawn_kinds(|id| if draws { levels.tool_kinds(id) } else { 0 });
             let tools_rev = self.drawings.tool_maps().revision();
+            let prev_visible = self.drawings.visible();
+            let prev_handle = self.drawings.selected_plugin_handle();
             self.drawings.prepare(
                 &TimeAxis::new(view),
                 &self.vp,
@@ -5280,9 +5474,13 @@ impl ChartView {
                 &fmt,
                 self.instrument.point_value,
             );
-            // A plugin tool drew new levels (a drawing placed or its handle moved): the levels
-            // layer takes them at the next render.
-            if self.drawings.tool_maps().revision() != tools_rev {
+            // A plugin tool drew new levels (a drawing placed or its handle moved), or the
+            // visible span / selected handle moved while a strip or point card is showing:
+            // re-render so the levels layer, strip and point card stay in step.
+            let overlay_moved = self.active_plugin_tool().is_some()
+                && (self.drawings.visible() != prev_visible
+                    || self.drawings.selected_plugin_handle() != prev_handle);
+            if self.drawings.tool_maps().revision() != tools_rev || overlay_moved {
                 cx.notify();
             }
         }
@@ -7986,11 +8184,12 @@ impl ChartView {
     }
 
     /// The pointer at plot-local (`x`, `y`) as a drawing anchor: the bar's start and a price
-    /// on the tick grid (or its O/H/L/C with the magnet).
+    /// on the tick grid (or its O/H/L/C with the magnet; a bar's high or low for a tool that
+    /// snaps to them).
     fn drawing_anchor(&self, x: f64, y: f64) -> Option<Anchor> {
         let d = self.store.try_read()?;
         let axis = TimeAxis::new(bars_view(&self.derived, self.tick_key(), &d));
-        snap_anchor(
+        self.drawings.snap(
             &axis,
             &self.vp,
             self.instrument.price.tick,
@@ -9130,7 +9329,7 @@ impl ChartView {
     }
 
     /// The banner for drawing mode, a temporary measure or the delete-all confirmation.
-    fn drawing_banner(&self, t: &Theme) -> Option<AnyElement> {
+    fn drawing_banner(&self, t: &Theme, has_tool_strip: bool) -> Option<AnyElement> {
         let d = &self.drawings;
         let text = if d.confirm_clear {
             clear_drawings_question(d.count(), self.instrument.symbol)
@@ -9150,10 +9349,21 @@ impl ChartView {
         } else {
             return None;
         };
+        // When a plugin tool strip sits at top-right, place the drawing-mode banner at the
+        // bottom of the plot so the two never overlap.
+        let at_bottom = !d.confirm_clear && has_tool_strip;
+        let bottom_inset = if f32::from(self.plot.size.height) > 0.0 {
+            let chart_bottom = f32::from(self.chart.origin.y + self.chart.size.height);
+            let plot_bottom = f32::from(self.plot.origin.y + self.plot.size.height);
+            (chart_bottom - plot_bottom).max(0.0) + crate::zoom::f(6.0)
+        } else {
+            crate::zoom::f(30.0)
+        };
         Some(
             div()
                 .absolute()
-                .top(px(6.0))
+                .when(!at_bottom, |d| d.top(px(6.0)))
+                .when(at_bottom, |d| d.bottom(px(bottom_inset)))
                 .left_0()
                 .right_0()
                 .flex()
@@ -10298,12 +10508,14 @@ impl Pane for ChartView {
         // Trade history does no work at all while hidden (on the chart, or by Clean chart or
         // Hide studies): built again on the first poll once shown, if its inputs moved.
         let marks = marks | (self.trade_marks.shown() && self.poll_trade_marks());
-        // Drawings changed on any chart of this product (shown here).
+        // Drawings changed on any chart of this product, or a plugin tool's async overlay
+        // finished loading / refreshed (shown here).
         let rates = group
             | marks
             | std::mem::take(&mut self.rates_changed)
             | self.trade.changed()
-            | (self.drawings.changed() && !self.drawings.hidden);
+            | ((self.drawings.changed() || self.drawings.overlay_changed())
+                && !self.drawings.hidden);
         if !self.visibility.draws_studies() {
             return rates;
         }
@@ -11168,9 +11380,12 @@ impl Render for ChartView {
                     },
                 )
                 .size_full(),
-            )
+            );
+        let (tool_overlays, has_tool_strip) = self.tool_overlays(&t, cx);
+        let body = body
             .when_some(self.legend(&t, window, cx), |d, l| d.child(l))
             .when_some(self.order_strip_view(&t, cx), |d, s| d.child(s))
+            .children(tool_overlays)
             .when_some(
                 crate::order_group_view::layer(self, window, &t, cx),
                 |d, m| d.child(m),
@@ -11213,7 +11428,7 @@ impl Render for ChartView {
             .when_some(self.dropper_layer(&t), |d, e| d.child(e))
             .when_some(overlay, |d, overlay| d.child(overlay))
             .when_some(self.timeframe_entry(&t), |d, e| d.child(e))
-            .when_some(self.drawing_banner(&t), |d, b| d.child(b))
+            .when_some(self.drawing_banner(&t, has_tool_strip), |d, b| d.child(b))
             .when_some(self.strategy_mark_tip(&t), |d, b| d.child(b))
             .when_some(self.trade_mark_tip(&t), |d, b| d.child(b));
         let root = div().size_full().flex().flex_col().bg(t.bg).child(header);
@@ -11867,6 +12082,26 @@ mod symbol_studies_tests {
     /// The legend's actions act on the set the chart uses (decision 0039): on a symbol's,
     /// removing or hiding changes every chart of it and the Undo names the symbol; Undo puts
     /// it back exactly, on every chart; on separate studies only that chart changes.
+    /// A chart switched by its own picker draws the new product's drawings and offers the new
+    /// product's plugin drawing tools (it once kept the old product's: an MES chart switched
+    /// to NQ never offered a tool serving NQ only).
+    #[gpui::test]
+    fn a_chart_switched_by_its_picker_takes_the_new_products_drawings(cx: &mut TestAppContext) {
+        let _serial = serial();
+        cx.update(|cx| cx.set_global(crate::picker_view::AppSettings::ephemeral()));
+        let a = chart(catalog::MES, cx);
+        let product = |a: &Entity<ChartView>, cx: &mut TestAppContext| {
+            a.read_with(cx, |c, _| c.drawings.tool_maps().context().product.id)
+        };
+        assert_eq!(product(&a, cx), catalog::MES);
+        a.update(cx, |c, cx| c.switched_own(feed(catalog::NQ), cx));
+        assert_eq!(product(&a, cx), catalog::NQ);
+        assert_eq!(
+            a.read_with(cx, |c, _| c.drawings.data().product.id),
+            catalog::NQ
+        );
+    }
+
     #[gpui::test]
     fn legend_actions_act_on_the_charts_set(cx: &mut TestAppContext) {
         let _serial = serial();
